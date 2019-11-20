@@ -126,7 +126,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     cases.add(
         "using an unknown len ptr type instead of array",
         \\const resolutions = [*][*]const u8{
-        \\    c"[320 240  ]",
+        \\    "[320 240  ]",
         \\    null,
         \\};
         \\comptime {
@@ -743,7 +743,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "peer cast then implicit cast const pointer to mutable C pointer",
         \\export fn func() void {
         \\    var strValue: [*c]u8 = undefined;
-        \\    strValue = strValue orelse c"";
+        \\    strValue = strValue orelse "";
         \\}
     ,
         "tmp.zig:3:32: error: cast discards const qualifier",
@@ -1077,7 +1077,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
             "libc headers note",
             \\const c = @cImport(@cInclude("stdio.h"));
             \\export fn entry() void {
-            \\    _ = c.printf(c"hello, world!\n");
+            \\    _ = c.printf("hello, world!\n");
             \\}
         ,
             "tmp.zig:1:11: error: C import failed",
@@ -3314,7 +3314,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     cases.add(
         "variable has wrong type",
         \\export fn f() i32 {
-        \\    const a = c"a";
+        \\    const a = "a";
         \\    return a;
         \\}
     ,
@@ -4748,7 +4748,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     cases.add(
         "assign through constant pointer",
         \\export fn f() void {
-        \\  var cstr = c"Hat";
+        \\  var cstr = "Hat";
         \\  cstr[0] = 'W';
         \\}
     ,
