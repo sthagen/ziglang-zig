@@ -969,7 +969,7 @@ pub const Builder = struct {
 };
 
 test "builder.findProgram compiles" {
-    const builder = try Builder.create(std.heap.direct_allocator, "zig", "zig-cache", "zig-cache");
+    const builder = try Builder.create(std.heap.page_allocator, "zig", "zig-cache", "zig-cache");
     _ = builder.findProgram([_][]const u8{}, [_][]const u8{}) catch null;
 }
 
@@ -1063,6 +1063,9 @@ pub const LibExeObjStep = struct {
 
     /// Uses system QEMU installation to run cross compiled foreign architecture build artifacts.
     enable_qemu: bool = false,
+
+    /// Uses system Wasmtime installation to run cross compiled wasm/wasi build artifacts.
+    enable_wasmtime: bool = false,
 
     /// After following the steps in https://github.com/ziglang/zig/wiki/Updating-libc#glibc,
     /// this will be the directory $glibc-build-dir/install/glibcs
@@ -1859,6 +1862,11 @@ pub const LibExeObjStep = struct {
                 try zig_args.append("--test-cmd-bin");
             },
             .wine => |bin_name| if (self.enable_wine) {
+                try zig_args.append("--test-cmd");
+                try zig_args.append(bin_name);
+                try zig_args.append("--test-cmd-bin");
+            },
+            .wasmtime => |bin_name| if (self.enable_wasmtime) {
                 try zig_args.append("--test-cmd");
                 try zig_args.append(bin_name);
                 try zig_args.append("--test-cmd-bin");

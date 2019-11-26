@@ -74,7 +74,7 @@ else
             pub fn release(self: Held) void {
                 switch (@atomicRmw(State, &self.mutex.state, .Xchg, .Unlocked, .Release)) {
                     .Locked => {},
-                    .Sleeping => self.mutex.parker.unpark(@ptrCast(*const u32,  &self.mutex.state)),
+                    .Sleeping => self.mutex.parker.unpark(@ptrCast(*const u32, &self.mutex.state)),
                     .Unlocked => unreachable, // unlocking an unlocked mutex
                     else => unreachable, // should never be anything else
                 }
@@ -112,7 +112,7 @@ else
                 if (@atomicRmw(State, &self.state, .Xchg, .Sleeping, .Acquire) == .Unlocked)
                     return Held{ .mutex = self };
                 state = .Sleeping;
-                self.parker.park(@ptrCast(*const u32,  &self.state), @enumToInt(State.Sleeping));
+                self.parker.park(@ptrCast(*const u32, &self.state), @enumToInt(State.Sleeping));
             }
         }
     };
@@ -125,8 +125,8 @@ const TestContext = struct {
 };
 
 test "std.Mutex" {
-    var plenty_of_memory = try std.heap.direct_allocator.alloc(u8, 300 * 1024);
-    defer std.heap.direct_allocator.free(plenty_of_memory);
+    var plenty_of_memory = try std.heap.page_allocator.alloc(u8, 300 * 1024);
+    defer std.heap.page_allocator.free(plenty_of_memory);
 
     var fixed_buffer_allocator = std.heap.ThreadSafeFixedBufferAllocator.init(plenty_of_memory);
     var a = &fixed_buffer_allocator.allocator;

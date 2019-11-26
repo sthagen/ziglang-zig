@@ -20,7 +20,7 @@ test "makePath, put some files in it, deleteTree" {
     try io.writeFile("os_test_tmp" ++ fs.path.sep_str ++ "b" ++ fs.path.sep_str ++ "c" ++ fs.path.sep_str ++ "file.txt", "nonsense");
     try io.writeFile("os_test_tmp" ++ fs.path.sep_str ++ "b" ++ fs.path.sep_str ++ "file2.txt", "blah");
     try fs.deleteTree("os_test_tmp");
-    if (fs.Dir.open("os_test_tmp")) |dir| {
+    if (fs.Dir.cwd().openDirTraverse("os_test_tmp")) |dir| {
         @panic("expected error");
     } else |err| {
         expect(err == error.FileNotFound);
@@ -234,6 +234,6 @@ test "pipe" {
 }
 
 test "argsAlloc" {
-    var args = try std.process.argsAlloc(std.heap.direct_allocator);
-    std.heap.direct_allocator.free(args);
+    var args = try std.process.argsAlloc(std.heap.page_allocator);
+    std.process.argsFree(std.heap.page_allocator, args);
 }

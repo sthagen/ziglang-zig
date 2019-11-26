@@ -1527,7 +1527,22 @@ pub fn isatty(handle: fd_t) bool {
         return system.isatty(handle) != 0;
     }
     if (builtin.os == .wasi) {
-        @compileError("TODO implement std.os.isatty for WASI");
+        var statbuf: fdstat_t = undefined;
+        const err = system.fd_fdstat_get(handle, &statbuf);
+        if (err != 0) {
+            // errno = err;
+            return false;
+        }
+
+        // A tty is a character device that we can't seek or tell on.
+        if (statbuf.fs_filetype != FILETYPE_CHARACTER_DEVICE or
+            (statbuf.fs_rights_base & (RIGHT_FD_SEEK | RIGHT_FD_TELL)) != 0)
+        {
+            // errno = ENOTTY;
+            return false;
+        }
+
+        return true;
     }
     if (builtin.os == .linux) {
         var wsz: linux.winsize = undefined;
@@ -2720,6 +2735,20 @@ pub fn dl_iterate_phdr(
 pub const ClockGetTimeError = error{UnsupportedClock} || UnexpectedError;
 
 pub fn clock_gettime(clk_id: i32, tp: *timespec) ClockGetTimeError!void {
+    if (comptime std.Target.current.getOs() == .wasi) {
+        var ts: timestamp_t = undefined;
+        switch (system.clock_time_get(@bitCast(u32, clk_id), 1, &ts)) {
+            0 => {
+                tp.* = .{
+                    .tv_sec = @intCast(i64, ts / std.time.ns_per_s),
+                    .tv_nsec = @intCast(isize, ts % std.time.ns_per_s),
+                };
+            },
+            EINVAL => return error.UnsupportedClock,
+            else => |err| return unexpectedErrno(err),
+        }
+        return;
+    }
     switch (errno(system.clock_gettime(clk_id, tp))) {
         0 => return,
         EFAULT => unreachable,
@@ -2729,6 +2758,19 @@ pub fn clock_gettime(clk_id: i32, tp: *timespec) ClockGetTimeError!void {
 }
 
 pub fn clock_getres(clk_id: i32, res: *timespec) ClockGetTimeError!void {
+    if (comptime std.Target.current.getOs() == .wasi) {
+        var ts: timestamp_t = undefined;
+        switch (system.clock_res_get(@bitCast(u32, clk_id), &ts)) {
+            0 => res.* = .{
+                .tv_sec = @intCast(i64, ts / std.time.ns_per_s),
+                .tv_nsec = @intCast(isize, ts % std.time.ns_per_s),
+            },
+            EINVAL => return error.UnsupportedClock,
+            else => |err| return unexpectedErrno(err),
+        }
+        return;
+    }
+
     switch (errno(system.clock_getres(clk_id, res))) {
         0 => return,
         EFAULT => unreachable,
@@ -2753,8 +2795,8 @@ pub fn sched_getaffinity(pid: pid_t) SchedGetAffinityError!cpu_set_t {
 
 /// Used to convert a slice to a null terminated slice on the stack.
 /// TODO https://github.com/ziglang/zig/issues/287
-pub fn toPosixPath(file_path: []const u8) ![PATH_MAX-1:0]u8 {
-    var path_with_null: [PATH_MAX-1:0]u8 = undefined;
+pub fn toPosixPath(file_path: []const u8) ![PATH_MAX - 1:0]u8 {
+    var path_with_null: [PATH_MAX - 1:0]u8 = undefined;
     // >= rather than > to make room for the null byte
     if (file_path.len >= PATH_MAX) return error.NameTooLong;
     mem.copy(u8, &path_with_null, file_path);
