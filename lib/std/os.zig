@@ -14,6 +14,7 @@
 // Note: The Zig standard library does not support POSIX thread cancellation, and
 // in general EINTR is handled by trying again.
 
+const root = @import("root");
 const std = @import("std.zig");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
@@ -31,7 +32,6 @@ pub const linux = @import("os/linux.zig");
 pub const uefi = @import("os/uefi.zig");
 pub const wasi = @import("os/wasi.zig");
 pub const windows = @import("os/windows.zig");
-pub const zen = @import("os/zen.zig");
 
 comptime {
     assert(@import("std") == std); // std lib tests require --override-lib-dir
@@ -45,13 +45,18 @@ test "" {
     _ = uefi;
     _ = wasi;
     _ = windows;
-    _ = zen;
 
     _ = @import("os/test.zig");
 }
 
-/// When linking libc, this is the C API. Otherwise, it is the OS-specific system interface.
-pub const system = if (builtin.link_libc) std.c else switch (builtin.os) {
+/// Applications can override the `system` API layer in their root source file.
+/// Otherwise, when linking libc, this is the C API.
+/// When not linking libc, it is the OS-specific system interface.
+pub const system = if (@hasDecl(root, "os") and root.os != @This())
+    root.os.system
+else if (builtin.link_libc)
+    std.c
+else switch (builtin.os) {
     .macosx, .ios, .watchos, .tvos => darwin,
     .freebsd => freebsd,
     .linux => linux,
@@ -59,7 +64,6 @@ pub const system = if (builtin.link_libc) std.c else switch (builtin.os) {
     .dragonfly => dragonfly,
     .wasi => wasi,
     .windows => windows,
-    .zen => zen,
     else => struct {},
 };
 
