@@ -322,6 +322,7 @@ enum LazyValueId {
     LazyValueIdSliceType,
     LazyValueIdFnType,
     LazyValueIdErrUnionType,
+    LazyValueIdArrayType,
 };
 
 struct LazyValue {
@@ -353,6 +354,15 @@ struct LazyValueSliceType {
     bool is_const;
     bool is_volatile;
     bool is_allowzero;
+};
+
+struct LazyValueArrayType {
+    LazyValue base;
+
+    IrAnalyze *ira;
+    IrInstruction *sentinel; // can be null
+    IrInstruction *elem_type;
+    uint64_t length;
 };
 
 struct LazyValuePtrType {
@@ -1298,6 +1308,13 @@ struct RootStruct {
     ZigLLVMDIFile *di_file;
 };
 
+enum StructSpecial {
+    StructSpecialNone,
+    StructSpecialSlice,
+    StructSpecialInferredTuple,
+    StructSpecialInferredStruct,
+};
+
 struct ZigTypeStruct {
     AstNode *decl_node;
     TypeStructField **fields;
@@ -1313,13 +1330,12 @@ struct ZigTypeStruct {
     ContainerLayout layout;
     ResolveStatus resolve_status;
 
-    bool is_slice;
+    StructSpecial special;
     // whether any of the fields require comptime
     // known after ResolveStatusZeroBitsKnown
     bool requires_comptime;
     bool resolve_loop_flag_zero_bits;
     bool resolve_loop_flag_other;
-    bool is_inferred;
 };
 
 struct ZigTypeOptional {
