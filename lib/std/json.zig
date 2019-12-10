@@ -387,14 +387,17 @@ pub const StreamingParser = struct {
                     token.* = Token.initMarker(Token.Id.ArrayBegin);
                 },
                 '-' => {
+                    p.number_is_integer = true;
                     p.state = State.Number;
                     p.count = 0;
                 },
                 '0' => {
+                    p.number_is_integer = true;
                     p.state = State.NumberMaybeDotOrExponent;
                     p.count = 0;
                 },
                 '1'...'9' => {
+                    p.number_is_integer = true;
                     p.state = State.NumberMaybeDigitOrDotOrExponent;
                     p.count = 0;
                 },
@@ -453,14 +456,17 @@ pub const StreamingParser = struct {
                     token.* = Token.initMarker(Token.Id.ArrayBegin);
                 },
                 '-' => {
+                    p.number_is_integer = true;
                     p.state = State.Number;
                     p.count = 0;
                 },
                 '0' => {
+                    p.number_is_integer = true;
                     p.state = State.NumberMaybeDotOrExponent;
                     p.count = 0;
                 },
                 '1'...'9' => {
+                    p.number_is_integer = true;
                     p.state = State.NumberMaybeDigitOrDotOrExponent;
                     p.count = 0;
                 },
@@ -1032,7 +1038,7 @@ pub const Value = union(enum) {
     }
 
     pub fn dumpStream(self: @This(), stream: var, comptime max_depth: usize) !void {
-        var w = std.json.WriteStream(@typeOf(stream).Child, max_depth).init(stream);
+        var w = std.json.WriteStream(@TypeOf(stream).Child, max_depth).init(stream);
         w.newline = "";
         w.one_indent = "";
         w.space = "";
@@ -1042,7 +1048,7 @@ pub const Value = union(enum) {
     pub fn dumpStreamIndent(self: @This(), comptime indent: usize, stream: var, comptime max_depth: usize) !void {
         var one_indent = " " ** indent;
 
-        var w = std.json.WriteStream(@typeOf(stream).Child, max_depth).init(stream);
+        var w = std.json.WriteStream(@TypeOf(stream).Child, max_depth).init(stream);
         w.one_indent = one_indent;
         try w.emitJson(self);
     }
@@ -1332,7 +1338,7 @@ test "write json then parse it" {
 
     var slice_out_stream = std.io.SliceOutStream.init(&out_buffer);
     const out_stream = &slice_out_stream.stream;
-    var jw = WriteStream(@typeOf(out_stream).Child, 4).init(out_stream);
+    var jw = WriteStream(@TypeOf(out_stream).Child, 4).init(out_stream);
 
     try jw.beginObject();
 
@@ -1374,8 +1380,21 @@ test "write json then parse it" {
     testing.expect(mem.eql(u8, tree.root.Object.get("str").?.value.String, "hello"));
 }
 
-test "parsing empty string gives appropriate error" {
+fn test_parse(json_str: []const u8) !Value {
     var p = Parser.init(debug.global_allocator, false);
-    defer p.deinit();
-    testing.expectError(error.UnexpectedEndOfJson, p.parse(""));
+    return (try p.parse(json_str)).root;
+}
+
+test "parsing empty string gives appropriate error" {
+    testing.expectError(error.UnexpectedEndOfJson, test_parse(""));
+}
+
+test "integer after float has proper type" {
+    const json = try test_parse(
+        \\{
+        \\  "float": 3.14,
+        \\  "ints": [1, 2, 3]
+        \\}
+    );
+    std.testing.expect(json.Object.getValue("ints").?.Array.at(0) == .Integer);
 }
