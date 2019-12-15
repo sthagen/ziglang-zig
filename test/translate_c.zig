@@ -186,9 +186,106 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub export var arr2: [*c]u8 = "hello";
     });
 
+    cases.add_2("array initializer expr",
+        \\static void foo(void){
+        \\    char arr[10] ={1};
+        \\    char *arr1[10] ={0};
+        \\}
+    , &[_][]const u8{
+        \\pub fn foo() void {
+        \\    var arr: [10]u8 = .{
+        \\        @as(u8, 1),
+        \\    } ++ .{0} ** 9;
+        \\    var arr1: [10][*c]u8 = .{
+        \\        null,
+        \\    } ++ .{null} ** 9;
+        \\}
+    });
+
+    cases.add_2("field struct",
+        \\union OpenGLProcs {
+        \\    struct {
+        \\        int Clear;
+        \\    } gl;
+        \\};
+    , &[_][]const u8{
+        \\pub const union_OpenGLProcs = extern union {
+        \\    gl: extern struct {
+        \\        Clear: c_int,
+        \\    },
+        \\};
+        \\pub const OpenGLProcs = union_OpenGLProcs;
+    });
+
+    cases.add_2("enums",
+        \\typedef enum {
+        \\    a,
+        \\    b,
+        \\    c,
+        \\} d;
+        \\enum {
+        \\    e,
+        \\    f = 4,
+        \\    g,
+        \\} h = e;
+        \\struct Baz {
+        \\    enum {
+        \\        i,
+        \\        j,
+        \\        k,
+        \\    } l;
+        \\    d m;
+        \\};
+        \\enum i {
+        \\    n,
+        \\    o,
+        \\    p,
+        \\};
+    , &[_][]const u8{
+        \\pub const a = enum_unnamed_1.a;
+        \\pub const b = enum_unnamed_1.b;
+        \\pub const c = enum_unnamed_1.c;
+        \\pub const enum_unnamed_1 = extern enum {
+        \\    a,
+        \\    b,
+        \\    c,
+        \\};
+        \\pub const d = enum_unnamed_1;
+        \\pub const e = enum_unnamed_2.e;
+        \\pub const f = enum_unnamed_2.f;
+        \\pub const g = enum_unnamed_2.g;
+        \\pub const enum_unnamed_2 = extern enum {
+        \\    e = 0,
+        \\    f = 4,
+        \\    g = 5,
+        \\};
+        \\pub export var h: enum_unnamed_2 = @as(enum_unnamed_2, e);
+        \\pub const i = enum_unnamed_3.i;
+        \\pub const j = enum_unnamed_3.j;
+        \\pub const k = enum_unnamed_3.k;
+        \\pub const enum_unnamed_3 = extern enum {
+        \\    i,
+        \\    j,
+        \\    k,
+        \\};
+        \\pub const struct_Baz = extern struct {
+        \\    l: enum_unnamed_3,
+        \\    m: d,
+        \\};
+        \\pub const n = enum_i.n;
+        \\pub const o = enum_i.o;
+        \\pub const p = enum_i.p;
+        \\pub const enum_i = extern enum {
+        \\    n,
+        \\    o,
+        \\    p,
+        \\};
+        \\pub const Baz = struct_Baz;
+    });
+
     /////////////// Cases for only stage1 which are TODO items for stage2 ////////////////
 
-    cases.add("typedef of function in struct field",
+    cases.add_both("typedef of function in struct field",
         \\typedef void lws_callback_function(void);
         \\struct Foo {
         \\    void (*func)(void);
@@ -202,7 +299,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\};
     });
 
-    cases.add("pointer to struct demoted to opaque due to bit fields",
+    cases.add_both("pointer to struct demoted to opaque due to bit fields",
         \\struct Foo {
         \\    unsigned int: 1;
         \\};
@@ -210,7 +307,8 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\    struct Foo *foo;
         \\};
     , &[_][]const u8{
-        \\pub const struct_Foo = @OpaqueType();
+        \\pub const struct_Foo = @OpaqueType()
+    ,
         \\pub const struct_Bar = extern struct {
         \\    foo: ?*struct_Foo,
         \\};
@@ -359,7 +457,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\}
     });
 
-    cases.add("double define struct",
+    cases.add_both("double define struct",
         \\typedef struct Bar Bar;
         \\typedef struct Foo Foo;
         \\
@@ -374,10 +472,14 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub const struct_Foo = extern struct {
         \\    a: [*c]Foo,
         \\};
+    ,
         \\pub const Foo = struct_Foo;
+    ,
         \\pub const struct_Bar = extern struct {
         \\    a: [*c]Foo,
         \\};
+    ,
+        \\pub const Bar = struct_Bar;
     });
 
     cases.addAllowWarnings("simple data types",
@@ -404,7 +506,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\}
     });
 
-    cases.add("enums",
+    cases.add_both("enums",
         \\enum Foo {
         \\    FooA,
         \\    FooB,
@@ -426,7 +528,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub const Foo = enum_Foo;
     });
 
-    cases.add("enums",
+    cases.add_both("enums",
         \\enum Foo {
         \\    FooA = 2,
         \\    FooB = 5,
@@ -454,7 +556,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub extern fn foo(noalias bar: ?*c_void, noalias arg1: ?*c_void) void;
     });
 
-    cases.add("simple struct",
+    cases.add_both("simple struct",
         \\struct Foo {
         \\    int x;
         \\    char *y;
@@ -506,7 +608,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub extern fn func(array: [*c]c_int) void;
     });
 
-    cases.add("self referential struct with function pointer",
+    cases.add_both("self referential struct with function pointer",
         \\struct Foo {
         \\    void (*derp)(struct Foo *foo);
         \\};
@@ -518,7 +620,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub const Foo = struct_Foo;
     });
 
-    cases.add("struct prototype used in func",
+    cases.add_both("struct prototype used in func",
         \\struct Foo;
         \\struct Foo *some_func(struct Foo *foo, int x);
     , &[_][]const u8{
@@ -550,7 +652,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub const THING2 = THING1;
     });
 
-    cases.add("circular struct definitions",
+    cases.add_both("circular struct definitions",
         \\struct Bar;
         \\
         \\struct Foo {
@@ -650,7 +752,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub const SDL_INIT_VIDEO = @as(c_ulonglong, 32);
     });
 
-    cases.add("zig keywords in C code",
+    cases.add_both("zig keywords in C code",
         \\struct comptime {
         \\    int defer;
         \\};
