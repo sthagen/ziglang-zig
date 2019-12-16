@@ -12728,7 +12728,7 @@ static IrInstruction *ir_analyze_int_to_enum(IrAnalyze *ira, IrInstruction *sour
             return ira->codegen->invalid_instruction;
 
         TypeEnumField *field = find_enum_field_by_tag(wanted_type, &val->data.x_bigint);
-        if (field == nullptr) {
+        if (field == nullptr && wanted_type->data.enumeration.layout != ContainerLayoutExtern) {
             Buf *val_buf = buf_alloc();
             bigint_append_buf(val_buf, &val->data.x_bigint, 10);
             ErrorMsg *msg = ir_add_error(ira, source_instr,
@@ -17395,7 +17395,7 @@ static IrInstruction *ir_get_var_ptr(IrAnalyze *ira, IrInstruction *instruction,
     result->value->type = get_pointer_to_type_extra(ira->codegen, var->var_type,
             var->src_is_const, is_volatile, PtrLenSingle, var->align_bytes, 0, 0, false);
 
-    if (linkage_makes_it_runtime)
+    if (linkage_makes_it_runtime || var->is_thread_local)
         goto no_mem_slot;
 
     if (value_is_comptime(var->const_value)) {
@@ -25791,6 +25791,10 @@ static IrInstruction *ir_analyze_instruction_check_switch_prongs(IrAnalyze *ira,
             }
         }
         if (!instruction->have_else_prong) {
+            if (switch_type->data.enumeration.layout == ContainerLayoutExtern) {
+                ir_add_error(ira, &instruction->base,
+                    buf_sprintf("switch on an extern enum must have an else prong"));
+            }
             for (uint32_t i = 0; i < switch_type->data.enumeration.src_field_count; i += 1) {
                 TypeEnumField *enum_field = &switch_type->data.enumeration.fields[i];
 
@@ -26603,6 +26607,14 @@ static IrInstruction *ir_analyze_int_to_ptr(IrAnalyze *ira, IrInstruction *sourc
         if (!ptr_allows_addr_zero(ptr_type) && addr == 0) {
             ir_add_error(ira, source_instr,
                     buf_sprintf("pointer type '%s' does not allow address zero", buf_ptr(&ptr_type->name)));
+            return ira->codegen->invalid_instruction;
+        }
+
+        const uint32_t align_bytes = get_ptr_align(ira->codegen, ptr_type);
+        if (addr != 0 && addr % align_bytes != 0) {
+            ir_add_error(ira, source_instr,
+                    buf_sprintf("pointer type '%s' requires aligned address",
+                                buf_ptr(&ptr_type->name)));
             return ira->codegen->invalid_instruction;
         }
 

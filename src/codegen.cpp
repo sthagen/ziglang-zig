@@ -422,9 +422,10 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
     LLVMTypeRef fn_llvm_type = fn->raw_type_ref;
     LLVMValueRef llvm_fn = nullptr;
     if (fn->body_node == nullptr) {
+        const unsigned fn_addrspace = ZigLLVMDataLayoutGetProgramAddressSpace(g->target_data_ref);
         LLVMValueRef existing_llvm_fn = LLVMGetNamedFunction(g->module, symbol_name);
         if (existing_llvm_fn) {
-            return LLVMConstBitCast(existing_llvm_fn, LLVMPointerType(fn_llvm_type, 0));
+            return LLVMConstBitCast(existing_llvm_fn, LLVMPointerType(fn_llvm_type, fn_addrspace));
         } else {
             Buf *buf_symbol_name = buf_create_from_str(symbol_name);
             auto entry = g->exported_symbol_names.maybe_get(buf_symbol_name);
@@ -447,7 +448,7 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
                 resolve_llvm_types_fn(g, tld_fn->fn_entry);
                 tld_fn->fn_entry->llvm_value = LLVMAddFunction(g->module, symbol_name,
                         tld_fn->fn_entry->raw_type_ref);
-                llvm_fn = LLVMConstBitCast(tld_fn->fn_entry->llvm_value, LLVMPointerType(fn_llvm_type, 0));
+                llvm_fn = LLVMConstBitCast(tld_fn->fn_entry->llvm_value, LLVMPointerType(fn_llvm_type, fn_addrspace));
                 return llvm_fn;
             }
         }
@@ -3241,17 +3242,37 @@ static LLVMValueRef ir_render_widen_or_shorten(CodeGen *g, IrExecutable *executa
 static LLVMValueRef ir_render_int_to_ptr(CodeGen *g, IrExecutable *executable, IrInstructionIntToPtr *instruction) {
     ZigType *wanted_type = instruction->base.value->type;
     LLVMValueRef target_val = ir_llvm_value(g, instruction->target);
-    if (!ptr_allows_addr_zero(wanted_type) && ir_want_runtime_safety(g, &instruction->base)) {
-        LLVMValueRef zero = LLVMConstNull(LLVMTypeOf(target_val));
-        LLVMValueRef is_zero_bit = LLVMBuildICmp(g->builder, LLVMIntEQ, target_val, zero, "");
-        LLVMBasicBlockRef bad_block = LLVMAppendBasicBlock(g->cur_fn_val, "PtrToIntBad");
-        LLVMBasicBlockRef ok_block = LLVMAppendBasicBlock(g->cur_fn_val, "PtrToIntOk");
-        LLVMBuildCondBr(g->builder, is_zero_bit, bad_block, ok_block);
 
-        LLVMPositionBuilderAtEnd(g->builder, bad_block);
-        gen_safety_crash(g, PanicMsgIdPtrCastNull);
+    if (ir_want_runtime_safety(g, &instruction->base)) {
+        ZigType *usize = g->builtin_types.entry_usize;
+        LLVMValueRef zero = LLVMConstNull(usize->llvm_type);
 
-        LLVMPositionBuilderAtEnd(g->builder, ok_block);
+        if (!ptr_allows_addr_zero(wanted_type)) {
+            LLVMValueRef is_zero_bit = LLVMBuildICmp(g->builder, LLVMIntEQ, target_val, zero, "");
+            LLVMBasicBlockRef bad_block = LLVMAppendBasicBlock(g->cur_fn_val, "PtrToIntBad");
+            LLVMBasicBlockRef ok_block = LLVMAppendBasicBlock(g->cur_fn_val, "PtrToIntOk");
+            LLVMBuildCondBr(g->builder, is_zero_bit, bad_block, ok_block);
+
+            LLVMPositionBuilderAtEnd(g->builder, bad_block);
+            gen_safety_crash(g, PanicMsgIdPtrCastNull);
+
+            LLVMPositionBuilderAtEnd(g->builder, ok_block);
+        }
+
+        {
+            const uint32_t align_bytes = get_ptr_align(g, wanted_type);
+            LLVMValueRef alignment_minus_1 = LLVMConstInt(usize->llvm_type, align_bytes - 1, false);
+            LLVMValueRef anded_val = LLVMBuildAnd(g->builder, target_val, alignment_minus_1, "");
+            LLVMValueRef is_ok_bit = LLVMBuildICmp(g->builder, LLVMIntEQ, anded_val, zero, "");
+            LLVMBasicBlockRef bad_block = LLVMAppendBasicBlock(g->cur_fn_val, "PtrToIntAlignBad");
+            LLVMBasicBlockRef ok_block = LLVMAppendBasicBlock(g->cur_fn_val, "PtrToIntAlignOk");
+            LLVMBuildCondBr(g->builder, is_ok_bit, ok_block, bad_block);
+
+            LLVMPositionBuilderAtEnd(g->builder, bad_block);
+            gen_safety_crash(g, PanicMsgIdIncorrectAlignment);
+
+            LLVMPositionBuilderAtEnd(g->builder, ok_block);
+        }
     }
     return LLVMBuildIntToPtr(g->builder, target_val, get_llvm_type(g, wanted_type), "");
 }
@@ -3271,7 +3292,7 @@ static LLVMValueRef ir_render_int_to_enum(CodeGen *g, IrExecutable *executable, 
     LLVMValueRef tag_int_value = gen_widen_or_shorten(g, ir_want_runtime_safety(g, &instruction->base),
             instruction->target->value->type, tag_int_type, target_val);
 
-    if (ir_want_runtime_safety(g, &instruction->base)) {
+    if (ir_want_runtime_safety(g, &instruction->base) && wanted_type->data.enumeration.layout != ContainerLayoutExtern) {
         LLVMBasicBlockRef bad_value_block = LLVMAppendBasicBlock(g->cur_fn_val, "BadValue");
         LLVMBasicBlockRef ok_value_block = LLVMAppendBasicBlock(g->cur_fn_val, "OkValue");
         size_t field_count = wanted_type->data.enumeration.src_field_count;

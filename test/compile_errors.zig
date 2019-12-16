@@ -2,6 +2,33 @@ const tests = @import("tests.zig");
 const builtin = @import("builtin");
 
 pub fn addCases(cases: *tests.CompileErrorContext) void {
+    cases.add("intToPtr with misaligned address",
+        \\pub fn main() void {
+        \\    var y = @intToPtr([*]align(4) u8, 5);
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:13: error: pointer type '[*]align(4) u8' requires aligned address",
+    });
+
+    cases.add("switch on extern enum missing else prong",
+        \\const i = extern enum {
+        \\    n = 0,
+        \\    o = 2,
+        \\    p = 4,
+        \\    q = 4,
+        \\};
+        \\pub fn main() void {
+        \\    var x = @intToEnum(i, 52);
+        \\    switch (x) {
+        \\        .n,
+        \\        .o,
+        \\        .p => unreachable,
+        \\    }
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:9:5: error: switch on an extern enum must have an else prong",
+    });
+
     cases.add("invalid float literal",
         \\const std = @import("std");
         \\
@@ -2153,7 +2180,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
 
     cases.add("bad @alignCast at comptime",
         \\comptime {
-        \\    const ptr = @intToPtr(*i32, 0x1);
+        \\    const ptr = @intToPtr(*align(1) i32, 0x1);
         \\    const aligned = @alignCast(4, ptr);
         \\}
     , &[_][]const u8{
