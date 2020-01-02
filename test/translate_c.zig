@@ -3,6 +3,21 @@ const builtin = @import("builtin");
 
 pub fn addCases(cases: *tests.TranslateCContext) void {
     /////////////// Cases that pass for both stage1/stage2 ////////////////
+    cases.add("simple ptrCast for casts between opaque types",
+        \\struct opaque;
+        \\struct opaque_2;
+        \\void function(struct opaque *opaque) {
+        \\    struct opaque_2 *cast = (struct opaque_2 *)opaque;
+        \\}
+    , &[_][]const u8{
+        \\pub const struct_opaque = @OpaqueType();
+        \\pub const struct_opaque_2 = @OpaqueType();
+        \\pub export fn function(arg_opaque_1: ?*struct_opaque) void {
+        \\    var opaque_1 = arg_opaque_1;
+        \\    var cast: ?*struct_opaque_2 = @ptrCast(?*struct_opaque_2, opaque_1);
+        \\}
+    });
+
     cases.add("simple function prototypes",
         \\void __attribute__((noreturn)) foo(void);
         \\int bar(void);
@@ -570,13 +585,13 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
 
     cases.add("for loop",
         \\void foo(void) {
-        \\    for (int i = 0; i; i = i + 1) { }
+        \\    for (int i = 0; i; i++) { }
         \\}
     , &[_][]const u8{
         \\pub export fn foo() void {
         \\    {
         \\        var i: c_int = 0;
-        \\        while (i != 0) : (i = (i + @as(c_int, 1))) {}
+        \\        while (i != 0) : (i += 1) {}
         \\    }
         \\}
     });
@@ -2307,9 +2322,11 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\inline void a(void) {}
         \\static void b(void) {}
         \\void c(void) {}
+        \\static void foo() {}
     , &[_][]const u8{
         \\pub fn a() void {}
         \\pub fn b() void {}
         \\pub export fn c() void {}
+        \\pub fn foo() void {}
     });
 }

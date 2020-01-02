@@ -477,8 +477,14 @@ fn visitFnDecl(c: *Context, fn_decl: *const ZigClangFunctionDecl) Error!void {
     var it = proto_node.params.iterator(0);
     while (it.next()) |p| {
         const param = @fieldParentPtr(ast.Node.ParamDecl, "base", p.*);
-        const param_name = tokenSlice(c, param.name_token orelse
-            return failDecl(c, fn_decl_loc, fn_name, "function {} parameter has no name", .{fn_name}));
+        const param_name = if (param.name_token) |name_tok|
+            tokenSlice(c, name_tok)
+        else if (param.var_args_token != null) {
+            assert(it.next() == null);
+            _ = proto_node.params.pop();
+            break;
+        } else
+            return failDecl(c, fn_decl_loc, fn_name, "function {} parameter has no name", .{fn_name});
 
         const mangled_param_name = try block_scope.makeMangledName(c, param_name);
 
@@ -2472,7 +2478,8 @@ fn transCreatePreCrement(
         const expr = try transExpr(rp, scope, op_expr, .used, .r_value);
         const token = try appendToken(rp.c, op_tok_id, bytes);
         const one = try transCreateNodeInt(rp.c, 1);
-        _ = try appendToken(rp.c, .Semicolon, ";");
+        if (scope.id != .Condition)
+            _ = try appendToken(rp.c, .Semicolon, ";");
         return transCreateNodeInfixOp(rp, scope, expr, op, token, one, .used, false);
     }
     // worst case
@@ -2536,7 +2543,8 @@ fn transCreatePostCrement(
         const expr = try transExpr(rp, scope, op_expr, .used, .r_value);
         const token = try appendToken(rp.c, op_tok_id, bytes);
         const one = try transCreateNodeInt(rp.c, 1);
-        _ = try appendToken(rp.c, .Semicolon, ";");
+        if (scope.id != .Condition)
+            _ = try appendToken(rp.c, .Semicolon, ";");
         return transCreateNodeInfixOp(rp, scope, expr, op, token, one, .used, false);
     }
     // worst case
@@ -2734,6 +2742,9 @@ fn transCPtrCast(
 
     if (ZigClangType_isVoidType(qualTypeCanon(child_type))) {
         // void has 1-byte alignment, so @alignCast is not needed
+        try ptrcast_node.params.push(expr);
+    } else if (typeIsOpaque(rp.c, qualTypeCanon(child_type), loc)) {
+        // For opaque types a ptrCast is enough
         try ptrcast_node.params.push(expr);
     } else {
         const aligncast_node = try transCreateNodeBuiltinFnCall(rp.c, "@alignCast");
