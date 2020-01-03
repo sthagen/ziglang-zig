@@ -581,6 +581,36 @@ fn visitVarDecl(c: *Context, var_decl: *const ZigClangVarDecl) Error!void {
         return failDecl(c, var_decl_loc, checked_name, "non-extern variable has no initializer", .{});
     }
 
+    const linksection_expr = blk: {
+        var str_len: usize = undefined;
+        if (ZigClangVarDecl_getSectionAttribute(var_decl, &str_len)) |str_ptr| {
+            _ = try appendToken(rp.c, .Keyword_linksection, "linksection");
+            _ = try appendToken(rp.c, .LParen, "(");
+            const expr = try transCreateNodeStringLiteral(
+                rp.c,
+                try std.fmt.allocPrint(rp.c.a(), "\"{}\"", .{str_ptr[0..str_len]}),
+            );
+            _ = try appendToken(rp.c, .RParen, ")");
+
+            break :blk expr;
+        }
+        break :blk null;
+    };
+
+    const align_expr = blk: {
+        const alignment = ZigClangVarDecl_getAlignedAttribute(var_decl, rp.c.clang_context);
+        if (alignment != 0) {
+            _ = try appendToken(rp.c, .Keyword_linksection, "align");
+            _ = try appendToken(rp.c, .LParen, "(");
+            // Clang reports the alignment in bits
+            const expr = try transCreateNodeInt(rp.c, alignment / 8);
+            _ = try appendToken(rp.c, .RParen, ")");
+
+            break :blk expr;
+        }
+        break :blk null;
+    };
+
     const node = try c.a().create(ast.Node.VarDecl);
     node.* = ast.Node.VarDecl{
         .doc_comments = null,
@@ -593,8 +623,8 @@ fn visitVarDecl(c: *Context, var_decl: *const ZigClangVarDecl) Error!void {
         .extern_export_token = extern_tok,
         .lib_name = null,
         .type_node = type_node,
-        .align_node = null,
-        .section_node = null,
+        .align_node = align_expr,
+        .section_node = linksection_expr,
         .init_node = init_node,
         .semicolon_token = try appendToken(c, .Semicolon, ";"),
     };
@@ -868,11 +898,25 @@ fn transEnumDecl(c: *Context, enum_decl: *const ZigClangEnumDecl) Error!?*ast.No
 
             try container_node.fields_and_decls.push(&field_node.base);
             _ = try appendToken(c, .Comma, ",");
+
             // In C each enum value is in the global namespace. So we put them there too.
             // At this point we can rely on the enum emitting successfully.
             const tld_node = try transCreateNodeVarDecl(c, true, true, enum_val_name);
             tld_node.eq_token = try appendToken(c, .Equal, "=");
-            tld_node.init_node = try transCreateNodeAPInt(c, ZigClangEnumConstantDecl_getInitVal(enum_const));
+            const cast_node = try transCreateNodeBuiltinFnCall(rp.c, "@enumToInt");
+            const enum_ident = try transCreateNodeIdentifier(c, name);
+            const period_tok = try appendToken(c, .Period, ".");
+            const field_ident = try transCreateNodeIdentifier(c, field_name);
+            const field_access_node = try c.a().create(ast.Node.InfixOp);
+            field_access_node.* = .{
+                .op_token = period_tok,
+                .lhs = enum_ident,
+                .op = .Period,
+                .rhs = field_ident,
+            };
+            try cast_node.params.push(&field_access_node.base);
+            cast_node.rparen_token = try appendToken(rp.c, .RParen, ")");
+            tld_node.init_node = &cast_node.base;
             tld_node.semicolon_token = try appendToken(c, .Semicolon, ";");
             try addTopLevelDecl(c, field_name, &tld_node.base);
         }
@@ -1682,15 +1726,7 @@ fn transCCast(
         builtin_node.rparen_token = try appendToken(rp.c, .RParen, ")");
         return &builtin_node.base;
     }
-    if (ZigClangQualType_getTypeClass(src_type) == .Elaborated) {
-        const elaborated_ty = @ptrCast(*const ZigClangElaboratedType, ZigClangQualType_getTypePtr(src_type));
-        return transCCast(rp, scope, loc, dst_type, ZigClangElaboratedType_getNamedType(elaborated_ty), expr);
-    }
-    if (ZigClangQualType_getTypeClass(dst_type) == .Elaborated) {
-        const elaborated_ty = @ptrCast(*const ZigClangElaboratedType, ZigClangQualType_getTypePtr(dst_type));
-        return transCCast(rp, scope, loc, ZigClangElaboratedType_getNamedType(elaborated_ty), src_type, expr);
-    }
-    if (ZigClangQualType_getTypeClass(dst_type) == .Enum) {
+    if (ZigClangQualType_getTypeClass(ZigClangQualType_getCanonicalType(dst_type)) == .Enum) {
         const builtin_node = try transCreateNodeBuiltinFnCall(rp.c, "@intToEnum");
         try builtin_node.params.push(try transQualType(rp, dst_type, loc));
         _ = try appendToken(rp.c, .Comma, ",");
@@ -1698,8 +1734,8 @@ fn transCCast(
         builtin_node.rparen_token = try appendToken(rp.c, .RParen, ")");
         return &builtin_node.base;
     }
-    if (ZigClangQualType_getTypeClass(src_type) == .Enum and
-        ZigClangQualType_getTypeClass(dst_type) != .Enum)
+    if (ZigClangQualType_getTypeClass(ZigClangQualType_getCanonicalType(src_type)) == .Enum and
+        ZigClangQualType_getTypeClass(ZigClangQualType_getCanonicalType(dst_type)) != .Enum)
     {
         const builtin_node = try transCreateNodeBuiltinFnCall(rp.c, "@enumToInt");
         try builtin_node.params.push(expr);
@@ -1751,6 +1787,70 @@ fn transExprCoercing(
     return transExpr(rp, scope, expr, .used, .r_value);
 }
 
+fn transInitListExprRecord(
+    rp: RestorePoint,
+    scope: *Scope,
+    loc: ZigClangSourceLocation,
+    expr: *const ZigClangInitListExpr,
+    ty: *const ZigClangType,
+    used: ResultUsed,
+) TransError!*ast.Node {
+    var is_union_type = false;
+    // Unions and Structs are both represented as RecordDecl
+    const record_ty = ZigClangType_getAsRecordType(ty) orelse
+        blk: {
+        is_union_type = true;
+        break :blk ZigClangType_getAsUnionType(ty);
+    } orelse unreachable;
+    const record_decl = ZigClangRecordType_getDecl(record_ty);
+    const record_def = ZigClangRecordDecl_getDefinition(record_decl) orelse
+        unreachable;
+
+    const ty_node = try transType(rp, ty, loc);
+    const init_count = ZigClangInitListExpr_getNumInits(expr);
+    var init_node = try transCreateNodeStructInitializer(rp.c, ty_node);
+
+    var init_i: c_uint = 0;
+    var it = ZigClangRecordDecl_field_begin(record_def);
+    const end_it = ZigClangRecordDecl_field_end(record_def);
+    while (ZigClangRecordDecl_field_iterator_neq(it, end_it)) : (it = ZigClangRecordDecl_field_iterator_next(it)) {
+        const field_decl = ZigClangRecordDecl_field_iterator_deref(it);
+
+        // The initializer for a union type has a single entry only
+        if (is_union_type and field_decl != ZigClangInitListExpr_getInitializedFieldInUnion(expr)) {
+            continue;
+        }
+
+        assert(init_i < init_count);
+        const elem_expr = ZigClangInitListExpr_getInit(expr, init_i);
+        init_i += 1;
+
+        // Generate the field assignment expression:
+        //     .field_name = expr
+        const period_tok = try appendToken(rp.c, .Period, ".");
+
+        const raw_name = try rp.c.str(ZigClangDecl_getName_bytes_begin(@ptrCast(*const ZigClangDecl, field_decl)));
+        if (raw_name.len < 1) continue;
+        const field_name_tok = try appendIdentifier(rp.c, raw_name);
+
+        _ = try appendToken(rp.c, .Equal, "=");
+
+        const field_init_node = try rp.c.a().create(ast.Node.FieldInitializer);
+        field_init_node.* = .{
+            .period_token = period_tok,
+            .name_token = field_name_tok,
+            .expr = try transExpr(rp, scope, elem_expr, .used, .r_value),
+        };
+
+        try init_node.op.StructInitializer.push(&field_init_node.base);
+        _ = try appendToken(rp.c, .Comma, ",");
+    }
+
+    init_node.rtoken = try appendToken(rp.c, .RBrace, "}");
+
+    return &init_node.base;
+}
+
 fn transInitListExpr(
     rp: RestorePoint,
     scope: *Scope,
@@ -1763,7 +1863,7 @@ fn transInitListExpr(
     switch (ZigClangType_getTypeClass(qual_type)) {
         .ConstantArray => {},
         .Record, .Elaborated => {
-            return revertAndWarn(rp, error.UnsupportedType, source_loc, "TODO initListExpr for structs", .{});
+            return transInitListExprRecord(rp, scope, source_loc, expr, qual_type, used);
         },
         else => {
             const type_name = rp.c.str(ZigClangType_getTypeClassName(qual_type));
@@ -1831,16 +1931,13 @@ fn transInitListExpr(
     return &cat_node.base;
 }
 
-fn transImplicitValueInitExpr(
+fn transZeroInitExpr(
     rp: RestorePoint,
     scope: *Scope,
-    expr: *const ZigClangExpr,
-    used: ResultUsed,
+    source_loc: ZigClangSourceLocation,
+    ty: *const ZigClangType,
 ) TransError!*ast.Node {
-    const source_loc = ZigClangExpr_getBeginLoc(expr);
-    const qt = getExprQualType(rp.c, expr);
-    const ty = ZigClangQualType_getTypePtr(qt);
-    const node = switch (ZigClangType_getTypeClass(ty)) {
+    switch (ZigClangType_getTypeClass(ty)) {
         .Builtin => blk: {
             const builtin_ty = @ptrCast(*const ZigClangBuiltinType, ty);
             switch (ZigClangBuiltinType_getKind(builtin_ty)) {
@@ -1870,8 +1967,34 @@ fn transImplicitValueInitExpr(
             }
         },
         .Pointer => return transCreateNodeNullLiteral(rp.c),
-        else => return revertAndWarn(rp, error.UnsupportedType, source_loc, "type does not have an implicit init value", .{}),
-    };
+        .Typedef => {
+            const typedef_ty = @ptrCast(*const ZigClangTypedefType, ty);
+            const typedef_decl = ZigClangTypedefType_getDecl(typedef_ty);
+            return transZeroInitExpr(
+                rp,
+                scope,
+                source_loc,
+                ZigClangQualType_getTypePtr(
+                    ZigClangTypedefNameDecl_getUnderlyingType(typedef_decl),
+                ),
+            );
+        },
+        else => {},
+    }
+
+    return revertAndWarn(rp, error.UnsupportedType, source_loc, "type does not have an implicit init value", .{});
+}
+
+fn transImplicitValueInitExpr(
+    rp: RestorePoint,
+    scope: *Scope,
+    expr: *const ZigClangExpr,
+    used: ResultUsed,
+) TransError!*ast.Node {
+    const source_loc = ZigClangExpr_getBeginLoc(expr);
+    const qt = getExprQualType(rp.c, expr);
+    const ty = ZigClangQualType_getTypePtr(qt);
+    return transZeroInitExpr(rp, scope, source_loc, ty);
 }
 
 fn transIfStmt(
@@ -3454,6 +3577,19 @@ fn transCreateNodeContainerInitializer(c: *Context, dot_tok: ast.TokenIndex) !*a
     return node;
 }
 
+fn transCreateNodeStructInitializer(c: *Context, ty: *ast.Node) !*ast.Node.SuffixOp {
+    _ = try appendToken(c, .LBrace, "{");
+    const node = try c.a().create(ast.Node.SuffixOp);
+    node.* = ast.Node.SuffixOp{
+        .lhs = .{ .node = ty },
+        .op = .{
+            .StructInitializer = ast.Node.SuffixOp.Op.InitList.init(c.a()),
+        },
+        .rtoken = undefined, // set after appending values
+    };
+    return node;
+}
+
 fn transCreateNodeInt(c: *Context, int: var) !*ast.Node {
     const token = try appendTokenFmt(c, .IntegerLiteral, "{}", .{int});
     const node = try c.a().create(ast.Node.IntegerLiteral);
@@ -3571,6 +3707,14 @@ fn transCreateNodeEnumLiteral(c: *Context, name: []const u8) !*ast.Node {
     node.* = .{
         .dot = try appendToken(c, .Period, "."),
         .name = try appendIdentifier(c, name),
+    };
+    return &node.base;
+}
+
+fn transCreateNodeStringLiteral(c: *Context, str: []const u8) !*ast.Node {
+    const node = try c.a().create(ast.Node.StringLiteral);
+    node.* = .{
+        .token = try appendToken(c, .StringLiteral, str),
     };
     return &node.base;
 }
@@ -4048,8 +4192,8 @@ fn finishTransFnProto(
         const noalias_tok = if (ZigClangQualType_isRestrictQualified(param_qt)) try appendToken(rp.c, .Keyword_noalias, "noalias") else null;
 
         const param_name_tok: ?ast.TokenIndex = blk: {
-            if (fn_decl != null) {
-                const param = ZigClangFunctionDecl_getParamDecl(fn_decl.?, @intCast(c_uint, i));
+            if (fn_decl) |decl| {
+                const param = ZigClangFunctionDecl_getParamDecl(decl, @intCast(c_uint, i));
                 const param_name: []const u8 = try rp.c.str(ZigClangDecl_getName_bytes_begin(@ptrCast(*const ZigClangDecl, param)));
                 if (param_name.len < 1)
                     break :blk null;
@@ -4100,6 +4244,40 @@ fn finishTransFnProto(
 
     const rparen_tok = try appendToken(rp.c, .RParen, ")");
 
+    const linksection_expr = blk: {
+        if (fn_decl) |decl| {
+            var str_len: usize = undefined;
+            if (ZigClangFunctionDecl_getSectionAttribute(decl, &str_len)) |str_ptr| {
+                _ = try appendToken(rp.c, .Keyword_linksection, "linksection");
+                _ = try appendToken(rp.c, .LParen, "(");
+                const expr = try transCreateNodeStringLiteral(
+                    rp.c,
+                    try std.fmt.allocPrint(rp.c.a(), "\"{}\"", .{str_ptr[0..str_len]}),
+                );
+                _ = try appendToken(rp.c, .RParen, ")");
+
+                break :blk expr;
+            }
+        }
+        break :blk null;
+    };
+
+    const align_expr = blk: {
+        if (fn_decl) |decl| {
+            const alignment = ZigClangFunctionDecl_getAlignedAttribute(decl, rp.c.clang_context);
+            if (alignment != 0) {
+                _ = try appendToken(rp.c, .Keyword_linksection, "align");
+                _ = try appendToken(rp.c, .LParen, "(");
+                // Clang reports the alignment in bits
+                const expr = try transCreateNodeInt(rp.c, alignment / 8);
+                _ = try appendToken(rp.c, .RParen, ")");
+
+                break :blk expr;
+            }
+        }
+        break :blk null;
+    };
+
     const return_type_node = blk: {
         if (ZigClangFunctionType_getNoReturnAttr(fn_ty)) {
             break :blk try transCreateNodeIdentifier(rp.c, "noreturn");
@@ -4133,8 +4311,8 @@ fn finishTransFnProto(
         .cc_token = cc_tok,
         .body_node = null,
         .lib_name = null,
-        .align_expr = null,
-        .section_expr = null,
+        .align_expr = align_expr,
+        .section_expr = linksection_expr,
     };
     return fn_proto;
 }

@@ -2,7 +2,69 @@ const tests = @import("tests.zig");
 const builtin = @import("builtin");
 
 pub fn addCases(cases: *tests.TranslateCContext) void {
-    /////////////// Cases that pass for both stage1/stage2 ////////////////
+    cases.add("union initializer",
+        \\union { int x; char c[4]; }
+        \\  ua = {1},
+        \\  ub = {.c={'a','b','b','a'}};
+    , &[_][]const u8{
+        \\const union_unnamed_1 = extern union {
+        \\    x: c_int,
+        \\    c: [4]u8,
+        \\};
+        \\pub export var ua: union_unnamed_1 = union_unnamed_1{
+        \\    .x = @as(c_int, 1),
+        \\};
+        \\pub export var ub: union_unnamed_1 = union_unnamed_1{
+        \\    .c = .{
+        \\        @bitCast(u8, @truncate(i8, @as(c_int, 'a'))),
+        \\        @bitCast(u8, @truncate(i8, @as(c_int, 'b'))),
+        \\        @bitCast(u8, @truncate(i8, @as(c_int, 'b'))),
+        \\        @bitCast(u8, @truncate(i8, @as(c_int, 'a'))),
+        \\    },
+        \\};
+    });
+
+    cases.add("struct initializer - simple",
+        \\struct {double x,y,z;} s0 = {1.2, 1.3};
+        \\struct {int sec,min,hour,day,mon,year;} s1 = {.day=31,12,2014,.sec=30,15,17};
+        \\struct {int x,y;} s2 = {.y = 2, .x=1};
+    , &[_][]const u8{
+        \\const struct_unnamed_1 = extern struct {
+        \\    x: f64,
+        \\    y: f64,
+        \\    z: f64,
+        \\};
+        \\pub export var s0: struct_unnamed_1 = struct_unnamed_1{
+        \\    .x = 1.2,
+        \\    .y = 1.3,
+        \\    .z = 0,
+        \\};
+        \\const struct_unnamed_2 = extern struct {
+        \\    sec: c_int,
+        \\    min: c_int,
+        \\    hour: c_int,
+        \\    day: c_int,
+        \\    mon: c_int,
+        \\    year: c_int,
+        \\};
+        \\pub export var s1: struct_unnamed_2 = struct_unnamed_2{
+        \\    .sec = @as(c_int, 30),
+        \\    .min = @as(c_int, 15),
+        \\    .hour = @as(c_int, 17),
+        \\    .day = @as(c_int, 31),
+        \\    .mon = @as(c_int, 12),
+        \\    .year = @as(c_int, 2014),
+        \\};
+        \\const struct_unnamed_3 = extern struct {
+        \\    x: c_int,
+        \\    y: c_int,
+        \\};
+        \\pub export var s2: struct_unnamed_3 = struct_unnamed_3{
+        \\    .x = @as(c_int, 1),
+        \\    .y = @as(c_int, 2),
+        \\};
+    });
+
     cases.add("simple ptrCast for casts between opaque types",
         \\struct opaque;
         \\struct opaque_2;
@@ -16,6 +78,28 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\    var opaque_1 = arg_opaque_1;
         \\    var cast: ?*struct_opaque_2 = @ptrCast(?*struct_opaque_2, opaque_1);
         \\}
+    });
+
+    cases.add("align() attribute",
+        \\__attribute__ ((aligned(128)))
+        \\extern char my_array[16];
+        \\__attribute__ ((aligned(128)))
+        \\void my_fn(void) { }
+    , &[_][]const u8{
+        \\pub extern var my_array: [16]u8 align(128);
+        \\pub export fn my_fn() align(128) void {}
+    });
+
+    cases.add("linksection() attribute",
+        \\// Use the "segment,section" format to make this test pass when
+        \\// targeting the mach-o binary format
+        \\__attribute__ ((__section__("NEAR,.data")))
+        \\extern char my_array[16];
+        \\__attribute__ ((__section__("NEAR,.data")))
+        \\void my_fn(void) { }
+    , &[_][]const u8{
+        \\pub extern var my_array: [16]u8 linksection("NEAR,.data");
+        \\pub export fn my_fn() linksection("NEAR,.data") void {}
     });
 
     cases.add("simple function prototypes",
@@ -828,7 +912,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\extern enum enum_ty my_enum;
         \\enum enum_ty { FOO };
     , &[_][]const u8{
-        \\pub const FOO = 0;
+        \\pub const FOO = @enumToInt(enum_enum_ty.FOO);
         \\pub const enum_enum_ty = extern enum {
         \\    FOO,
         \\};
@@ -906,27 +990,27 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\    p,
         \\};
     , &[_][]const u8{
-        \\pub const a = 0;
-        \\pub const b = 1;
-        \\pub const c = 2;
+        \\pub const a = @enumToInt(enum_unnamed_1.a);
+        \\pub const b = @enumToInt(enum_unnamed_1.b);
+        \\pub const c = @enumToInt(enum_unnamed_1.c);
         \\const enum_unnamed_1 = extern enum {
         \\    a,
         \\    b,
         \\    c,
         \\};
         \\pub const d = enum_unnamed_1;
-        \\pub const e = 0;
-        \\pub const f = 4;
-        \\pub const g = 5;
+        \\pub const e = @enumToInt(enum_unnamed_2.e);
+        \\pub const f = @enumToInt(enum_unnamed_2.f);
+        \\pub const g = @enumToInt(enum_unnamed_2.g);
         \\const enum_unnamed_2 = extern enum {
         \\    e = 0,
         \\    f = 4,
         \\    g = 5,
         \\};
         \\pub export var h: enum_unnamed_2 = @intToEnum(enum_unnamed_2, e);
-        \\pub const i = 0;
-        \\pub const j = 1;
-        \\pub const k = 2;
+        \\pub const i = @enumToInt(enum_unnamed_3.i);
+        \\pub const j = @enumToInt(enum_unnamed_3.j);
+        \\pub const k = @enumToInt(enum_unnamed_3.k);
         \\const enum_unnamed_3 = extern enum {
         \\    i,
         \\    j,
@@ -936,9 +1020,9 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\    l: enum_unnamed_3,
         \\    m: d,
         \\};
-        \\pub const n = 0;
-        \\pub const o = 1;
-        \\pub const p = 2;
+        \\pub const n = @enumToInt(enum_i.n);
+        \\pub const o = @enumToInt(enum_i.o);
+        \\pub const p = @enumToInt(enum_i.p);
         \\pub const enum_i = extern enum {
         \\    n,
         \\    o,
@@ -1364,8 +1448,8 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\    Two,
         \\};
     , &[_][]const u8{
-        \\pub const One = 0;
-        \\pub const Two = 1;
+        \\pub const One = @enumToInt(enum_unnamed_1.One);
+        \\pub const Two = @enumToInt(enum_unnamed_1.Two);
         \\const enum_unnamed_1 = extern enum {
         \\    One,
         \\    Two,
@@ -2170,44 +2254,19 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
 
     cases.add("enums",
         \\enum Foo {
-        \\    FooA,
-        \\    FooB,
-        \\    Foo1,
-        \\};
-    , &[_][]const u8{
-        \\pub const enum_Foo = extern enum {
-        \\    A,
-        \\    B,
-        \\    @"1",
-        \\};
-    ,
-        \\pub const FooA = 0;
-    ,
-        \\pub const FooB = 1;
-    ,
-        \\pub const Foo1 = 2;
-    ,
-        \\pub const Foo = enum_Foo;
-    });
-
-    cases.add("enums",
-        \\enum Foo {
         \\    FooA = 2,
         \\    FooB = 5,
         \\    Foo1,
         \\};
     , &[_][]const u8{
+        \\pub const FooA = @enumToInt(enum_Foo.A);
+        \\pub const FooB = @enumToInt(enum_Foo.B);
+        \\pub const Foo1 = @enumToInt(enum_Foo.@"1");
         \\pub const enum_Foo = extern enum {
         \\    A = 2,
         \\    B = 5,
         \\    @"1" = 6,
         \\};
-    ,
-        \\pub const FooA = 2;
-    ,
-        \\pub const FooB = 5;
-    ,
-        \\pub const Foo1 = 6;
     ,
         \\pub const Foo = enum_Foo;
     });
