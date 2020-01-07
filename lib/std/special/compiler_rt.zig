@@ -75,6 +75,9 @@ comptime {
     @export("__floatsisf", @import("compiler_rt/floatsiXf.zig").__floatsisf, linkage);
     @export("__floatdidf", @import("compiler_rt/floatdidf.zig").__floatdidf, linkage);
     @export("__floatsitf", @import("compiler_rt/floatsiXf.zig").__floatsitf, linkage);
+
+    @export("__floatunsisf", @import("compiler_rt/floatunsisf.zig").__floatunsisf, linkage);
+    @export("__floatundisf", @import("compiler_rt/floatundisf.zig").__floatundisf, linkage);
     @export("__floatunsidf", @import("compiler_rt/floatunsidf.zig").__floatunsidf, linkage);
     @export("__floatundidf", @import("compiler_rt/floatundidf.zig").__floatundidf, linkage);
 
@@ -183,6 +186,8 @@ comptime {
         @export("__aeabi_l2d", @import("compiler_rt/floatdidf.zig").__floatdidf, linkage);
         @export("__aeabi_ui2d", @import("compiler_rt/floatunsidf.zig").__floatunsidf, linkage);
         @export("__aeabi_ul2d", @import("compiler_rt/floatundidf.zig").__floatundidf, linkage);
+        @export("__aeabi_ui2f", @import("compiler_rt/floatunsisf.zig").__floatunsisf, linkage);
+        @export("__aeabi_ul2f", @import("compiler_rt/floatundisf.zig").__floatundisf, linkage);
 
         @export("__aeabi_fneg", @import("compiler_rt/negXf2.zig").__negsf2, linkage);
         @export("__aeabi_dneg", @import("compiler_rt/negXf2.zig").__negdf2, linkage);
@@ -309,7 +314,7 @@ pub fn panic(msg: []const u8, error_return_trace: ?*builtin.StackTrace) noreturn
     }
 }
 
-extern fn __stack_chk_fail() noreturn {
+fn __stack_chk_fail() callconv(.C) noreturn {
     @panic("stack smashing detected");
 }
 
@@ -320,17 +325,17 @@ extern var __stack_chk_guard: usize = blk: {
     break :blk @bitCast(usize, buf);
 };
 
-extern fn __aeabi_unwind_cpp_pr0() void {
+fn __aeabi_unwind_cpp_pr0() callconv(.C) void {
     unreachable;
 }
-extern fn __aeabi_unwind_cpp_pr1() void {
+fn __aeabi_unwind_cpp_pr1() callconv(.C) void {
     unreachable;
 }
-extern fn __aeabi_unwind_cpp_pr2() void {
+fn __aeabi_unwind_cpp_pr2() callconv(.C) void {
     unreachable;
 }
 
-extern fn __divmoddi4(a: i64, b: i64, rem: *i64) i64 {
+fn __divmoddi4(a: i64, b: i64, rem: *i64) callconv(.C) i64 {
     @setRuntimeSafety(is_test);
 
     const d = __divdi3(a, b);
@@ -338,7 +343,7 @@ extern fn __divmoddi4(a: i64, b: i64, rem: *i64) i64 {
     return d;
 }
 
-extern fn __divdi3(a: i64, b: i64) i64 {
+fn __divdi3(a: i64, b: i64) callconv(.C) i64 {
     @setRuntimeSafety(is_test);
 
     // Set aside the sign of the quotient.
@@ -352,7 +357,7 @@ extern fn __divdi3(a: i64, b: i64) i64 {
     return @bitCast(i64, (res ^ sign) -% sign);
 }
 
-extern fn __moddi3(a: i64, b: i64) i64 {
+fn __moddi3(a: i64, b: i64) callconv(.C) i64 {
     @setRuntimeSafety(is_test);
 
     // Take absolute value of a and b via abs(x) = (x^(x >> 63)) - (x >> 63).
@@ -365,12 +370,12 @@ extern fn __moddi3(a: i64, b: i64) i64 {
     return (@bitCast(i64, r) ^ (a >> 63)) -% (a >> 63);
 }
 
-extern fn __udivdi3(a: u64, b: u64) u64 {
+fn __udivdi3(a: u64, b: u64) callconv(.C) u64 {
     @setRuntimeSafety(is_test);
     return __udivmoddi4(a, b, null);
 }
 
-extern fn __umoddi3(a: u64, b: u64) u64 {
+fn __umoddi3(a: u64, b: u64) callconv(.C) u64 {
     @setRuntimeSafety(is_test);
 
     var r: u64 = undefined;
@@ -378,7 +383,7 @@ extern fn __umoddi3(a: u64, b: u64) u64 {
     return r;
 }
 
-extern fn __aeabi_uidivmod(n: u32, d: u32) extern struct {
+fn __aeabi_uidivmod(n: u32, d: u32) callconv(.C) extern struct {
     q: u32,
     r: u32,
 } {
@@ -389,7 +394,7 @@ extern fn __aeabi_uidivmod(n: u32, d: u32) extern struct {
     return result;
 }
 
-extern fn __aeabi_uldivmod(n: u64, d: u64) extern struct {
+fn __aeabi_uldivmod(n: u64, d: u64) callconv(.C) extern struct {
     q: u64,
     r: u64,
 } {
@@ -400,7 +405,7 @@ extern fn __aeabi_uldivmod(n: u64, d: u64) extern struct {
     return result;
 }
 
-extern fn __aeabi_idivmod(n: i32, d: i32) extern struct {
+fn __aeabi_idivmod(n: i32, d: i32) callconv(.C) extern struct {
     q: i32,
     r: i32,
 } {
@@ -411,7 +416,7 @@ extern fn __aeabi_idivmod(n: i32, d: i32) extern struct {
     return result;
 }
 
-extern fn __aeabi_ldivmod(n: i64, d: i64) extern struct {
+fn __aeabi_ldivmod(n: i64, d: i64) callconv(.C) extern struct {
     q: i64,
     r: i64,
 } {
@@ -528,7 +533,7 @@ fn usesThumb1PreArmv6(arch: builtin.Arch) bool {
     };
 }
 
-nakedcc fn __aeabi_memcpy() noreturn {
+fn __aeabi_memcpy() callconv(.Naked) noreturn {
     @setRuntimeSafety(false);
     if (use_thumb_1) {
         asm volatile (
@@ -544,7 +549,7 @@ nakedcc fn __aeabi_memcpy() noreturn {
     unreachable;
 }
 
-nakedcc fn __aeabi_memmove() noreturn {
+fn __aeabi_memmove() callconv(.Naked) noreturn {
     @setRuntimeSafety(false);
     if (use_thumb_1) {
         asm volatile (
@@ -560,7 +565,7 @@ nakedcc fn __aeabi_memmove() noreturn {
     unreachable;
 }
 
-nakedcc fn __aeabi_memset() noreturn {
+fn __aeabi_memset() callconv(.Naked) noreturn {
     @setRuntimeSafety(false);
     if (use_thumb_1_pre_armv6) {
         asm volatile (
@@ -591,7 +596,7 @@ nakedcc fn __aeabi_memset() noreturn {
     unreachable;
 }
 
-nakedcc fn __aeabi_memclr() noreturn {
+fn __aeabi_memclr() callconv(.Naked) noreturn {
     @setRuntimeSafety(false);
     if (use_thumb_1_pre_armv6) {
         asm volatile (
@@ -619,7 +624,7 @@ nakedcc fn __aeabi_memclr() noreturn {
     unreachable;
 }
 
-nakedcc fn __aeabi_memcmp() noreturn {
+fn __aeabi_memcmp() callconv(.Naked) noreturn {
     @setRuntimeSafety(false);
     if (use_thumb_1) {
         asm volatile (
@@ -635,7 +640,7 @@ nakedcc fn __aeabi_memcmp() noreturn {
     unreachable;
 }
 
-extern fn __divmodsi4(a: i32, b: i32, rem: *i32) i32 {
+fn __divmodsi4(a: i32, b: i32, rem: *i32) callconv(.C) i32 {
     @setRuntimeSafety(is_test);
 
     const d = __divsi3(a, b);
@@ -643,7 +648,7 @@ extern fn __divmodsi4(a: i32, b: i32, rem: *i32) i32 {
     return d;
 }
 
-extern fn __udivmodsi4(a: u32, b: u32, rem: *u32) u32 {
+fn __udivmodsi4(a: u32, b: u32, rem: *u32) callconv(.C) u32 {
     @setRuntimeSafety(is_test);
 
     const d = __udivsi3(a, b);
@@ -651,7 +656,7 @@ extern fn __udivmodsi4(a: u32, b: u32, rem: *u32) u32 {
     return d;
 }
 
-extern fn __divsi3(n: i32, d: i32) i32 {
+fn __divsi3(n: i32, d: i32) callconv(.C) i32 {
     @setRuntimeSafety(is_test);
 
     // Set aside the sign of the quotient.
@@ -665,7 +670,7 @@ extern fn __divsi3(n: i32, d: i32) i32 {
     return @bitCast(i32, (res ^ sign) -% sign);
 }
 
-extern fn __udivsi3(n: u32, d: u32) u32 {
+fn __udivsi3(n: u32, d: u32) callconv(.C) u32 {
     @setRuntimeSafety(is_test);
 
     const n_uword_bits: c_uint = u32.bit_count;
@@ -706,13 +711,13 @@ extern fn __udivsi3(n: u32, d: u32) u32 {
     return q;
 }
 
-extern fn __modsi3(n: i32, d: i32) i32 {
+fn __modsi3(n: i32, d: i32) callconv(.C) i32 {
     @setRuntimeSafety(is_test);
 
     return n -% __divsi3(n, d) *% d;
 }
 
-extern fn __umodsi3(n: u32, d: u32) u32 {
+fn __umodsi3(n: u32, d: u32) callconv(.C) u32 {
     @setRuntimeSafety(is_test);
 
     return n -% __udivsi3(n, d) *% d;
