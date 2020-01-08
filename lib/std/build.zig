@@ -60,6 +60,7 @@ pub const Builder = struct {
     override_lib_dir: ?[]const u8,
     vcpkg_root: VcpkgRoot,
     pkg_config_pkg_list: ?(PkgConfigError![]const PkgConfigPkg) = null,
+    args: ?[][]const u8 = null,
 
     const PkgConfigError = error{
         PkgConfigCrashed,
@@ -166,6 +167,7 @@ pub const Builder = struct {
             .override_lib_dir = null,
             .install_path = undefined,
             .vcpkg_root = VcpkgRoot{ .Unattempted = {} },
+            .args = null,
         };
         try self.top_level_steps.append(&self.install_tls);
         try self.top_level_steps.append(&self.uninstall_tls);
@@ -555,7 +557,15 @@ pub const Builder = struct {
                 },
                 UserValue.Scalar => |s| return s,
             },
-            TypeId.List => panic("TODO list options to build script", .{}),
+            TypeId.List => switch (entry.value.value) {
+                UserValue.Flag => {
+                    warn("Expected -D{} to be a list, but received a boolean.\n", .{name});
+                    self.markInvalidUserInput();
+                    return null;
+                },
+                UserValue.Scalar => |s| return &[_][]const u8{s},
+                UserValue.List => |lst| return lst.toSliceConst(),
+            },
         }
     }
 
@@ -957,7 +967,7 @@ pub const Builder = struct {
         }
     }
 
-    pub fn exec(self: *Builder, argv: []const []const u8) ![]u8 {
+    pub fn execFromStep(self: *Builder, argv: []const []const u8, src_step: ?*Step) ![]u8 {
         assert(argv.len != 0);
 
         if (self.verbose) {
@@ -967,22 +977,29 @@ pub const Builder = struct {
         var code: u8 = undefined;
         return self.execAllowFail(argv, &code, .Inherit) catch |err| switch (err) {
             error.FileNotFound => {
+                if (src_step) |s| warn("{}...", .{s.name});
                 warn("Unable to spawn the following command: file not found\n", .{});
                 printCmd(null, argv);
                 std.os.exit(@truncate(u8, code));
             },
             error.ExitCodeFailure => {
+                if (src_step) |s| warn("{}...", .{s.name});
                 warn("The following command exited with error code {}:\n", .{code});
                 printCmd(null, argv);
                 std.os.exit(@truncate(u8, code));
             },
             error.ProcessTerminated => {
+                if (src_step) |s| warn("{}...", .{s.name});
                 warn("The following command terminated unexpectedly:\n", .{});
                 printCmd(null, argv);
                 std.os.exit(@truncate(u8, code));
             },
             else => |e| return e,
         };
+    }
+
+    pub fn exec(self: *Builder, argv: []const []const u8) ![]u8 {
+        return self.execFromStep(argv, null);
     }
 
     pub fn addSearchPrefix(self: *Builder, search_prefix: []const u8) void {
@@ -1157,6 +1174,8 @@ pub const LibExeObjStep = struct {
     target_glibc: ?Version = null,
 
     valgrind_support: ?bool = null,
+
+    link_eh_frame_hdr: bool = false,
 
     /// Uses system Wine installation to run cross compiled Windows build artifacts.
     enable_wine: bool = false,
@@ -1893,7 +1912,10 @@ pub const LibExeObjStep = struct {
         if (builder.verbose_cc or self.verbose_cc) zig_args.append("--verbose-cc") catch unreachable;
 
         if (self.strip) {
-            zig_args.append("--strip") catch unreachable;
+            try zig_args.append("--strip");
+        }
+        if (self.link_eh_frame_hdr) {
+            try zig_args.append("--eh-frame-hdr");
         }
 
         if (self.single_threaded) {
@@ -2133,7 +2155,7 @@ pub const LibExeObjStep = struct {
             try zig_args.append("--cache");
             try zig_args.append("on");
 
-            const output_path_nl = try builder.exec(zig_args.toSliceConst());
+            const output_path_nl = try builder.execFromStep(zig_args.toSliceConst(), &self.step);
             const output_path = mem.trimRight(u8, output_path_nl, "\r\n");
 
             if (self.output_dir) |output_dir| {
