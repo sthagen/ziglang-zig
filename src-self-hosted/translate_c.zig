@@ -330,11 +330,11 @@ pub fn translate(
     tree.root_node.eof_token = try appendToken(&context, .Eof, "");
     tree.source = source_buffer.toOwnedSlice();
     if (false) {
-        std.debug.warn("debug source:\n{}\n==EOF==\ntokens:\n", tree.source);
+        std.debug.warn("debug source:\n{}\n==EOF==\ntokens:\n", .{tree.source});
         var i: usize = 0;
         while (i < tree.tokens.len) : (i += 1) {
             const token = tree.tokens.at(i);
-            std.debug.warn("{}\n", token);
+            std.debug.warn("{}\n", .{token});
         }
     }
     return tree;
@@ -392,7 +392,7 @@ fn declVisitor(c: *Context, decl: *const ZigClangDecl) Error!void {
             return visitFnDecl(c, @ptrCast(*const ZigClangFunctionDecl, decl));
         },
         .Typedef => {
-            _ = try transTypeDef(c, @ptrCast(*const ZigClangTypedefNameDecl, decl));
+            _ = try transTypeDef(c, @ptrCast(*const ZigClangTypedefNameDecl, decl), true);
         },
         .Enum => {
             _ = try transEnumDecl(c, @ptrCast(*const ZigClangEnumDecl, decl));
@@ -636,9 +636,9 @@ fn transTypeDefAsBuiltin(c: *Context, typedef_decl: *const ZigClangTypedefNameDe
     return transCreateNodeIdentifier(c, builtin_name);
 }
 
-fn transTypeDef(c: *Context, typedef_decl: *const ZigClangTypedefNameDecl) Error!?*ast.Node {
+fn transTypeDef(c: *Context, typedef_decl: *const ZigClangTypedefNameDecl, top_level_visit: bool) Error!?*ast.Node {
     if (c.decl_table.get(@ptrToInt(ZigClangTypedefNameDecl_getCanonicalDecl(typedef_decl)))) |kv|
-        return try transCreateNodeIdentifier(c, kv.value); // Avoid processing this decl twice
+        return transCreateNodeIdentifier(c, kv.value); // Avoid processing this decl twice
     const rp = makeRestorePoint(c);
 
     const typedef_name = try c.str(ZigClangDecl_getName_bytes_begin(@ptrCast(*const ZigClangDecl, typedef_decl)));
@@ -671,6 +671,10 @@ fn transTypeDef(c: *Context, typedef_decl: *const ZigClangTypedefNameDecl) Error
         return transTypeDefAsBuiltin(c, typedef_decl, "isize")
     else if (mem.eql(u8, checked_name, "size_t"))
         return transTypeDefAsBuiltin(c, typedef_decl, "usize");
+    
+    if (!top_level_visit) {
+        return transCreateNodeIdentifier(c, checked_name);
+    }
 
     _ = try c.decl_table.put(@ptrToInt(ZigClangTypedefNameDecl_getCanonicalDecl(typedef_decl)), checked_name);
     const visib_tok = try appendToken(c, .Keyword_pub, "pub");
@@ -2573,8 +2577,27 @@ fn transArrayAccess(rp: RestorePoint, scope: *Scope, stmt: *const ZigClangArrayS
 
     const container_node = try transExpr(rp, scope, base_stmt, .used, .r_value);
     const node = try transCreateNodeArrayAccess(rp.c, container_node);
-    node.op.ArrayAccess = try transExpr(rp, scope, ZigClangArraySubscriptExpr_getIdx(stmt), .used, .r_value);
-    node.rtoken = try appendToken(rp.c, .RBrace, "]");
+
+    // cast if the index is long long or signed
+    const subscr_expr = ZigClangArraySubscriptExpr_getIdx(stmt);
+    const qt = getExprQualType(rp.c, subscr_expr);
+    const is_longlong = cIsLongLongInteger(qt);
+    const is_signed = cIsSignedInteger(qt);
+
+    if (is_longlong or is_signed) {
+        const cast_node = try transCreateNodeBuiltinFnCall(rp.c, "@intCast");
+        // check if long long first so that signed long long doesn't just become unsigned long long
+        var typeid_node = if (is_longlong) try transCreateNodeIdentifier(rp.c, "usize") else try transQualTypeIntWidthOf(rp.c, qt, false);
+        try cast_node.params.push(typeid_node);
+        _ = try appendToken(rp.c, .Comma, ",");
+        try cast_node.params.push(try transExpr(rp, scope, subscr_expr, .used, .r_value));
+        cast_node.rparen_token = try appendToken(rp.c, .RParen, ")");
+        node.rtoken = try appendToken(rp.c, .RBrace, "]");
+        node.op.ArrayAccess = &cast_node.base;
+    } else {
+        node.op.ArrayAccess = try transExpr(rp, scope, subscr_expr, .used, .r_value);
+        node.rtoken = try appendToken(rp.c, .RBrace, "]");
+    }
     return maybeSuppressResult(rp, scope, result_used, &node.base);
 }
 
@@ -3524,6 +3547,15 @@ fn cIsFloating(qt: ZigClangQualType) bool {
     };
 }
 
+fn cIsLongLongInteger(qt: ZigClangQualType) bool {
+    const c_type = qualTypeCanon(qt);
+    if (ZigClangType_getTypeClass(c_type) != .Builtin) return false;
+    const builtin_ty = @ptrCast(*const ZigClangBuiltinType, c_type);
+    return switch (ZigClangBuiltinType_getKind(builtin_ty)) {
+        .LongLong, .ULongLong, .Int128, .UInt128 => true,
+        else => false,
+    };
+}
 fn transCreateNodeAssign(
     rp: RestorePoint,
     scope: *Scope,
@@ -4299,7 +4331,7 @@ fn transType(rp: RestorePoint, ty: *const ZigClangType, source_loc: ZigClangSour
             const typedef_ty = @ptrCast(*const ZigClangTypedefType, ty);
 
             const typedef_decl = ZigClangTypedefType_getDecl(typedef_ty);
-            return (try transTypeDef(rp.c, typedef_decl)) orelse
+            return (try transTypeDef(rp.c, typedef_decl, false)) orelse
                 revertAndWarn(rp, error.UnsupportedType, source_loc, "unable to translate typedef declaration", .{});
         },
         .Record => {
