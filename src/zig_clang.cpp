@@ -1649,10 +1649,15 @@ bool ZigClangRecordDecl_isAnonymousStructOrUnion(const ZigClangRecordDecl *recor
     return reinterpret_cast<const clang::RecordDecl*>(record_decl)->isAnonymousStructOrUnion();
 }
 
-const char *ZigClangDecl_getName_bytes_begin(const ZigClangDecl *zig_decl) {
-    const clang::Decl *decl = reinterpret_cast<const clang::Decl *>(zig_decl);
-    const clang::NamedDecl *named_decl = static_cast<const clang::NamedDecl *>(decl);
-    return (const char *)named_decl->getName().bytes_begin();
+const ZigClangNamedDecl* ZigClangDecl_castToNamedDecl(const ZigClangDecl *self) {
+    auto casted = reinterpret_cast<const clang::Decl *>(self);
+    auto cast = clang::dyn_cast<const clang::NamedDecl>(casted);
+    return reinterpret_cast<const ZigClangNamedDecl *>(cast);
+}
+
+const char *ZigClangNamedDecl_getName_bytes_begin(const ZigClangNamedDecl *self) {
+    auto casted = reinterpret_cast<const clang::NamedDecl *>(self);
+    return (const char *)casted->getName().bytes_begin();
 }
 
 ZigClangDeclKind ZigClangDecl_getKind(const struct ZigClangDecl *self) {
@@ -2111,28 +2116,40 @@ ZigClangASTUnit *ZigClangLoadFromCommandLine(const char **args_begin, const char
             llvm::StringRef msg_str_ref = it->getMessage();
 
             Stage2ErrorMsg *msg = errors.add_one();
+            memset(msg, 0, sizeof(*msg));
+
             msg->msg_ptr = (const char *)msg_str_ref.bytes_begin();
             msg->msg_len = msg_str_ref.size();
 
             clang::FullSourceLoc fsl = it->getLocation();
+            // Expand the location if possible
+            fsl = fsl.getFileLoc();
+
+            // The only known way to obtain a Loc without a manager associated
+            // to it is if you have a lot of errors clang emits "too many errors
+            // emitted, stopping now"
             if (fsl.hasManager()) {
-                clang::FileID file_id = fsl.getFileID();
-                clang::StringRef filename = fsl.getManager().getFilename(fsl);
-                if (filename.empty()) {
-                    msg->filename_ptr = nullptr;
-                } else {
+                const clang::SourceManager &SM = fsl.getManager();
+
+                clang::PresumedLoc presumed_loc = SM.getPresumedLoc(fsl);
+                assert(!presumed_loc.isInvalid());
+
+                msg->line = presumed_loc.getLine() - 1;
+                msg->column = presumed_loc.getColumn() - 1;
+
+                clang::StringRef filename = presumed_loc.getFilename();
+                if (!filename.empty()) {
                     msg->filename_ptr = (const char *)filename.bytes_begin();
                     msg->filename_len = filename.size();
                 }
-                msg->source = (const char *)fsl.getManager().getBufferData(file_id).bytes_begin();
-                msg->line = fsl.getSpellingLineNumber() - 1;
-                msg->column = fsl.getSpellingColumnNumber() - 1;
-                msg->offset = fsl.getManager().getFileOffset(fsl);
-            } else {
-                // The only known way this gets triggered right now is if you have a lot of errors
-                // clang emits "too many errors emitted, stopping now"
-                msg->filename_ptr = nullptr;
-                msg->source = nullptr;
+
+                bool invalid;
+                clang::StringRef buffer = fsl.getBufferData(&invalid);
+
+                if (!invalid) {
+                    msg->source = (const char *)buffer.bytes_begin();
+                    msg->offset = SM.getFileOffset(fsl);
+                }
             }
         }
 
