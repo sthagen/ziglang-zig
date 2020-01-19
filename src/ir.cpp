@@ -6030,8 +6030,7 @@ static IrInstruction *ir_gen_builtin_fn_call(IrBuilder *irb, Scope *scope, AstNo
                 if (arg0_value == irb->codegen->invalid_instruction)
                     return arg0_value;
 
-                IrInstruction *actual_tag = ir_build_union_tag(irb, scope, node, arg0_value);
-                IrInstruction *tag_name = ir_build_tag_name(irb, scope, node, actual_tag);
+                IrInstruction *tag_name = ir_build_tag_name(irb, scope, node, arg0_value);
                 return ir_lval_wrap(irb, scope, tag_name, lval, result_loc);
             }
         case BuiltinFnIdTagType:
@@ -21389,10 +21388,6 @@ static IrInstruction *ir_analyze_union_tag(IrAnalyze *ira, IrInstruction *source
     if (type_is_invalid(value->value->type))
         return ira->codegen->invalid_instruction;
 
-    if (value->value->type->id == ZigTypeIdEnum) {
-        return value;
-    }
-
     if (value->value->type->id != ZigTypeIdUnion) {
         ir_add_error(ira, value,
             buf_sprintf("expected enum or union type, found '%s'", buf_ptr(&value->value->type->name)));
@@ -21460,12 +21455,6 @@ static IrInstruction *ir_analyze_instruction_switch_br(IrAnalyze *ira,
             if (type_is_invalid(case_value->value->type))
                 return ir_unreach_error(ira);
 
-            if (case_value->value->type->id == ZigTypeIdEnum) {
-                case_value = ir_analyze_union_tag(ira, &switch_br_instruction->base, case_value);
-                if (type_is_invalid(case_value->value->type))
-                    return ir_unreach_error(ira);
-            }
-
             IrInstruction *casted_case_value = ir_implicit_cast(ira, case_value, target_value->value->type);
             if (type_is_invalid(casted_case_value->value->type))
                 return ir_unreach_error(ira);
@@ -21509,12 +21498,6 @@ static IrInstruction *ir_analyze_instruction_switch_br(IrAnalyze *ira,
         IrInstruction *new_value = old_value->child;
         if (type_is_invalid(new_value->value->type))
             continue;
-
-        if (new_value->value->type->id == ZigTypeIdEnum) {
-            new_value = ir_analyze_union_tag(ira, &switch_br_instruction->base, new_value);
-            if (type_is_invalid(new_value->value->type))
-                continue;
-        }
 
         IrInstruction *casted_new_value = ir_implicit_cast(ira, new_value, target_value->value->type);
         if (type_is_invalid(casted_new_value->value->type))
@@ -21631,7 +21614,7 @@ static IrInstruction *ir_analyze_instruction_switch_target(IrAnalyze *ira,
         case ZigTypeIdEnum: {
             if ((err = type_resolve(ira->codegen, target_type, ResolveStatusZeroBitsKnown)))
                 return ira->codegen->invalid_instruction;
-            if (target_type->data.enumeration.src_field_count < 2) {
+            if (target_type->data.enumeration.src_field_count == 1) {
                 TypeEnumField *only_field = &target_type->data.enumeration.fields[0];
                 IrInstruction *result = ir_const(ira, &switch_target_instruction->base, target_type);
                 bigint_init_bigint(&result->value->data.x_enum_tag, &only_field->value);
@@ -22352,7 +22335,30 @@ static IrInstruction *ir_analyze_instruction_enum_tag_name(IrAnalyze *ira, IrIns
     if (type_is_invalid(target->value->type))
         return ira->codegen->invalid_instruction;
 
+    if (target->value->type->id == ZigTypeIdEnumLiteral) {
+        IrInstruction *result = ir_const(ira, &instruction->base, nullptr);
+        Buf *field_name = target->value->data.x_enum_literal;
+        ZigValue *array_val = create_const_str_lit(ira->codegen, field_name)->data.x_ptr.data.ref.pointee;
+        init_const_slice(ira->codegen, result->value, array_val, 0, buf_len(field_name), true);
+        return result;
+    }
+
+    if (target->value->type->id == ZigTypeIdUnion) {
+        target = ir_analyze_union_tag(ira, &instruction->base, target);
+        if (type_is_invalid(target->value->type))
+            return ira->codegen->invalid_instruction;
+    }
+
     assert(target->value->type->id == ZigTypeIdEnum);
+
+    if (target->value->type->data.enumeration.src_field_count == 1 &&
+        !target->value->type->data.enumeration.non_exhaustive) {
+        TypeEnumField *only_field = &target->value->type->data.enumeration.fields[0];
+        ZigValue *array_val = create_const_str_lit(ira->codegen, only_field->name)->data.x_ptr.data.ref.pointee;
+        IrInstruction *result = ir_const(ira, &instruction->base, nullptr);
+        init_const_slice(ira->codegen, result->value, array_val, 0, buf_len(only_field->name), true);
+        return result;
+    }
 
     if (instr_is_comptime(target)) {
         if ((err = type_resolve(ira->codegen, target->value->type, ResolveStatusZeroBitsKnown)))
