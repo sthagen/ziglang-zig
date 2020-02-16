@@ -5018,6 +5018,12 @@ static LLVMValueRef ir_render_ref(CodeGen *g, IrExecutableGen *executable, IrIns
     if (!type_has_bits(instruction->base.value->type)) {
         return nullptr;
     }
+    if (instruction->operand->id == IrInstGenIdCall) {
+        IrInstGenCall *call = reinterpret_cast<IrInstGenCall *>(instruction->operand);
+        if (call->result_loc != nullptr) {
+            return ir_llvm_value(g, call->result_loc);
+        }
+    }
     LLVMValueRef value = ir_llvm_value(g, instruction->operand);
     if (handle_is_ptr(instruction->operand->value->type)) {
         return value;
@@ -6182,7 +6188,9 @@ static LLVMValueRef ir_render_await(CodeGen *g, IrExecutableGen *executable, IrI
     LLVMValueRef result_loc = (instruction->result_loc == nullptr) ?
         nullptr : ir_llvm_value(g, instruction->result_loc);
 
-    if (instruction->target_fn != nullptr && !fn_is_async(instruction->target_fn)) {
+    if (instruction->is_noasync ||
+        (instruction->target_fn != nullptr && !fn_is_async(instruction->target_fn)))
+    {
         return gen_await_early_return(g, &instruction->base, target_frame_ptr, result_type,
                 ptr_result_type, result_loc, true);
     }
@@ -6533,7 +6541,7 @@ static void ir_render(CodeGen *g, ZigFn *fn_entry) {
                 set_debug_location(g, instruction);
             }
             instruction->llvm_value = ir_render_instruction(g, executable, instruction);
-            if (instruction->spill != nullptr) {
+            if (instruction->spill != nullptr && instruction->llvm_value != nullptr) {
                 LLVMValueRef spill_ptr = ir_llvm_value(g, instruction->spill);
                 gen_assign_raw(g, spill_ptr, instruction->spill->value->type, instruction->llvm_value);
                 instruction->llvm_value = nullptr;
