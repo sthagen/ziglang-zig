@@ -369,10 +369,20 @@ enum LazyValueId {
     LazyValueIdFnType,
     LazyValueIdErrUnionType,
     LazyValueIdArrayType,
+    LazyValueIdTypeInfoDecls,
 };
 
 struct LazyValue {
     LazyValueId id;
+};
+
+struct LazyValueTypeInfoDecls {
+    LazyValue base;
+
+    IrAnalyze *ira;
+
+    ScopeDecls *decls_scope;
+    IrInst *source_instr;
 };
 
 struct LazyValueAlignOf {
@@ -1956,12 +1966,6 @@ enum CodeModel {
     CodeModelLarge,
 };
 
-enum EmitFileType {
-    EmitFileTypeBinary,
-    EmitFileTypeAssembly,
-    EmitFileTypeLLVMIr,
-};
-
 struct LinkLib {
     Buf *name;
     Buf *path;
@@ -2132,8 +2136,10 @@ struct CodeGen {
 
     Buf llvm_triple_str;
     Buf global_asm;
-    Buf output_file_path;
     Buf o_file_output_path;
+    Buf bin_file_output_path;
+    Buf asm_file_output_path;
+    Buf llvm_ir_file_output_path;
     Buf *cache_dir;
     // As an input parameter, mutually exclusive with enable_cache. But it gets
     // populated in codegen_build_and_link.
@@ -2226,7 +2232,6 @@ struct CodeGen {
     size_t version_patch;
     const char *linker_script;
 
-    EmitFileType emit_file_type;
     BuildMode build_mode;
     OutType out_type;
     const ZigTarget *zig_target;
@@ -2248,7 +2253,9 @@ struct CodeGen {
     bool function_sections;
     bool enable_dump_analysis;
     bool enable_doc_generation;
-    bool disable_bin_generation;
+    bool emit_bin;
+    bool emit_asm;
+    bool emit_llvm_ir;
     bool test_is_evented;
     CodeModel code_model;
 
