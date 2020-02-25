@@ -38,6 +38,7 @@ pub const Builder = struct {
     verbose_ir: bool,
     verbose_llvm_ir: bool,
     verbose_cimport: bool,
+    verbose_llvm_cpu_features: bool,
     invalid_user_input: bool,
     zig_exe: []const u8,
     default_step: *Step,
@@ -134,6 +135,7 @@ pub const Builder = struct {
             .verbose_ir = false,
             .verbose_llvm_ir = false,
             .verbose_cimport = false,
+            .verbose_llvm_cpu_features = false,
             .invalid_user_input = false,
             .allocator = allocator,
             .user_input_options = UserInputOptionsMap.init(allocator),
@@ -607,13 +609,13 @@ pub const Builder = struct {
     }
 
     fn typeToEnum(comptime T: type) TypeId {
-        return switch (@typeId(T)) {
-            builtin.TypeId.Int => TypeId.Int,
-            builtin.TypeId.Float => TypeId.Float,
-            builtin.TypeId.Bool => TypeId.Bool,
+        return switch (@typeInfo(T)) {
+            .Int => .Int,
+            .Float => .Float,
+            .Bool => .Bool,
             else => switch (T) {
-                []const u8 => TypeId.String,
-                []const []const u8 => TypeId.List,
+                []const u8 => .String,
+                []const []const u8 => .List,
                 else => @compileError("Unsupported type: " ++ @typeName(T)),
             },
         };
@@ -625,11 +627,11 @@ pub const Builder = struct {
 
     pub fn typeIdName(id: TypeId) []const u8 {
         return switch (id) {
-            TypeId.Bool => "bool",
-            TypeId.Int => "int",
-            TypeId.Float => "float",
-            TypeId.String => "string",
-            TypeId.List => "list",
+            .Bool => "bool",
+            .Int => "int",
+            .Float => "float",
+            .String => "string",
+            .List => "list",
         };
     }
 
@@ -1837,6 +1839,7 @@ pub const LibExeObjStep = struct {
         if (builder.verbose_llvm_ir) zig_args.append("--verbose-llvm-ir") catch unreachable;
         if (builder.verbose_link or self.verbose_link) zig_args.append("--verbose-link") catch unreachable;
         if (builder.verbose_cc or self.verbose_cc) zig_args.append("--verbose-cc") catch unreachable;
+        if (builder.verbose_llvm_cpu_features) zig_args.append("--verbose-llvm-cpu-features") catch unreachable;
 
         if (self.emit_llvm_ir) try zig_args.append("-femit-llvm-ir");
         if (self.emit_asm) try zig_args.append("-femit-asm");

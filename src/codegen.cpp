@@ -972,8 +972,6 @@ static Buf *panic_msg_buf(PanicMsgId msg_id) {
             return buf_create_from_str("remainder division by zero or negative value");
         case PanicMsgIdExactDivisionRemainder:
             return buf_create_from_str("exact division produced remainder");
-        case PanicMsgIdSliceWidenRemainder:
-            return buf_create_from_str("slice widening size mismatch");
         case PanicMsgIdUnwrapOptionalFail:
             return buf_create_from_str("attempt to unwrap null");
         case PanicMsgIdUnreachable:
@@ -3083,74 +3081,6 @@ static void add_error_range_check(CodeGen *g, ZigType *err_set_type, ZigType *in
 
         LLVMPositionBuilderAtEnd(g->builder, ok_block);
     }
-}
-
-static LLVMValueRef ir_render_resize_slice(CodeGen *g, IrExecutableGen *executable,
-        IrInstGenResizeSlice *instruction)
-{
-    ZigType *actual_type = instruction->operand->value->type;
-    ZigType *wanted_type = instruction->base.value->type;
-    LLVMValueRef expr_val = ir_llvm_value(g, instruction->operand);
-    assert(expr_val);
-
-    LLVMValueRef result_loc = ir_llvm_value(g, instruction->result_loc);
-    assert(wanted_type->id == ZigTypeIdStruct);
-    assert(wanted_type->data.structure.special == StructSpecialSlice);
-    assert(actual_type->id == ZigTypeIdStruct);
-    assert(actual_type->data.structure.special == StructSpecialSlice);
-
-    ZigType *actual_pointer_type = actual_type->data.structure.fields[0]->type_entry;
-    ZigType *actual_child_type = actual_pointer_type->data.pointer.child_type;
-    ZigType *wanted_pointer_type = wanted_type->data.structure.fields[0]->type_entry;
-    ZigType *wanted_child_type = wanted_pointer_type->data.pointer.child_type;
-
-
-    size_t actual_ptr_index = actual_type->data.structure.fields[slice_ptr_index]->gen_index;
-    size_t actual_len_index = actual_type->data.structure.fields[slice_len_index]->gen_index;
-    size_t wanted_ptr_index = wanted_type->data.structure.fields[slice_ptr_index]->gen_index;
-    size_t wanted_len_index = wanted_type->data.structure.fields[slice_len_index]->gen_index;
-
-    LLVMValueRef src_ptr_ptr = LLVMBuildStructGEP(g->builder, expr_val, (unsigned)actual_ptr_index, "");
-    LLVMValueRef src_ptr = gen_load_untyped(g, src_ptr_ptr, 0, false, "");
-    LLVMValueRef src_ptr_casted = LLVMBuildBitCast(g->builder, src_ptr,
-            get_llvm_type(g, wanted_type->data.structure.fields[0]->type_entry), "");
-    LLVMValueRef dest_ptr_ptr = LLVMBuildStructGEP(g->builder, result_loc,
-            (unsigned)wanted_ptr_index, "");
-    gen_store_untyped(g, src_ptr_casted, dest_ptr_ptr, 0, false);
-
-    LLVMValueRef src_len_ptr = LLVMBuildStructGEP(g->builder, expr_val, (unsigned)actual_len_index, "");
-    LLVMValueRef src_len = gen_load_untyped(g, src_len_ptr, 0, false, "");
-    uint64_t src_size = type_size(g, actual_child_type);
-    uint64_t dest_size = type_size(g, wanted_child_type);
-
-    LLVMValueRef new_len;
-    if (dest_size == 1) {
-        LLVMValueRef src_size_val = LLVMConstInt(g->builtin_types.entry_usize->llvm_type, src_size, false);
-        new_len = LLVMBuildMul(g->builder, src_len, src_size_val, "");
-    } else if (src_size == 1) {
-        LLVMValueRef dest_size_val = LLVMConstInt(g->builtin_types.entry_usize->llvm_type, dest_size, false);
-        if (ir_want_runtime_safety(g, &instruction->base)) {
-            LLVMValueRef remainder_val = LLVMBuildURem(g->builder, src_len, dest_size_val, "");
-            LLVMValueRef zero = LLVMConstNull(g->builtin_types.entry_usize->llvm_type);
-            LLVMValueRef ok_bit = LLVMBuildICmp(g->builder, LLVMIntEQ, remainder_val, zero, "");
-            LLVMBasicBlockRef ok_block = LLVMAppendBasicBlock(g->cur_fn_val, "SliceWidenOk");
-            LLVMBasicBlockRef fail_block = LLVMAppendBasicBlock(g->cur_fn_val, "SliceWidenFail");
-            LLVMBuildCondBr(g->builder, ok_bit, ok_block, fail_block);
-
-            LLVMPositionBuilderAtEnd(g->builder, fail_block);
-            gen_safety_crash(g, PanicMsgIdSliceWidenRemainder);
-
-            LLVMPositionBuilderAtEnd(g->builder, ok_block);
-        }
-        new_len = LLVMBuildExactUDiv(g->builder, src_len, dest_size_val, "");
-    } else {
-        zig_unreachable();
-    }
-
-    LLVMValueRef dest_len_ptr = LLVMBuildStructGEP(g->builder, result_loc, (unsigned)wanted_len_index, "");
-    gen_store_untyped(g, new_len, dest_len_ptr, 0, false);
-
-    return result_loc;
 }
 
 static LLVMValueRef ir_render_cast(CodeGen *g, IrExecutableGen *executable,
@@ -6485,8 +6415,6 @@ static LLVMValueRef ir_render_instruction(CodeGen *g, IrExecutableGen *executabl
             return ir_render_assert_zero(g, executable, (IrInstGenAssertZero *)instruction);
         case IrInstGenIdAssertNonNull:
             return ir_render_assert_non_null(g, executable, (IrInstGenAssertNonNull *)instruction);
-        case IrInstGenIdResizeSlice:
-            return ir_render_resize_slice(g, executable, (IrInstGenResizeSlice *)instruction);
         case IrInstGenIdPtrOfArrayToSlice:
             return ir_render_ptr_of_array_to_slice(g, executable, (IrInstGenPtrOfArrayToSlice *)instruction);
         case IrInstGenIdSuspendBegin:
@@ -8224,9 +8152,6 @@ static void define_builtin_fns(CodeGen *g) {
     create_builtin_fn(g, BuiltinFnIdMemset, "memset", 3);
     create_builtin_fn(g, BuiltinFnIdSizeof, "sizeOf", 1);
     create_builtin_fn(g, BuiltinFnIdAlignOf, "alignOf", 1);
-    create_builtin_fn(g, BuiltinFnIdMemberCount, "memberCount", 1);
-    create_builtin_fn(g, BuiltinFnIdMemberType, "memberType", 2);
-    create_builtin_fn(g, BuiltinFnIdMemberName, "memberName", 2);
     create_builtin_fn(g, BuiltinFnIdField, "field", 2);
     create_builtin_fn(g, BuiltinFnIdTypeInfo, "typeInfo", 1);
     create_builtin_fn(g, BuiltinFnIdType, "Type", 1);
@@ -8264,7 +8189,6 @@ static void define_builtin_fns(CodeGen *g) {
     create_builtin_fn(g, BuiltinFnIdIntToEnum, "intToEnum", 2);
     create_builtin_fn(g, BuiltinFnIdCompileErr, "compileError", 1);
     create_builtin_fn(g, BuiltinFnIdCompileLog, "compileLog", SIZE_MAX);
-    create_builtin_fn(g, BuiltinFnIdIntType, "IntType", 2); // TODO rename to Int
     create_builtin_fn(g, BuiltinFnIdVectorType, "Vector", 2);
     create_builtin_fn(g, BuiltinFnIdShuffle, "shuffle", 4);
     create_builtin_fn(g, BuiltinFnIdSplat, "splat", 2);
@@ -8303,22 +8227,18 @@ static void define_builtin_fns(CodeGen *g) {
     create_builtin_fn(g, BuiltinFnIdMulAdd, "mulAdd", 4);
     create_builtin_fn(g, BuiltinFnIdNewStackCall, "newStackCall", SIZE_MAX);
     create_builtin_fn(g, BuiltinFnIdAsyncCall, "asyncCall", SIZE_MAX);
-    create_builtin_fn(g, BuiltinFnIdTypeId, "typeId", 1);
     create_builtin_fn(g, BuiltinFnIdShlExact, "shlExact", 2);
     create_builtin_fn(g, BuiltinFnIdShrExact, "shrExact", 2);
     create_builtin_fn(g, BuiltinFnIdSetEvalBranchQuota, "setEvalBranchQuota", 1);
     create_builtin_fn(g, BuiltinFnIdAlignCast, "alignCast", 2);
     create_builtin_fn(g, BuiltinFnIdOpaqueType, "OpaqueType", 0);
     create_builtin_fn(g, BuiltinFnIdSetAlignStack, "setAlignStack", 1);
-    create_builtin_fn(g, BuiltinFnIdArgType, "ArgType", 2);
     create_builtin_fn(g, BuiltinFnIdExport, "export", 2);
     create_builtin_fn(g, BuiltinFnIdErrorReturnTrace, "errorReturnTrace", 0);
     create_builtin_fn(g, BuiltinFnIdAtomicRmw, "atomicRmw", 5);
     create_builtin_fn(g, BuiltinFnIdAtomicLoad, "atomicLoad", 3);
     create_builtin_fn(g, BuiltinFnIdAtomicStore, "atomicStore", 4);
     create_builtin_fn(g, BuiltinFnIdErrSetCast, "errSetCast", 2);
-    create_builtin_fn(g, BuiltinFnIdToBytes, "sliceToBytes", 1);
-    create_builtin_fn(g, BuiltinFnIdFromBytes, "bytesToSlice", 2);
     create_builtin_fn(g, BuiltinFnIdThis, "This", 0);
     create_builtin_fn(g, BuiltinFnIdHasDecl, "hasDecl", 2);
     create_builtin_fn(g, BuiltinFnIdUnionInit, "unionInit", 3);

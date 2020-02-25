@@ -1695,9 +1695,6 @@ enum BuiltinFnId {
     BuiltinFnIdMemset,
     BuiltinFnIdSizeof,
     BuiltinFnIdAlignOf,
-    BuiltinFnIdMemberCount,
-    BuiltinFnIdMemberType,
-    BuiltinFnIdMemberName,
     BuiltinFnIdField,
     BuiltinFnIdTypeInfo,
     BuiltinFnIdType,
@@ -1750,8 +1747,6 @@ enum BuiltinFnId {
     BuiltinFnIdIntCast,
     BuiltinFnIdFloatCast,
     BuiltinFnIdErrSetCast,
-    BuiltinFnIdToBytes,
-    BuiltinFnIdFromBytes,
     BuiltinFnIdIntToFloat,
     BuiltinFnIdFloatToInt,
     BuiltinFnIdBoolToInt,
@@ -1759,7 +1754,6 @@ enum BuiltinFnId {
     BuiltinFnIdIntToErr,
     BuiltinFnIdEnumToInt,
     BuiltinFnIdIntToEnum,
-    BuiltinFnIdIntType,
     BuiltinFnIdVectorType,
     BuiltinFnIdShuffle,
     BuiltinFnIdSplat,
@@ -1779,7 +1773,6 @@ enum BuiltinFnId {
     BuiltinFnIdBitOffsetOf,
     BuiltinFnIdNewStackCall,
     BuiltinFnIdAsyncCall,
-    BuiltinFnIdTypeId,
     BuiltinFnIdShlExact,
     BuiltinFnIdShrExact,
     BuiltinFnIdSetEvalBranchQuota,
@@ -1787,7 +1780,6 @@ enum BuiltinFnId {
     BuiltinFnIdOpaqueType,
     BuiltinFnIdThis,
     BuiltinFnIdSetAlignStack,
-    BuiltinFnIdArgType,
     BuiltinFnIdExport,
     BuiltinFnIdErrorReturnTrace,
     BuiltinFnIdAtomicRmw,
@@ -1821,7 +1813,6 @@ enum PanicMsgId {
     PanicMsgIdDivisionByZero,
     PanicMsgIdRemainderDivisionByZero,
     PanicMsgIdExactDivisionRemainder,
-    PanicMsgIdSliceWidenRemainder,
     PanicMsgIdUnwrapOptionalFail,
     PanicMsgIdInvalidErrorCode,
     PanicMsgIdIncorrectAlignment,
@@ -2633,7 +2624,6 @@ enum IrInstSrcId {
     IrInstSrcIdIntToFloat,
     IrInstSrcIdFloatToInt,
     IrInstSrcIdBoolToInt,
-    IrInstSrcIdIntType,
     IrInstSrcIdVectorType,
     IrInstSrcIdShuffleVector,
     IrInstSrcIdSplat,
@@ -2641,9 +2631,6 @@ enum IrInstSrcId {
     IrInstSrcIdMemset,
     IrInstSrcIdMemcpy,
     IrInstSrcIdSlice,
-    IrInstSrcIdMemberCount,
-    IrInstSrcIdMemberType,
-    IrInstSrcIdMemberName,
     IrInstSrcIdBreakpoint,
     IrInstSrcIdReturnAddress,
     IrInstSrcIdFrameAddress,
@@ -2680,7 +2667,6 @@ enum IrInstSrcId {
     IrInstSrcIdTypeInfo,
     IrInstSrcIdType,
     IrInstSrcIdHasField,
-    IrInstSrcIdTypeId,
     IrInstSrcIdSetEvalBranchQuota,
     IrInstSrcIdPtrType,
     IrInstSrcIdAlignCast,
@@ -2699,8 +2685,6 @@ enum IrInstSrcId {
     IrInstSrcIdSaveErrRetAddr,
     IrInstSrcIdAddImplicitReturnType,
     IrInstSrcIdErrSetCast,
-    IrInstSrcIdToBytes,
-    IrInstSrcIdFromBytes,
     IrInstSrcIdCheckRuntimeScope,
     IrInstSrcIdHasDecl,
     IrInstSrcIdUndeclaredIdent,
@@ -2739,7 +2723,6 @@ enum IrInstGenId {
     IrInstGenIdCall,
     IrInstGenIdReturn,
     IrInstGenIdCast,
-    IrInstGenIdResizeSlice,
     IrInstGenIdUnreachable,
     IrInstGenIdAsm,
     IrInstGenIdTestNonNull,
@@ -3271,13 +3254,6 @@ struct IrInstGenCast {
     CastOp cast_op;
 };
 
-struct IrInstGenResizeSlice {
-    IrInstGen base;
-
-    IrInstGen *operand;
-    IrInstGen *result_loc;
-};
-
 struct IrInstSrcContainerInitList {
     IrInstSrc base;
 
@@ -3629,21 +3605,6 @@ struct IrInstSrcErrSetCast {
     IrInstSrc *target;
 };
 
-struct IrInstSrcToBytes {
-    IrInstSrc base;
-
-    IrInstSrc *target;
-    ResultLoc *result_loc;
-};
-
-struct IrInstSrcFromBytes {
-    IrInstSrc base;
-
-    IrInstSrc *dest_child_type;
-    IrInstSrc *target;
-    ResultLoc *result_loc;
-};
-
 struct IrInstSrcIntToFloat {
     IrInstSrc base;
 
@@ -3662,13 +3623,6 @@ struct IrInstSrcBoolToInt {
     IrInstSrc base;
 
     IrInstSrc *target;
-};
-
-struct IrInstSrcIntType {
-    IrInstSrc base;
-
-    IrInstSrc *is_signed;
-    IrInstSrc *bit_count;
 };
 
 struct IrInstSrcVectorType {
@@ -3741,26 +3695,6 @@ struct IrInstGenSlice {
     IrInstGen *end;
     IrInstGen *result_loc;
     bool safety_check_on;
-};
-
-struct IrInstSrcMemberCount {
-    IrInstSrc base;
-
-    IrInstSrc *container;
-};
-
-struct IrInstSrcMemberType {
-    IrInstSrc base;
-
-    IrInstSrc *container_type;
-    IrInstSrc *member_index;
-};
-
-struct IrInstSrcMemberName {
-    IrInstSrc base;
-
-    IrInstSrc *container_type;
-    IrInstSrc *member_index;
 };
 
 struct IrInstSrcBreakpoint {
@@ -4168,12 +4102,6 @@ struct IrInstSrcHasField {
 
     IrInstSrc *container_type;
     IrInstSrc *field_name;
-};
-
-struct IrInstSrcTypeId {
-    IrInstSrc base;
-
-    IrInstSrc *type_value;
 };
 
 struct IrInstSrcSetEvalBranchQuota {
