@@ -12588,13 +12588,22 @@ static IrInstGen *ir_resolve_ptr_of_array_to_slice(IrAnalyze *ira, IrInst* sourc
 {
     Error err;
 
-    if ((err = type_resolve(ira->codegen, array_ptr->value->type->data.pointer.child_type,
-                    ResolveStatusAlignmentKnown)))
-    {
+    assert(array_ptr->value->type->id == ZigTypeIdPointer);
+
+    if ((err = type_resolve(ira->codegen, array_ptr->value->type, ResolveStatusAlignmentKnown))) {
         return ira->codegen->invalid_inst_gen;
     }
 
-    wanted_type = adjust_slice_align(ira->codegen, wanted_type, get_ptr_align(ira->codegen, array_ptr->value->type));
+    assert(array_ptr->value->type->data.pointer.child_type->id == ZigTypeIdArray);
+
+    const size_t array_len = array_ptr->value->type->data.pointer.child_type->data.array.len;
+
+    // A zero-sized array can always be casted irregardless of the destination
+    // alignment
+    if (array_len != 0) {
+        wanted_type = adjust_slice_align(ira->codegen, wanted_type,
+            get_ptr_align(ira->codegen, array_ptr->value->type));
+    }
 
     if (instr_is_comptime(array_ptr)) {
         ZigValue *array_ptr_val = ir_resolve_const(ira, array_ptr, UndefBad);
@@ -27851,9 +27860,15 @@ static IrInstGen *ir_analyze_int_to_ptr(IrAnalyze *ira, IrInst* source_instr, Ir
         }
 
         IrInstGen *result = ir_const(ira, source_instr, ptr_type);
-        result->value->data.x_ptr.special = ConstPtrSpecialHardCodedAddr;
-        result->value->data.x_ptr.mut = ConstPtrMutRuntimeVar;
-        result->value->data.x_ptr.data.hard_coded_addr.addr = addr;
+        if (ptr_type->id == ZigTypeIdOptional && addr == 0) {
+            result->value->data.x_ptr.special = ConstPtrSpecialNull;
+            result->value->data.x_ptr.mut = ConstPtrMutComptimeConst;
+        } else {
+            result->value->data.x_ptr.special = ConstPtrSpecialHardCodedAddr;
+            result->value->data.x_ptr.mut = ConstPtrMutRuntimeVar;
+            result->value->data.x_ptr.data.hard_coded_addr.addr = addr;
+        }
+
         return result;
     }
 
@@ -27911,15 +27926,15 @@ static IrInstGen *ir_analyze_instruction_ptr_to_int(IrAnalyze *ira, IrInstSrcPtr
 
     ZigType *usize = ira->codegen->builtin_types.entry_usize;
 
-    // We check size explicitly so we can use get_src_ptr_type here.
-    if (get_src_ptr_type(target->value->type) == nullptr) {
+    ZigType *src_ptr_type = get_src_ptr_type(target->value->type);
+    if (src_ptr_type == nullptr) {
         ir_add_error(ira, &target->base,
                 buf_sprintf("expected pointer, found '%s'", buf_ptr(&target->value->type->name)));
         return ira->codegen->invalid_inst_gen;
     }
 
     bool has_bits;
-    if ((err = type_has_bits2(ira->codegen, target->value->type, &has_bits)))
+    if ((err = type_has_bits2(ira->codegen, src_ptr_type, &has_bits)))
         return ira->codegen->invalid_inst_gen;
 
     if (!has_bits) {
@@ -27932,9 +27947,17 @@ static IrInstGen *ir_analyze_instruction_ptr_to_int(IrAnalyze *ira, IrInstSrcPtr
         ZigValue *val = ir_resolve_const(ira, target, UndefBad);
         if (!val)
             return ira->codegen->invalid_inst_gen;
-        if (val->type->id == ZigTypeIdPointer && val->data.x_ptr.special == ConstPtrSpecialHardCodedAddr) {
+
+        // Since we've already run this type trough get_codegen_ptr_type it is
+        // safe to access the x_ptr fields
+        if (val->data.x_ptr.special == ConstPtrSpecialHardCodedAddr) {
             IrInstGen *result = ir_const(ira, &instruction->base.base, usize);
             bigint_init_unsigned(&result->value->data.x_bigint, val->data.x_ptr.data.hard_coded_addr.addr);
+            result->value->type = usize;
+            return result;
+        } else if (val->data.x_ptr.special == ConstPtrSpecialNull) {
+            IrInstGen *result = ir_const(ira, &instruction->base.base, usize);
+            bigint_init_unsigned(&result->value->data.x_bigint, 0);
             result->value->type = usize;
             return result;
         }
