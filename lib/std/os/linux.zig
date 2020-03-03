@@ -6,7 +6,7 @@
 //   provide `rename` when only the `renameat` syscall exists.
 // * Does not support POSIX thread cancellation.
 const std = @import("../std.zig");
-const builtin = @import("builtin");
+const builtin = std.builtin;
 const assert = std.debug.assert;
 const maxInt = std.math.maxInt;
 const elf = std.elf;
@@ -38,6 +38,13 @@ pub fn getauxval(index: usize) usize {
     }
     return 0;
 }
+
+// Some architectures require 64bit parameters for some syscalls to be passed in
+// even-aligned register pair
+const require_aligned_register_pair = //
+    std.Target.current.cpu.arch.isMIPS() or
+    std.Target.current.cpu.arch.isARM() or
+    std.Target.current.cpu.arch.isThumb();
 
 /// Get the errno from a syscall return value, or 0 for no error.
 pub fn getErrno(r: usize) u12 {
@@ -316,8 +323,31 @@ pub fn symlinkat(existing: [*:0]const u8, newfd: i32, newpath: [*:0]const u8) us
     return syscall3(SYS_symlinkat, @ptrToInt(existing), @bitCast(usize, @as(isize, newfd)), @ptrToInt(newpath));
 }
 
-pub fn pread(fd: i32, buf: [*]u8, count: usize, offset: usize) usize {
-    return syscall4(SYS_pread, @bitCast(usize, @as(isize, fd)), @ptrToInt(buf), count, offset);
+pub fn pread(fd: i32, buf: [*]u8, count: usize, offset: u64) usize {
+    if (@hasDecl(@This(), "SYS_pread64")) {
+        if (require_aligned_register_pair) {
+            return syscall6(
+                SYS_pread64,
+                @bitCast(usize, @as(isize, fd)),
+                @ptrToInt(buf),
+                count,
+                0,
+                @truncate(usize, offset),
+                @truncate(usize, offset >> 32),
+            );
+        } else {
+            return syscall5(
+                SYS_pread64,
+                @bitCast(usize, @as(isize, fd)),
+                @ptrToInt(buf),
+                count,
+                @truncate(usize, offset),
+                @truncate(usize, offset >> 32),
+            );
+        }
+    } else {
+        return syscall4(SYS_pread, @bitCast(usize, @as(isize, fd)), @ptrToInt(buf), count, offset);
+    }
 }
 
 pub fn access(path: [*:0]const u8, mode: u32) usize {
@@ -333,7 +363,7 @@ pub fn faccessat(dirfd: i32, path: [*:0]const u8, mode: u32, flags: u32) usize {
 }
 
 pub fn pipe(fd: *[2]i32) usize {
-    if (builtin.arch == .mipsel) {
+    if (comptime builtin.arch.isMIPS()) {
         return syscall_pipe(fd);
     } else if (@hasDecl(@This(), "SYS_pipe")) {
         return syscall1(SYS_pipe, @ptrToInt(fd));
@@ -844,6 +874,26 @@ pub fn sendto(fd: i32, buf: [*]const u8, len: usize, flags: u32, addr: ?*const s
         return socketcall(SC_sendto, &[6]usize{ @bitCast(usize, @as(isize, fd)), @ptrToInt(buf), len, flags, @ptrToInt(addr), @intCast(usize, alen) });
     }
     return syscall6(SYS_sendto, @bitCast(usize, @as(isize, fd)), @ptrToInt(buf), len, flags, @ptrToInt(addr), @intCast(usize, alen));
+}
+
+pub fn sendfile(outfd: i32, infd: i32, offset: ?*i64, count: usize) usize {
+    if (@hasDecl(@This(), "SYS_sendfile64")) {
+        return syscall4(
+            SYS_sendfile64,
+            @bitCast(usize, @as(isize, outfd)),
+            @bitCast(usize, @as(isize, infd)),
+            @ptrToInt(offset),
+            count,
+        );
+    } else {
+        return syscall4(
+            SYS_sendfile,
+            @bitCast(usize, @as(isize, outfd)),
+            @bitCast(usize, @as(isize, infd)),
+            @ptrToInt(offset),
+            count,
+        );
+    }
 }
 
 pub fn socketpair(domain: i32, socket_type: i32, protocol: i32, fd: [2]i32) usize {
