@@ -3,11 +3,62 @@ const std = @import("std");
 const CrossTarget = std.zig.CrossTarget;
 
 pub fn addCases(cases: *tests.TranslateCContext) void {
+    cases.add("macro comma operator",
+        \\#define foo (foo, bar)
+        \\#define bar(x) (x, 3, 4, 5 * 6, baz(1, 2), 2, baz(1,2))
+    , &[_][]const u8{
+        \\pub const foo = blk: {
+        \\    _ = foo;
+        \\    break :blk bar;
+        \\};
+    ,
+        \\pub inline fn bar(x: var) @TypeOf(baz(1, 2)) {
+        \\    return blk: {
+        \\        _ = x;
+        \\        _ = 3;
+        \\        _ = 4;
+        \\        _ = 5 * 6;
+        \\        _ = baz(1, 2);
+        \\        _ = 2;
+        \\        break :blk baz(1, 2);
+        \\    };
+        \\}
+    });
+
+    cases.add("macro keyword define",
+        \\#define foo 1
+        \\#define inline 2
+    , &[_][]const u8{
+        \\pub const foo = 1;
+    ,
+        \\pub const @"inline" = 2;
+    });
+
     cases.add("macro line continuation",
         \\#define FOO -\
         \\BAR
     , &[_][]const u8{
         \\pub const FOO = -BAR;
+    });
+
+    cases.add("struct with atomic field",
+        \\struct arcan_shmif_cont {
+        \\        struct arcan_shmif_page* addr;
+        \\};
+        \\struct arcan_shmif_page {
+        \\        volatile _Atomic int abufused[12];
+        \\};
+    , &[_][]const u8{
+        \\pub const struct_arcan_shmif_page = //
+    ,
+        \\warning: unsupported type: 'Atomic'
+        \\    @OpaqueType(); // 
+    ,
+        \\ warning: struct demoted to opaque type - unable to translate type of field abufused
+    , // TODO should be `addr: *struct_arcan_shmif_page`
+        \\pub const struct_arcan_shmif_cont = extern struct {
+        \\    addr: [*c]struct_arcan_shmif_page,
+        \\};
     });
 
     cases.add("function prototype translated as optional",
