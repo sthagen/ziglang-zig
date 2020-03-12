@@ -251,13 +251,16 @@ Error stage2_target_parse(struct ZigTarget *target, const char *zig_triple, cons
         target->cache_hash = "\n\n";
     }
 
+    target->cache_hash_len = strlen(target->cache_hash);
+
     if (dynamic_linker != nullptr) {
         target->dynamic_linker = dynamic_linker;
     }
+
     return ErrorNone;
 }
 
-int stage2_cmd_targets(const char *zig_triple) {
+int stage2_cmd_targets(const char *zig_triple, const char *mcpu, const char *dynamic_linker) {
     const char *msg = "stage0 called stage2_cmd_targets";
     stage2_panic(msg, strlen(msg));
 }
