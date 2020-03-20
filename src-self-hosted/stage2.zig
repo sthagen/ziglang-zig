@@ -128,7 +128,7 @@ export fn stage2_translate_c(
     args_end: [*]?[*]const u8,
     resources_path: [*:0]const u8,
 ) Error {
-    var errors = @as([*]translate_c.ClangErrMsg, undefined)[0..0];
+    var errors: []translate_c.ClangErrMsg = &[0]translate_c.ClangErrMsg{};
     out_ast.* = translate_c.translate(std.heap.c_allocator, args_begin, args_end, &errors, resources_path) catch |err| switch (err) {
         error.SemanticAnalyzeFail => {
             out_errors_ptr.* = errors.ptr;
@@ -909,6 +909,7 @@ const Stage2Target = extern struct {
     os_builtin_str: ?[*:0]const u8,
 
     dynamic_linker: ?[*:0]const u8,
+    standard_dynamic_linker_path: ?[*:0]const u8,
 
     fn fromTarget(self: *Stage2Target, cross_target: CrossTarget) !void {
         const allocator = std.heap.c_allocator;
@@ -1119,6 +1120,12 @@ const Stage2Target = extern struct {
             }
         };
 
+        const std_dl = target.standardDynamicLinkerPath();
+        const std_dl_z = if (std_dl.get()) |dl|
+            (try mem.dupeZ(std.heap.c_allocator, u8, dl)).ptr
+        else
+            null;
+
         const cache_hash_slice = cache_hash.toOwnedSlice();
         self.* = .{
             .arch = @enumToInt(target.cpu.arch) + 1, // skip over ZigLLVM_UnknownArch
@@ -1134,6 +1141,7 @@ const Stage2Target = extern struct {
             .is_native = cross_target.isNative(),
             .glibc_or_darwin_version = glibc_or_darwin_version,
             .dynamic_linker = dynamic_linker,
+            .standard_dynamic_linker_path = std_dl_z,
         };
     }
 };
