@@ -63,6 +63,10 @@ const known_options = [_]KnownOpt{
         .ident = "nostdlib",
     },
     .{
+        .name = "nostdlib++",
+        .ident = "nostdlib_cpp",
+    },
+    .{
         .name = "shared",
         .ident = "shared",
     },
@@ -73,6 +77,22 @@ const known_options = [_]KnownOpt{
     .{
         .name = "Wl,",
         .ident = "wl",
+    },
+    .{
+        .name = "Xlinker",
+        .ident = "for_linker",
+    },
+    .{
+        .name = "for-linker",
+        .ident = "for_linker",
+    },
+    .{
+        .name = "for-linker=",
+        .ident = "for_linker",
+    },
+    .{
+        .name = "z",
+        .ident = "linker_input_z",
     },
     .{
         .name = "E",
@@ -146,6 +166,14 @@ const known_options = [_]KnownOpt{
         .name = "fsanitize",
         .ident = "sanitize",
     },
+    .{
+        .name = "T",
+        .ident = "linker_script",
+    },
+    .{
+        .name = "###",
+        .ident = "verbose_cmds",
+    },
 };
 
 const blacklisted_options = [_][]const u8{};
@@ -195,7 +223,7 @@ pub fn main() anyerror!void {
         try std.fmt.allocPrint(allocator, "-I={}/clang/include/clang/Driver", .{llvm_src_root}),
     };
 
-    const child_result = try std.ChildProcess.exec2(.{
+    const child_result = try std.ChildProcess.exec(.{
         .allocator = allocator,
         .argv = &child_args,
         .max_output_bytes = 100 * 1024 * 1024,

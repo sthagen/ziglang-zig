@@ -235,7 +235,7 @@ pub const Context = struct {
 
     /// Convert a null-terminated C string to a slice allocated in the arena
     fn str(c: *Context, s: [*:0]const u8) ![]u8 {
-        return mem.dupe(c.a(), u8, mem.toSliceConst(u8, s));
+        return mem.dupe(c.a(), u8, mem.spanZ(s));
     }
 
     /// Convert a clang source location to a file:line:column string
@@ -3845,7 +3845,9 @@ fn transCreateNodePtrType(
 }
 
 fn transCreateNodeAPInt(c: *Context, int: *const ZigClangAPSInt) !*ast.Node {
-    const num_limbs = ZigClangAPSInt_getNumWords(int);
+    const num_limbs = math.cast(usize, ZigClangAPSInt_getNumWords(int)) catch |err| switch (err) {
+        error.Overflow => return error.OutOfMemory,
+    };
     var aps_int = int;
     const is_negative = ZigClangAPSInt_isSigned(int) and ZigClangAPSInt_isNegative(int);
     if (is_negative)
@@ -3855,8 +3857,26 @@ fn transCreateNodeAPInt(c: *Context, int: *const ZigClangAPSInt) !*ast.Node {
         big.negate();
     defer big.deinit();
     const data = ZigClangAPSInt_getRawData(aps_int);
-    var i: @TypeOf(num_limbs) = 0;
-    while (i < num_limbs) : (i += 1) big.limbs[i] = data[i];
+    switch (@sizeOf(std.math.big.Limb)) {
+        8 => {
+            var i: usize = 0;
+            while (i < num_limbs) : (i += 1) {
+                big.limbs[i] = data[i];
+            }
+        },
+        4 => {
+            var limb_i: usize = 0;
+            var data_i: usize = 0;
+            while (limb_i < num_limbs) : ({
+                limb_i += 2;
+                data_i += 1;
+            }) {
+                big.limbs[limb_i] = @truncate(u32, data[data_i]);
+                big.limbs[limb_i + 1] = @truncate(u32, data[data_i] >> 32);
+            }
+        },
+        else => @compileError("unimplemented"),
+    }
     const str = big.toString(c.a(), 10) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
@@ -4750,6 +4770,7 @@ fn appendToken(c: *Context, token_id: Token.Id, bytes: []const u8) !ast.TokenInd
 }
 
 fn appendTokenFmt(c: *Context, token_id: Token.Id, comptime format: []const u8, args: var) !ast.TokenIndex {
+    assert(token_id != .Invalid);
     const start_index = c.source_buffer.len();
     errdefer c.source_buffer.shrink(start_index);
 
@@ -5781,6 +5802,18 @@ fn parseCSuffixOpExpr(c: *Context, it: *CTokenList.Iterator, source: []const u8,
                 op_id = .Mod;
                 op_token = try appendToken(c, .Percent, "%");
             },
+            .StringLiteral => {
+                op_id = .ArrayCat;
+                op_token = try appendToken(c, .PlusPlus, "++");
+
+                _ = it.prev();
+            },
+            .Identifier => {
+                op_id = .ArrayCat;
+                op_token = try appendToken(c, .PlusPlus, "++");
+
+                _ = it.prev();
+            },
             else => {
                 _ = it.prev();
                 return node;
@@ -5838,7 +5871,7 @@ fn parseCPrefixOpExpr(c: *Context, it: *CTokenList.Iterator, source: []const u8,
 
 fn tokenSlice(c: *Context, token: ast.TokenIndex) []u8 {
     const tok = c.tree.tokens.at(token);
-    const slice = c.source_buffer.toSlice()[tok.start..tok.end];
+    const slice = c.source_buffer.span()[tok.start..tok.end];
     return if (mem.startsWith(u8, slice, "@\""))
         slice[2 .. slice.len - 1]
     else

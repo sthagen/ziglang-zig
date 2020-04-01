@@ -41,6 +41,9 @@ comptime {
     _ = @import("behavior/bugs/3586.zig");
     _ = @import("behavior/bugs/3742.zig");
     _ = @import("behavior/bugs/4560.zig");
+    _ = @import("behavior/bugs/4769_a.zig");
+    _ = @import("behavior/bugs/4769_b.zig");
+    _ = @import("behavior/bugs/4769_c.zig");
     _ = @import("behavior/bugs/394.zig");
     _ = @import("behavior/bugs/421.zig");
     _ = @import("behavior/bugs/529.zig");
@@ -82,7 +85,6 @@ comptime {
     _ = @import("behavior/misc.zig");
     _ = @import("behavior/muladd.zig");
     _ = @import("behavior/namespace_depends_on_compile_var.zig");
-    _ = @import("behavior/new_stack_call.zig");
     _ = @import("behavior/null.zig");
     _ = @import("behavior/optional.zig");
     _ = @import("behavior/pointers.zig");

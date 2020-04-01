@@ -1097,8 +1097,8 @@ static Error set_file_times(OsFile file, OsTimeStamp ts) {
     return ErrorNone;
 #else
     struct timespec times[2] = {
-        { (time_t)ts.sec, (time_t)ts.nsec },
-        { (time_t)ts.sec, (time_t)ts.nsec },
+        { (time_t)ts.sec, (long)ts.nsec },
+        { (time_t)ts.sec, (long)ts.nsec },
     };
     if (futimens(file, times) == -1) {
         switch (errno) {
@@ -1160,9 +1160,6 @@ Error os_update_file(Buf *src_path, Buf *dst_path) {
         fclose(src_libc_file);
         fclose(dst_libc_file);
         return err;
-    }
-    if (fflush(src_libc_file) == -1) {
-        return ErrorUnexpected;
     }
     if (fflush(dst_libc_file) == -1) {
         return ErrorUnexpected;
@@ -1459,7 +1456,10 @@ static void init_rand() {
     memcpy(&seed, bytes, sizeof(unsigned));
     srand(seed);
 #elif defined(ZIG_OS_LINUX)
-    srand(*((unsigned*)getauxval(AT_RANDOM)));
+    unsigned char *ptr_random = (unsigned char*)getauxval(AT_RANDOM);
+    unsigned seed;
+    memcpy(&seed, ptr_random, sizeof(seed));
+    srand(seed);
 #else
     int fd = open("/dev/urandom", O_RDONLY|O_CLOEXEC);
     if (fd == -1) {
