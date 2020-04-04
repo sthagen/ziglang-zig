@@ -3,7 +3,6 @@ const builtin = std.builtin;
 const math = std.math;
 const assert = std.debug.assert;
 const mem = std.mem;
-const Buffer = std.Buffer;
 const testing = std.testing;
 
 pub fn InStream(
@@ -55,7 +54,7 @@ pub fn InStream(
         /// and the `std.ArrayList` has exactly `max_append_size` bytes appended.
         pub fn readAllArrayList(self: Self, array_list: *std.ArrayList(u8), max_append_size: usize) !void {
             try array_list.ensureCapacity(math.min(max_append_size, 4096));
-            const original_len = array_list.len;
+            const original_len = array_list.items.len;
             var start_index: usize = original_len;
             while (true) {
                 array_list.expandToCapacity();
@@ -107,7 +106,7 @@ pub fn InStream(
                     return;
                 }
 
-                if (array_list.len == max_size) {
+                if (array_list.items.len == max_size) {
                     return error.StreamTooLong;
                 }
 

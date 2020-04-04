@@ -4,7 +4,6 @@ const debug = std.debug;
 const warn = debug.warn;
 const build = std.build;
 const CrossTarget = std.zig.CrossTarget;
-const Buffer = std.Buffer;
 const io = std.io;
 const fs = std.fs;
 const mem = std.mem;
@@ -90,6 +89,15 @@ const test_targets = blk: {
             },
             .link_libc = true,
         },
+        // https://github.com/ziglang/zig/issues/4926
+        //TestTarget{
+        //    .target = .{
+        //        .cpu_arch = .i386,
+        //        .os_tag = .linux,
+        //        .abi = .gnu,
+        //    },
+        //    .link_libc = true,
+        //},
 
         TestTarget{
             .target = .{
@@ -128,7 +136,7 @@ const test_targets = blk: {
             }) catch unreachable,
             .link_libc = true,
         },
-        // TODO https://github.com/ziglang/zig/issues/3287
+        // https://github.com/ziglang/zig/issues/3287
         //TestTarget{
         //    .target = CrossTarget.parse(.{
         //        .arch_os_abi = "arm-linux-gnueabihf",
@@ -152,26 +160,32 @@ const test_targets = blk: {
             },
             .link_libc = true,
         },
-
-        // TODO disabled only because the CI server has such an old qemu that
-        // qemu-riscv64 isn't available :(
+        // https://github.com/ziglang/zig/issues/4927
         //TestTarget{
         //    .target = .{
-        //        .cpu_arch = .riscv64,
+        //        .cpu_arch = .mipsel,
         //        .os_tag = .linux,
-        //        .abi = .none,
-        //    },
-        //},
-
-        // https://github.com/ziglang/zig/issues/4485
-        //TestTarget{
-        //    .target = .{
-        //        .cpu_arch = .riscv64,
-        //        .os_tag = .linux,
-        //        .abi = .musl,
+        //        .abi = .gnu,
         //    },
         //    .link_libc = true,
         //},
+
+        TestTarget{
+            .target = .{
+                .cpu_arch = .riscv64,
+                .os_tag = .linux,
+                .abi = .none,
+            },
+        },
+
+        TestTarget{
+            .target = .{
+                .cpu_arch = .riscv64,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
+            .link_libc = true,
+        },
 
         // https://github.com/ziglang/zig/issues/3340
         //TestTarget{
@@ -189,7 +203,7 @@ const test_targets = blk: {
                 .os_tag = .macosx,
                 .abi = .gnu,
             },
-            // TODO https://github.com/ziglang/zig/issues/3295
+            // https://github.com/ziglang/zig/issues/3295
             .disable_native = true,
         },
 
@@ -640,7 +654,7 @@ pub const StackTracesContext = struct {
             // - replace address with symbolic string
             // - skip empty lines
             const got: []const u8 = got_result: {
-                var buf = try Buffer.initSize(b.allocator, 0);
+                var buf = ArrayList(u8).init(b.allocator);
                 defer buf.deinit();
                 if (stderr.len != 0 and stderr[stderr.len - 1] == '\n') stderr = stderr[0 .. stderr.len - 1];
                 var it = mem.separate(stderr, "\n");
@@ -652,21 +666,21 @@ pub const StackTracesContext = struct {
                     var pos: usize = if (std.Target.current.os.tag == .windows) 2 else 0;
                     for (delims) |delim, i| {
                         marks[i] = mem.indexOfPos(u8, line, pos, delim) orelse {
-                            try buf.append(line);
-                            try buf.append("\n");
+                            try buf.appendSlice(line);
+                            try buf.appendSlice("\n");
                             continue :process_lines;
                         };
                         pos = marks[i] + delim.len;
                     }
                     pos = mem.lastIndexOfScalar(u8, line[0..marks[0]], fs.path.sep) orelse {
-                        try buf.append(line);
-                        try buf.append("\n");
+                        try buf.appendSlice(line);
+                        try buf.appendSlice("\n");
                         continue :process_lines;
                     };
-                    try buf.append(line[pos + 1 .. marks[2] + delims[2].len]);
-                    try buf.append(" [address]");
-                    try buf.append(line[marks[3]..]);
-                    try buf.append("\n");
+                    try buf.appendSlice(line[pos + 1 .. marks[2] + delims[2].len]);
+                    try buf.appendSlice(" [address]");
+                    try buf.appendSlice(line[marks[3]..]);
+                    try buf.appendSlice("\n");
                 }
                 break :got_result buf.toOwnedSlice();
             };
@@ -865,13 +879,13 @@ pub const CompileErrorContext = struct {
                 var err_iter = ErrLineIter.init(stderr);
                 var i: usize = 0;
                 ok = while (err_iter.next()) |line| : (i += 1) {
-                    if (i >= self.case.expected_errors.len) break false;
+                    if (i >= self.case.expected_errors.items.len) break false;
                     const expected = self.case.expected_errors.at(i);
                     if (mem.indexOf(u8, line, expected) == null) break false;
                     continue;
                 } else true;
 
-                ok = ok and i == self.case.expected_errors.len;
+                ok = ok and i == self.case.expected_errors.items.len;
 
                 if (!ok) {
                     warn("\n======== Expected these compile errors: ========\n", .{});

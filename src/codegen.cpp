@@ -714,7 +714,7 @@ static LLVMValueRef get_arithmetic_overflow_fn(CodeGen *g, ZigType *operand_type
     };
 
     if (operand_type->id == ZigTypeIdVector) {
-        sprintf(fn_name, "llvm.%s.with.overflow.v%" PRIu32 "i%" PRIu32, signed_str,
+        sprintf(fn_name, "llvm.%s.with.overflow.v%" PRIu64 "i%" PRIu32, signed_str,
                 operand_type->data.vector.len, int_type->data.integral.bit_count);
 
         LLVMTypeRef return_elem_types[] = {
@@ -3954,8 +3954,9 @@ static void render_async_var_decls(CodeGen *g, Scope *scope) {
                 if (var->did_the_decl_codegen) {
                     render_decl_var(g, var);
                 }
-                // fallthrough
             }
+            ZIG_FALLTHROUGH;
+
             case ScopeIdDecls:
             case ScopeIdBlock:
             case ScopeIdDefer:
@@ -8939,10 +8940,24 @@ static void init(CodeGen *g) {
         fprintf(stderr, "name=%s target_specific_cpu_args=%s\n", buf_ptr(g->root_out_name), target_specific_cpu_args);
         fprintf(stderr, "name=%s target_specific_features=%s\n", buf_ptr(g->root_out_name), target_specific_features);
     }
+
+    // TODO handle float ABI better- it should depend on the ABI portion of std.Target
+    ZigLLVMABIType float_abi = ZigLLVMABITypeDefault;
+
+    // TODO a way to override this as part of std.Target ABI?
+    const char *abi_name = nullptr;
+    if (target_is_riscv(g->zig_target)) {
+        // RISC-V Linux defaults to ilp32d/lp64d
+        if (g->zig_target->os == OsLinux) {
+            abi_name = (g->zig_target->arch == ZigLLVM_riscv32) ? "ilp32d" : "lp64d";
+        } else {
+            abi_name = (g->zig_target->arch == ZigLLVM_riscv32) ? "ilp32" : "lp64";
+        }
+    }
     
     g->target_machine = ZigLLVMCreateTargetMachine(target_ref, buf_ptr(&g->llvm_triple_str),
             target_specific_cpu_args, target_specific_features, opt_level, reloc_mode,
-            to_llvm_code_model(g), g->function_sections);
+            to_llvm_code_model(g), g->function_sections, float_abi, abi_name);
 
     g->target_data_ref = LLVMCreateTargetDataLayout(g->target_machine);
 
@@ -9123,21 +9138,29 @@ static void detect_libc(CodeGen *g) {
         g->libc_include_dir_len = 0;
         g->libc_include_dir_list = heap::c_allocator.allocate<const char *>(dir_count);
 
-        g->libc_include_dir_list[g->libc_include_dir_len] = g->libc->include_dir;
+        g->libc_include_dir_list[g->libc_include_dir_len] = buf_ptr(buf_create_from_mem(
+                    g->libc->include_dir, g->libc->include_dir_len));
         g->libc_include_dir_len += 1;
 
         if (want_sys_dir) {
-            g->libc_include_dir_list[g->libc_include_dir_len] = g->libc->sys_include_dir;
+            g->libc_include_dir_list[g->libc_include_dir_len] = buf_ptr(buf_create_from_mem(
+                        g->libc->sys_include_dir, g->libc->sys_include_dir_len));
             g->libc_include_dir_len += 1;
         }
 
         if (want_um_and_shared_dirs != 0) {
-            g->libc_include_dir_list[g->libc_include_dir_len] = buf_ptr(buf_sprintf(
-                        "%s" OS_SEP ".." OS_SEP "um", g->libc->include_dir));
+            Buf *include_dir_parent = buf_alloc();
+            os_path_join(buf_create_from_mem(g->libc->include_dir, g->libc->include_dir_len),
+                    buf_create_from_str(".."), include_dir_parent);
+
+            Buf *buff1 = buf_alloc();
+            os_path_join(include_dir_parent, buf_create_from_str("um"), buff1);
+            g->libc_include_dir_list[g->libc_include_dir_len] = buf_ptr(buff1);
             g->libc_include_dir_len += 1;
 
-            g->libc_include_dir_list[g->libc_include_dir_len] = buf_ptr(buf_sprintf(
-                        "%s" OS_SEP ".." OS_SEP "shared", g->libc->include_dir));
+            Buf *buff2 = buf_alloc();
+            os_path_join(include_dir_parent, buf_create_from_str("shared"), buff2);
+            g->libc_include_dir_list[g->libc_include_dir_len] = buf_ptr(buff2);
             g->libc_include_dir_len += 1;
         }
         assert(g->libc_include_dir_len == dir_count);
@@ -9161,18 +9184,11 @@ static void detect_libc(CodeGen *g) {
 
 // does not add the "cc" arg
 void add_cc_args(CodeGen *g, ZigList<const char *> &args, const char *out_dep_path,
-        bool translate_c, CSourceKind source_kind)
+        bool translate_c, FileExt source_kind)
 {
     if (translate_c) {
         args.append("-x");
         args.append("c");
-    }
-
-    if (source_kind != CSourceKindAsm && out_dep_path != nullptr) {
-        args.append("-MD");
-        args.append("-MV");
-        args.append("-MF");
-        args.append(out_dep_path);
     }
 
     args.append("-nostdinc");
@@ -9182,14 +9198,7 @@ void add_cc_args(CodeGen *g, ZigList<const char *> &args, const char *out_dep_pa
         args.append("-ffunction-sections");
     }
 
-    if (translate_c) {
-        if (source_kind != CSourceKindAsm) {
-            // this gives us access to preprocessing entities, presumably at
-            // the cost of performance
-            args.append("-Xclang");
-            args.append("-detailed-preprocessing-record");
-        }
-    } else {
+    if (!translate_c) {
         switch (g->err_color) {
             case ErrColorAuto:
                 break;
@@ -9223,24 +9232,25 @@ void add_cc_args(CodeGen *g, ZigList<const char *> &args, const char *out_dep_pa
         args.append("-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS");
     }
 
-    // According to Rich Felker libc headers are supposed to go before C language headers.
-    // However as noted by @dimenus, appending libc headers before c_headers breaks intrinsics
-    // and other compiler specific items.
-    args.append("-isystem");
-    args.append(buf_ptr(g->zig_c_headers_dir));
-
-    for (size_t i = 0; i < g->libc_include_dir_len; i += 1) {
-        const char *include_dir = g->libc_include_dir_list[i];
-        args.append("-isystem");
-        args.append(include_dir);
-    }
-
     args.append("-target");
     args.append(buf_ptr(&g->llvm_triple_str));
 
     switch (source_kind) {
-        case CSourceKindC:
-        case CSourceKindCpp:
+        case FileExtC:
+        case FileExtCpp:
+        case FileExtHeader:
+            // According to Rich Felker libc headers are supposed to go before C language headers.
+            // However as noted by @dimenus, appending libc headers before c_headers breaks intrinsics
+            // and other compiler specific items.
+            args.append("-isystem");
+            args.append(buf_ptr(g->zig_c_headers_dir));
+
+            for (size_t i = 0; i < g->libc_include_dir_len; i += 1) {
+                const char *include_dir = g->libc_include_dir_list[i];
+                args.append("-isystem");
+                args.append(include_dir);
+            }
+
             if (g->zig_target->llvm_cpu_name != nullptr) {
                 args.append("-Xclang");
                 args.append("-target-cpu");
@@ -9253,8 +9263,23 @@ void add_cc_args(CodeGen *g, ZigList<const char *> &args, const char *out_dep_pa
                 args.append("-Xclang");
                 args.append(g->zig_target->llvm_cpu_features);
             }
+            if (translate_c) {
+                // this gives us access to preprocessing entities, presumably at
+                // the cost of performance
+                args.append("-Xclang");
+                args.append("-detailed-preprocessing-record");
+            }
+            if (out_dep_path != nullptr) {
+                args.append("-MD");
+                args.append("-MV");
+                args.append("-MF");
+                args.append(out_dep_path);
+            }
             break;
-        case CSourceKindAsm:
+        case FileExtAsm:
+        case FileExtLLVMIr:
+        case FileExtLLVMBitCode:
+        case FileExtUnknown:
             break;
     }
     for (size_t i = 0; i < g->zig_target->llvm_cpu_features_asm_len; i += 1) {
@@ -9404,7 +9429,7 @@ void codegen_translate_c(CodeGen *g, Buf *full_path) {
     }
 
     ZigList<const char *> clang_argv = {0};
-    add_cc_args(g, clang_argv, out_dep_path_cstr, true, CSourceKindC);
+    add_cc_args(g, clang_argv, out_dep_path_cstr, true, FileExtC);
 
     clang_argv.append(buf_ptr(full_path));
 
@@ -9742,15 +9767,6 @@ static void gen_c_object(CodeGen *g, Buf *self_exe_path, CFile *c_file) {
     Buf *c_source_basename = buf_alloc();
     os_path_split(c_source_file, nullptr, c_source_basename);
 
-    CSourceKind c_source_kind;
-    if (buf_ends_with_str(c_source_basename, ".s") ||
-        buf_ends_with_str(c_source_basename, ".S"))
-    {
-        c_source_kind = CSourceKindAsm;
-    } else {
-        c_source_kind = CSourceKindC;
-    }
-
     Stage2ProgressNode *child_prog_node = stage2_progress_start(g->sub_progress_node, buf_ptr(c_source_basename),
             buf_len(c_source_basename), 0);
 
@@ -9801,7 +9817,7 @@ static void gen_c_object(CodeGen *g, Buf *self_exe_path, CFile *c_file) {
             exit(1);
         }
     }
-    bool is_cache_miss = (buf_len(&digest) == 0);
+    bool is_cache_miss = g->disable_c_depfile || (buf_len(&digest) == 0);
     if (is_cache_miss) {
         // we can't know the digest until we do the C compiler invocation, so we
         // need a tmp filename.
@@ -9816,14 +9832,14 @@ static void gen_c_object(CodeGen *g, Buf *self_exe_path, CFile *c_file) {
         args.append(buf_ptr(self_exe_path));
         args.append("clang");
 
-        if (c_file->preprocessor_only_basename != nullptr) {
-            args.append("-E");
-        } else {
+        if (c_file->preprocessor_only_basename == nullptr) {
             args.append("-c");
         }
 
-        Buf *out_dep_path = buf_sprintf("%s.d", buf_ptr(out_obj_path));
-        add_cc_args(g, args, buf_ptr(out_dep_path), false, c_source_kind);
+        Buf *out_dep_path = g->disable_c_depfile ? nullptr : buf_sprintf("%s.d", buf_ptr(out_obj_path));
+        const char *out_dep_path_cstr = (out_dep_path == nullptr) ? nullptr : buf_ptr(out_dep_path);
+        FileExt ext = classify_file_ext(buf_ptr(c_source_basename), buf_len(c_source_basename));
+        add_cc_args(g, args, out_dep_path_cstr, false, ext);
 
         args.append("-o");
         args.append(buf_ptr(out_obj_path));
@@ -9844,22 +9860,24 @@ static void gen_c_object(CodeGen *g, Buf *self_exe_path, CFile *c_file) {
             exit(1);
         }
 
-        // add the files depended on to the cache system
-        if ((err = cache_add_dep_file(cache_hash, out_dep_path, true))) {
-            // Don't treat the absence of the .d file as a fatal error, the
-            // compiler may not produce one eg. when compiling .s files
+        if (out_dep_path != nullptr) {
+            // add the files depended on to the cache system
+            if ((err = cache_add_dep_file(cache_hash, out_dep_path, true))) {
+                // Don't treat the absence of the .d file as a fatal error, the
+                // compiler may not produce one eg. when compiling .s files
+                if (err != ErrorFileNotFound) {
+                    fprintf(stderr, "Failed to add C source dependencies to cache: %s\n", err_str(err));
+                    exit(1);
+                }
+            }
             if (err != ErrorFileNotFound) {
-                fprintf(stderr, "Failed to add C source dependencies to cache: %s\n", err_str(err));
+                os_delete_file(out_dep_path);
+            }
+
+            if ((err = cache_final(cache_hash, &digest))) {
+                fprintf(stderr, "Unable to finalize cache hash: %s\n", err_str(err));
                 exit(1);
             }
-        }
-        if (err != ErrorFileNotFound) {
-            os_delete_file(out_dep_path);
-        }
-
-        if ((err = cache_final(cache_hash, &digest))) {
-            fprintf(stderr, "Unable to finalize cache hash: %s\n", err_str(err));
-            exit(1);
         }
         artifact_dir = buf_alloc();
         os_path_join(o_dir, &digest, artifact_dir);
@@ -10546,14 +10564,19 @@ static Error check_cache(CodeGen *g, Buf *manifest_dir, Buf *digest) {
     cache_list_of_str(ch, g->lib_dirs.items, g->lib_dirs.length);
     cache_list_of_str(ch, g->framework_dirs.items, g->framework_dirs.length);
     if (g->libc) {
-        cache_str(ch, g->libc->include_dir);
-        cache_str(ch, g->libc->sys_include_dir);
-        cache_str(ch, g->libc->crt_dir);
-        cache_str(ch, g->libc->msvc_lib_dir);
-        cache_str(ch, g->libc->kernel32_lib_dir);
+        cache_slice(ch, Slice<const char>{g->libc->include_dir, g->libc->include_dir_len});
+        cache_slice(ch, Slice<const char>{g->libc->sys_include_dir, g->libc->sys_include_dir_len});
+        cache_slice(ch, Slice<const char>{g->libc->crt_dir, g->libc->crt_dir_len});
+        cache_slice(ch, Slice<const char>{g->libc->msvc_lib_dir, g->libc->msvc_lib_dir_len});
+        cache_slice(ch, Slice<const char>{g->libc->kernel32_lib_dir, g->libc->kernel32_lib_dir_len});
     }
     cache_buf_opt(ch, g->version_script_path);
     cache_buf_opt(ch, g->override_soname);
+    cache_buf_opt(ch, g->linker_optimization);
+    cache_int(ch, g->linker_gc_sections);
+    cache_int(ch, g->linker_allow_shlib_undefined);
+    cache_bool(ch, g->linker_z_nodelete);
+    cache_bool(ch, g->linker_z_defs);
 
     // gen_c_objects appends objects to g->link_objects which we want to include in the hash
     gen_c_objects(g);

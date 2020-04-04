@@ -11454,10 +11454,8 @@ static ConstCastOnly types_match_const_cast_only(IrAnalyze *ira, ZigType *wanted
     bool actual_allows_zero = ptr_allows_addr_zero(actual_type);
     bool wanted_is_c_ptr = wanted_type->id == ZigTypeIdPointer && wanted_type->data.pointer.ptr_len == PtrLenC;
     bool actual_is_c_ptr = actual_type->id == ZigTypeIdPointer && actual_type->data.pointer.ptr_len == PtrLenC;
-    bool wanted_opt_or_ptr = wanted_ptr_type != nullptr &&
-        (wanted_type->id == ZigTypeIdPointer || wanted_type->id == ZigTypeIdOptional);
-    bool actual_opt_or_ptr = actual_ptr_type != nullptr &&
-        (actual_type->id == ZigTypeIdPointer || actual_type->id == ZigTypeIdOptional);
+    bool wanted_opt_or_ptr = wanted_ptr_type != nullptr && wanted_ptr_type->id == ZigTypeIdPointer;
+    bool actual_opt_or_ptr = actual_ptr_type != nullptr && actual_ptr_type->id == ZigTypeIdPointer;
     if (wanted_opt_or_ptr && actual_opt_or_ptr) {
         bool ok_null_term_ptrs =
             wanted_ptr_type->data.pointer.sentinel == nullptr ||
@@ -15953,7 +15951,7 @@ static IrInstGen *ir_analyze_bin_op_cmp_numeric(IrAnalyze *ira, IrInst *source_i
     if (op1->value->type->id == ZigTypeIdVector && op2->value->type->id == ZigTypeIdVector) {
         if (op1->value->type->data.vector.len != op2->value->type->data.vector.len) {
             ir_add_error(ira, source_instr,
-                buf_sprintf("vector length mismatch: %" PRIu32 " and %" PRIu32,
+                buf_sprintf("vector length mismatch: %" PRIu64 " and %" PRIu64,
                     op1->value->type->data.vector.len, op2->value->type->data.vector.len));
             return ira->codegen->invalid_inst_gen;
         }
@@ -18982,7 +18980,7 @@ static IrInstGen *ir_analyze_async_call(IrAnalyze *ira, IrInst* source_instr, Zi
         if (type_is_invalid(result_loc->value->type) || result_loc->value->type->id == ZigTypeIdUnreachable) {
             return result_loc;
         }
-        result_loc = ir_implicit_cast2(ira, &call_result_loc->source_instruction->base, result_loc,
+        result_loc = ir_implicit_cast2(ira, source_instr, result_loc,
                 get_pointer_to_type(ira->codegen, frame_type, false));
         if (type_is_invalid(result_loc->value->type))
             return ira->codegen->invalid_inst_gen;
@@ -19949,6 +19947,7 @@ static IrInstGen *ir_analyze_call_extra(IrAnalyze *ira, IrInst* source_instr,
                     buf_sprintf("the specified modifier requires a comptime-known function"));
                 return ira->codegen->invalid_inst_gen;
             }
+            ZIG_FALLTHROUGH;
         default:
             break;
     }
@@ -19967,14 +19966,16 @@ static IrInstGen *ir_analyze_call_extra(IrAnalyze *ira, IrInst* source_instr,
         return ira->codegen->invalid_inst_gen;
 
     IrInstGen *stack = nullptr;
+    IrInst *stack_src = nullptr;
     if (stack_is_non_null) {
         stack = ir_analyze_optional_value_payload_value(ira, source_instr, opt_stack, false);
         if (type_is_invalid(stack->value->type))
             return ira->codegen->invalid_inst_gen;
+        stack_src = &stack->base;
     }
 
     return ir_analyze_fn_call(ira, source_instr, fn, fn_type, fn_ref, first_arg_ptr, first_arg_ptr_src,
-        modifier, stack, &stack->base, false, args_ptr, args_len, nullptr, result_loc);
+        modifier, stack, stack_src, false, args_ptr, args_len, nullptr, result_loc);
 }
 
 static IrInstGen *ir_analyze_instruction_call_extra(IrAnalyze *ira, IrInstSrcCallExtra *instruction) {
@@ -25170,7 +25171,7 @@ static IrInstGen *ir_analyze_instruction_c_import(IrAnalyze *ira, IrInstSrcCImpo
 
         ZigList<const char *> clang_argv = {0};
 
-        add_cc_args(ira->codegen, clang_argv, buf_ptr(tmp_dep_file), true, CSourceKindC);
+        add_cc_args(ira->codegen, clang_argv, buf_ptr(tmp_dep_file), true, FileExtC);
 
         clang_argv.append(buf_ptr(&tmp_c_file_path));
 
@@ -26582,7 +26583,6 @@ done_with_return_type:
                 if (parent_ptr == nullptr)
                     return ira->codegen->invalid_inst_gen;
 
-
                 if (parent_ptr->special == ConstValSpecialUndef) {
                     array_val = nullptr;
                     abs_offset = 0;
@@ -26744,6 +26744,113 @@ done_with_return_type:
             ir_add_error(ira, &instruction->base.base, buf_sprintf("non-zero length slice of undefined pointer"));
             return ira->codegen->invalid_inst_gen;
         }
+
+        // check sentinel when target is comptime-known
+        {
+            if (!sentinel_val)
+                goto exit_check_sentinel;
+
+            switch (ptr_ptr->value->data.x_ptr.mut) {
+                case ConstPtrMutComptimeConst:
+                case ConstPtrMutComptimeVar:
+                    break;
+                case ConstPtrMutRuntimeVar:
+                case ConstPtrMutInfer:
+                    goto exit_check_sentinel;
+            }
+
+            // prepare check parameters
+            ZigValue *target = const_ptr_pointee(ira, ira->codegen, ptr_ptr->value, instruction->base.base.source_node);
+            if (target == nullptr)
+                return ira->codegen->invalid_inst_gen;
+
+            uint64_t target_len = 0;
+            ZigValue *target_sentinel = nullptr;
+            ZigValue *target_elements = nullptr;
+
+            for (;;) {
+                if (target->type->id == ZigTypeIdArray) {
+                    // handle `[N]T`
+                    target_len = target->type->data.array.len;
+                    target_sentinel = target->type->data.array.sentinel;
+                    target_elements = target->data.x_array.data.s_none.elements;
+                    break;
+                } else if (target->type->id == ZigTypeIdPointer && target->type->data.pointer.child_type->id == ZigTypeIdArray) {
+                    // handle `*[N]T`
+                    target = const_ptr_pointee(ira, ira->codegen, target, instruction->base.base.source_node);
+                    if (target == nullptr)
+                        return ira->codegen->invalid_inst_gen;
+                    assert(target->type->id == ZigTypeIdArray);
+                    continue;
+                } else if (target->type->id == ZigTypeIdPointer) {
+                    // handle `[*]T`
+                    // handle `[*c]T`
+                    switch (target->data.x_ptr.special) {
+                        case ConstPtrSpecialInvalid:
+                        case ConstPtrSpecialDiscard:
+                            zig_unreachable();
+                        case ConstPtrSpecialRef:
+                            target = target->data.x_ptr.data.ref.pointee;
+                            assert(target->type->id == ZigTypeIdArray);
+                            continue;
+                        case ConstPtrSpecialBaseArray:
+                        case ConstPtrSpecialSubArray:
+                            target = target->data.x_ptr.data.base_array.array_val;
+                            assert(target->type->id == ZigTypeIdArray);
+                            continue;
+                        case ConstPtrSpecialBaseStruct:
+                            zig_panic("TODO slice const inner struct");
+                        case ConstPtrSpecialBaseErrorUnionCode:
+                            zig_panic("TODO slice const inner error union code");
+                        case ConstPtrSpecialBaseErrorUnionPayload:
+                            zig_panic("TODO slice const inner error union payload");
+                        case ConstPtrSpecialBaseOptionalPayload:
+                            zig_panic("TODO slice const inner optional payload");
+                        case ConstPtrSpecialHardCodedAddr:
+                            // skip check
+                            goto exit_check_sentinel;
+                        case ConstPtrSpecialFunction:
+                            zig_panic("TODO slice of ptr cast from function");
+                        case ConstPtrSpecialNull:
+                            zig_panic("TODO slice of null ptr");
+                    }
+                    break;
+                } else if (is_slice(target->type)) {
+                    // handle `[]T`
+                    target = target->data.x_struct.fields[slice_ptr_index];
+                    assert(target->type->id == ZigTypeIdPointer);
+                    continue;
+                }
+
+                zig_unreachable();
+            }
+
+            // perform check
+            if (target_sentinel == nullptr) {
+                if (end_scalar >= target_len) {
+                    ir_add_error(ira, &instruction->base.base, buf_sprintf("slice-sentinel is out of bounds"));
+                    return ira->codegen->invalid_inst_gen;
+                }
+                if (!const_values_equal(ira->codegen, sentinel_val, &target_elements[end_scalar])) {
+                    ir_add_error(ira, &instruction->base.base, buf_sprintf("slice-sentinel does not match memory at target index"));
+                    return ira->codegen->invalid_inst_gen;
+                }
+            } else {
+                assert(end_scalar <= target_len);
+                if (end_scalar == target_len) {
+                    if (!const_values_equal(ira->codegen, sentinel_val, target_sentinel)) {
+                        ir_add_error(ira, &instruction->base.base, buf_sprintf("slice-sentinel does not match target-sentinel"));
+                        return ira->codegen->invalid_inst_gen;
+                    }
+                } else {
+                    if (!const_values_equal(ira->codegen, sentinel_val, &target_elements[end_scalar])) {
+                        ir_add_error(ira, &instruction->base.base, buf_sprintf("slice-sentinel does not match memory at target index"));
+                        return ira->codegen->invalid_inst_gen;
+                    }
+                }
+            }
+        }
+        exit_check_sentinel:
 
         IrInstGen *result = ir_const(ira, &instruction->base.base, return_type);
 
@@ -28167,6 +28274,7 @@ static void buf_write_value_bytes(CodeGen *codegen, uint8_t *buf, ZigValue *val)
                     return;
                 }
             }
+            zig_unreachable();
         case ZigTypeIdOptional:
             zig_panic("TODO buf_write_value_bytes maybe type");
         case ZigTypeIdFn:
