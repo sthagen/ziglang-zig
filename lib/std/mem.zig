@@ -374,7 +374,7 @@ test "mem.zeroes" {
     testing.expect(a.y == 10);
 
     const ZigStruct = struct {
-        const IntegralTypes = struct {
+        integral_types: struct {
             integer_0: i0,
             integer_8: i8,
             integer_16: i16,
@@ -390,16 +390,13 @@ test "mem.zeroes" {
 
             float_32: f32,
             float_64: f64,
-        };
+        },
 
-        integral_types: IntegralTypes,
-
-        const Pointers = struct {
+        pointers: struct {
             optional: ?*u8,
             c_pointer: [*c]u8,
             slice: []u8,
-        };
-        pointers: Pointers,
+        },
 
         array: [2]u32,
         optional_int: ?u8,
@@ -501,7 +498,7 @@ pub const toSlice = @compileError("deprecated; use std.mem.spanZ");
 /// the constness of the input type. `[*c]` pointers are assumed to be 0-terminated,
 /// and assumed to not allow null.
 pub fn Span(comptime T: type) type {
-    switch(@typeInfo(T)) {
+    switch (@typeInfo(T)) {
         .Optional => |optional_info| {
             return ?Span(optional_info.child);
         },
@@ -1758,7 +1755,8 @@ fn BytesAsValueReturnType(comptime T: type, comptime B: type) type {
     if (comptime !trait.is(.Pointer)(B) or
         (meta.Child(B) != [size]u8 and meta.Child(B) != [size:0]u8))
     {
-        @compileError("expected *[N]u8 " ++ ", passed " ++ @typeName(B));
+        comptime var buf: [100]u8 = undefined;
+        @compileError(std.fmt.bufPrint(&buf, "expected *[{}]u8, passed " ++ @typeName(B), .{size}) catch unreachable);
     }
 
     const alignment = comptime meta.alignment(B);

@@ -34,8 +34,14 @@ pub fn build(b: *Builder) !void {
 
     const test_step = b.step("test", "Run all the tests");
 
-    var ctx = try findAndParseConfigH(b);
-    ctx.llvm = try findLLVM(b, ctx.llvm_config_exe);
+    const config_h_text = if (b.option(
+        []const u8,
+        "config_h",
+        "Path to the generated config.h",
+    )) |config_h_path|
+        try std.fs.cwd().readFileAlloc(b.allocator, toNativePathSep(b, config_h_path), max_config_h_bytes)
+    else
+        try findAndReadConfigH(b);
 
     var test_stage2 = b.addTest("src-self-hosted/test.zig");
     test_stage2.setBuildMode(builtin.Mode.Debug);
@@ -45,9 +51,6 @@ pub fn build(b: *Builder) !void {
 
     var exe = b.addExecutable("zig", "src-self-hosted/main.zig");
     exe.setBuildMode(mode);
-
-    try configureStage2(b, test_stage2, ctx);
-    try configureStage2(b, exe, ctx);
 
     const skip_release = b.option(bool, "skip-release", "Main test suite skips release builds") orelse false;
     const skip_release_small = b.option(bool, "skip-release-small", "Main test suite skips release-small builds") orelse skip_release;
@@ -62,6 +65,12 @@ pub fn build(b: *Builder) !void {
 
     const only_install_lib_files = b.option(bool, "lib-files-only", "Only install library files") orelse false;
     if (!only_install_lib_files and !skip_self_hosted) {
+        var ctx = parseConfigH(b, config_h_text);
+        ctx.llvm = try findLLVM(b, ctx.llvm_config_exe);
+
+        try configureStage2(b, test_stage2, ctx);
+        try configureStage2(b, exe, ctx);
+
         b.default_step.dependOn(&exe.step);
         exe.install();
     }
@@ -127,14 +136,14 @@ pub fn build(b: *Builder) !void {
 }
 
 fn dependOnLib(b: *Builder, lib_exe_obj: var, dep: LibraryDep) void {
-    for (dep.libdirs.toSliceConst()) |lib_dir| {
+    for (dep.libdirs.items) |lib_dir| {
         lib_exe_obj.addLibPath(lib_dir);
     }
     const lib_dir = fs.path.join(
         b.allocator,
         &[_][]const u8{ dep.prefix, "lib" },
     ) catch unreachable;
-    for (dep.system_libs.toSliceConst()) |lib| {
+    for (dep.system_libs.items) |lib| {
         const static_bare_name = if (mem.eql(u8, lib, "curses"))
             @as([]const u8, "libncurses.a")
         else
@@ -150,10 +159,10 @@ fn dependOnLib(b: *Builder, lib_exe_obj: var, dep: LibraryDep) void {
             lib_exe_obj.linkSystemLibrary(lib);
         }
     }
-    for (dep.libs.toSliceConst()) |lib| {
+    for (dep.libs.items) |lib| {
         lib_exe_obj.addObjectFile(lib);
     }
-    for (dep.includes.toSliceConst()) |include_path| {
+    for (dep.includes.items) |include_path| {
         lib_exe_obj.addIncludeDir(include_path);
     }
 }
@@ -216,10 +225,11 @@ fn findLLVM(b: *Builder, llvm_config_exe: []const u8) !LibraryDep {
                 if (fs.path.isAbsolute(lib_arg)) {
                     try result.libs.append(lib_arg);
                 } else {
+                    var lib_arg_copy = lib_arg;
                     if (mem.endsWith(u8, lib_arg, ".lib")) {
-                        lib_arg = lib_arg[0 .. lib_arg.len - 4];
+                        lib_arg_copy = lib_arg[0 .. lib_arg.len - 4];
                     }
-                    try result.system_libs.append(lib_arg);
+                    try result.system_libs.append(lib_arg_copy);
                 }
             }
         }
@@ -343,14 +353,15 @@ const Context = struct {
     llvm: LibraryDep,
 };
 
-fn findAndParseConfigH(b: *Builder) !Context {
+const max_config_h_bytes = 1 * 1024 * 1024;
+
+fn findAndReadConfigH(b: *Builder) ![]const u8 {
     var check_dir = fs.path.dirname(b.zig_exe).?;
-    const config_h_text = while (true) {
+    while (true) {
         var dir = try fs.cwd().openDir(check_dir, .{});
         defer dir.close();
 
-        const max_bytes = 1 * 1024 * 1024;
-        const config_h_text = dir.readFileAlloc(b.allocator, "config.h", max_bytes) catch |err| switch (err) {
+        const config_h_text = dir.readFileAlloc(b.allocator, "config.h", max_config_h_bytes) catch |err| switch (err) {
             error.FileNotFound => {
                 const new_check_dir = fs.path.dirname(check_dir);
                 if (new_check_dir == null or mem.eql(u8, new_check_dir.?, check_dir)) {
@@ -363,9 +374,11 @@ fn findAndParseConfigH(b: *Builder) !Context {
             },
             else => |e| return e,
         };
-        break config_h_text;
+        return config_h_text;
     } else unreachable; // TODO should not need `else unreachable`.
+}
 
+fn parseConfigH(b: *Builder, config_h_text: []const u8) Context {
     var ctx: Context = .{
         .cmake_binary_dir = undefined,
         .cxx_compiler = undefined,
@@ -414,9 +427,19 @@ fn findAndParseConfigH(b: *Builder) !Context {
             if (mem.startsWith(u8, line, mapping.prefix)) {
                 var it = mem.split(line, "\"");
                 _ = it.next().?; // skip the stuff before the quote
-                @field(ctx, mapping.field) = it.next().?; // the stuff inside the quote
+                const quoted = it.next().?; // the stuff inside the quote
+                @field(ctx, mapping.field) = toNativePathSep(b, quoted);
             }
         }
     }
     return ctx;
+}
+
+fn toNativePathSep(b: *Builder, s: []const u8) []u8 {
+    const duplicated = mem.dupe(b.allocator, u8, s) catch unreachable;
+    for (duplicated) |*byte| switch (byte.*) {
+        '/' => byte.* = fs.path.sep,
+        else => {},
+    };
+    return duplicated;
 }

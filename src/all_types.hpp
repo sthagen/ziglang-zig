@@ -524,9 +524,10 @@ struct ZigValue {
         RuntimeHintSlice rh_slice;
     } data;
 
-    // uncomment these to find bugs. can't leave them uncommented because of a gcc-9 warning
-    //ZigValue(const ZigValue &other) = delete; // plz zero initialize with {}
+    // uncomment this to find bugs. can't leave it uncommented because of a gcc-9 warning
     //ZigValue& operator= (const ZigValue &other) = delete; // use copy_const_val
+
+    ZigValue(const ZigValue &other) = delete; // plz zero initialize with ZigValue val = {};
 
     // for use in debuggers
     void dump();
@@ -2083,7 +2084,7 @@ struct CodeGen {
     HashMap<Scope *, ZigValue *, fn_eval_hash, fn_eval_eql> memoized_fn_eval_table;
     HashMap<ZigLLVMFnKey, LLVMValueRef, zig_llvm_fn_key_hash, zig_llvm_fn_key_eql> llvm_fn_table;
     HashMap<Buf *, Tld *, buf_hash, buf_eql_buf> exported_symbol_names;
-    HashMap<Buf *, Tld *, buf_hash, buf_eql_buf> external_prototypes;
+    HashMap<Buf *, Tld *, buf_hash, buf_eql_buf> external_symbol_names;
     HashMap<Buf *, ZigValue *, buf_hash, buf_eql_buf> string_literals_table;
     HashMap<const ZigType *, ZigValue *, type_ptr_hash, type_ptr_eql> type_info_cache;
     HashMap<const ZigType *, ZigValue *, type_ptr_hash, type_ptr_eql> one_possible_values;
@@ -2259,6 +2260,7 @@ struct CodeGen {
     size_t version_minor;
     size_t version_patch;
     const char *linker_script;
+    size_t stack_size_override;
 
     BuildMode build_mode;
     OutType out_type;
@@ -2405,6 +2407,7 @@ struct ScopeDecls {
 enum LVal {
     LValNone,
     LValPtr,
+    LValAssign,
 };
 
 // This scope comes from a block expression in user code.
@@ -3518,8 +3521,6 @@ struct IrInstSrcRef {
     IrInstSrc base;
 
     IrInstSrc *value;
-    bool is_const;
-    bool is_volatile;
 };
 
 struct IrInstGenRef {

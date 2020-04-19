@@ -37,6 +37,7 @@ static int print_full_usage(const char *arg0, FILE *file, int return_code) {
         "  build-obj [source]           create object from source or assembly\n"
         "  builtin                      show the source code of @import(\"builtin\")\n"
         "  cc                           use Zig as a drop-in C compiler\n"
+        "  c++                          use Zig as a drop-in C++ compiler\n"
         "  fmt                          parse files and render in canonical zig format\n"
         "  id                           print the base64-encoded compiler id\n"
         "  init-exe                     initialize a `zig build` application in the cwd\n"
@@ -453,6 +454,7 @@ static int main0(int argc, char **argv) {
     OptionalBool linker_allow_shlib_undefined = OptionalBoolNull;
     bool linker_z_nodelete = false;
     bool linker_z_defs = false;
+    size_t stack_size_override = 0;
 
     ZigList<const char *> llvm_argv = {0};
     llvm_argv.append("zig (LLVM option parsing)");
@@ -631,11 +633,17 @@ static int main0(int argc, char **argv) {
                     break;
                 }
                 case Stage2ClangArgL: // -l
-                    if (strcmp(it.only_arg, "c") == 0)
+                    if (strcmp(it.only_arg, "c") == 0) {
                         have_libc = true;
-                    if (strcmp(it.only_arg, "c++") == 0)
+                        link_libs.append("c");
+                    } else if (strcmp(it.only_arg, "c++") == 0 ||
+                        strcmp(it.only_arg, "stdc++") == 0)
+                    {
                         have_libcpp = true;
-                    link_libs.append(it.only_arg);
+                        link_libs.append("c++");
+                    } else {
+                        link_libs.append(it.only_arg);
+                    }
                     break;
                 case Stage2ClangArgIgnore:
                     break;
@@ -848,6 +856,27 @@ static int main0(int argc, char **argv) {
                 } else {
                     fprintf(stderr, "warning: unsupported linker arg: -z %s\n", buf_ptr(z_arg));
                 }
+            } else if (buf_eql_str(arg, "--major-image-version")) {
+                i += 1;
+                if (i >= linker_args.length) {
+                    fprintf(stderr, "expected linker arg after '%s'\n", buf_ptr(arg));
+                    return EXIT_FAILURE;
+                }
+                ver_major = atoi(buf_ptr(linker_args.at(i)));
+            } else if (buf_eql_str(arg, "--minor-image-version")) {
+                i += 1;
+                if (i >= linker_args.length) {
+                    fprintf(stderr, "expected linker arg after '%s'\n", buf_ptr(arg));
+                    return EXIT_FAILURE;
+                }
+                ver_minor = atoi(buf_ptr(linker_args.at(i)));
+            } else if (buf_eql_str(arg, "--stack")) {
+                i += 1;
+                if (i >= linker_args.length) {
+                    fprintf(stderr, "expected linker arg after '%s'\n", buf_ptr(arg));
+                    return EXIT_FAILURE;
+                }
+                stack_size_override = atoi(buf_ptr(linker_args.at(i)));
             } else {
                 fprintf(stderr, "warning: unsupported linker arg: %s\n", buf_ptr(arg));
             }
@@ -887,6 +916,7 @@ static int main0(int argc, char **argv) {
             }
             if (emit_bin_override_path == nullptr) {
                 emit_bin_override_path = "a.out";
+                enable_cache = CacheOptOn;
             }
         } else {
             cmd = CmdBuild;
@@ -994,11 +1024,15 @@ static int main0(int argc, char **argv) {
             } else if (arg[1] == 'l' && arg[2] != 0) {
                 // alias for --library
                 const char *l = &arg[2];
-                if (strcmp(l, "c") == 0)
+                if (strcmp(l, "c") == 0) {
                     have_libc = true;
-                if (strcmp(l, "c++") == 0)
+                    link_libs.append("c");
+                } else if (strcmp(l, "c++") == 0 || strcmp(l, "stdc++") == 0) {
                     have_libcpp = true;
-                link_libs.append(l);
+                    link_libs.append("c++");
+                } else {
+                    link_libs.append(l);
+                }
             } else if (arg[1] == 'I' && arg[2] != 0) {
                 clang_argv.append("-I");
                 clang_argv.append(&arg[2]);
@@ -1137,11 +1171,15 @@ static int main0(int argc, char **argv) {
                 } else if (strcmp(arg, "-F") == 0) {
                     framework_dirs.append(argv[i]);
                 } else if (strcmp(arg, "--library") == 0 || strcmp(arg, "-l") == 0) {
-                    if (strcmp(argv[i], "c") == 0)
+                    if (strcmp(argv[i], "c") == 0) {
                         have_libc = true;
-                    if (strcmp(argv[i], "c++") == 0)
+                        link_libs.append("c");
+                    } else if (strcmp(argv[i], "c++") == 0 || strcmp(argv[i], "stdc++") == 0) {
                         have_libcpp = true;
-                    link_libs.append(argv[i]);
+                        link_libs.append("c++");
+                    } else {
+                        link_libs.append(argv[i]);
+                    }
                 } else if (strcmp(arg, "--forbid-library") == 0) {
                     forbidden_link_libs.append(argv[i]);
                 } else if (strcmp(arg, "--object") == 0) {
@@ -1573,6 +1611,7 @@ static int main0(int argc, char **argv) {
             g->linker_allow_shlib_undefined = linker_allow_shlib_undefined;
             g->linker_z_nodelete = linker_z_nodelete;
             g->linker_z_defs = linker_z_defs;
+            g->stack_size_override = stack_size_override;
 
             if (override_soname) {
                 g->override_soname = buf_create_from_str(override_soname);

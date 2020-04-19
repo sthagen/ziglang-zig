@@ -77,7 +77,7 @@ test "encodesTo" {
     testing.expectEqual(true, encodesTo("false", "false"));
     // totally different
     testing.expectEqual(false, encodesTo("false", "true"));
-    // differnt lengths
+    // different lengths
     testing.expectEqual(false, encodesTo("false", "other"));
     // with escape
     testing.expectEqual(true, encodesTo("\\", "\\\\"));
@@ -1327,12 +1327,13 @@ test "Value.jsonStringify" {
     {
         var buffer: [10]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&buffer);
+        var vals = [_]Value{
+            .{ .Integer = 1 },
+            .{ .Integer = 2 },
+            .{ .Integer = 3 },
+        };
         try (Value{
-            .Array = Array.fromOwnedSlice(undefined, &[_]Value{
-                .{ .Integer = 1 },
-                .{ .Integer = 2 },
-                .{ .Integer = 3 },
-            }),
+            .Array = Array.fromOwnedSlice(undefined, &vals),
         }).jsonStringify(.{}, fbs.outStream());
         testing.expectEqualSlices(u8, fbs.getWritten(), "[1,2,3]");
     }
@@ -1770,22 +1771,20 @@ test "parse into struct with misc fields" {
         static_array: [3]f64,
         dynamic_array: []f64,
 
-        const Bar = struct {
+        complex: struct {
             nested: []const u8,
-        };
-        complex: Bar,
+        },
 
-        const Baz = struct {
+        veryComplex: []struct {
             foo: []const u8,
-        };
-        veryComplex: []Baz,
+        },
 
+        a_union: Union,
         const Union = union(enum) {
             x: u8,
             float: f64,
             string: []const u8,
         };
-        a_union: Union,
     };
     const r = try parse(T, &TokenStream.init(
         \\{
@@ -1878,7 +1877,7 @@ pub const Parser = struct {
 
         return ValueTree{
             .arena = arena,
-            .root = p.stack.at(0),
+            .root = p.stack.items[0],
         };
     }
 
@@ -2167,7 +2166,7 @@ test "json.parser.dynamic" {
     const array_of_object = image.Object.get("ArrayOfObject").?.value;
     testing.expect(array_of_object.Array.items.len == 1);
 
-    const obj0 = array_of_object.Array.at(0).Object.get("n").?.value;
+    const obj0 = array_of_object.Array.items[0].Object.get("n").?.value;
     testing.expect(mem.eql(u8, obj0.String, "m"));
 
     const double = image.Object.get("double").?.value;
@@ -2221,8 +2220,8 @@ test "write json then parse it" {
     testing.expect(tree.root.Object.get("f").?.value.Bool == false);
     testing.expect(tree.root.Object.get("t").?.value.Bool == true);
     testing.expect(tree.root.Object.get("int").?.value.Integer == 1234);
-    testing.expect(tree.root.Object.get("array").?.value.Array.at(0).Null == {});
-    testing.expect(tree.root.Object.get("array").?.value.Array.at(1).Float == 12.34);
+    testing.expect(tree.root.Object.get("array").?.value.Array.items[0].Null == {});
+    testing.expect(tree.root.Object.get("array").?.value.Array.items[1].Float == 12.34);
     testing.expect(mem.eql(u8, tree.root.Object.get("str").?.value.String, "hello"));
 }
 
@@ -2246,7 +2245,7 @@ test "integer after float has proper type" {
         \\  "ints": [1, 2, 3]
         \\}
     );
-    std.testing.expect(json.Object.getValue("ints").?.Array.at(0) == .Integer);
+    std.testing.expect(json.Object.getValue("ints").?.Array.items[0] == .Integer);
 }
 
 test "escaped characters" {
@@ -2322,13 +2321,14 @@ pub const StringifyOptions = struct {
         /// How many indentation levels deep are we?
         indent_level: usize = 0,
 
-        pub const Indentation = union(enum) {
+        /// What character(s) should be used for indentation?
+        indent: union(enum) {
             Space: u8,
             Tab: void,
-        };
+        } = .{ .Space = 4 },
 
-        /// What character(s) should be used for indentation?
-        indent: Indentation = Indentation{ .Space = 4 },
+        /// After a colon, should whitespace be inserted?
+        separator: bool = true,
 
         fn outputIndent(
             whitespace: @This(),
@@ -2349,17 +2349,17 @@ pub const StringifyOptions = struct {
             n_chars *= whitespace.indent_level;
             try out_stream.writeByteNTimes(char, n_chars);
         }
-
-        /// After a colon, should whitespace be inserted?
-        separator: bool = true,
     };
 
     /// Controls the whitespace emitted
     whitespace: ?Whitespace = null,
 
+    string: StringOptions = StringOptions{ .String = .{} },
+
     /// Should []u8 be serialised as a string? or an array?
     pub const StringOptions = union(enum) {
         Array,
+        String: StringOutputOptions,
 
         /// String output options
         const StringOutputOptions = struct {
@@ -2369,10 +2369,7 @@ pub const StringifyOptions = struct {
             /// Should unicode characters be escaped in strings?
             escape_unicode: bool = false,
         };
-        String: StringOutputOptions,
     };
-
-    string: StringOptions = StringOptions{ .String = .{} },
 };
 
 fn outputUnicodeEscape(
