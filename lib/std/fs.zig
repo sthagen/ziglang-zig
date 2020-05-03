@@ -8,6 +8,8 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const math = std.math;
 
+const is_darwin = std.Target.current.os.tag.isDarwin();
+
 pub const path = @import("fs/path.zig");
 pub const File = @import("fs/file.zig").File;
 
@@ -197,7 +199,7 @@ pub const AtomicFile = struct {
         if (std.Target.current.os.tag == .windows) {
             const dest_path_w = try os.windows.sliceToPrefixedFileW(self.dest_basename);
             const tmp_path_w = try os.windows.cStrToPrefixedFileW(&self.tmp_path_buf);
-            try os.renameatW(self.dir.fd, &tmp_path_w, self.dir.fd, &dest_path_w, os.windows.TRUE);
+            try os.renameatW(self.dir.fd, tmp_path_w.span(), self.dir.fd, dest_path_w.span(), os.windows.TRUE);
             self.file_exists = false;
         } else {
             const dest_path_c = try os.toPosixPath(self.dest_basename);
@@ -580,7 +582,7 @@ pub const Dir = struct {
     pub fn openFile(self: Dir, sub_path: []const u8, flags: File.OpenFlags) File.OpenError!File {
         if (builtin.os.tag == .windows) {
             const path_w = try os.windows.sliceToPrefixedFileW(sub_path);
-            return self.openFileW(&path_w, flags);
+            return self.openFileW(path_w.span(), flags);
         }
         const path_c = try os.toPosixPath(sub_path);
         return self.openFileZ(&path_c, flags);
@@ -592,13 +594,16 @@ pub const Dir = struct {
     pub fn openFileZ(self: Dir, sub_path: [*:0]const u8, flags: File.OpenFlags) File.OpenError!File {
         if (builtin.os.tag == .windows) {
             const path_w = try os.windows.cStrToPrefixedFileW(sub_path);
-            return self.openFileW(&path_w, flags);
+            return self.openFileW(path_w.span(), flags);
         }
 
         // Use the O_ locking flags if the os supports them
         // (Or if it's darwin, as darwin's `open` doesn't support the O_SYNC flag)
-        const has_flock_open_flags = @hasDecl(os, "O_EXLOCK") and !builtin.os.tag.isDarwin();
-        const nonblocking_lock_flag = if (has_flock_open_flags and flags.lock_nonblocking) (os.O_NONBLOCK | os.O_SYNC) else @as(u32, 0);
+        const has_flock_open_flags = @hasDecl(os, "O_EXLOCK") and !is_darwin;
+        const nonblocking_lock_flag = if (has_flock_open_flags and flags.lock_nonblocking)
+            os.O_NONBLOCK | os.O_SYNC
+        else
+            @as(u32, 0);
         const lock_flag: u32 = if (has_flock_open_flags) switch (flags.lock) {
             .None => @as(u32, 0),
             .Shared => os.O_SHLOCK | nonblocking_lock_flag,
@@ -612,7 +617,7 @@ pub const Dir = struct {
             @as(u32, os.O_WRONLY)
         else
             @as(u32, os.O_RDONLY);
-        const fd = if (need_async_thread and !flags.always_blocking)
+        const fd = if (flags.intended_io_mode != .blocking)
             try std.event.Loop.instance.?.openatZ(self.fd, sub_path, os_flags, 0)
         else
             try os.openatZ(self.fd, sub_path, os_flags, 0);
@@ -629,31 +634,32 @@ pub const Dir = struct {
 
         return File{
             .handle = fd,
-            .io_mode = .blocking,
-            .async_block_allowed = if (flags.always_blocking)
-                File.async_block_allowed_yes
-            else
-                File.async_block_allowed_no,
+            .capable_io_mode = .blocking,
+            .intended_io_mode = flags.intended_io_mode,
         };
     }
 
     /// Same as `openFile` but Windows-only and the path parameter is
     /// [WTF-16](https://simonsapin.github.io/wtf-8/#potentially-ill-formed-utf-16) encoded.
-    pub fn openFileW(self: Dir, sub_path_w: [*:0]const u16, flags: File.OpenFlags) File.OpenError!File {
+    pub fn openFileW(self: Dir, sub_path_w: []const u16, flags: File.OpenFlags) File.OpenError!File {
         const w = os.windows;
-        const access_mask = w.SYNCHRONIZE |
-            (if (flags.read) @as(u32, w.GENERIC_READ) else 0) |
-            (if (flags.write) @as(u32, w.GENERIC_WRITE) else 0);
-
-        const share_access = switch (flags.lock) {
-            .None => @as(?w.ULONG, null),
-            .Shared => w.FILE_SHARE_READ | w.FILE_SHARE_DELETE,
-            .Exclusive => w.FILE_SHARE_DELETE,
-        };
-
         return @as(File, .{
-            .handle = try os.windows.OpenFileW(self.fd, sub_path_w, null, access_mask, share_access, flags.lock_nonblocking, w.FILE_OPEN),
-            .io_mode = .blocking,
+            .handle = try os.windows.OpenFile(sub_path_w, .{
+                .dir = self.fd,
+                .access_mask = w.SYNCHRONIZE |
+                    (if (flags.read) @as(u32, w.GENERIC_READ) else 0) |
+                    (if (flags.write) @as(u32, w.GENERIC_WRITE) else 0),
+                .share_access = switch (flags.lock) {
+                    .None => w.FILE_SHARE_WRITE | w.FILE_SHARE_READ | w.FILE_SHARE_DELETE,
+                    .Shared => w.FILE_SHARE_READ | w.FILE_SHARE_DELETE,
+                    .Exclusive => w.FILE_SHARE_DELETE,
+                },
+                .share_access_nonblocking = flags.lock_nonblocking,
+                .creation = w.FILE_OPEN,
+                .io_mode = flags.intended_io_mode,
+            }),
+            .capable_io_mode = std.io.default_mode,
+            .intended_io_mode = flags.intended_io_mode,
         });
     }
 
@@ -663,7 +669,7 @@ pub const Dir = struct {
     pub fn createFile(self: Dir, sub_path: []const u8, flags: File.CreateFlags) File.OpenError!File {
         if (builtin.os.tag == .windows) {
             const path_w = try os.windows.sliceToPrefixedFileW(sub_path);
-            return self.createFileW(&path_w, flags);
+            return self.createFileW(path_w.span(), flags);
         }
         const path_c = try os.toPosixPath(sub_path);
         return self.createFileZ(&path_c, flags);
@@ -675,13 +681,16 @@ pub const Dir = struct {
     pub fn createFileZ(self: Dir, sub_path_c: [*:0]const u8, flags: File.CreateFlags) File.OpenError!File {
         if (builtin.os.tag == .windows) {
             const path_w = try os.windows.cStrToPrefixedFileW(sub_path_c);
-            return self.createFileW(&path_w, flags);
+            return self.createFileW(path_w.span(), flags);
         }
 
         // Use the O_ locking flags if the os supports them
         // (Or if it's darwin, as darwin's `open` doesn't support the O_SYNC flag)
-        const has_flock_open_flags = @hasDecl(os, "O_EXLOCK") and !builtin.os.tag.isDarwin();
-        const nonblocking_lock_flag = if (has_flock_open_flags and flags.lock_nonblocking) (os.O_NONBLOCK | os.O_SYNC) else @as(u32, 0);
+        const has_flock_open_flags = @hasDecl(os, "O_EXLOCK") and !is_darwin;
+        const nonblocking_lock_flag: u32 = if (has_flock_open_flags and flags.lock_nonblocking)
+            os.O_NONBLOCK | os.O_SYNC
+        else
+            0;
         const lock_flag: u32 = if (has_flock_open_flags) switch (flags.lock) {
             .None => @as(u32, 0),
             .Shared => os.O_SHLOCK,
@@ -693,7 +702,7 @@ pub const Dir = struct {
             (if (flags.truncate) @as(u32, os.O_TRUNC) else 0) |
             (if (flags.read) @as(u32, os.O_RDWR) else os.O_WRONLY) |
             (if (flags.exclusive) @as(u32, os.O_EXCL) else 0);
-        const fd = if (need_async_thread)
+        const fd = if (flags.intended_io_mode != .blocking)
             try std.event.Loop.instance.?.openatZ(self.fd, sub_path_c, os_flags, flags.mode)
         else
             try os.openatZ(self.fd, sub_path_c, os_flags, flags.mode);
@@ -708,31 +717,38 @@ pub const Dir = struct {
             });
         }
 
-        return File{ .handle = fd, .io_mode = .blocking };
+        return File{
+            .handle = fd,
+            .capable_io_mode = .blocking,
+            .intended_io_mode = flags.intended_io_mode,
+        };
     }
 
     /// Same as `createFile` but Windows-only and the path parameter is
     /// [WTF-16](https://simonsapin.github.io/wtf-8/#potentially-ill-formed-utf-16) encoded.
-    pub fn createFileW(self: Dir, sub_path_w: [*:0]const u16, flags: File.CreateFlags) File.OpenError!File {
+    pub fn createFileW(self: Dir, sub_path_w: []const u16, flags: File.CreateFlags) File.OpenError!File {
         const w = os.windows;
-        const access_mask = w.SYNCHRONIZE | w.GENERIC_WRITE |
-            (if (flags.read) @as(u32, w.GENERIC_READ) else 0);
-        const creation = if (flags.exclusive)
-            @as(u32, w.FILE_CREATE)
-        else if (flags.truncate)
-            @as(u32, w.FILE_OVERWRITE_IF)
-        else
-            @as(u32, w.FILE_OPEN_IF);
-
-        const share_access = switch (flags.lock) {
-            .None => @as(?w.ULONG, null),
-            .Shared => w.FILE_SHARE_READ | w.FILE_SHARE_DELETE,
-            .Exclusive => w.FILE_SHARE_DELETE,
-        };
-
+        const read_flag = if (flags.read) @as(u32, w.GENERIC_READ) else 0;
         return @as(File, .{
-            .handle = try os.windows.OpenFileW(self.fd, sub_path_w, null, access_mask, share_access, flags.lock_nonblocking, creation),
-            .io_mode = .blocking,
+            .handle = try os.windows.OpenFile(sub_path_w, .{
+                .dir = self.fd,
+                .access_mask = w.SYNCHRONIZE | w.GENERIC_WRITE | read_flag,
+                .share_access = switch (flags.lock) {
+                    .None => w.FILE_SHARE_WRITE | w.FILE_SHARE_READ | w.FILE_SHARE_DELETE,
+                    .Shared => w.FILE_SHARE_READ | w.FILE_SHARE_DELETE,
+                    .Exclusive => w.FILE_SHARE_DELETE,
+                },
+                .share_access_nonblocking = flags.lock_nonblocking,
+                .creation = if (flags.exclusive)
+                    @as(u32, w.FILE_CREATE)
+                else if (flags.truncate)
+                    @as(u32, w.FILE_OVERWRITE_IF)
+                else
+                    @as(u32, w.FILE_OPEN_IF),
+                .io_mode = flags.intended_io_mode,
+            }),
+            .capable_io_mode = std.io.default_mode,
+            .intended_io_mode = flags.intended_io_mode,
         });
     }
 
@@ -787,6 +803,15 @@ pub const Dir = struct {
         }
     }
 
+    /// This function performs `makePath`, followed by `openDir`.
+    /// If supported by the OS, this operation is atomic. It is not atomic on
+    /// all operating systems.
+    pub fn makeOpenPath(self: Dir, sub_path: []const u8, open_dir_options: OpenDirOptions) !Dir {
+        // TODO improve this implementation on Windows; we can avoid 1 call to NtClose
+        try self.makePath(sub_path);
+        return self.openDir(sub_path, open_dir_options);
+    }
+
     /// Changes the current working directory to the open directory handle.
     /// This modifies global state and can have surprising effects in multi-
     /// threaded applications. Most applications and especially libraries should
@@ -816,7 +841,7 @@ pub const Dir = struct {
     pub fn openDir(self: Dir, sub_path: []const u8, args: OpenDirOptions) OpenError!Dir {
         if (builtin.os.tag == .windows) {
             const sub_path_w = try os.windows.sliceToPrefixedFileW(sub_path);
-            return self.openDirW(&sub_path_w, args);
+            return self.openDirW(sub_path_w.span().ptr, args);
         } else {
             const sub_path_c = try os.toPosixPath(sub_path);
             return self.openDirZ(&sub_path_c, args);
@@ -829,7 +854,7 @@ pub const Dir = struct {
     pub fn openDirZ(self: Dir, sub_path_c: [*:0]const u8, args: OpenDirOptions) OpenError!Dir {
         if (builtin.os.tag == .windows) {
             const sub_path_w = try os.windows.cStrToPrefixedFileW(sub_path_c);
-            return self.openDirW(&sub_path_w, args);
+            return self.openDirW(sub_path_w.span().ptr, args);
         } else if (!args.iterate) {
             const O_PATH = if (@hasDecl(os, "O_PATH")) os.O_PATH else 0;
             return self.openDirFlagsZ(sub_path_c, os.O_DIRECTORY | os.O_RDONLY | os.O_CLOEXEC | O_PATH);
@@ -971,7 +996,7 @@ pub const Dir = struct {
     pub fn deleteDir(self: Dir, sub_path: []const u8) DeleteDirError!void {
         if (builtin.os.tag == .windows) {
             const sub_path_w = try os.windows.sliceToPrefixedFileW(sub_path);
-            return self.deleteDirW(&sub_path_w);
+            return self.deleteDirW(sub_path_w.span().ptr);
         }
         const sub_path_c = try os.toPosixPath(sub_path);
         return self.deleteDirZ(&sub_path_c);
@@ -1230,7 +1255,7 @@ pub const Dir = struct {
     pub fn access(self: Dir, sub_path: []const u8, flags: File.OpenFlags) AccessError!void {
         if (builtin.os.tag == .windows) {
             const sub_path_w = try os.windows.sliceToPrefixedFileW(sub_path);
-            return self.accessW(&sub_path_w, flags);
+            return self.accessW(sub_path_w.span().ptr, flags);
         }
         const path_c = try os.toPosixPath(sub_path);
         return self.accessZ(&path_c, flags);
@@ -1240,7 +1265,7 @@ pub const Dir = struct {
     pub fn accessZ(self: Dir, sub_path: [*:0]const u8, flags: File.OpenFlags) AccessError!void {
         if (builtin.os.tag == .windows) {
             const sub_path_w = try os.windows.cStrToPrefixedFileW(sub_path);
-            return self.accessW(&sub_path_w, flags);
+            return self.accessW(sub_path_w.span().ptr, flags);
         }
         const os_mode = if (flags.write and flags.read)
             @as(u32, os.R_OK | os.W_OK)
@@ -1248,7 +1273,7 @@ pub const Dir = struct {
             @as(u32, os.W_OK)
         else
             @as(u32, os.F_OK);
-        const result = if (need_async_thread)
+        const result = if (need_async_thread and flags.intended_io_mode != .blocking)
             std.event.Loop.instance.?.faccessatZ(self.fd, sub_path, os_mode, 0)
         else
             os.faccessatZ(self.fd, sub_path, os_mode, 0);
@@ -1390,8 +1415,8 @@ pub fn openFileAbsoluteZ(absolute_path_c: [*:0]const u8, flags: File.OpenFlags) 
 }
 
 /// Same as `openFileAbsolute` but the path parameter is WTF-16 encoded.
-pub fn openFileAbsoluteW(absolute_path_w: [*:0]const u16, flags: File.OpenFlags) File.OpenError!File {
-    assert(path.isAbsoluteWindowsW(absolute_path_w));
+pub fn openFileAbsoluteW(absolute_path_w: []const u16, flags: File.OpenFlags) File.OpenError!File {
+    assert(path.isAbsoluteWindowsWTF16(absolute_path_w));
     return cwd().openFileW(absolute_path_w, flags);
 }
 
@@ -1424,7 +1449,7 @@ pub fn createFileAbsoluteW(absolute_path_w: [*:0]const u16, flags: File.CreateFl
 /// Asserts that the path is absolute. See `Dir.deleteFile` for a function that
 /// operates on both absolute and relative paths.
 /// Asserts that the path parameter has no null bytes.
-pub fn deleteFileAbsolute(absolute_path: []const u8) DeleteFileError!void {
+pub fn deleteFileAbsolute(absolute_path: []const u8) Dir.DeleteFileError!void {
     assert(path.isAbsolute(absolute_path));
     return cwd().deleteFile(absolute_path);
 }
@@ -1432,13 +1457,13 @@ pub fn deleteFileAbsolute(absolute_path: []const u8) DeleteFileError!void {
 pub const deleteFileAbsoluteC = @compileError("deprecated: renamed to deleteFileAbsoluteZ");
 
 /// Same as `deleteFileAbsolute` except the parameter is null-terminated.
-pub fn deleteFileAbsoluteZ(absolute_path_c: [*:0]const u8) DeleteFileError!void {
+pub fn deleteFileAbsoluteZ(absolute_path_c: [*:0]const u8) Dir.DeleteFileError!void {
     assert(path.isAbsoluteZ(absolute_path_c));
     return cwd().deleteFileZ(absolute_path_c);
 }
 
 /// Same as `deleteFileAbsolute` except the parameter is WTF-16 encoded.
-pub fn deleteFileAbsoluteW(absolute_path_w: [*:0]const u16) DeleteFileError!void {
+pub fn deleteFileAbsoluteW(absolute_path_w: [*:0]const u16) Dir.DeleteFileError!void {
     assert(path.isAbsoluteWindowsW(absolute_path_w));
     return cwd().deleteFileW(absolute_path_w);
 }
@@ -1580,7 +1605,7 @@ pub fn openSelfExe() OpenSelfExeError!File {
     if (builtin.os.tag == .windows) {
         const wide_slice = selfExePathW();
         const prefixed_path_w = try os.windows.wToPrefixedFileW(wide_slice);
-        return cwd().openFileW(&prefixed_path_w, .{});
+        return cwd().openFileW(prefixed_path_w.span(), .{});
     }
     var buf: [MAX_PATH_BYTES]u8 = undefined;
     const self_exe_path = try selfExePath(&buf);
@@ -1608,7 +1633,7 @@ pub fn selfExePathAlloc(allocator: *Allocator) ![]u8 {
 /// been deleted, the file path looks something like `/a/b/c/exe (deleted)`.
 /// TODO make the return type of this a null terminated pointer
 pub fn selfExePath(out_buffer: *[MAX_PATH_BYTES]u8) SelfExePathError![]u8 {
-    if (comptime std.Target.current.isDarwin()) {
+    if (is_darwin) {
         var u32_len: u32 = out_buffer.len;
         const rc = std.c._NSGetExecutablePath(out_buffer, &u32_len);
         if (rc != 0) return error.NameTooLong;

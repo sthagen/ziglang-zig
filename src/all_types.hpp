@@ -19,6 +19,11 @@
 #include "target.hpp"
 #include "tokenizer.hpp"
 
+#ifndef NDEBUG
+#define DBG_MACRO_NO_WARNING
+#include <dbg.h>
+#endif
+
 struct AstNode;
 struct ZigFn;
 struct Scope;
@@ -2270,6 +2275,7 @@ struct CodeGen {
     CodeModel code_model;
     OptionalBool linker_gc_sections;
     OptionalBool linker_allow_shlib_undefined;
+    OptionalBool linker_bind_global_refs_locally;
     bool strip_debug_symbols;
     bool is_test_build;
     bool is_single_threaded;
@@ -3452,7 +3458,6 @@ struct IrInstSrcOptionalUnwrapPtr {
 
     IrInstSrc *base_ptr;
     bool safety_check_on;
-    bool initializing;
 };
 
 struct IrInstGenOptionalUnwrapPtr {

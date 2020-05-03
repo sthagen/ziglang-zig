@@ -9825,6 +9825,9 @@ Error create_c_object_cache(CodeGen *g, CacheHash **out_cache_hash, bool verbose
     }
     cache_buf(cache_hash, compiler_id);
     cache_int(cache_hash, g->err_color);
+    cache_list_of_str(cache_hash, g->framework_dirs.items, g->framework_dirs.length);
+    cache_bool(cache_hash, g->libcpp_link_lib != nullptr);
+    cache_buf(cache_hash, g->zig_lib_dir);
     cache_buf(cache_hash, g->zig_c_headers_dir);
     cache_list_of_str(cache_hash, g->libc_include_dir_list, g->libc_include_dir_len);
     cache_int(cache_hash, g->zig_target->is_native_os);
@@ -9840,6 +9843,11 @@ Error create_c_object_cache(CodeGen *g, CacheHash **out_cache_hash, bool verbose
     cache_bool(cache_hash, want_valgrind_support(g));
     cache_bool(cache_hash, g->function_sections);
     cache_int(cache_hash, g->code_model);
+    cache_bool(cache_hash, codegen_have_frame_pointer(g));
+    cache_bool(cache_hash, g->libc_link_lib);
+    if (g->zig_target->cache_hash != nullptr) {
+        cache_mem(cache_hash, g->zig_target->cache_hash, g->zig_target->cache_hash_len);
+    }
 
     for (size_t arg_i = 0; arg_i < g->clang_argv_len; arg_i += 1) {
         cache_str(cache_hash, g->clang_argv[arg_i]);
@@ -10685,6 +10693,7 @@ static Error check_cache(CodeGen *g, Buf *manifest_dir, Buf *digest) {
     cache_buf_opt(ch, g->linker_optimization);
     cache_int(ch, g->linker_gc_sections);
     cache_int(ch, g->linker_allow_shlib_undefined);
+    cache_int(ch, g->linker_bind_global_refs_locally);
     cache_bool(ch, g->linker_z_nodelete);
     cache_bool(ch, g->linker_z_defs);
     cache_usize(ch, g->stack_size_override);

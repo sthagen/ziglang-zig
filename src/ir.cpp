@@ -2967,12 +2967,11 @@ static IrInstGen *ir_build_test_non_null_gen(IrAnalyze *ira, IrInst *source_inst
 }
 
 static IrInstSrc *ir_build_optional_unwrap_ptr(IrBuilderSrc *irb, Scope *scope, AstNode *source_node,
-        IrInstSrc *base_ptr, bool safety_check_on, bool initializing)
+        IrInstSrc *base_ptr, bool safety_check_on)
 {
     IrInstSrcOptionalUnwrapPtr *instruction = ir_build_instruction<IrInstSrcOptionalUnwrapPtr>(irb, scope, source_node);
     instruction->base_ptr = base_ptr;
     instruction->safety_check_on = safety_check_on;
-    instruction->initializing = initializing;
 
     ir_ref_instruction(base_ptr, irb->current_basic_block);
 
@@ -5721,7 +5720,7 @@ static IrInstSrc *ir_gen_orelse(IrBuilderSrc *irb, Scope *parent_scope, AstNode 
         ir_mark_gen(ir_build_br(irb, parent_scope, node, end_block, is_comptime));
 
     ir_set_cursor_at_end_and_append_block(irb, ok_block);
-    IrInstSrc *unwrapped_ptr = ir_build_optional_unwrap_ptr(irb, parent_scope, node, maybe_ptr, false, false);
+    IrInstSrc *unwrapped_ptr = ir_build_optional_unwrap_ptr(irb, parent_scope, node, maybe_ptr, false);
     IrInstSrc *unwrapped_payload = ir_build_load_ptr(irb, parent_scope, node, unwrapped_ptr);
     ir_build_end_expr(irb, parent_scope, node, unwrapped_payload, &peer_parent->peers.at(1)->base);
     IrBasicBlockSrc *after_ok_block = irb->current_basic_block;
@@ -8080,7 +8079,7 @@ static IrInstSrc *ir_gen_while_expr(IrBuilderSrc *irb, Scope *scope, AstNode *no
                 is_comptime);
 
         ir_set_cursor_at_end_and_append_block(irb, body_block);
-        IrInstSrc *payload_ptr = ir_build_optional_unwrap_ptr(irb, &spill_scope->base, symbol_node, maybe_val_ptr, false, false);
+        IrInstSrc *payload_ptr = ir_build_optional_unwrap_ptr(irb, &spill_scope->base, symbol_node, maybe_val_ptr, false);
         IrInstSrc *var_value = node->data.while_expr.var_is_ptr ?
             payload_ptr : ir_build_load_ptr(irb, &spill_scope->base, symbol_node, payload_ptr);
         build_decl_var_and_init(irb, child_scope, symbol_node, payload_var, var_value, buf_ptr(var_symbol), is_comptime);
@@ -8743,7 +8742,7 @@ static IrInstSrc *ir_gen_if_optional_expr(IrBuilderSrc *irb, Scope *scope, AstNo
         ZigVar *var = ir_create_var(irb, node, subexpr_scope,
                 var_symbol, is_const, is_const, is_shadowable, is_comptime);
 
-        IrInstSrc *payload_ptr = ir_build_optional_unwrap_ptr(irb, subexpr_scope, node, maybe_val_ptr, false, false);
+        IrInstSrc *payload_ptr = ir_build_optional_unwrap_ptr(irb, subexpr_scope, node, maybe_val_ptr, false);
         IrInstSrc *var_value = var_is_ptr ?
             payload_ptr : ir_build_load_ptr(irb, &spill_scope->base, node, payload_ptr);
         build_decl_var_and_init(irb, subexpr_scope, node, var, var_value, buf_ptr(var_symbol), is_comptime);
@@ -9987,7 +9986,7 @@ static IrInstSrc *ir_gen_node_raw(IrBuilderSrc *irb, AstNode *node, Scope *scope
             if (maybe_ptr == irb->codegen->invalid_inst_src)
                 return irb->codegen->invalid_inst_src;
 
-            IrInstSrc *unwrapped_ptr = ir_build_optional_unwrap_ptr(irb, scope, node, maybe_ptr, true, false);
+            IrInstSrc *unwrapped_ptr = ir_build_optional_unwrap_ptr(irb, scope, node, maybe_ptr, true );
             if (lval == LValPtr || lval == LValAssign)
                 return unwrapped_ptr;
 
@@ -25267,6 +25266,19 @@ static ZigType *get_const_field_meta_type(IrAnalyze *ira, AstNode *source_node, 
     return value->data.x_type;
 }
 
+static ZigType *get_const_field_meta_type_optional(IrAnalyze *ira, AstNode *source_node,
+    ZigValue *struct_value, const char *name, size_t field_index)
+{
+    ZigValue *value = get_const_field(ira, source_node, struct_value, name, field_index);
+    if (value == nullptr)
+        return ira->codegen->invalid_inst_gen->value->type;
+    assert(value->type->id == ZigTypeIdOptional);
+    assert(value->type->data.maybe.child_type == ira->codegen->builtin_types.entry_type);
+    if (value->data.x_optional == nullptr)
+        return nullptr;
+    return value->data.x_optional->data.x_type;
+}
+
 static ZigType *type_info_to_type(IrAnalyze *ira, IrInst *source_instr, ZigTypeId tagTypeId, ZigValue *payload) {
     Error err;
     switch (tagTypeId) {
@@ -25388,14 +25400,46 @@ static ZigType *type_info_to_type(IrAnalyze *ira, IrInst *source_instr, ZigTypeI
             return ira->codegen->builtin_types.entry_undef;
         case ZigTypeIdNull:
             return ira->codegen->builtin_types.entry_null;
-        case ZigTypeIdOptional:
-        case ZigTypeIdErrorUnion:
+        case ZigTypeIdOptional: {
+            assert(payload->special == ConstValSpecialStatic);
+            assert(payload->type == ir_type_info_get_type(ira, "Optional", nullptr));
+            ZigType *child_type = get_const_field_meta_type(ira, source_instr->source_node, payload, "child", 0);
+            return get_optional_type(ira->codegen, child_type);
+        }
+        case ZigTypeIdErrorUnion: {
+            assert(payload->special == ConstValSpecialStatic);
+            assert(payload->type == ir_type_info_get_type(ira, "ErrorUnion", nullptr));
+            ZigType *err_set_type = get_const_field_meta_type(ira, source_instr->source_node, payload, "error_set", 0);
+            ZigType *payload_type = get_const_field_meta_type(ira, source_instr->source_node, payload, "payload", 1);
+            return get_error_union_type(ira->codegen, err_set_type, payload_type);
+        }
+        case ZigTypeIdOpaque: {
+            Buf *bare_name = buf_alloc();
+            Buf *full_name = get_anon_type_name(ira->codegen,
+                ira->old_irb.exec, "opaque", source_instr->scope, source_instr->source_node, bare_name);
+            return get_opaque_type(ira->codegen,
+                source_instr->scope, source_instr->source_node, buf_ptr(full_name), bare_name);
+        }
+        case ZigTypeIdVector: {
+            assert(payload->special == ConstValSpecialStatic);
+            assert(payload->type == ir_type_info_get_type(ira, "Vector", nullptr));
+            BigInt *len = get_const_field_lit_int(ira, source_instr->source_node, payload, "len", 0);
+            ZigType *child_type = get_const_field_meta_type(ira, source_instr->source_node, payload, "child", 1);
+            Error err;
+            if ((err = ir_validate_vector_elem_type(ira, source_instr->source_node, child_type))) {
+                return ira->codegen->invalid_inst_gen->value->type;
+            }
+            return get_vector_type(ira->codegen, bigint_as_u32(len), child_type);
+        }
+        case ZigTypeIdAnyFrame: {
+            assert(payload->special == ConstValSpecialStatic);
+            assert(payload->type == ir_type_info_get_type(ira, "AnyFrame", nullptr));
+            ZigType *child_type = get_const_field_meta_type_optional(ira, source_instr->source_node, payload, "child", 0);
+            return get_any_frame_type(ira->codegen, child_type);
+        }
         case ZigTypeIdErrorSet:
         case ZigTypeIdEnum:
-        case ZigTypeIdOpaque:
         case ZigTypeIdFnFrame:
-        case ZigTypeIdAnyFrame:
-        case ZigTypeIdVector:
         case ZigTypeIdEnumLiteral:
             ir_add_error(ira, source_instr, buf_sprintf(
                 "TODO implement @Type for 'TypeInfo.%s': see https://github.com/ziglang/zig/issues/2907", type_id_name(tagTypeId)));

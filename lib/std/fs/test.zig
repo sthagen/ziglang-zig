@@ -27,7 +27,12 @@ test "open file with exclusive nonblocking lock twice" {
 }
 
 test "open file with lock twice, make sure it wasn't open at the same time" {
-    if (builtin.single_threaded) return;
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    if (std.io.is_async) {
+        // This test starts its own threads and is not compatible with async I/O.
+        return error.SkipZigTest;
+    }
 
     const filename = "file_lock_test.txt";
 
@@ -57,6 +62,11 @@ test "open file with lock twice, make sure it wasn't open at the same time" {
 
 test "create file, lock and read from multiple process at once" {
     if (builtin.single_threaded) return error.SkipZigTest;
+
+    if (std.io.is_async) {
+        // This test starts its own threads and is not compatible with async I/O.
+        return error.SkipZigTest;
+    }
 
     if (true) {
         // https://github.com/ziglang/zig/issues/5006
@@ -98,6 +108,22 @@ test "create file, lock and read from multiple process at once" {
         error.FileNotFound => {},
         else => return err,
     };
+}
+
+test "open file with exclusive nonblocking lock twice (absolute paths)" {
+    const allocator = std.testing.allocator;
+
+    const file_paths: [1][]const u8 = .{"zig-test-absolute-paths.txt"};
+    const filename = try fs.path.resolve(allocator, &file_paths);
+    defer allocator.free(filename);
+
+    const file1 = try fs.createFileAbsolute(filename, .{ .lock = .Exclusive, .lock_nonblocking = true });
+
+    const file2 = fs.createFileAbsolute(filename, .{ .lock = .Exclusive, .lock_nonblocking = true });
+    file1.close();
+    std.testing.expectError(error.WouldBlock, file2);
+
+    try fs.deleteFileAbsolute(filename);
 }
 
 const FileLockTestContext = struct {

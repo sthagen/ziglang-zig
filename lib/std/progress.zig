@@ -13,6 +13,9 @@ pub const Progress = struct {
     /// not print on update()
     terminal: ?std.fs.File = undefined,
 
+    /// Whether the terminal supports ANSI escape codes.
+    supports_ansi_escape_codes: bool = false,
+
     root: Node = undefined,
 
     /// Keeps track of how much time has passed since the beginning.
@@ -103,6 +106,7 @@ pub const Progress = struct {
         self.terminal = null;
         if (stderr.supportsAnsiEscapeCodes()) {
             self.terminal = stderr;
+            self.supports_ansi_escape_codes = true;
         } else if (std.builtin.os.tag == .windows and stderr.isTty()) {
             self.terminal = stderr;
         }
@@ -138,10 +142,10 @@ pub const Progress = struct {
             // restore the cursor position by moving the cursor
             // `columns_written` cells to the left, then clear the rest of the
             // line
-            if (std.builtin.os.tag != .windows) {
+            if (self.supports_ansi_escape_codes) {
                 end += (std.fmt.bufPrint(self.output_buffer[end..], "\x1b[{}D", .{self.columns_written}) catch unreachable).len;
                 end += (std.fmt.bufPrint(self.output_buffer[end..], "\x1b[0K", .{}) catch unreachable).len;
-            } else {
+            } else if (std.builtin.os.tag == .windows) winapi: {
                 var info: windows.CONSOLE_SCREEN_BUFFER_INFO = undefined;
                 if (windows.kernel32.GetConsoleScreenBufferInfo(file.handle, &info) != windows.TRUE)
                     unreachable;
@@ -163,7 +167,11 @@ pub const Progress = struct {
                     fill_chars,
                     cursor_pos,
                     &written,
-                ) != windows.TRUE) unreachable;
+                ) != windows.TRUE) {
+                    // Stop trying to write to this file.
+                    self.terminal = null;
+                    break :winapi;
+                }
                 if (windows.kernel32.FillConsoleOutputCharacterA(
                     file.handle,
                     ' ',
@@ -174,7 +182,7 @@ pub const Progress = struct {
 
                 if (windows.kernel32.SetConsoleCursorPosition(file.handle, cursor_pos) != windows.TRUE)
                     unreachable;
-            }
+            } else unreachable;
 
             self.columns_written = 0;
         }

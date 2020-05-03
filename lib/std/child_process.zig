@@ -46,6 +46,10 @@ pub const ChildProcess = struct {
 
     /// Set to change the current working directory when spawning the child process.
     cwd: ?[]const u8,
+    /// Set to change the current working directory when spawning the child process.
+    /// This is not yet implemented for Windows. See https://github.com/ziglang/zig/issues/5190
+    /// Once that is done, `cwd` will be deprecated in favor of this field.
+    cwd_dir: ?fs.Dir = null,
 
     err_pipe: if (builtin.os.tag == .windows) void else [2]os.fd_t,
 
@@ -183,6 +187,7 @@ pub const ChildProcess = struct {
         allocator: *mem.Allocator,
         argv: []const []const u8,
         cwd: ?[]const u8 = null,
+        cwd_dir: ?fs.Dir = null,
         env_map: ?*const BufMap = null,
         max_output_bytes: usize = 50 * 1024,
         expand_arg0: Arg0Expand = .no_expand,
@@ -194,6 +199,7 @@ pub const ChildProcess = struct {
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
         child.cwd = args.cwd;
+        child.cwd_dir = args.cwd_dir;
         child.env_map = args.env_map;
         child.expand_arg0 = args.expand_arg0;
 
@@ -414,7 +420,9 @@ pub const ChildProcess = struct {
                 os.close(stderr_pipe[1]);
             }
 
-            if (self.cwd) |cwd| {
+            if (self.cwd_dir) |cwd| {
+                os.fchdir(cwd.fd) catch |err| forkChildErrReport(err_pipe[1], err);
+            } else if (self.cwd) |cwd| {
                 os.chdir(cwd) catch |err| forkChildErrReport(err_pipe[1], err);
             }
 
@@ -433,26 +441,17 @@ pub const ChildProcess = struct {
         // we are the parent
         const pid = @intCast(i32, pid_result);
         if (self.stdin_behavior == StdIo.Pipe) {
-            self.stdin = File{
-                .handle = stdin_pipe[1],
-                .io_mode = std.io.mode,
-            };
+            self.stdin = File{ .handle = stdin_pipe[1] };
         } else {
             self.stdin = null;
         }
         if (self.stdout_behavior == StdIo.Pipe) {
-            self.stdout = File{
-                .handle = stdout_pipe[0],
-                .io_mode = std.io.mode,
-            };
+            self.stdout = File{ .handle = stdout_pipe[0] };
         } else {
             self.stdout = null;
         }
         if (self.stderr_behavior == StdIo.Pipe) {
-            self.stderr = File{
-                .handle = stderr_pipe[0],
-                .io_mode = std.io.mode,
-            };
+            self.stderr = File{ .handle = stderr_pipe[0] };
         } else {
             self.stderr = null;
         }
@@ -676,26 +675,17 @@ pub const ChildProcess = struct {
         };
 
         if (g_hChildStd_IN_Wr) |h| {
-            self.stdin = File{
-                .handle = h,
-                .io_mode = io.mode,
-            };
+            self.stdin = File{ .handle = h };
         } else {
             self.stdin = null;
         }
         if (g_hChildStd_OUT_Rd) |h| {
-            self.stdout = File{
-                .handle = h,
-                .io_mode = io.mode,
-            };
+            self.stdout = File{ .handle = h };
         } else {
             self.stdout = null;
         }
         if (g_hChildStd_ERR_Rd) |h| {
-            self.stderr = File{
-                .handle = h,
-                .io_mode = io.mode,
-            };
+            self.stderr = File{ .handle = h };
         } else {
             self.stderr = null;
         }
@@ -830,13 +820,13 @@ fn forkChildErrReport(fd: i32, err: ChildProcess.SpawnError) noreturn {
     os.exit(1);
 }
 
-const ErrInt = std.meta.IntType(false, @sizeOf(anyerror) * 8);
+const ErrInt = std.meta.Int(false, @sizeOf(anyerror) * 8);
 
 fn writeIntFd(fd: i32, value: ErrInt) !void {
     const file = File{
         .handle = fd,
-        .io_mode = .blocking,
-        .async_block_allowed = File.async_block_allowed_yes,
+        .capable_io_mode = .blocking,
+        .intended_io_mode = .blocking,
     };
     file.outStream().writeIntNative(u64, @intCast(u64, value)) catch return error.SystemResources;
 }
@@ -844,8 +834,8 @@ fn writeIntFd(fd: i32, value: ErrInt) !void {
 fn readIntFd(fd: i32) !ErrInt {
     const file = File{
         .handle = fd,
-        .io_mode = .blocking,
-        .async_block_allowed = File.async_block_allowed_yes,
+        .capable_io_mode = .blocking,
+        .intended_io_mode = .blocking,
     };
     return @intCast(ErrInt, file.inStream().readIntNative(u64) catch return error.SystemResources);
 }
