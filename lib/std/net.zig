@@ -386,7 +386,7 @@ pub const AddressList = struct {
     addrs: []Address,
     canon_name: ?[]u8,
 
-    fn deinit(self: *AddressList) void {
+    pub fn deinit(self: *AddressList) void {
         // Here we copy the arena allocator into stack memory, because
         // otherwise it would destroy itself while it was still working.
         var arena = self.arena;
@@ -1366,6 +1366,10 @@ pub const StreamServer = struct {
 
         /// Firewall rules forbid connection.
         BlockedByFirewall,
+
+        /// Permission to create a socket of the specified type and/or
+        /// protocol is denied.
+        PermissionDenied,
     } || os.UnexpectedError;
 
     pub const Connection = struct {

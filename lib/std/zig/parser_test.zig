@@ -35,10 +35,10 @@ test "zig fmt: errdefer with payload" {
     );
 }
 
-test "zig fmt: noasync block" {
+test "zig fmt: nosuspend block" {
     try testCanonical(
         \\pub fn main() anyerror!void {
-        \\    noasync {
+        \\    nosuspend {
         \\        var foo: Foo = .{ .bar = 42 };
         \\    }
         \\}
@@ -46,10 +46,10 @@ test "zig fmt: noasync block" {
     );
 }
 
-test "zig fmt: noasync await" {
+test "zig fmt: nosuspend await" {
     try testCanonical(
         \\fn foo() void {
-        \\    x = noasync await y;
+        \\    x = nosuspend await y;
         \\}
         \\
     );
@@ -119,22 +119,6 @@ test "zig fmt: trailing comma in fn parameter list" {
         \\    a: i32,
         \\    b: i32,
         \\) linksection(".text") callconv(.C) i32 {}
-        \\
-    );
-}
-
-// TODO: Remove nakedcc/stdcallcc once zig 0.6.0 is released. See https://github.com/ziglang/zig/pull/3977
-test "zig fmt: convert extern/nakedcc/stdcallcc into callconv(...)" {
-    try testTransform(
-        \\nakedcc fn foo1() void {}
-        \\stdcallcc fn foo2() void {}
-        \\extern fn foo3() void {}
-        \\extern "mylib" fn foo4() void {}
-    ,
-        \\fn foo1() callconv(.Naked) void {}
-        \\fn foo2() callconv(.Stdcall) void {}
-        \\fn foo3() callconv(.C) void {}
-        \\fn foo4() callconv(.C) void {}
         \\
     );
 }
@@ -252,10 +236,10 @@ test "zig fmt: anon list literal syntax" {
 test "zig fmt: async function" {
     try testCanonical(
         \\pub const Server = struct {
-        \\    handleRequestFn: async fn (*Server, *const std.net.Address, File) void,
+        \\    handleRequestFn: fn (*Server, *const std.net.Address, File) callconv(.Async) void,
         \\};
         \\test "hi" {
-        \\    var ptr = @ptrCast(async fn (i32) void, other);
+        \\    var ptr = @ptrCast(fn (i32) callconv(.Async) void, other);
         \\}
         \\
     );
@@ -447,15 +431,6 @@ test "zig fmt: aligned struct field" {
         \\pub const S = struct {
         \\    f: i32 align(32) = 1,
         \\};
-        \\
-    );
-}
-
-test "zig fmt: preserve space between async fn definitions" {
-    try testCanonical(
-        \\async fn a() void {}
-        \\
-        \\async fn b() void {}
         \\
     );
 }
@@ -1515,7 +1490,7 @@ test "zig fmt: line comments in struct initializer" {
 
 test "zig fmt: first line comment in struct initializer" {
     try testCanonical(
-        \\pub async fn acquire(self: *Self) HeldLock {
+        \\pub fn acquire(self: *Self) HeldLock {
         \\    return HeldLock{
         \\        // guaranteed allocation elision
         \\        .held = self.lock.acquire(),
@@ -2477,8 +2452,7 @@ test "zig fmt: fn type" {
         \\}
         \\
         \\const a: fn (u8) u8 = undefined;
-        \\const b: extern fn (u8) u8 = undefined;
-        \\const c: fn (u8) callconv(.Naked) u8 = undefined;
+        \\const b: fn (u8) callconv(.Naked) u8 = undefined;
         \\const ap: fn (u8) u8 = a;
         \\
     );
@@ -2500,7 +2474,7 @@ test "zig fmt: inline asm" {
 
 test "zig fmt: async functions" {
     try testCanonical(
-        \\async fn simpleAsyncFn() void {
+        \\fn simpleAsyncFn() void {
         \\    const a = async a.b();
         \\    x += 1;
         \\    suspend;
@@ -2519,9 +2493,9 @@ test "zig fmt: async functions" {
     );
 }
 
-test "zig fmt: noasync" {
+test "zig fmt: nosuspend" {
     try testCanonical(
-        \\const a = noasync foo();
+        \\const a = nosuspend foo();
         \\
     );
 }
@@ -2926,6 +2900,40 @@ test "zig fmt: hexadeciaml float literals with underscore separators" {
     );
 }
 
+test "zig fmt: noasync to nosuspend" {
+    // TODO: remove this
+    try testTransform(
+        \\pub fn main() void {
+        \\    noasync call();
+        \\}
+    ,
+        \\pub fn main() void {
+        \\    nosuspend call();
+        \\}
+        \\
+    );
+}
+
+test "zig fmt: convert async fn into callconv(.Async)" {
+    try testTransform(
+        \\async fn foo() void {}
+    ,
+        \\fn foo() callconv(.Async) void {}
+        \\
+    );
+}
+
+test "zig fmt: convert extern fn proto into callconv(.C)" {
+    try testTransform(
+        \\extern fn foo0() void {}
+        \\const foo1 = extern fn () void;
+    ,
+        \\extern fn foo0() void {}
+        \\const foo1 = fn () callconv(.C) void;
+        \\
+    );
+}
+
 const std = @import("std");
 const mem = std.mem;
 const warn = std.debug.warn;
@@ -2972,7 +2980,6 @@ fn testParse(source: []const u8, allocator: *mem.Allocator, anything_changed: *b
     anything_changed.* = try std.zig.render(allocator, buffer.outStream(), tree);
     return buffer.toOwnedSlice();
 }
-
 fn testTransform(source: []const u8, expected_source: []const u8) !void {
     const needed_alloc_count = x: {
         // Try it once with unlimited memory, make sure it works
@@ -3020,11 +3027,9 @@ fn testTransform(source: []const u8, expected_source: []const u8) !void {
         }
     }
 }
-
 fn testCanonical(source: []const u8) !void {
     return testTransform(source, source);
 }
-
 fn testError(source: []const u8) !void {
     const tree = try std.zig.parse(std.testing.allocator, source);
     defer tree.deinit();

@@ -438,7 +438,7 @@ pub const Node = struct {
         ContainerDecl,
         Asm,
         Comptime,
-        Noasync,
+        Nosuspend,
         Block,
 
         // Misc
@@ -569,9 +569,9 @@ pub const Node = struct {
 
                     return true;
                 },
-                .Noasync => {
-                    const noasync_node = @fieldParentPtr(Noasync, "base", n);
-                    return noasync_node.expr.id != .Block;
+                .Nosuspend => {
+                    const nosuspend_node = @fieldParentPtr(Nosuspend, "base", n);
+                    return nosuspend_node.expr.id != .Block;
                 },
                 else => return true,
             }
@@ -875,12 +875,13 @@ pub const Node = struct {
         return_type: ReturnType,
         var_args_token: ?TokenIndex,
         extern_export_inline_token: ?TokenIndex,
-        cc_token: ?TokenIndex,
         body_node: ?*Node,
         lib_name: ?*Node, // populated if this is an extern declaration
         align_expr: ?*Node, // populated if align(A) is present
         section_expr: ?*Node, // populated if linksection(A) is present
         callconv_expr: ?*Node, // populated if callconv(A) is present
+        is_extern_prototype: bool = false, // TODO: Remove once extern fn rewriting is
+        is_async: bool = false, // TODO: remove once async fn rewriting is
 
         pub const ParamList = SegmentedList(*Node, 2);
 
@@ -929,7 +930,6 @@ pub const Node = struct {
             if (self.visib_token) |visib_token| return visib_token;
             if (self.extern_export_inline_token) |extern_export_inline_token| return extern_export_inline_token;
             assert(self.lib_name == null);
-            if (self.cc_token) |cc_token| return cc_token;
             return self.fn_token;
         }
 
@@ -1084,12 +1084,12 @@ pub const Node = struct {
         }
     };
 
-    pub const Noasync = struct {
-        base: Node = Node{ .id = .Noasync },
-        noasync_token: TokenIndex,
+    pub const Nosuspend = struct {
+        base: Node = Node{ .id = .Nosuspend },
+        nosuspend_token: TokenIndex,
         expr: *Node,
 
-        pub fn iterate(self: *Noasync, index: usize) ?*Node {
+        pub fn iterate(self: *Nosuspend, index: usize) ?*Node {
             var i = index;
 
             if (i < 1) return self.expr;
@@ -1098,11 +1098,11 @@ pub const Node = struct {
             return null;
         }
 
-        pub fn firstToken(self: *const Noasync) TokenIndex {
-            return self.noasync_token;
+        pub fn firstToken(self: *const Nosuspend) TokenIndex {
+            return self.nosuspend_token;
         }
 
-        pub fn lastToken(self: *const Noasync) TokenIndex {
+        pub fn lastToken(self: *const Nosuspend) TokenIndex {
             return self.expr.lastToken();
         }
     };

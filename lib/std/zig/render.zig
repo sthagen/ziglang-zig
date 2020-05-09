@@ -391,11 +391,15 @@ fn renderExpression(
             try renderToken(tree, stream, comptime_node.comptime_token, indent, start_col, Space.Space);
             return renderExpression(allocator, stream, tree, indent, start_col, comptime_node.expr, space);
         },
-        .Noasync => {
-            const noasync_node = @fieldParentPtr(ast.Node.Noasync, "base", base);
-
-            try renderToken(tree, stream, noasync_node.noasync_token, indent, start_col, Space.Space);
-            return renderExpression(allocator, stream, tree, indent, start_col, noasync_node.expr, space);
+        .Nosuspend => {
+            const nosuspend_node = @fieldParentPtr(ast.Node.Nosuspend, "base", base);
+            if (mem.eql(u8, tree.tokenSlice(nosuspend_node.nosuspend_token), "noasync")) {
+                // TODO: remove this
+                try stream.writeAll("nosuspend ");
+            } else {
+                try renderToken(tree, stream, nosuspend_node.nosuspend_token, indent, start_col, Space.Space);
+            }
+            return renderExpression(allocator, stream, tree, indent, start_col, nosuspend_node.expr, space);
         },
 
         .Suspend => {
@@ -1409,30 +1413,13 @@ fn renderExpression(
                 try renderToken(tree, stream, visib_token_index, indent, start_col, Space.Space); // pub
             }
 
-            // Some extra machinery is needed to rewrite the old-style cc
-            // notation to the new callconv one
-            var cc_rewrite_str: ?[*:0]const u8 = null;
             if (fn_proto.extern_export_inline_token) |extern_export_inline_token| {
-                const tok = tree.tokens.at(extern_export_inline_token);
-                if (tok.id != .Keyword_extern or fn_proto.body_node == null) {
-                    try renderToken(tree, stream, extern_export_inline_token, indent, start_col, Space.Space); // extern/export
-                } else {
-                    cc_rewrite_str = ".C";
-                    fn_proto.lib_name = null;
-                }
+                if (!fn_proto.is_extern_prototype)
+                    try renderToken(tree, stream, extern_export_inline_token, indent, start_col, Space.Space); // extern/export/inline
             }
 
             if (fn_proto.lib_name) |lib_name| {
                 try renderExpression(allocator, stream, tree, indent, start_col, lib_name, Space.Space);
-            }
-
-            if (fn_proto.cc_token) |cc_token| {
-                var str = tree.tokenSlicePtr(tree.tokens.at(cc_token));
-                if (mem.eql(u8, str, "stdcallcc")) {
-                    cc_rewrite_str = ".Stdcall";
-                } else if (mem.eql(u8, str, "nakedcc")) {
-                    cc_rewrite_str = ".Naked";
-                } else try renderToken(tree, stream, cc_token, indent, start_col, Space.Space); // stdcallcc
             }
 
             const lparen = if (fn_proto.name_token) |name_token| blk: {
@@ -1524,10 +1511,10 @@ fn renderExpression(
                 try renderToken(tree, stream, callconv_lparen, indent, start_col, Space.None); // (
                 try renderExpression(allocator, stream, tree, indent, start_col, callconv_expr, Space.None);
                 try renderToken(tree, stream, callconv_rparen, indent, start_col, Space.Space); // )
-            } else if (cc_rewrite_str) |str| {
-                try stream.writeAll("callconv(");
-                try stream.writeAll(mem.spanZ(str));
-                try stream.writeAll(") ");
+            } else if (fn_proto.is_extern_prototype) {
+                try stream.writeAll("callconv(.C) ");
+            } else if (fn_proto.is_async) {
+                try stream.writeAll("callconv(.Async) ");
             }
 
             switch (fn_proto.return_type) {
