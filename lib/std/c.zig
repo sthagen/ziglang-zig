@@ -132,6 +132,7 @@ pub extern "c" fn tcgetattr(fd: fd_t, termios_p: *termios) c_int;
 pub extern "c" fn tcsetattr(fd: fd_t, optional_action: TCSA, termios_p: *const termios) c_int;
 pub extern "c" fn fcntl(fd: fd_t, cmd: c_int, ...) c_int;
 pub extern "c" fn flock(fd: fd_t, operation: c_int) c_int;
+pub extern "c" fn ioctl(fd: fd_t, request: c_int, ...) c_int;
 pub extern "c" fn uname(buf: *utsname) c_int;
 
 pub extern "c" fn gethostname(name: [*]u8, len: usize) c_int;
@@ -192,6 +193,20 @@ pub usingnamespace switch (builtin.os.tag) {
         pub extern "c" fn sigaction(sig: c_int, noalias act: *const Sigaction, noalias oact: ?*Sigaction) c_int;
         pub extern "c" fn sigprocmask(how: c_int, noalias set: ?*const sigset_t, noalias oset: ?*sigset_t) c_int;
         pub extern "c" fn socket(domain: c_uint, sock_type: c_uint, protocol: c_uint) c_int;
+        pub extern "c" fn stat(noalias path: [*:0]const u8, noalias buf: *Stat) c_int;
+    },
+    .windows => struct {
+        // TODO: copied the else case and removed the socket function (because its in ws2_32)
+        //       need to verify which of these is actually supported on windows
+        pub extern "c" fn clock_getres(clk_id: c_int, tp: *timespec) c_int;
+        pub extern "c" fn clock_gettime(clk_id: c_int, tp: *timespec) c_int;
+        pub extern "c" fn fstat(fd: fd_t, buf: *Stat) c_int;
+        pub extern "c" fn getrusage(who: c_int, usage: *rusage) c_int;
+        pub extern "c" fn gettimeofday(noalias tv: ?*timeval, noalias tz: ?*timezone) c_int;
+        pub extern "c" fn nanosleep(rqtp: *const timespec, rmtp: ?*timespec) c_int;
+        pub extern "c" fn sched_yield() c_int;
+        pub extern "c" fn sigaction(sig: c_int, noalias act: *const Sigaction, noalias oact: ?*Sigaction) c_int;
+        pub extern "c" fn sigprocmask(how: c_int, noalias set: ?*const sigset_t, noalias oset: ?*sigset_t) c_int;
         pub extern "c" fn stat(noalias path: [*:0]const u8, noalias buf: *Stat) c_int;
     },
     else => struct {

@@ -182,6 +182,7 @@ pub fn OpenFile(sub_path_w: []const u16, options: OpenFileOptions) OpenError!HAN
             .PIPE_BUSY => return error.PipeBusy,
             .OBJECT_PATH_SYNTAX_BAD => unreachable,
             .OBJECT_NAME_COLLISION => return error.PathAlreadyExists,
+            .FILE_IS_A_DIRECTORY => return error.IsDir,
             else => return unexpectedStatus(rc),
         }
     }
@@ -391,6 +392,7 @@ pub fn GetQueuedCompletionStatus(
             .HANDLE_EOF => return GetQueuedCompletionStatusResult.EOF,
             else => |err| {
                 if (std.debug.runtime_safety) {
+                    @setEvalBranchQuota(2500);
                     std.debug.panic("unexpected error: {}\n", .{err});
                 }
             },
@@ -744,6 +746,7 @@ pub const RemoveDirectoryError = error{
     FileNotFound,
     DirNotEmpty,
     Unexpected,
+    NotDir,
 };
 
 pub fn RemoveDirectory(dir_path: []const u8) RemoveDirectoryError!void {
@@ -756,6 +759,7 @@ pub fn RemoveDirectoryW(dir_path_w: [*:0]const u16) RemoveDirectoryError!void {
         switch (kernel32.GetLastError()) {
             .PATH_NOT_FOUND => return error.FileNotFound,
             .DIR_NOT_EMPTY => return error.DirNotEmpty,
+            .DIRECTORY => return error.NotDir,
             else => |err| return unexpectedError(err),
         }
     }

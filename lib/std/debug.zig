@@ -53,7 +53,7 @@ pub const LineInfo = struct {
 /// Tries to write to stderr, unbuffered, and ignores any error returned.
 /// Does not append a newline.
 var stderr_file: File = undefined;
-var stderr_file_out_stream: File.OutStream = undefined;
+var stderr_file_writer: File.Writer = undefined;
 
 var stderr_stream: ?*File.OutStream = null;
 var stderr_mutex = std.Mutex.init();
@@ -70,8 +70,8 @@ pub fn getStderrStream() *File.OutStream {
         return st;
     } else {
         stderr_file = io.getStdErr();
-        stderr_file_out_stream = stderr_file.outStream();
-        const st = &stderr_file_out_stream;
+        stderr_file_writer = stderr_file.outStream();
+        const st = &stderr_file_writer;
         stderr_stream = st;
         return st;
     }
@@ -1003,7 +1003,7 @@ fn readMachODebugInfo(allocator: *mem.Allocator, macho_file: File) !ModuleDebugI
     // Even though lld emits symbols in ascending order, this debug code
     // should work for programs linked in any valid way.
     // This sort is so that we can binary search later.
-    std.sort.sort(MachoSymbol, symbols, MachoSymbol.addressLessThan);
+    std.sort.sort(MachoSymbol, symbols, {}, MachoSymbol.addressLessThan);
 
     return ModuleDebugInfo{
         .base_address = undefined,
@@ -1058,7 +1058,7 @@ const MachoSymbol = struct {
         return self.nlist.n_value;
     }
 
-    fn addressLessThan(lhs: MachoSymbol, rhs: MachoSymbol) bool {
+    fn addressLessThan(context: void, lhs: MachoSymbol, rhs: MachoSymbol) bool {
         return lhs.address() < rhs.address();
     }
 };
@@ -1295,10 +1295,13 @@ pub const DebugInfo = struct {
         const obj_di = try self.allocator.create(ModuleDebugInfo);
         errdefer self.allocator.destroy(obj_di);
 
-        const elf_file = (if (ctx.name.len > 0)
+        // TODO https://github.com/ziglang/zig/issues/5525
+        const copy = if (ctx.name.len > 0)
             fs.cwd().openFile(ctx.name, .{ .intended_io_mode = .blocking })
         else
-            fs.openSelfExe(.{ .intended_io_mode = .blocking })) catch |err| switch (err) {
+            fs.openSelfExe(.{ .intended_io_mode = .blocking });
+
+        const elf_file = copy catch |err| switch (err) {
             error.FileNotFound => return error.MissingDebugInfo,
             else => return err,
         };

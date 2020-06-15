@@ -642,15 +642,29 @@ pub const File = struct {
         }
     }
 
-    pub const InStream = io.InStream(File, ReadError, read);
+    pub const Reader = io.Reader(File, ReadError, read);
+    /// Deprecated: use `Reader`
+    pub const InStream = Reader;
 
+    pub fn reader(file: File) io.Reader(File, ReadError, read) {
+        return .{ .context = file };
+    }
+    /// Deprecated: use `reader`
     pub fn inStream(file: File) io.InStream(File, ReadError, read) {
         return .{ .context = file };
     }
 
-    pub const OutStream = io.OutStream(File, WriteError, write);
+    pub const Writer = io.Writer(File, WriteError, write);
 
-    pub fn outStream(file: File) OutStream {
+    /// Deprecated: use `Writer`
+    pub const OutStream = Writer;
+
+    pub fn writer(file: File) Writer {
+        return .{ .context = file };
+    }
+
+    /// Deprecated: use `writer`
+    pub fn outStream(file: File) Writer {
         return .{ .context = file };
     }
 

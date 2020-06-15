@@ -7643,6 +7643,49 @@ mem.copy(u8, dest[0..byte_count], source[0..byte_count]);{#endsyntax#}</pre>
 mem.set(u8, dest, c);{#endsyntax#}</pre>
       {#header_close#}
 
+      {#header_open|@wasmMemorySize#}
+      <pre>{#syntax#}@wasmMemorySize(index: u32) u32{#endsyntax#}</pre>
+      <p>
+      This function returns the size of the Wasm memory identified by {#syntax#}index{#endsyntax#} as
+      an unsigned value in units of Wasm pages. Note that each Wasm page is 64KB in size.
+      </p>
+      <p>
+      This function is a low level intrinsic with no safety mechanisms usually useful for allocator
+      designers targeting Wasm. So unless you are writing a new allocator from scratch, you should use
+      something like {#syntax#}@import("std").heap.WasmPageAllocator{#endsyntax#}.
+      </p>
+      {#see_also|@wasmMemoryGrow#}
+      {#header_close#}
+
+      {#header_open|@wasmMemoryGrow#}
+      <pre>{#syntax#}@wasmMemoryGrow(index: u32, delta: u32) i32{#endsyntax#}</pre>
+      <p>
+      This function increases the size of the Wasm memory identified by {#syntax#}index{#endsyntax#} by
+      {#syntax#}delta{#endsyntax#} in units of unsigned number of Wasm pages. Note that each Wasm page
+      is 64KB in size. On success, returns previous memory size; on failure, if the allocation fails,
+      returns -1.
+      </p>
+      <p>
+      This function is a low level intrinsic with no safety mechanisms usually useful for allocator
+      designers targeting Wasm. So unless you are writing a new allocator from scratch, you should use
+      something like {#syntax#}@import("std").heap.WasmPageAllocator{#endsyntax#}.
+      </p>
+      {#code_begin|test#}
+const std = @import("std");
+const builtin = @import("builtin");
+const assert = std.debug.assert;
+
+test "@wasmMemoryGrow" {
+    if (builtin.arch != .wasm32) return error.SkipZigTest;
+
+    var prev = @wasmMemorySize(0);
+    assert(prev == @wasmMemoryGrow(0, 1));
+    assert(prev + 1 == @wasmMemorySize(0));
+}
+      {#code_end#}
+      {#see_also|@wasmMemorySize#}
+      {#header_close#}
+
       {#header_open|@mod#}
       <pre>{#syntax#}@mod(numerator: T, denominator: T) T{#endsyntax#}</pre>
       <p>
@@ -9293,8 +9336,8 @@ test "string literal to constant slice" {
       the function will accept an {#syntax#}*Allocator{#endsyntax#} parameter.
       </p>
       <p>
-      Sometimes the lifetime of a pointer may be more complicated. For example, when using
-      {#syntax#}std.ArrayList(T).span(){#endsyntax#}, the returned slice has a lifetime that remains
+      Sometimes the lifetime of a pointer may be more complicated. For example, the
+      {#syntax#}std.ArrayList(T).items{#endsyntax#} slice has a lifetime that remains
       valid until the next time the list is resized, such as by appending new elements.
       </p>
       <p>
@@ -9659,7 +9702,7 @@ The result is 3</code></pre>
       {#header_open|WASI#}
       <p>Zig's support for WebAssembly System Interface (WASI) is under active development.
       Example of using the standard library and reading command line arguments:</p>
-      {#code_begin|exe|wasi#}
+      {#code_begin|exe|args#}
       {#target_wasi#}
 const std = @import("std");
 
@@ -9673,10 +9716,31 @@ pub fn main() !void {
     }
 }
       {#code_end#}
-     <pre><code>$ wasmer run wasi.wasm 123 hello
-0: wasi.wasm
+      <pre><code>$ wasmtime args.wasm 123 hello
+0: args.wasm
 1: 123
 2: hello</code></pre>
+      <p>A more interesting example would be extracting the list of preopens from the runtime.
+      This is now supported in the standard library via {#syntax#}std.fs.wasi.PreopenList{#endsyntax#}:</p>
+      {#code_begin|exe|preopens#}
+      {#target_wasi#}
+const std = @import("std");
+const PreopenList = std.fs.wasi.PreopenList;
+
+pub fn main() !void {
+    var preopens = PreopenList.init(std.heap.page_allocator);
+    defer preopens.deinit();
+
+    try preopens.populate();
+
+    for (preopens.asSlice()) |preopen, i| {
+        std.debug.warn("{}: {}\n", .{ i, preopen });
+    }
+}
+      {#code_end#}
+      <pre><code>$ wasmtime --dir=. preopens.wasm
+0: { .fd = 3, .Dir = '.' }
+</code></pre>
       {#header_close#}
       {#header_close#}
       {#header_open|Targets#}

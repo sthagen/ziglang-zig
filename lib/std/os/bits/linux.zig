@@ -1270,7 +1270,7 @@ pub const io_uring_sqe = extern struct {
     union3: union3,
 };
 
-pub const IOSQE_BIT = extern enum {
+pub const IOSQE_BIT = extern enum(u8) {
     FIXED_FILE,
     IO_DRAIN,
     IO_LINK,
@@ -1283,16 +1283,16 @@ pub const IOSQE_BIT = extern enum {
 // io_uring_sqe.flags
 
 /// use fixed fileset
-pub const IOSQE_FIXED_FILE = 1 << IOSQE_BIT.FIXED_FILE;
+pub const IOSQE_FIXED_FILE = 1 << @enumToInt(IOSQE_BIT.FIXED_FILE);
 
 /// issue after inflight IO
-pub const IOSQE_IO_DRAIN = 1 << IOSQE_BIT.IO_DRAIN;
+pub const IOSQE_IO_DRAIN = 1 << @enumToInt(IOSQE_BIT.IO_DRAIN);
 
 /// links next sqe
-pub const IOSQE_IO_LINK = 1 << IOSQE_BIT.IO_LINK;
+pub const IOSQE_IO_LINK = 1 << @enumToInt(IOSQE_BIT.IO_LINK);
 
 /// like LINK, but stronger
-pub const IOSQE_IO_HARDLINK = 1 << IOSQE_BIT.IO_HARDLINK;
+pub const IOSQE_IO_HARDLINK = 1 << @enumToInt(IOSQE_BIT.IO_HARDLINK);
 
 /// always go async
 pub const IOSQE_ASYNC = 1 << IOSQE_BIT.ASYNC;
@@ -1704,4 +1704,36 @@ pub const termios = extern struct {
     cc: [NCCS]cc_t,
     ispeed: speed_t,
     ospeed: speed_t,
+};
+
+pub const SIOCGIFINDEX = 0x8933;
+pub const IFNAMESIZE = 16;
+
+pub const ifmap = extern struct {
+    mem_start: u32,
+    mem_end: u32,
+    base_addr: u16,
+    irq: u8,
+    dma: u8,
+    port: u8,
+};
+
+pub const ifreq = extern struct {
+    ifrn: extern union {
+        name: [IFNAMESIZE]u8,
+    },
+    ifru: extern union {
+        addr: sockaddr,
+        dstaddr: sockaddr,
+        broadaddr: sockaddr,
+        netmask: sockaddr,
+        hwaddr: sockaddr,
+        flags: i16,
+        ivalue: i32,
+        mtu: i32,
+        map: ifmap,
+        slave: [IFNAMESIZE - 1:0]u8,
+        newname: [IFNAMESIZE - 1:0]u8,
+        data: ?[*]u8,
+    },
 };

@@ -7495,4 +7495,31 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         ":22:12: error: cannot compare types '?[3]i32' and '[3]i32'",
         ":22:12: note: operator not supported for type '[3]i32'",
     });
+
+    cases.add("slice cannot have its bytes reinterpreted",
+        \\export fn foo() void {
+        \\    const bytes = [1]u8{ 0xfa } ** 16;
+        \\    var value = @ptrCast(*const []const u8, &bytes).*;
+        \\}
+    , &[_][]const u8{
+        ":3:52: error: slice '[]const u8' cannot have its bytes reinterpreted",
+    });
+
+    cases.add("wasmMemorySize is a compile error in non-Wasm targets",
+        \\export fn foo() void {
+        \\    _ = @wasmMemorySize(0);
+        \\    return;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:9: error: @wasmMemorySize is a wasm32 feature only",
+    });
+
+    cases.add("wasmMemoryGrow is a compile error in non-Wasm targets",
+        \\export fn foo() void {
+        \\    _ = @wasmMemoryGrow(0, 1);
+        \\    return;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:9: error: @wasmMemoryGrow is a wasm32 feature only",
+    });
 }
