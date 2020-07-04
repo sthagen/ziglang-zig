@@ -202,7 +202,7 @@ fn testUnion() void {
     expect(typeinfo_info.Union.fields[4].enum_field != null);
     expect(typeinfo_info.Union.fields[4].enum_field.?.value == 4);
     expect(typeinfo_info.Union.fields[4].field_type == @TypeOf(@typeInfo(u8).Int));
-    expect(typeinfo_info.Union.decls.len == 20);
+    expect(typeinfo_info.Union.decls.len == 21);
 
     const TestNoTagUnion = union {
         Foo: void,
@@ -251,14 +251,13 @@ fn testStruct() void {
 }
 
 const TestStruct = packed struct {
-    const Self = @This();
-
     fieldA: usize,
     fieldB: void,
     fieldC: *Self,
     fieldD: u32 = 4,
 
     pub fn foo(self: *const Self) void {}
+    const Self = @This();
 };
 
 test "type info: function type info" {
@@ -388,4 +387,25 @@ test "@typeInfo does not force declarations into existence" {
 test "defaut value for a var-typed field" {
     const S = struct { x: var };
     expect(@typeInfo(S).Struct.fields[0].default_value == null);
+}
+
+fn add(a: i32, b: i32) i32 {
+    return a + b;
+}
+
+test "type info for async frames" {
+    switch (@typeInfo(@Frame(add))) {
+        .Frame => |frame| {
+            expect(frame.function == add);
+        },
+        else => unreachable,
+    }
+}
+
+test "type info: value is correctly copied" {
+    comptime {
+        var ptrInfo = @typeInfo([]u32);
+        ptrInfo.Pointer.size = .One;
+        expect(@typeInfo([]u32).Pointer.size == .Slice);
+    }
 }

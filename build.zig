@@ -49,11 +49,6 @@ pub fn build(b: *Builder) !void {
 
     const fmt_build_zig = b.addFmt(&[_][]const u8{"build.zig"});
 
-    var exe = b.addExecutable("zig", "src-self-hosted/main.zig");
-    exe.setBuildMode(mode);
-    test_step.dependOn(&exe.step);
-    b.default_step.dependOn(&exe.step);
-
     const skip_release = b.option(bool, "skip-release", "Main test suite skips release builds") orelse false;
     const skip_release_small = b.option(bool, "skip-release-small", "Main test suite skips release-small builds") orelse skip_release;
     const skip_release_fast = b.option(bool, "skip-release-fast", "Main test suite skips release-fast builds") orelse skip_release;
@@ -63,17 +58,38 @@ pub fn build(b: *Builder) !void {
 
     const only_install_lib_files = b.option(bool, "lib-files-only", "Only install library files") orelse false;
     const enable_llvm = b.option(bool, "enable-llvm", "Build self-hosted compiler with LLVM backend enabled") orelse false;
-    if (enable_llvm) {
-        var ctx = parseConfigH(b, config_h_text);
-        ctx.llvm = try findLLVM(b, ctx.llvm_config_exe);
 
-        try configureStage2(b, exe, ctx);
-    }
     if (!only_install_lib_files) {
-        exe.install();
+        var exe = b.addExecutable("zig", "src-self-hosted/main.zig");
+        exe.setBuildMode(mode);
+        test_step.dependOn(&exe.step);
+        b.default_step.dependOn(&exe.step);
+
+        if (enable_llvm) {
+            var ctx = parseConfigH(b, config_h_text);
+            ctx.llvm = try findLLVM(b, ctx.llvm_config_exe);
+
+            try configureStage2(b, exe, ctx);
+        }
+        if (!only_install_lib_files) {
+            exe.install();
+        }
+        const tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
+        const link_libc = b.option(bool, "force-link-libc", "Force self-hosted compiler to link libc") orelse false;
+        if (link_libc) exe.linkLibC();
+
+        exe.addBuildOption(bool, "enable_tracy", tracy != null);
+        if (tracy) |tracy_path| {
+            const client_cpp = fs.path.join(
+                b.allocator,
+                &[_][]const u8{ tracy_path, "TracyClient.cpp" },
+            ) catch unreachable;
+            exe.addIncludeDir(tracy_path);
+            exe.addCSourceFile(client_cpp, &[_][]const u8{ "-DTRACY_ENABLE=1", "-fno-sanitize=undefined" });
+            exe.linkSystemLibraryName("c++");
+            exe.linkLibC();
+        }
     }
-    const link_libc = b.option(bool, "force-link-libc", "Force self-hosted compiler to link libc") orelse false;
-    if (link_libc) exe.linkLibC();
 
     b.installDirectory(InstallDirectoryOptions{
         .source_dir = "lib",
@@ -126,7 +142,10 @@ pub fn build(b: *Builder) !void {
     test_step.dependOn(tests.addCompareOutputTests(b, test_filter, modes));
     test_step.dependOn(tests.addStandaloneTests(b, test_filter, modes));
     test_step.dependOn(tests.addStackTraceTests(b, test_filter, modes));
-    test_step.dependOn(tests.addCliTests(b, test_filter, modes));
+    const test_cli = tests.addCliTests(b, test_filter, modes);
+    const test_cli_step = b.step("test-cli", "Run zig cli tests");
+    test_cli_step.dependOn(test_cli);
+    test_step.dependOn(test_cli);
     test_step.dependOn(tests.addAssembleAndLinkTests(b, test_filter, modes));
     test_step.dependOn(tests.addRuntimeSafetyTests(b, test_filter, modes));
     test_step.dependOn(tests.addTranslateCTests(b, test_filter));

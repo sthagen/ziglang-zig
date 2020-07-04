@@ -15,8 +15,11 @@ pub const Inst = struct {
     src: usize,
 
     pub const Tag = enum {
+        add,
+        arg,
         assembly,
         bitcast,
+        block,
         breakpoint,
         call,
         cmp,
@@ -26,7 +29,35 @@ pub const Inst = struct {
         isnull,
         ptrtoint,
         ret,
+        retvoid,
         unreach,
+
+        /// Returns whether the instruction is one of the control flow "noreturn" types.
+        /// Function calls do not count. When ZIR is generated, the compiler automatically
+        /// emits an `Unreach` after a function call with the `noreturn` return type.
+        pub fn isNoReturn(tag: Tag) bool {
+            return switch (tag) {
+                .add,
+                .arg,
+                .assembly,
+                .bitcast,
+                .block,
+                .breakpoint,
+                .cmp,
+                .constant,
+                .isnonnull,
+                .isnull,
+                .ptrtoint,
+                .call,
+                => false,
+
+                .condbr,
+                .ret,
+                .retvoid,
+                .unreach,
+                => true,
+            };
+        }
     };
 
     pub fn cast(base: *Inst, comptime T: type) ?*T {
@@ -49,6 +80,25 @@ pub const Inst = struct {
         return inst.val;
     }
 
+    pub const Add = struct {
+        pub const base_tag = Tag.add;
+        base: Inst,
+
+        args: struct {
+            lhs: *Inst,
+            rhs: *Inst,
+        },
+    };
+
+    pub const Arg = struct {
+        pub const base_tag = Tag.arg;
+        base: Inst,
+
+        args: struct {
+            index: usize,
+        },
+    };
+
     pub const Assembly = struct {
         pub const base_tag = Tag.assembly;
         base: Inst,
@@ -69,6 +119,14 @@ pub const Inst = struct {
         base: Inst,
         args: struct {
             operand: *Inst,
+        },
+    };
+
+    pub const Block = struct {
+        pub const base_tag = Tag.block;
+        base: Inst,
+        args: struct {
+            body: Body,
         },
     };
 
@@ -104,8 +162,8 @@ pub const Inst = struct {
         base: Inst,
         args: struct {
             condition: *Inst,
-            true_body: Module.Body,
-            false_body: Module.Body,
+            true_body: Body,
+            false_body: Body,
         },
     };
 
@@ -146,6 +204,14 @@ pub const Inst = struct {
     pub const Ret = struct {
         pub const base_tag = Tag.ret;
         base: Inst,
+        args: struct {
+            operand: *Inst,
+        },
+    };
+
+    pub const RetVoid = struct {
+        pub const base_tag = Tag.retvoid;
+        base: Inst,
         args: void,
     };
 
@@ -154,4 +220,8 @@ pub const Inst = struct {
         base: Inst,
         args: void,
     };
+};
+
+pub const Body = struct {
+    instructions: []*Inst,
 };

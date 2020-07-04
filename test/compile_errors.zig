@@ -2,6 +2,14 @@ const tests = @import("tests.zig");
 const std = @import("std");
 
 pub fn addCases(cases: *tests.CompileErrorContext) void {
+    cases.add("@src outside function",
+        \\comptime {
+        \\    @src();
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:5: error: @src outside function",
+    });
+
     cases.add("call assigned to constant",
         \\const Foo = struct {
         \\    x: i32,
@@ -1136,13 +1144,26 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "tmp.zig:2:15: error: @Type not available for 'TypeInfo.Struct'",
     });
 
+    cases.add("wrong type for argument tuple to @asyncCall",
+        \\export fn entry1() void {
+        \\    var frame: @Frame(foo) = undefined;
+        \\    @asyncCall(&frame, {}, foo, {});
+        \\}
+        \\
+        \\fn foo() i32 {
+        \\    return 0;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:3:33: error: expected tuple or struct, found 'void'",
+    });
+
     cases.add("wrong type for result ptr to @asyncCall",
         \\export fn entry() void {
         \\    _ = async amain();
         \\}
         \\fn amain() i32 {
         \\    var frame: @Frame(foo) = undefined;
-        \\    return await @asyncCall(&frame, false, foo);
+        \\    return await @asyncCall(&frame, false, foo, .{});
         \\}
         \\fn foo() i32 {
         \\    return 1234;
@@ -1283,7 +1304,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\export fn entry() void {
         \\    var ptr: fn () callconv(.Async) void = func;
         \\    var bytes: [64]u8 = undefined;
-        \\    _ = @asyncCall(&bytes, {}, ptr);
+        \\    _ = @asyncCall(&bytes, {}, ptr, .{});
         \\}
         \\fn func() callconv(.Async) void {}
     , &[_][]const u8{
@@ -1459,7 +1480,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\export fn entry() void {
         \\    var ptr = afunc;
         \\    var bytes: [100]u8 align(16) = undefined;
-        \\    _ = @asyncCall(&bytes, {}, ptr);
+        \\    _ = @asyncCall(&bytes, {}, ptr, .{});
         \\}
         \\fn afunc() void { }
     , &[_][]const u8{
@@ -4352,6 +4373,40 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     , &[_][]const u8{
         "tmp.zig:6:9: error: duplicate switch value",
         "tmp.zig:5:14: note: previous value is here",
+    });
+
+    cases.add("switch expression - duplicate type",
+        \\fn foo(comptime T: type, x: T) u8 {
+        \\    return switch (T) {
+        \\        u32 => 0,
+        \\        u64 => 1,
+        \\        u32 => 2,
+        \\        else => 3,
+        \\    };
+        \\}
+        \\export fn entry() usize { return @sizeOf(@TypeOf(foo(u32, 0))); }
+    , &[_][]const u8{
+        "tmp.zig:5:9: error: duplicate switch value",
+        "tmp.zig:3:9: note: previous value is here",
+    });
+
+    cases.add("switch expression - duplicate type (struct alias)",
+        \\const Test = struct {
+        \\    bar: i32,
+        \\};
+        \\const Test2 = Test;
+        \\fn foo(comptime T: type, x: T) u8 {
+        \\    return switch (T) {
+        \\        Test => 0,
+        \\        u64 => 1,
+        \\        Test2 => 2,
+        \\        else => 3,
+        \\    };
+        \\}
+        \\export fn entry() usize { return @sizeOf(@TypeOf(foo(u32, 0))); }
+    , &[_][]const u8{
+        "tmp.zig:9:9: error: duplicate switch value",
+        "tmp.zig:7:9: note: previous value is here",
     });
 
     cases.add("switch expression - switch on pointer type with no else",
@@ -7521,5 +7576,24 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\}
     , &[_][]const u8{
         "tmp.zig:2:9: error: @wasmMemoryGrow is a wasm32 feature only",
+    });
+
+    cases.add("Issue #5586: Make unary minus for unsigned types a compile error",
+        \\export fn f(x: u32) u32 {
+        \\    const y = -%x;
+        \\    return -y;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:3:12: error: negation of type 'u32'",
+    });
+
+    cases.add("Issue #5618: coercion of ?*c_void to *c_void must fail.",
+        \\export fn foo() void {
+        \\    var u: ?*c_void = null;
+        \\    var v: *c_void = undefined;
+        \\    v = u;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:4:9: error: expected type '*c_void', found '?*c_void'",
     });
 }

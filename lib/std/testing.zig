@@ -11,7 +11,7 @@ pub var allocator_instance = LeakCountAllocator.init(&base_allocator_instance.al
 pub const failing_allocator = &failing_allocator_instance.allocator;
 pub var failing_allocator_instance = FailingAllocator.init(&base_allocator_instance.allocator, 0);
 
-pub var base_allocator_instance = std.heap.ThreadSafeFixedBufferAllocator.init(allocator_mem[0..]);
+pub var base_allocator_instance = std.mem.validationWrap(std.heap.ThreadSafeFixedBufferAllocator.init(allocator_mem[0..]));
 var allocator_mem: [2 * 1024 * 1024]u8 = undefined;
 
 /// This function is intended to be used only in tests. It prints diagnostics to stderr
@@ -215,7 +215,7 @@ fn getCwdOrWasiPreopen() std.fs.Dir {
         defer preopens.deinit();
         preopens.populate() catch
             @panic("unable to make tmp dir for testing: unable to populate preopens");
-        const preopen = preopens.find(".") orelse
+        const preopen = preopens.find(std.fs.wasi.PreopenType{ .Dir = "." }) orelse
             @panic("unable to make tmp dir for testing: didn't find '.' in the preopens");
 
         return std.fs.Dir{ .fd = preopen.fd };

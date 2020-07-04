@@ -1905,10 +1905,11 @@ pub const LibExeObjStep = struct {
                 builder.allocator,
                 &[_][]const u8{ builder.cache_root, builder.fmt("{}_build_options.zig", .{self.name}) },
             );
-            try fs.cwd().writeFile(build_options_file, self.build_options_contents.span());
+            const path_from_root = builder.pathFromRoot(build_options_file);
+            try fs.cwd().writeFile(path_from_root, self.build_options_contents.span());
             try zig_args.append("--pkg-begin");
             try zig_args.append("build_options");
-            try zig_args.append(builder.pathFromRoot(build_options_file));
+            try zig_args.append(path_from_root);
             try zig_args.append("--pkg-end");
         }
 
@@ -2558,3 +2559,10 @@ pub const InstalledFile = struct {
     dir: InstallDir,
     path: []const u8,
 };
+
+test "" {
+    // The only purpose of this test is to get all these untested functions
+    // to be referenced to avoid regression so it is okay to skip some targets.
+    if (comptime std.Target.current.cpu.arch.ptrBitWidth() == 64)
+        std.meta.refAllDecls(@This());
+}
