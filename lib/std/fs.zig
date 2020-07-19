@@ -453,6 +453,8 @@ pub const Dir = struct {
 
             pub const Error = IteratorError;
 
+            /// Memory such as file names referenced in this returned entry becomes invalid
+            /// with subsequent calls to `next`, as well as when this `Dir` is deinitialized.
             pub fn next(self: *Self) Error!?Entry {
                 start_over: while (true) {
                     const w = os.windows;
@@ -1825,7 +1827,7 @@ pub fn selfExePathAlloc(allocator: *Allocator) ![]u8 {
     // TODO(#4812): Investigate other systems and whether it is possible to get
     // this path by trying larger and larger buffers until one succeeds.
     var buf: [MAX_PATH_BYTES]u8 = undefined;
-    return mem.dupe(allocator, u8, try selfExePath(&buf));
+    return allocator.dupe(u8, try selfExePath(&buf));
 }
 
 /// Get the path to the current executable.
@@ -1888,7 +1890,7 @@ pub fn selfExeDirPathAlloc(allocator: *Allocator) ![]u8 {
     // TODO(#4812): Investigate other systems and whether it is possible to get
     // this path by trying larger and larger buffers until one succeeds.
     var buf: [MAX_PATH_BYTES]u8 = undefined;
-    return mem.dupe(allocator, u8, try selfExeDirPath(&buf));
+    return allocator.dupe(u8, try selfExeDirPath(&buf));
 }
 
 /// Get the directory path that contains the current executable.
@@ -1910,7 +1912,7 @@ pub fn realpathAlloc(allocator: *Allocator, pathname: []const u8) ![]u8 {
     // paths. musl supports passing NULL but restricts the output to PATH_MAX
     // anyway.
     var buf: [MAX_PATH_BYTES]u8 = undefined;
-    return mem.dupe(allocator, u8, try os.realpath(pathname, &buf));
+    return allocator.dupe(u8, try os.realpath(pathname, &buf));
 }
 
 test "" {

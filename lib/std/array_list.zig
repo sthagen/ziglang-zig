@@ -53,7 +53,7 @@ pub fn ArrayListAligned(comptime T: type, comptime alignment: ?u29) type {
         /// Deprecated: use `items` field directly.
         /// Return contents as a slice. Only valid while the list
         /// doesn't change size.
-        pub fn span(self: var) @TypeOf(self.items) {
+        pub fn span(self: anytype) @TypeOf(self.items) {
             return self.items;
         }
 
@@ -210,6 +210,14 @@ pub fn ArrayListAligned(comptime T: type, comptime alignment: ?u29) type {
             self.capacity = new_len;
         }
 
+        /// Reduce length to `new_len`.
+        /// Invalidates element pointers.
+        /// Keeps capacity the same.
+        pub fn shrinkRetainingCapacity(self: *Self, new_len: usize) void {
+            assert(new_len <= self.items.len);
+            self.items.len = new_len;
+        }
+
         pub fn ensureCapacity(self: *Self, new_capacity: usize) !void {
             var better_capacity = self.capacity;
             if (better_capacity >= new_capacity) return;
@@ -247,6 +255,24 @@ pub fn ArrayListAligned(comptime T: type, comptime alignment: ?u29) type {
 
             self.items.len += 1;
             return &self.items[self.items.len - 1];
+        }
+
+        /// Resize the array, adding `n` new elements, which have `undefined` values.
+        /// The return value is an array pointing to the newly allocated elements.
+        pub fn addManyAsArray(self: *Self, comptime n: usize) !*[n]T {
+            const prev_len = self.items.len;
+            try self.resize(self.items.len + n);
+            return self.items[prev_len..][0..n];
+        }
+
+        /// Resize the array, adding `n` new elements, which have `undefined` values.
+        /// The return value is an array pointing to the newly allocated elements.
+        /// Asserts that there is already space for the new item without allocating more.
+        pub fn addManyAsArrayAssumeCapacity(self: *Self, comptime n: usize) *[n]T {
+            assert(self.items.len + n <= self.capacity);
+            const prev_len = self.items.len;
+            self.items.len += n;
+            return self.items[prev_len..][0..n];
         }
 
         /// Remove and return the last element from the list.
@@ -432,6 +458,14 @@ pub fn ArrayListAlignedUnmanaged(comptime T: type, comptime alignment: ?u29) typ
             self.capacity = new_len;
         }
 
+        /// Reduce length to `new_len`.
+        /// Invalidates element pointers.
+        /// Keeps capacity the same.
+        pub fn shrinkRetainingCapacity(self: *Self, new_len: usize) void {
+            assert(new_len <= self.items.len);
+            self.items.len = new_len;
+        }
+
         pub fn ensureCapacity(self: *Self, allocator: *Allocator, new_capacity: usize) !void {
             var better_capacity = self.capacity;
             if (better_capacity >= new_capacity) return;
@@ -470,6 +504,24 @@ pub fn ArrayListAlignedUnmanaged(comptime T: type, comptime alignment: ?u29) typ
 
             self.items.len += 1;
             return &self.items[self.items.len - 1];
+        }
+
+        /// Resize the array, adding `n` new elements, which have `undefined` values.
+        /// The return value is an array pointing to the newly allocated elements.
+        pub fn addManyAsArray(self: *Self, allocator: *Allocator, comptime n: usize) !*[n]T {
+            const prev_len = self.items.len;
+            try self.resize(allocator, self.items.len + n);
+            return self.items[prev_len..][0..n];
+        }
+
+        /// Resize the array, adding `n` new elements, which have `undefined` values.
+        /// The return value is an array pointing to the newly allocated elements.
+        /// Asserts that there is already space for the new item without allocating more.
+        pub fn addManyAsArrayAssumeCapacity(self: *Self, comptime n: usize) *[n]T {
+            assert(self.items.len + n <= self.capacity);
+            const prev_len = self.items.len;
+            self.items.len += n;
+            return self.items[prev_len..][0..n];
         }
 
         /// Remove and return the last element from the list.
@@ -710,4 +762,28 @@ test "std.ArrayList.writer" {
     try writer.writeAll("d");
     try writer.writeAll("efg");
     testing.expectEqualSlices(u8, list.items, "abcdefg");
+}
+
+test "addManyAsArray" {
+    const a = std.testing.allocator;
+    {
+        var list = ArrayList(u8).init(a);
+        defer list.deinit();
+
+        (try list.addManyAsArray(4)).* = "aoeu".*;
+        try list.ensureCapacity(8);
+        list.addManyAsArrayAssumeCapacity(4).* = "asdf".*;
+
+        testing.expectEqualSlices(u8, list.items, "aoeuasdf");
+    }
+    {
+        var list = ArrayListUnmanaged(u8){};
+        defer list.deinit(a);
+
+        (try list.addManyAsArray(a, 4)).* = "aoeu".*;
+        try list.ensureCapacity(a, 8);
+        list.addManyAsArrayAssumeCapacity(4).* = "asdf".*;
+
+        testing.expectEqualSlices(u8, list.items, "aoeuasdf");
+    }
 }

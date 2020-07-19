@@ -34,15 +34,6 @@ pub fn build(b: *Builder) !void {
 
     const test_step = b.step("test", "Run all the tests");
 
-    const config_h_text = if (b.option(
-        []const u8,
-        "config_h",
-        "Path to the generated config.h",
-    )) |config_h_path|
-        try std.fs.cwd().readFileAlloc(b.allocator, toNativePathSep(b, config_h_path), max_config_h_bytes)
-    else
-        try findAndReadConfigH(b);
-
     var test_stage2 = b.addTest("src-self-hosted/test.zig");
     test_stage2.setBuildMode(.Debug); // note this is only the mode of the test harness
     test_stage2.addPackagePath("stage2_tests", "test/stage2/test.zig");
@@ -58,6 +49,7 @@ pub fn build(b: *Builder) !void {
 
     const only_install_lib_files = b.option(bool, "lib-files-only", "Only install library files") orelse false;
     const enable_llvm = b.option(bool, "enable-llvm", "Build self-hosted compiler with LLVM backend enabled") orelse false;
+    const config_h_path_option = b.option([]const u8, "config_h", "Path to the generated config.h");
 
     if (!only_install_lib_files) {
         var exe = b.addExecutable("zig", "src-self-hosted/main.zig");
@@ -66,6 +58,11 @@ pub fn build(b: *Builder) !void {
         b.default_step.dependOn(&exe.step);
 
         if (enable_llvm) {
+            const config_h_text = if (config_h_path_option) |config_h_path|
+                try std.fs.cwd().readFileAlloc(b.allocator, toNativePathSep(b, config_h_path), max_config_h_bytes)
+            else
+                try findAndReadConfigH(b);
+
             var ctx = parseConfigH(b, config_h_text);
             ctx.llvm = try findLLVM(b, ctx.llvm_config_exe);
 
@@ -156,7 +153,7 @@ pub fn build(b: *Builder) !void {
     test_step.dependOn(docs_step);
 }
 
-fn dependOnLib(b: *Builder, lib_exe_obj: var, dep: LibraryDep) void {
+fn dependOnLib(b: *Builder, lib_exe_obj: anytype, dep: LibraryDep) void {
     for (dep.libdirs.items) |lib_dir| {
         lib_exe_obj.addLibPath(lib_dir);
     }
@@ -196,7 +193,7 @@ fn fileExists(filename: []const u8) !bool {
     return true;
 }
 
-fn addCppLib(b: *Builder, lib_exe_obj: var, cmake_binary_dir: []const u8, lib_name: []const u8) void {
+fn addCppLib(b: *Builder, lib_exe_obj: anytype, cmake_binary_dir: []const u8, lib_name: []const u8) void {
     lib_exe_obj.addObjectFile(fs.path.join(b.allocator, &[_][]const u8{
         cmake_binary_dir,
         "zig_cpp",
@@ -278,7 +275,7 @@ fn findLLVM(b: *Builder, llvm_config_exe: []const u8) !LibraryDep {
     return result;
 }
 
-fn configureStage2(b: *Builder, exe: var, ctx: Context) !void {
+fn configureStage2(b: *Builder, exe: anytype, ctx: Context) !void {
     exe.addIncludeDir("src");
     exe.addIncludeDir(ctx.cmake_binary_dir);
     addCppLib(b, exe, ctx.cmake_binary_dir, "zig_cpp");
@@ -343,7 +340,7 @@ fn configureStage2(b: *Builder, exe: var, ctx: Context) !void {
 fn addCxxKnownPath(
     b: *Builder,
     ctx: Context,
-    exe: var,
+    exe: anytype,
     objname: []const u8,
     errtxt: ?[]const u8,
 ) !void {

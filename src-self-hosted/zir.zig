@@ -34,10 +34,13 @@ pub const Inst = struct {
 
     /// These names are used directly as the instruction names in the text format.
     pub const Tag = enum {
-        /// Function parameter value.
+        /// Function parameter value. These must be first in a function's main block,
+        /// in respective order with the parameters.
         arg,
         /// A labeled block of code, which can return a value.
         block,
+        /// Return a value from a `Block`.
+        @"break",
         breakpoint,
         /// Same as `break` but without an operand; the operand is assumed to be the void value.
         breakvoid,
@@ -54,9 +57,11 @@ pub const Inst = struct {
         declval,
         /// Same as declval but the parameter is a `*Module.Decl` rather than a name.
         declval_in_module,
+        boolnot,
         /// String Literal. Makes an anonymous Decl and then takes a pointer to it.
         str,
         int,
+        inttype,
         ptrtoint,
         fieldptr,
         deref,
@@ -73,16 +78,65 @@ pub const Inst = struct {
         bitcast,
         elemptr,
         add,
+        sub,
         cmp,
         condbr,
         isnull,
         isnonnull,
+
+        /// Returns whether the instruction is one of the control flow "noreturn" types.
+        /// Function calls do not count.
+        pub fn isNoReturn(tag: Tag) bool {
+            return switch (tag) {
+                .arg,
+                .block,
+                .breakpoint,
+                .call,
+                .@"const",
+                .declref,
+                .declref_str,
+                .declval,
+                .declval_in_module,
+                .str,
+                .int,
+                .inttype,
+                .ptrtoint,
+                .fieldptr,
+                .deref,
+                .as,
+                .@"asm",
+                .@"fn",
+                .fntype,
+                .@"export",
+                .primitive,
+                .intcast,
+                .bitcast,
+                .elemptr,
+                .add,
+                .sub,
+                .cmp,
+                .isnull,
+                .isnonnull,
+                .boolnot,
+                => false,
+
+                .condbr,
+                .@"unreachable",
+                .@"return",
+                .returnvoid,
+                .@"break",
+                .breakvoid,
+                .compileerror,
+                => true,
+            };
+        }
     };
 
     pub fn TagToType(tag: Tag) type {
         return switch (tag) {
             .arg => Arg,
             .block => Block,
+            .@"break" => Break,
             .breakpoint => Breakpoint,
             .breakvoid => BreakVoid,
             .call => Call,
@@ -92,8 +146,10 @@ pub const Inst = struct {
             .declval_in_module => DeclValInModule,
             .compileerror => CompileError,
             .@"const" => Const,
+            .boolnot => BoolNot,
             .str => Str,
             .int => Int,
+            .inttype => IntType,
             .ptrtoint => PtrToInt,
             .fieldptr => FieldPtr,
             .deref => Deref,
@@ -110,6 +166,7 @@ pub const Inst = struct {
             .bitcast => BitCast,
             .elemptr => ElemPtr,
             .add => Add,
+            .sub => Sub,
             .cmp => Cmp,
             .condbr => CondBr,
             .isnull => IsNull,
@@ -128,9 +185,7 @@ pub const Inst = struct {
         pub const base_tag = Tag.arg;
         base: Inst,
 
-        positionals: struct {
-            index: usize,
-        },
+        positionals: struct {},
         kw_args: struct {},
     };
 
@@ -139,8 +194,18 @@ pub const Inst = struct {
         base: Inst,
 
         positionals: struct {
-            label: []const u8,
             body: Module.Body,
+        },
+        kw_args: struct {},
+    };
+
+    pub const Break = struct {
+        pub const base_tag = Tag.@"break";
+        base: Inst,
+
+        positionals: struct {
+            block: *Block,
+            operand: *Inst,
         },
         kw_args: struct {},
     };
@@ -158,7 +223,7 @@ pub const Inst = struct {
         base: Inst,
 
         positionals: struct {
-            label: []const u8,
+            block: *Block,
         },
         kw_args: struct {},
     };
@@ -236,6 +301,16 @@ pub const Inst = struct {
         kw_args: struct {},
     };
 
+    pub const BoolNot = struct {
+        pub const base_tag = Tag.boolnot;
+        base: Inst,
+
+        positionals: struct {
+            operand: *Inst,
+        },
+        kw_args: struct {},
+    };
+
     pub const Str = struct {
         pub const base_tag = Tag.str;
         base: Inst,
@@ -290,6 +365,7 @@ pub const Inst = struct {
 
     pub const As = struct {
         pub const base_tag = Tag.as;
+        pub const builtin_name = "@as";
         base: Inst,
 
         positionals: struct {
@@ -364,6 +440,17 @@ pub const Inst = struct {
         kw_args: struct {
             cc: std.builtin.CallingConvention = .Unspecified,
         },
+    };
+
+    pub const IntType = struct {
+        pub const base_tag = Tag.inttype;
+        base: Inst,
+
+        positionals: struct {
+            signed: *Inst,
+            bits: *Inst,
+        },
+        kw_args: struct {},
     };
 
     pub const Export = struct {
@@ -511,6 +598,19 @@ pub const Inst = struct {
         kw_args: struct {},
     };
 
+    pub const Sub = struct {
+        pub const base_tag = Tag.sub;
+        base: Inst,
+
+        positionals: struct {
+            lhs: *Inst,
+            rhs: *Inst,
+        },
+        kw_args: struct {},
+    };
+
+    /// TODO get rid of the op positional arg and make that data part of
+    /// the base Inst tag.
     pub const Cmp = struct {
         pub const base_tag = Tag.cmp;
         base: Inst,
@@ -581,8 +681,6 @@ pub const Module = struct {
         self.writeToStream(std.heap.page_allocator, std.io.getStdErr().outStream()) catch {};
     }
 
-    const InstPtrTable = std.AutoHashMap(*Inst, struct { inst: *Inst, index: ?usize, name: []const u8 });
-
     const DeclAndIndex = struct {
         decl: *Decl,
         index: usize,
@@ -615,81 +713,68 @@ pub const Module = struct {
 
     /// The allocator is used for temporary storage, but this function always returns
     /// with no resources allocated.
-    pub fn writeToStream(self: Module, allocator: *Allocator, stream: var) !void {
-        // First, build a map of *Inst to @ or % indexes
-        var inst_table = InstPtrTable.init(allocator);
-        defer inst_table.deinit();
+    pub fn writeToStream(self: Module, allocator: *Allocator, stream: anytype) !void {
+        var write = Writer{
+            .module = &self,
+            .inst_table = InstPtrTable.init(allocator),
+            .block_table = std.AutoHashMap(*Inst.Block, []const u8).init(allocator),
+            .arena = std.heap.ArenaAllocator.init(allocator),
+            .indent = 2,
+        };
+        defer write.arena.deinit();
+        defer write.inst_table.deinit();
+        defer write.block_table.deinit();
 
-        try inst_table.ensureCapacity(self.decls.len);
+        // First, build a map of *Inst to @ or % indexes
+        try write.inst_table.ensureCapacity(self.decls.len);
 
         for (self.decls) |decl, decl_i| {
-            try inst_table.putNoClobber(decl.inst, .{ .inst = decl.inst, .index = null, .name = decl.name });
+            try write.inst_table.putNoClobber(decl.inst, .{ .inst = decl.inst, .index = null, .name = decl.name });
 
             if (decl.inst.cast(Inst.Fn)) |fn_inst| {
                 for (fn_inst.positionals.body.instructions) |inst, inst_i| {
-                    try inst_table.putNoClobber(inst, .{ .inst = inst, .index = inst_i, .name = undefined });
+                    try write.inst_table.putNoClobber(inst, .{ .inst = inst, .index = inst_i, .name = undefined });
                 }
             }
         }
 
         for (self.decls) |decl, i| {
             try stream.print("@{} ", .{decl.name});
-            try self.writeInstToStream(stream, decl.inst, &inst_table);
+            try write.writeInstToStream(stream, decl.inst);
             try stream.writeByte('\n');
         }
     }
+};
+
+const InstPtrTable = std.AutoHashMap(*Inst, struct { inst: *Inst, index: ?usize, name: []const u8 });
+
+const Writer = struct {
+    module: *const Module,
+    inst_table: InstPtrTable,
+    block_table: std.AutoHashMap(*Inst.Block, []const u8),
+    arena: std.heap.ArenaAllocator,
+    indent: usize,
 
     fn writeInstToStream(
-        self: Module,
-        stream: var,
+        self: *Writer,
+        stream: anytype,
         inst: *Inst,
-        inst_table: *const InstPtrTable,
-    ) @TypeOf(stream).Error!void {
-        // TODO I tried implementing this with an inline for loop and hit a compiler bug
-        switch (inst.tag) {
-            .arg => return self.writeInstToStreamGeneric(stream, .arg, inst, inst_table),
-            .block => return self.writeInstToStreamGeneric(stream, .block, inst, inst_table),
-            .breakpoint => return self.writeInstToStreamGeneric(stream, .breakpoint, inst, inst_table),
-            .breakvoid => return self.writeInstToStreamGeneric(stream, .breakvoid, inst, inst_table),
-            .call => return self.writeInstToStreamGeneric(stream, .call, inst, inst_table),
-            .declref => return self.writeInstToStreamGeneric(stream, .declref, inst, inst_table),
-            .declref_str => return self.writeInstToStreamGeneric(stream, .declref_str, inst, inst_table),
-            .declval => return self.writeInstToStreamGeneric(stream, .declval, inst, inst_table),
-            .declval_in_module => return self.writeInstToStreamGeneric(stream, .declval_in_module, inst, inst_table),
-            .compileerror => return self.writeInstToStreamGeneric(stream, .compileerror, inst, inst_table),
-            .@"const" => return self.writeInstToStreamGeneric(stream, .@"const", inst, inst_table),
-            .str => return self.writeInstToStreamGeneric(stream, .str, inst, inst_table),
-            .int => return self.writeInstToStreamGeneric(stream, .int, inst, inst_table),
-            .ptrtoint => return self.writeInstToStreamGeneric(stream, .ptrtoint, inst, inst_table),
-            .fieldptr => return self.writeInstToStreamGeneric(stream, .fieldptr, inst, inst_table),
-            .deref => return self.writeInstToStreamGeneric(stream, .deref, inst, inst_table),
-            .as => return self.writeInstToStreamGeneric(stream, .as, inst, inst_table),
-            .@"asm" => return self.writeInstToStreamGeneric(stream, .@"asm", inst, inst_table),
-            .@"unreachable" => return self.writeInstToStreamGeneric(stream, .@"unreachable", inst, inst_table),
-            .@"return" => return self.writeInstToStreamGeneric(stream, .@"return", inst, inst_table),
-            .returnvoid => return self.writeInstToStreamGeneric(stream, .returnvoid, inst, inst_table),
-            .@"fn" => return self.writeInstToStreamGeneric(stream, .@"fn", inst, inst_table),
-            .@"export" => return self.writeInstToStreamGeneric(stream, .@"export", inst, inst_table),
-            .primitive => return self.writeInstToStreamGeneric(stream, .primitive, inst, inst_table),
-            .fntype => return self.writeInstToStreamGeneric(stream, .fntype, inst, inst_table),
-            .intcast => return self.writeInstToStreamGeneric(stream, .intcast, inst, inst_table),
-            .bitcast => return self.writeInstToStreamGeneric(stream, .bitcast, inst, inst_table),
-            .elemptr => return self.writeInstToStreamGeneric(stream, .elemptr, inst, inst_table),
-            .add => return self.writeInstToStreamGeneric(stream, .add, inst, inst_table),
-            .cmp => return self.writeInstToStreamGeneric(stream, .cmp, inst, inst_table),
-            .condbr => return self.writeInstToStreamGeneric(stream, .condbr, inst, inst_table),
-            .isnull => return self.writeInstToStreamGeneric(stream, .isnull, inst, inst_table),
-            .isnonnull => return self.writeInstToStreamGeneric(stream, .isnonnull, inst, inst_table),
+    ) (@TypeOf(stream).Error || error{OutOfMemory})!void {
+        inline for (@typeInfo(Inst.Tag).Enum.fields) |enum_field| {
+            const expected_tag = @field(Inst.Tag, enum_field.name);
+            if (inst.tag == expected_tag) {
+                return self.writeInstToStreamGeneric(stream, expected_tag, inst);
+            }
         }
+        unreachable; // all tags handled
     }
 
     fn writeInstToStreamGeneric(
-        self: Module,
-        stream: var,
+        self: *Writer,
+        stream: anytype,
         comptime inst_tag: Inst.Tag,
         base: *Inst,
-        inst_table: *const InstPtrTable,
-    ) !void {
+    ) (@TypeOf(stream).Error || error{OutOfMemory})!void {
         const SpecificInst = Inst.TagToType(inst_tag);
         const inst = @fieldParentPtr(SpecificInst, "base", base);
         const Positionals = @TypeOf(inst.positionals);
@@ -699,7 +784,7 @@ pub const Module = struct {
             if (i != 0) {
                 try stream.writeAll(", ");
             }
-            try self.writeParamToStream(stream, @field(inst.positionals, arg_field.name), inst_table);
+            try self.writeParamToStream(stream, @field(inst.positionals, arg_field.name));
         }
 
         comptime var need_comma = pos_fields.len != 0;
@@ -709,13 +794,13 @@ pub const Module = struct {
                 if (@field(inst.kw_args, arg_field.name)) |non_optional| {
                     if (need_comma) try stream.writeAll(", ");
                     try stream.print("{}=", .{arg_field.name});
-                    try self.writeParamToStream(stream, non_optional, inst_table);
+                    try self.writeParamToStream(stream, non_optional);
                     need_comma = true;
                 }
             } else {
                 if (need_comma) try stream.writeAll(", ");
                 try stream.print("{}=", .{arg_field.name});
-                try self.writeParamToStream(stream, @field(inst.kw_args, arg_field.name), inst_table);
+                try self.writeParamToStream(stream, @field(inst.kw_args, arg_field.name));
                 need_comma = true;
             }
         }
@@ -723,29 +808,37 @@ pub const Module = struct {
         try stream.writeByte(')');
     }
 
-    fn writeParamToStream(self: Module, stream: var, param: var, inst_table: *const InstPtrTable) !void {
+    fn writeParamToStream(self: *Writer, stream: anytype, param: anytype) !void {
         if (@typeInfo(@TypeOf(param)) == .Enum) {
             return stream.writeAll(@tagName(param));
         }
         switch (@TypeOf(param)) {
-            *Inst => return self.writeInstParamToStream(stream, param, inst_table),
+            *Inst => return self.writeInstParamToStream(stream, param),
             []*Inst => {
                 try stream.writeByte('[');
                 for (param) |inst, i| {
                     if (i != 0) {
                         try stream.writeAll(", ");
                     }
-                    try self.writeInstParamToStream(stream, inst, inst_table);
+                    try self.writeInstParamToStream(stream, inst);
                 }
                 try stream.writeByte(']');
             },
             Module.Body => {
                 try stream.writeAll("{\n");
                 for (param.instructions) |inst, i| {
-                    try stream.print("  %{} ", .{i});
-                    try self.writeInstToStream(stream, inst, inst_table);
+                    try stream.writeByteNTimes(' ', self.indent);
+                    try stream.print("%{} ", .{i});
+                    if (inst.cast(Inst.Block)) |block| {
+                        const name = try std.fmt.allocPrint(&self.arena.allocator, "label_{}", .{i});
+                        try self.block_table.put(block, name);
+                    }
+                    self.indent += 2;
+                    try self.writeInstToStream(stream, inst);
+                    self.indent -= 2;
                     try stream.writeByte('\n');
                 }
+                try stream.writeByteNTimes(' ', self.indent - 2);
                 try stream.writeByte('}');
             },
             bool => return stream.writeByte("01"[@boolToInt(param)]),
@@ -753,12 +846,16 @@ pub const Module = struct {
             BigIntConst, usize => return stream.print("{}", .{param}),
             TypedValue => unreachable, // this is a special case
             *IrModule.Decl => unreachable, // this is a special case
+            *Inst.Block => {
+                const name = self.block_table.get(param).?;
+                return std.zig.renderStringLiteral(name, stream);
+            },
             else => |T| @compileError("unimplemented: rendering parameter of type " ++ @typeName(T)),
         }
     }
 
-    fn writeInstParamToStream(self: Module, stream: var, inst: *Inst, inst_table: *const InstPtrTable) !void {
-        if (inst_table.getValue(inst)) |info| {
+    fn writeInstParamToStream(self: *Writer, stream: anytype, inst: *Inst) !void {
+        if (self.inst_table.get(inst)) |info| {
             if (info.index) |i| {
                 try stream.print("%{}", .{info.index});
             } else {
@@ -788,7 +885,9 @@ pub fn parse(allocator: *Allocator, source: [:0]const u8) Allocator.Error!Module
         .global_name_map = &global_name_map,
         .decls = .{},
         .unnamed_index = 0,
+        .block_table = std.StringHashMap(*Inst.Block).init(allocator),
     };
+    defer parser.block_table.deinit();
     errdefer parser.arena.deinit();
 
     parser.parseRoot() catch |err| switch (err) {
@@ -814,6 +913,7 @@ const Parser = struct {
     global_name_map: *std.StringHashMap(*Inst),
     error_msg: ?ErrorMsg = null,
     unnamed_index: usize,
+    block_table: std.StringHashMap(*Inst.Block),
 
     const Body = struct {
         instructions: std.ArrayList(*Inst),
@@ -843,7 +943,7 @@ const Parser = struct {
                 skipSpace(self);
                 const decl = try parseInstruction(self, &body_context, ident);
                 const ident_index = body_context.instructions.items.len;
-                if (try body_context.name_map.put(ident, decl.inst)) |_| {
+                if (try body_context.name_map.fetchPut(ident, decl.inst)) |_| {
                     return self.fail("redefinition of identifier '{}'", .{ident});
                 }
                 try body_context.instructions.append(decl.inst);
@@ -929,7 +1029,7 @@ const Parser = struct {
                     skipSpace(self);
                     const decl = try parseInstruction(self, null, ident);
                     const ident_index = self.decls.items.len;
-                    if (try self.global_name_map.put(ident, decl.inst)) |_| {
+                    if (try self.global_name_map.fetchPut(ident, decl.inst)) |_| {
                         return self.fail("redefinition of identifier '{}'", .{ident});
                     }
                     try self.decls.append(self.allocator, decl);
@@ -987,7 +1087,7 @@ const Parser = struct {
         }
     }
 
-    fn fail(self: *Parser, comptime format: []const u8, args: var) InnerError {
+    fn fail(self: *Parser, comptime format: []const u8, args: anytype) InnerError {
         @setCold(true);
         self.error_msg = ErrorMsg{
             .byte_offset = self.i,
@@ -1021,6 +1121,10 @@ const Parser = struct {
             .src = self.i,
             .tag = InstType.base_tag,
         };
+
+        if (InstType == Inst.Block) {
+            try self.block_table.put(inst_name, inst_specific);
+        }
 
         if (@hasField(InstType, "ty")) {
             inst_specific.ty = opt_type orelse {
@@ -1127,6 +1231,10 @@ const Parser = struct {
             },
             TypedValue => return self.fail("'const' is a special instruction; not legal in ZIR text", .{}),
             *IrModule.Decl => return self.fail("'declval_in_module' is a special instruction; not legal in ZIR text", .{}),
+            *Inst.Block => {
+                const name = try self.parseStringLiteral();
+                return self.block_table.get(name).?;
+            },
             else => @compileError("Unimplemented: ir parseParameterGeneric for type " ++ @typeName(T)),
         }
         return self.fail("TODO parse parameter {}", .{@typeName(T)});
@@ -1153,7 +1261,7 @@ const Parser = struct {
             else => continue,
         };
         const ident = self.source[name_start..self.i];
-        const kv = map.get(ident) orelse {
+        return map.get(ident) orelse {
             const bad_name = self.source[name_start - 1 .. self.i];
             const src = name_start - 1;
             if (local_ref) {
@@ -1172,7 +1280,6 @@ const Parser = struct {
                 return &declval.base;
             }
         };
-        return kv.value;
     }
 
     fn generateName(self: *Parser) ![]u8 {
@@ -1191,7 +1298,10 @@ pub fn emit(allocator: *Allocator, old_module: IrModule) !Module {
         .next_auto_name = 0,
         .names = std.StringHashMap(void).init(allocator),
         .primitive_table = std.AutoHashMap(Inst.Primitive.Builtin, *Decl).init(allocator),
+        .indent = 0,
+        .block_table = std.AutoHashMap(*ir.Inst.Block, *Inst.Block).init(allocator),
     };
+    defer ctx.block_table.deinit();
     defer ctx.decls.deinit(allocator);
     defer ctx.names.deinit();
     defer ctx.primitive_table.deinit();
@@ -1213,19 +1323,20 @@ const EmitZIR = struct {
     names: std.StringHashMap(void),
     next_auto_name: usize,
     primitive_table: std.AutoHashMap(Inst.Primitive.Builtin, *Decl),
+    indent: usize,
+    block_table: std.AutoHashMap(*ir.Inst.Block, *Inst.Block),
 
     fn emit(self: *EmitZIR) !void {
         // Put all the Decls in a list and sort them by name to avoid nondeterminism introduced
         // by the hash table.
         var src_decls = std.ArrayList(*IrModule.Decl).init(self.allocator);
         defer src_decls.deinit();
-        try src_decls.ensureCapacity(self.old_module.decl_table.size);
-        try self.decls.ensureCapacity(self.allocator, self.old_module.decl_table.size);
-        try self.names.ensureCapacity(self.old_module.decl_table.size);
+        try src_decls.ensureCapacity(self.old_module.decl_table.items().len);
+        try self.decls.ensureCapacity(self.allocator, self.old_module.decl_table.items().len);
+        try self.names.ensureCapacity(self.old_module.decl_table.items().len);
 
-        var decl_it = self.old_module.decl_table.iterator();
-        while (decl_it.next()) |kv| {
-            const decl = kv.value;
+        for (self.old_module.decl_table.items()) |entry| {
+            const decl = entry.value;
             src_decls.appendAssumeCapacity(decl);
             self.names.putAssumeCapacityNoClobber(mem.spanZ(decl.name), {});
         }
@@ -1239,16 +1350,18 @@ const EmitZIR = struct {
         for (src_decls.items) |ir_decl| {
             switch (ir_decl.analysis) {
                 .unreferenced => continue,
+
                 .complete => {},
+                .codegen_failure => {}, // We still can emit the ZIR.
+                .codegen_failure_retryable => {}, // We still can emit the ZIR.
+
                 .in_progress => unreachable,
                 .outdated => unreachable,
 
                 .sema_failure,
                 .sema_failure_retryable,
-                .codegen_failure,
                 .dependency_failure,
-                .codegen_failure_retryable,
-                => if (self.old_module.failed_decls.getValue(ir_decl)) |err_msg| {
+                => if (self.old_module.failed_decls.get(ir_decl)) |err_msg| {
                     const fail_inst = try self.arena.allocator.create(Inst.CompileError);
                     fail_inst.* = .{
                         .base = .{
@@ -1270,7 +1383,7 @@ const EmitZIR = struct {
                     continue;
                 },
             }
-            if (self.old_module.export_owners.getValue(ir_decl)) |exports| {
+            if (self.old_module.export_owners.get(ir_decl)) |exports| {
                 for (exports) |module_export| {
                     const symbol_name = try self.emitStringLiteral(module_export.src, module_export.options.name);
                     const export_inst = try self.arena.allocator.create(Inst.Export);
@@ -1314,7 +1427,7 @@ const EmitZIR = struct {
             try new_body.inst_table.putNoClobber(inst, new_inst);
             return new_inst;
         } else {
-            return new_body.inst_table.getValue(inst).?;
+            return new_body.inst_table.get(inst).?;
         }
     }
 
@@ -1424,7 +1537,7 @@ const EmitZIR = struct {
                         try self.emitBody(body, &inst_table, &instructions);
                     },
                     .sema_failure => {
-                        const err_msg = self.old_module.failed_decls.getValue(module_fn.owner_decl).?;
+                        const err_msg = self.old_module.failed_decls.get(module_fn.owner_decl).?;
                         const fail_inst = try self.arena.allocator.create(Inst.CompileError);
                         fail_inst.* = .{
                             .base = .{
@@ -1527,6 +1640,22 @@ const EmitZIR = struct {
         };
         for (body.instructions) |inst| {
             const new_inst = switch (inst.tag) {
+                .not => blk: {
+                    const old_inst = inst.cast(ir.Inst.Not).?;
+                    assert(inst.ty.zigTypeTag() == .Bool);
+                    const new_inst = try self.arena.allocator.create(Inst.BoolNot);
+                    new_inst.* = .{
+                        .base = .{
+                            .src = inst.src,
+                            .tag = Inst.BoolNot.base_tag,
+                        },
+                        .positionals = .{
+                            .operand = try self.resolveInst(new_body, old_inst.args.operand),
+                        },
+                        .kw_args = .{},
+                    };
+                    break :blk &new_inst.base;
+                },
                 .add => blk: {
                     const old_inst = inst.cast(ir.Inst.Add).?;
                     const new_inst = try self.arena.allocator.create(Inst.Add);
@@ -1534,6 +1663,22 @@ const EmitZIR = struct {
                         .base = .{
                             .src = inst.src,
                             .tag = Inst.Add.base_tag,
+                        },
+                        .positionals = .{
+                            .lhs = try self.resolveInst(new_body, old_inst.args.lhs),
+                            .rhs = try self.resolveInst(new_body, old_inst.args.rhs),
+                        },
+                        .kw_args = .{},
+                    };
+                    break :blk &new_inst.base;
+                },
+                .sub => blk: {
+                    const old_inst = inst.cast(ir.Inst.Sub).?;
+                    const new_inst = try self.arena.allocator.create(Inst.Sub);
+                    new_inst.* = .{
+                        .base = .{
+                            .src = inst.src,
+                            .tag = Inst.Sub.base_tag,
                         },
                         .positionals = .{
                             .lhs = try self.resolveInst(new_body, old_inst.args.lhs),
@@ -1551,7 +1696,7 @@ const EmitZIR = struct {
                             .src = inst.src,
                             .tag = Inst.Arg.base_tag,
                         },
-                        .positionals = .{ .index = old_inst.args.index },
+                        .positionals = .{},
                         .kw_args = .{},
                     };
                     break :blk &new_inst.base;
@@ -1559,6 +1704,8 @@ const EmitZIR = struct {
                 .block => blk: {
                     const old_inst = inst.cast(ir.Inst.Block).?;
                     const new_inst = try self.arena.allocator.create(Inst.Block);
+
+                    try self.block_table.put(old_inst, new_inst);
 
                     var block_body = std.ArrayList(*Inst).init(self.allocator);
                     defer block_body.deinit();
@@ -1571,14 +1718,47 @@ const EmitZIR = struct {
                             .tag = Inst.Block.base_tag,
                         },
                         .positionals = .{
-                            .label = try self.autoName(),
                             .body = .{ .instructions = block_body.toOwnedSlice() },
+                        },
+                        .kw_args = .{},
+                    };
+
+                    break :blk &new_inst.base;
+                },
+                .br => blk: {
+                    const old_inst = inst.cast(ir.Inst.Br).?;
+                    const new_block = self.block_table.get(old_inst.args.block).?;
+                    const new_inst = try self.arena.allocator.create(Inst.Break);
+                    new_inst.* = .{
+                        .base = .{
+                            .src = inst.src,
+                            .tag = Inst.Break.base_tag,
+                        },
+                        .positionals = .{
+                            .block = new_block,
+                            .operand = try self.resolveInst(new_body, old_inst.args.operand),
                         },
                         .kw_args = .{},
                     };
                     break :blk &new_inst.base;
                 },
                 .breakpoint => try self.emitTrivial(inst.src, Inst.Breakpoint),
+                .brvoid => blk: {
+                    const old_inst = inst.cast(ir.Inst.BrVoid).?;
+                    const new_block = self.block_table.get(old_inst.args.block).?;
+                    const new_inst = try self.arena.allocator.create(Inst.BreakVoid);
+                    new_inst.* = .{
+                        .base = .{
+                            .src = inst.src,
+                            .tag = Inst.BreakVoid.base_tag,
+                        },
+                        .positionals = .{
+                            .block = new_block,
+                        },
+                        .kw_args = .{},
+                    };
+                    break :blk &new_inst.base;
+                },
                 .call => blk: {
                     const old_inst = inst.cast(ir.Inst.Call).?;
                     const new_inst = try self.arena.allocator.create(Inst.Call);
@@ -1766,7 +1946,7 @@ const EmitZIR = struct {
                 },
             };
             try instructions.append(new_inst);
-            try inst_table.putNoClobber(inst, new_inst);
+            try inst_table.put(inst, new_inst);
         }
     }
 
@@ -1830,6 +2010,26 @@ const EmitZIR = struct {
                     };
                     return self.emitUnnamedDecl(&fntype_inst.base);
                 },
+                .Int => {
+                    const info = ty.intInfo(self.old_module.target());
+                    const signed = try self.emitPrimitive(src, if (info.signed) .@"true" else .@"false");
+                    const bits_payload = try self.arena.allocator.create(Value.Payload.Int_u64);
+                    bits_payload.* = .{ .int = info.bits };
+                    const bits = try self.emitComptimeIntVal(src, Value.initPayload(&bits_payload.base));
+                    const inttype_inst = try self.arena.allocator.create(Inst.IntType);
+                    inttype_inst.* = .{
+                        .base = .{
+                            .src = src,
+                            .tag = Inst.IntType.base_tag,
+                        },
+                        .positionals = .{
+                            .signed = signed.inst,
+                            .bits = bits.inst,
+                        },
+                        .kw_args = .{},
+                    };
+                    return self.emitUnnamedDecl(&inttype_inst.base);
+                },
                 else => std.debug.panic("TODO implement emitType for {}", .{ty}),
             },
         }
@@ -1841,7 +2041,7 @@ const EmitZIR = struct {
             self.next_auto_name += 1;
             const gop = try self.names.getOrPut(proposed_name);
             if (!gop.found_existing) {
-                gop.kv.value = {};
+                gop.entry.value = {};
                 return proposed_name;
             }
         }
@@ -1861,9 +2061,9 @@ const EmitZIR = struct {
                 },
                 .kw_args = .{},
             };
-            gop.kv.value = try self.emitUnnamedDecl(&primitive_inst.base);
+            gop.entry.value = try self.emitUnnamedDecl(&primitive_inst.base);
         }
-        return gop.kv.value;
+        return gop.entry.value;
     }
 
     fn emitStringLiteral(self: *EmitZIR, src: usize, str: []const u8) !*Decl {
