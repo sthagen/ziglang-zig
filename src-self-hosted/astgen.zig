@@ -16,6 +16,15 @@ pub fn expr(mod: *Module, scope: *Scope, node: *ast.Node) InnerError!*zir.Inst {
     switch (node.tag) {
         .VarDecl => unreachable, // Handled in `blockExpr`.
 
+        .Add => return simpleInfixOp(mod, scope, node.castTag(.Add).?, .add),
+        .Sub => return simpleInfixOp(mod, scope, node.castTag(.Sub).?, .sub),
+        .BangEqual => return simpleInfixOp(mod, scope, node.castTag(.BangEqual).?, .cmp_neq),
+        .EqualEqual => return simpleInfixOp(mod, scope, node.castTag(.EqualEqual).?, .cmp_eq),
+        .GreaterThan => return simpleInfixOp(mod, scope, node.castTag(.GreaterThan).?, .cmp_gt),
+        .GreaterOrEqual => return simpleInfixOp(mod, scope, node.castTag(.GreaterOrEqual).?, .cmp_gte),
+        .LessThan => return simpleInfixOp(mod, scope, node.castTag(.LessThan).?, .cmp_lt),
+        .LessOrEqual => return simpleInfixOp(mod, scope, node.castTag(.LessOrEqual).?, .cmp_lte),
+
         .Identifier => return identifier(mod, scope, node.castTag(.Identifier).?),
         .Asm => return assembly(mod, scope, node.castTag(.Asm).?),
         .StringLiteral => return stringLiteral(mod, scope, node.castTag(.StringLiteral).?),
@@ -26,14 +35,11 @@ pub fn expr(mod: *Module, scope: *Scope, node: *ast.Node) InnerError!*zir.Inst {
         .ControlFlowExpression => return controlFlowExpr(mod, scope, node.castTag(.ControlFlowExpression).?),
         .If => return ifExpr(mod, scope, node.castTag(.If).?),
         .Assign => return assign(mod, scope, node.castTag(.Assign).?),
-        .Add => return add(mod, scope, node.castTag(.Add).?),
-        .BangEqual => return cmp(mod, scope, node.castTag(.BangEqual).?, .neq),
-        .EqualEqual => return cmp(mod, scope, node.castTag(.EqualEqual).?, .eq),
-        .GreaterThan => return cmp(mod, scope, node.castTag(.GreaterThan).?, .gt),
-        .GreaterOrEqual => return cmp(mod, scope, node.castTag(.GreaterOrEqual).?, .gte),
-        .LessThan => return cmp(mod, scope, node.castTag(.LessThan).?, .lt),
-        .LessOrEqual => return cmp(mod, scope, node.castTag(.LessOrEqual).?, .lte),
+        .Period => return field(mod, scope, node.castTag(.Period).?),
+        .Deref => return deref(mod, scope, node.castTag(.Deref).?),
         .BoolNot => return boolNot(mod, scope, node.castTag(.BoolNot).?),
+        .FloatLiteral => return floatLiteral(mod, scope, node.castTag(.FloatLiteral).?),
+        .UndefinedLiteral, .BoolLiteral, .NullLiteral => return primitiveLiteral(mod, scope, node),
         else => return mod.failNode(scope, node, "TODO implement astgen.Expr for {}", .{@tagName(node.tag)}),
     }
 }
@@ -71,46 +77,47 @@ fn varDecl(mod: *Module, scope: *Scope, node: *ast.Node.VarDecl) InnerError!Scop
     if (node.getTrailer("align_node")) |align_node| {
         return mod.failNode(scope, align_node, "TODO implement alignment on locals", .{});
     }
-    if (node.getTrailer("type_node")) |type_node| {
-        return mod.failNode(scope, type_node, "TODO implement typed locals", .{});
-    }
     const tree = scope.tree();
     switch (tree.token_ids[node.mut_token]) {
-        .Keyword_const => {},
+        .Keyword_const => {
+            if (node.getTrailer("type_node")) |type_node| {
+                return mod.failNode(scope, type_node, "TODO implement typed const locals", .{});
+            }
+            // Depending on the type of AST the initialization expression is, we may need an lvalue
+            // or an rvalue as a result location. If it is an rvalue, we can use the instruction as
+            // the variable, no memory location needed.
+            const init_node = node.getTrailer("init_node").?;
+            if (nodeMayNeedMemoryLocation(init_node)) {
+                return mod.failNode(scope, init_node, "TODO implement result locations", .{});
+            }
+            const init_inst = try expr(mod, scope, init_node);
+            const ident_name = try identifierTokenString(mod, scope, node.name_token);
+            return Scope.LocalVar{
+                .parent = scope,
+                .gen_zir = scope.getGenZIR(),
+                .name = ident_name,
+                .inst = init_inst,
+            };
+        },
         .Keyword_var => {
-            return mod.failTok(scope, node.mut_token, "TODO implement mutable locals", .{});
+            return mod.failNode(scope, &node.base, "TODO implement local vars", .{});
         },
         else => unreachable,
     }
-    // Depending on the type of AST the initialization expression is, we may need an lvalue
-    // or an rvalue as a result location. If it is an rvalue, we can use the instruction as
-    // the variable, no memory location needed.
-    const init_node = node.getTrailer("init_node").?;
-    if (nodeNeedsMemoryLocation(init_node)) {
-        return mod.failNode(scope, init_node, "TODO implement result locations", .{});
-    }
-    const init_inst = try expr(mod, scope, init_node);
-    const ident_name = tree.tokenSlice(node.name_token); // TODO support @"aoeu" identifiers
-    return Scope.LocalVar{
-        .parent = scope,
-        .gen_zir = scope.getGenZIR(),
-        .name = ident_name,
-        .inst = init_inst,
-    };
 }
 
 fn boolNot(mod: *Module, scope: *Scope, node: *ast.Node.SimplePrefixOp) InnerError!*zir.Inst {
     const operand = try expr(mod, scope, node.rhs);
     const tree = scope.tree();
     const src = tree.token_locs[node.op_token].start;
-    return mod.addZIRInst(scope, src, zir.Inst.BoolNot, .{ .operand = operand }, .{});
+    return mod.addZIRUnOp(scope, src, .boolnot, operand);
 }
 
 fn assign(mod: *Module, scope: *Scope, infix_node: *ast.Node.SimpleInfixOp) InnerError!*zir.Inst {
     if (infix_node.lhs.tag == .Identifier) {
         const ident = @fieldParentPtr(ast.Node.Identifier, "base", infix_node.lhs);
         const tree = scope.tree();
-        const ident_name = tree.tokenSlice(ident.token);
+        const ident_name = try identifierTokenString(mod, scope, ident.token);
         if (std.mem.eql(u8, ident_name, "_")) {
             return expr(mod, scope, infix_node.rhs);
         } else {
@@ -121,21 +128,58 @@ fn assign(mod: *Module, scope: *Scope, infix_node: *ast.Node.SimpleInfixOp) Inne
     }
 }
 
-fn add(mod: *Module, scope: *Scope, infix_node: *ast.Node.SimpleInfixOp) InnerError!*zir.Inst {
-    const lhs = try expr(mod, scope, infix_node.lhs);
-    const rhs = try expr(mod, scope, infix_node.rhs);
-
+/// Identifier token -> String (allocated in scope.arena())
+pub fn identifierTokenString(mod: *Module, scope: *Scope, token: ast.TokenIndex) InnerError![]const u8 {
     const tree = scope.tree();
-    const src = tree.token_locs[infix_node.op_token].start;
 
-    return mod.addZIRInst(scope, src, zir.Inst.Add, .{ .lhs = lhs, .rhs = rhs }, .{});
+    const ident_name = tree.tokenSlice(token);
+    if (std.mem.startsWith(u8, ident_name, "@")) {
+        const raw_string = ident_name[1..];
+        var bad_index: usize = undefined;
+        return std.zig.parseStringLiteral(scope.arena(), raw_string, &bad_index) catch |err| switch (err) {
+            error.InvalidCharacter => {
+                const bad_byte = raw_string[bad_index];
+                const src = tree.token_locs[token].start;
+                return mod.fail(scope, src + 1 + bad_index, "invalid string literal character: '{c}'\n", .{bad_byte});
+            },
+            else => |e| return e,
+        };
+    }
+    return ident_name;
 }
 
-fn cmp(
+pub fn identifierStringInst(mod: *Module, scope: *Scope, node: *ast.Node.Identifier) InnerError!*zir.Inst {
+    const tree = scope.tree();
+    const src = tree.token_locs[node.token].start;
+
+    const ident_name = try identifierTokenString(mod, scope, node.token);
+
+    return mod.addZIRInst(scope, src, zir.Inst.Str, .{ .bytes = ident_name }, .{});
+}
+
+fn field(mod: *Module, scope: *Scope, node: *ast.Node.SimpleInfixOp) InnerError!*zir.Inst {
+    const tree = scope.tree();
+    const src = tree.token_locs[node.op_token].start;
+
+    const lhs = try expr(mod, scope, node.lhs);
+    const field_name = try identifierStringInst(mod, scope, node.rhs.castTag(.Identifier).?);
+
+    const pointer = try mod.addZIRInst(scope, src, zir.Inst.FieldPtr, .{ .object_ptr = lhs, .field_name = field_name }, .{});
+    return mod.addZIRUnOp(scope, src, .deref, pointer);
+}
+
+fn deref(mod: *Module, scope: *Scope, node: *ast.Node.SimpleSuffixOp) InnerError!*zir.Inst {
+    const tree = scope.tree();
+    const src = tree.token_locs[node.rtoken].start;
+    const lhs = try expr(mod, scope, node.lhs);
+    return mod.addZIRUnOp(scope, src, .deref, lhs);
+}
+
+fn simpleInfixOp(
     mod: *Module,
     scope: *Scope,
     infix_node: *ast.Node.SimpleInfixOp,
-    op: std.math.CompareOperator,
+    op_inst_tag: zir.Inst.Tag,
 ) InnerError!*zir.Inst {
     const lhs = try expr(mod, scope, infix_node.lhs);
     const rhs = try expr(mod, scope, infix_node.rhs);
@@ -143,11 +187,7 @@ fn cmp(
     const tree = scope.tree();
     const src = tree.token_locs[infix_node.op_token].start;
 
-    return mod.addZIRInst(scope, src, zir.Inst.Cmp, .{
-        .lhs = lhs,
-        .op = op,
-        .rhs = rhs,
-    }, .{});
+    return mod.addZIRBinOp(scope, src, op_inst_tag, lhs, rhs);
 }
 
 fn ifExpr(mod: *Module, scope: *Scope, if_node: *ast.Node.If) InnerError!*zir.Inst {
@@ -173,8 +213,8 @@ fn ifExpr(mod: *Module, scope: *Scope, if_node: *ast.Node.If) InnerError!*zir.In
     const if_src = tree.token_locs[if_node.if_token].start;
     const condbr = try mod.addZIRInstSpecial(&block_scope.base, if_src, zir.Inst.CondBr, .{
         .condition = cond,
-        .true_body = undefined, // populated below
-        .false_body = undefined, // populated below
+        .then_body = undefined, // populated below
+        .else_body = undefined, // populated below
     }, .{});
 
     const block = try mod.addZIRInstBlock(scope, if_src, .{
@@ -196,7 +236,7 @@ fn ifExpr(mod: *Module, scope: *Scope, if_node: *ast.Node.If) InnerError!*zir.In
             .operand = then_result,
         }, .{});
     }
-    condbr.positionals.true_body = .{
+    condbr.positionals.then_body = .{
         .instructions = try then_scope.arena.dupe(*zir.Inst, then_scope.instructions.items),
     };
 
@@ -225,7 +265,7 @@ fn ifExpr(mod: *Module, scope: *Scope, if_node: *ast.Node.If) InnerError!*zir.In
             .block = block,
         }, .{});
     }
-    condbr.positionals.false_body = .{
+    condbr.positionals.else_body = .{
         .instructions = try else_scope.arena.dupe(*zir.Inst, else_scope.instructions.items),
     };
 
@@ -246,9 +286,9 @@ fn controlFlowExpr(
     const src = tree.token_locs[cfe.ltoken].start;
     if (cfe.rhs) |rhs_node| {
         const operand = try expr(mod, scope, rhs_node);
-        return mod.addZIRInst(scope, src, zir.Inst.Return, .{ .operand = operand }, .{});
+        return mod.addZIRUnOp(scope, src, .@"return", operand);
     } else {
-        return mod.addZIRInst(scope, src, zir.Inst.ReturnVoid, .{}, .{});
+        return mod.addZIRNoOp(scope, src, .returnvoid);
     }
 }
 
@@ -257,8 +297,7 @@ fn identifier(mod: *Module, scope: *Scope, ident: *ast.Node.Identifier) InnerErr
     defer tracy.end();
 
     const tree = scope.tree();
-    // TODO implement @"aoeu" identifiers
-    const ident_name = tree.tokenSlice(ident.token);
+    const ident_name = try identifierTokenString(mod, scope, ident.token);
     const src = tree.token_locs[ident.token].start;
     if (mem.eql(u8, ident_name, "_")) {
         return mod.failNode(scope, &ident.base, "TODO implement '_' identifier", .{});
@@ -286,7 +325,14 @@ fn identifier(mod: *Module, scope: *Scope, ident: *ast.Node.Identifier) InnerErr
                 16 => if (is_signed) Value.initTag(.i16_type) else Value.initTag(.u16_type),
                 32 => if (is_signed) Value.initTag(.i32_type) else Value.initTag(.u32_type),
                 64 => if (is_signed) Value.initTag(.i64_type) else Value.initTag(.u64_type),
-                else => return mod.failNode(scope, &ident.base, "TODO implement arbitrary integer bitwidth types", .{}),
+                else => {
+                    const int_type_payload = try scope.arena().create(Value.Payload.IntType);
+                    int_type_payload.* = .{ .signed = is_signed, .bits = bit_count };
+                    return mod.addZIRInstConst(scope, src, .{
+                        .ty = Type.initTag(.comptime_int),
+                        .val = Value.initPayload(&int_type_payload.base),
+                    });
+                },
             };
             return mod.addZIRInstConst(scope, src, .{
                 .ty = Type.initTag(.type),
@@ -366,6 +412,52 @@ fn integerLiteral(mod: *Module, scope: *Scope, int_lit: *ast.Node.IntegerLiteral
     } else |err| {
         return mod.failTok(scope, int_lit.token, "TODO implement int literals that don't fit in a u64", .{});
     }
+}
+
+fn floatLiteral(mod: *Module, scope: *Scope, float_lit: *ast.Node.FloatLiteral) InnerError!*zir.Inst {
+    const arena = scope.arena();
+    const tree = scope.tree();
+    const bytes = tree.tokenSlice(float_lit.token);
+    if (bytes.len > 2 and bytes[1] == 'x') {
+        return mod.failTok(scope, float_lit.token, "TODO hex floats", .{});
+    }
+
+    const val = std.fmt.parseFloat(f128, bytes) catch |e| switch (e) {
+        error.InvalidCharacter => unreachable, // validated by tokenizer
+    };
+    const float_payload = try arena.create(Value.Payload.Float_128);
+    float_payload.* = .{ .val = val };
+    const src = tree.token_locs[float_lit.token].start;
+    return mod.addZIRInstConst(scope, src, .{
+        .ty = Type.initTag(.comptime_float),
+        .val = Value.initPayload(&float_payload.base),
+    });
+}
+
+fn primitiveLiteral(mod: *Module, scope: *Scope, node: *ast.Node) InnerError!*zir.Inst {
+    const arena = scope.arena();
+    const tree = scope.tree();
+    const src = tree.token_locs[node.firstToken()].start;
+
+    if (node.cast(ast.Node.BoolLiteral)) |bool_node| {
+        return mod.addZIRInstConst(scope, src, .{
+            .ty = Type.initTag(.bool),
+            .val = if (tree.token_ids[bool_node.token] == .Keyword_true)
+                Value.initTag(.bool_true)
+            else
+                Value.initTag(.bool_false),
+        });
+    } else if (node.tag == .UndefinedLiteral) {
+        return mod.addZIRInstConst(scope, src, .{
+            .ty = Type.initTag(.@"undefined"),
+            .val = Value.initTag(.undef),
+        });
+    } else if (node.tag == .NullLiteral) {
+        return mod.addZIRInstConst(scope, src, .{
+            .ty = Type.initTag(.@"null"),
+            .val = Value.initTag(.null_value),
+        });
+    } else unreachable;
 }
 
 fn assembly(mod: *Module, scope: *Scope, asm_node: *ast.Node.Asm) InnerError!*zir.Inst {
@@ -460,7 +552,7 @@ fn callExpr(mod: *Module, scope: *Scope, node: *ast.Node.Call) InnerError!*zir.I
 fn unreach(mod: *Module, scope: *Scope, unreach_node: *ast.Node.Unreachable) InnerError!*zir.Inst {
     const tree = scope.tree();
     const src = tree.token_locs[unreach_node.token].start;
-    return mod.addZIRInst(scope, src, zir.Inst.Unreachable, .{}, .{});
+    return mod.addZIRNoOp(scope, src, .@"unreachable");
 }
 
 fn getSimplePrimitiveValue(name: []const u8) ?TypedValue {
@@ -497,147 +589,136 @@ fn getSimplePrimitiveValue(name: []const u8) ?TypedValue {
             .val = Value.initTag(tag),
         };
     }
-    if (mem.eql(u8, name, "null")) {
-        return TypedValue{
-            .ty = Type.initTag(.@"null"),
-            .val = Value.initTag(.null_value),
-        };
-    }
-    if (mem.eql(u8, name, "undefined")) {
-        return TypedValue{
-            .ty = Type.initTag(.@"undefined"),
-            .val = Value.initTag(.undef),
-        };
-    }
-    if (mem.eql(u8, name, "true")) {
-        return TypedValue{
-            .ty = Type.initTag(.bool),
-            .val = Value.initTag(.bool_true),
-        };
-    }
-    if (mem.eql(u8, name, "false")) {
-        return TypedValue{
-            .ty = Type.initTag(.bool),
-            .val = Value.initTag(.bool_false),
-        };
-    }
     return null;
 }
 
-fn nodeNeedsMemoryLocation(node: *ast.Node) bool {
-    return switch (node.tag) {
-        .Root,
-        .Use,
-        .TestDecl,
-        .DocComment,
-        .SwitchCase,
-        .SwitchElse,
-        .Else,
-        .Payload,
-        .PointerPayload,
-        .PointerIndexPayload,
-        .ContainerField,
-        .ErrorTag,
-        .FieldInitializer,
-        => unreachable,
+fn nodeMayNeedMemoryLocation(start_node: *ast.Node) bool {
+    var node = start_node;
+    while (true) {
+        switch (node.tag) {
+            .Root,
+            .Use,
+            .TestDecl,
+            .DocComment,
+            .SwitchCase,
+            .SwitchElse,
+            .Else,
+            .Payload,
+            .PointerPayload,
+            .PointerIndexPayload,
+            .ContainerField,
+            .ErrorTag,
+            .FieldInitializer,
+            => unreachable,
 
-        .ControlFlowExpression,
-        .BitNot,
-        .BoolNot,
-        .VarDecl,
-        .Defer,
-        .AddressOf,
-        .OptionalType,
-        .Negation,
-        .NegationWrap,
-        .Resume,
-        .ArrayType,
-        .ArrayTypeSentinel,
-        .PtrType,
-        .SliceType,
-        .Suspend,
-        .AnyType,
-        .ErrorType,
-        .FnProto,
-        .AnyFrameType,
-        .IntegerLiteral,
-        .FloatLiteral,
-        .EnumLiteral,
-        .StringLiteral,
-        .MultilineStringLiteral,
-        .CharLiteral,
-        .BoolLiteral,
-        .NullLiteral,
-        .UndefinedLiteral,
-        .Unreachable,
-        .Identifier,
-        .ErrorSetDecl,
-        .ContainerDecl,
-        .Asm,
-        .Add,
-        .AddWrap,
-        .ArrayCat,
-        .ArrayMult,
-        .Assign,
-        .AssignBitAnd,
-        .AssignBitOr,
-        .AssignBitShiftLeft,
-        .AssignBitShiftRight,
-        .AssignBitXor,
-        .AssignDiv,
-        .AssignSub,
-        .AssignSubWrap,
-        .AssignMod,
-        .AssignAdd,
-        .AssignAddWrap,
-        .AssignMul,
-        .AssignMulWrap,
-        .BangEqual,
-        .BitAnd,
-        .BitOr,
-        .BitShiftLeft,
-        .BitShiftRight,
-        .BitXor,
-        .BoolAnd,
-        .BoolOr,
-        .Div,
-        .EqualEqual,
-        .ErrorUnion,
-        .GreaterOrEqual,
-        .GreaterThan,
-        .LessOrEqual,
-        .LessThan,
-        .MergeErrorSets,
-        .Mod,
-        .Mul,
-        .MulWrap,
-        .Range,
-        .Period,
-        .Sub,
-        .SubWrap,
-        => false,
+            .ControlFlowExpression,
+            .BitNot,
+            .BoolNot,
+            .VarDecl,
+            .Defer,
+            .AddressOf,
+            .OptionalType,
+            .Negation,
+            .NegationWrap,
+            .Resume,
+            .ArrayType,
+            .ArrayTypeSentinel,
+            .PtrType,
+            .SliceType,
+            .Suspend,
+            .AnyType,
+            .ErrorType,
+            .FnProto,
+            .AnyFrameType,
+            .IntegerLiteral,
+            .FloatLiteral,
+            .EnumLiteral,
+            .StringLiteral,
+            .MultilineStringLiteral,
+            .CharLiteral,
+            .BoolLiteral,
+            .NullLiteral,
+            .UndefinedLiteral,
+            .Unreachable,
+            .Identifier,
+            .ErrorSetDecl,
+            .ContainerDecl,
+            .Asm,
+            .Add,
+            .AddWrap,
+            .ArrayCat,
+            .ArrayMult,
+            .Assign,
+            .AssignBitAnd,
+            .AssignBitOr,
+            .AssignBitShiftLeft,
+            .AssignBitShiftRight,
+            .AssignBitXor,
+            .AssignDiv,
+            .AssignSub,
+            .AssignSubWrap,
+            .AssignMod,
+            .AssignAdd,
+            .AssignAddWrap,
+            .AssignMul,
+            .AssignMulWrap,
+            .BangEqual,
+            .BitAnd,
+            .BitOr,
+            .BitShiftLeft,
+            .BitShiftRight,
+            .BitXor,
+            .BoolAnd,
+            .BoolOr,
+            .Div,
+            .EqualEqual,
+            .ErrorUnion,
+            .GreaterOrEqual,
+            .GreaterThan,
+            .LessOrEqual,
+            .LessThan,
+            .MergeErrorSets,
+            .Mod,
+            .Mul,
+            .MulWrap,
+            .Range,
+            .Period,
+            .Sub,
+            .SubWrap,
+            .Slice,
+            .Deref,
+            .ArrayAccess,
+            => return false,
 
-        .ArrayInitializer,
-        .ArrayInitializerDot,
-        .StructInitializer,
-        .StructInitializerDot,
-        => true,
+            // Forward the question to a sub-expression.
+            .GroupedExpression => node = node.castTag(.GroupedExpression).?.expr,
+            .Try => node = node.castTag(.Try).?.rhs,
+            .Await => node = node.castTag(.Await).?.rhs,
+            .Catch => node = node.castTag(.Catch).?.rhs,
+            .OrElse => node = node.castTag(.OrElse).?.rhs,
+            .Comptime => node = node.castTag(.Comptime).?.expr,
+            .Nosuspend => node = node.castTag(.Nosuspend).?.expr,
+            .UnwrapOptional => node = node.castTag(.UnwrapOptional).?.lhs,
 
-        .GroupedExpression => nodeNeedsMemoryLocation(node.castTag(.GroupedExpression).?.expr),
+            // True because these are exactly the expressions we need memory locations for.
+            .ArrayInitializer,
+            .ArrayInitializerDot,
+            .StructInitializer,
+            .StructInitializerDot,
+            => return true,
 
-        .UnwrapOptional => @panic("TODO nodeNeedsMemoryLocation for UnwrapOptional"),
-        .Catch => @panic("TODO nodeNeedsMemoryLocation for Catch"),
-        .Await => @panic("TODO nodeNeedsMemoryLocation for Await"),
-        .Try => @panic("TODO nodeNeedsMemoryLocation for Try"),
-        .If => @panic("TODO nodeNeedsMemoryLocation for If"),
-        .SuffixOp => @panic("TODO nodeNeedsMemoryLocation for SuffixOp"),
-        .Call => @panic("TODO nodeNeedsMemoryLocation for Call"),
-        .Switch => @panic("TODO nodeNeedsMemoryLocation for Switch"),
-        .While => @panic("TODO nodeNeedsMemoryLocation for While"),
-        .For => @panic("TODO nodeNeedsMemoryLocation for For"),
-        .BuiltinCall => @panic("TODO nodeNeedsMemoryLocation for BuiltinCall"),
-        .Comptime => @panic("TODO nodeNeedsMemoryLocation for Comptime"),
-        .Nosuspend => @panic("TODO nodeNeedsMemoryLocation for Nosuspend"),
-        .Block => @panic("TODO nodeNeedsMemoryLocation for Block"),
-    };
+            // True because depending on comptime conditions, sub-expressions
+            // may be the kind that need memory locations.
+            .While,
+            .For,
+            .Switch,
+            .Call,
+            .BuiltinCall, // TODO some of these can return false
+            => return true,
+
+            // Depending on AST properties, they may need memory locations.
+            .If => return node.castTag(.If).?.@"else" != null,
+            .Block => return node.castTag(.Block).?.label != null,
+        }
+    }
 }
