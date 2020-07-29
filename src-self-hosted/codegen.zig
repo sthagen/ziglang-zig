@@ -1,5 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
+const math = std.math;
 const assert = std.debug.assert;
 const ir = @import("ir.zig");
 const Type = @import("type.zig").Type;
@@ -49,58 +50,59 @@ pub fn generateSymbol(
 
     switch (typed_value.ty.zigTypeTag()) {
         .Fn => {
-            switch (bin_file.options.target.cpu.arch) {
-                .arm => return Function(.arm).generateSymbol(bin_file, src, typed_value, code),
-                .armeb => return Function(.armeb).generateSymbol(bin_file, src, typed_value, code),
-                .aarch64 => return Function(.aarch64).generateSymbol(bin_file, src, typed_value, code),
-                .aarch64_be => return Function(.aarch64_be).generateSymbol(bin_file, src, typed_value, code),
-                .aarch64_32 => return Function(.aarch64_32).generateSymbol(bin_file, src, typed_value, code),
-                .arc => return Function(.arc).generateSymbol(bin_file, src, typed_value, code),
-                .avr => return Function(.avr).generateSymbol(bin_file, src, typed_value, code),
-                .bpfel => return Function(.bpfel).generateSymbol(bin_file, src, typed_value, code),
-                .bpfeb => return Function(.bpfeb).generateSymbol(bin_file, src, typed_value, code),
-                .hexagon => return Function(.hexagon).generateSymbol(bin_file, src, typed_value, code),
-                .mips => return Function(.mips).generateSymbol(bin_file, src, typed_value, code),
-                .mipsel => return Function(.mipsel).generateSymbol(bin_file, src, typed_value, code),
-                .mips64 => return Function(.mips64).generateSymbol(bin_file, src, typed_value, code),
-                .mips64el => return Function(.mips64el).generateSymbol(bin_file, src, typed_value, code),
-                .msp430 => return Function(.msp430).generateSymbol(bin_file, src, typed_value, code),
-                .powerpc => return Function(.powerpc).generateSymbol(bin_file, src, typed_value, code),
-                .powerpc64 => return Function(.powerpc64).generateSymbol(bin_file, src, typed_value, code),
-                .powerpc64le => return Function(.powerpc64le).generateSymbol(bin_file, src, typed_value, code),
-                .r600 => return Function(.r600).generateSymbol(bin_file, src, typed_value, code),
-                .amdgcn => return Function(.amdgcn).generateSymbol(bin_file, src, typed_value, code),
-                .riscv32 => return Function(.riscv32).generateSymbol(bin_file, src, typed_value, code),
-                .riscv64 => return Function(.riscv64).generateSymbol(bin_file, src, typed_value, code),
-                .sparc => return Function(.sparc).generateSymbol(bin_file, src, typed_value, code),
-                .sparcv9 => return Function(.sparcv9).generateSymbol(bin_file, src, typed_value, code),
-                .sparcel => return Function(.sparcel).generateSymbol(bin_file, src, typed_value, code),
-                .s390x => return Function(.s390x).generateSymbol(bin_file, src, typed_value, code),
-                .tce => return Function(.tce).generateSymbol(bin_file, src, typed_value, code),
-                .tcele => return Function(.tcele).generateSymbol(bin_file, src, typed_value, code),
-                .thumb => return Function(.thumb).generateSymbol(bin_file, src, typed_value, code),
-                .thumbeb => return Function(.thumbeb).generateSymbol(bin_file, src, typed_value, code),
-                .i386 => return Function(.i386).generateSymbol(bin_file, src, typed_value, code),
+            switch (bin_file.base.options.target.cpu.arch) {
+                //.arm => return Function(.arm).generateSymbol(bin_file, src, typed_value, code),
+                //.armeb => return Function(.armeb).generateSymbol(bin_file, src, typed_value, code),
+                //.aarch64 => return Function(.aarch64).generateSymbol(bin_file, src, typed_value, code),
+                //.aarch64_be => return Function(.aarch64_be).generateSymbol(bin_file, src, typed_value, code),
+                //.aarch64_32 => return Function(.aarch64_32).generateSymbol(bin_file, src, typed_value, code),
+                //.arc => return Function(.arc).generateSymbol(bin_file, src, typed_value, code),
+                //.avr => return Function(.avr).generateSymbol(bin_file, src, typed_value, code),
+                //.bpfel => return Function(.bpfel).generateSymbol(bin_file, src, typed_value, code),
+                //.bpfeb => return Function(.bpfeb).generateSymbol(bin_file, src, typed_value, code),
+                //.hexagon => return Function(.hexagon).generateSymbol(bin_file, src, typed_value, code),
+                //.mips => return Function(.mips).generateSymbol(bin_file, src, typed_value, code),
+                //.mipsel => return Function(.mipsel).generateSymbol(bin_file, src, typed_value, code),
+                //.mips64 => return Function(.mips64).generateSymbol(bin_file, src, typed_value, code),
+                //.mips64el => return Function(.mips64el).generateSymbol(bin_file, src, typed_value, code),
+                //.msp430 => return Function(.msp430).generateSymbol(bin_file, src, typed_value, code),
+                //.powerpc => return Function(.powerpc).generateSymbol(bin_file, src, typed_value, code),
+                //.powerpc64 => return Function(.powerpc64).generateSymbol(bin_file, src, typed_value, code),
+                //.powerpc64le => return Function(.powerpc64le).generateSymbol(bin_file, src, typed_value, code),
+                //.r600 => return Function(.r600).generateSymbol(bin_file, src, typed_value, code),
+                //.amdgcn => return Function(.amdgcn).generateSymbol(bin_file, src, typed_value, code),
+                //.riscv32 => return Function(.riscv32).generateSymbol(bin_file, src, typed_value, code),
+                //.riscv64 => return Function(.riscv64).generateSymbol(bin_file, src, typed_value, code),
+                //.sparc => return Function(.sparc).generateSymbol(bin_file, src, typed_value, code),
+                //.sparcv9 => return Function(.sparcv9).generateSymbol(bin_file, src, typed_value, code),
+                //.sparcel => return Function(.sparcel).generateSymbol(bin_file, src, typed_value, code),
+                //.s390x => return Function(.s390x).generateSymbol(bin_file, src, typed_value, code),
+                //.tce => return Function(.tce).generateSymbol(bin_file, src, typed_value, code),
+                //.tcele => return Function(.tcele).generateSymbol(bin_file, src, typed_value, code),
+                //.thumb => return Function(.thumb).generateSymbol(bin_file, src, typed_value, code),
+                //.thumbeb => return Function(.thumbeb).generateSymbol(bin_file, src, typed_value, code),
+                //.i386 => return Function(.i386).generateSymbol(bin_file, src, typed_value, code),
                 .x86_64 => return Function(.x86_64).generateSymbol(bin_file, src, typed_value, code),
-                .xcore => return Function(.xcore).generateSymbol(bin_file, src, typed_value, code),
-                .nvptx => return Function(.nvptx).generateSymbol(bin_file, src, typed_value, code),
-                .nvptx64 => return Function(.nvptx64).generateSymbol(bin_file, src, typed_value, code),
-                .le32 => return Function(.le32).generateSymbol(bin_file, src, typed_value, code),
-                .le64 => return Function(.le64).generateSymbol(bin_file, src, typed_value, code),
-                .amdil => return Function(.amdil).generateSymbol(bin_file, src, typed_value, code),
-                .amdil64 => return Function(.amdil64).generateSymbol(bin_file, src, typed_value, code),
-                .hsail => return Function(.hsail).generateSymbol(bin_file, src, typed_value, code),
-                .hsail64 => return Function(.hsail64).generateSymbol(bin_file, src, typed_value, code),
-                .spir => return Function(.spir).generateSymbol(bin_file, src, typed_value, code),
-                .spir64 => return Function(.spir64).generateSymbol(bin_file, src, typed_value, code),
-                .kalimba => return Function(.kalimba).generateSymbol(bin_file, src, typed_value, code),
-                .shave => return Function(.shave).generateSymbol(bin_file, src, typed_value, code),
-                .lanai => return Function(.lanai).generateSymbol(bin_file, src, typed_value, code),
-                .wasm32 => return Function(.wasm32).generateSymbol(bin_file, src, typed_value, code),
-                .wasm64 => return Function(.wasm64).generateSymbol(bin_file, src, typed_value, code),
-                .renderscript32 => return Function(.renderscript32).generateSymbol(bin_file, src, typed_value, code),
-                .renderscript64 => return Function(.renderscript64).generateSymbol(bin_file, src, typed_value, code),
-                .ve => return Function(.ve).generateSymbol(bin_file, src, typed_value, code),
+                //.xcore => return Function(.xcore).generateSymbol(bin_file, src, typed_value, code),
+                //.nvptx => return Function(.nvptx).generateSymbol(bin_file, src, typed_value, code),
+                //.nvptx64 => return Function(.nvptx64).generateSymbol(bin_file, src, typed_value, code),
+                //.le32 => return Function(.le32).generateSymbol(bin_file, src, typed_value, code),
+                //.le64 => return Function(.le64).generateSymbol(bin_file, src, typed_value, code),
+                //.amdil => return Function(.amdil).generateSymbol(bin_file, src, typed_value, code),
+                //.amdil64 => return Function(.amdil64).generateSymbol(bin_file, src, typed_value, code),
+                //.hsail => return Function(.hsail).generateSymbol(bin_file, src, typed_value, code),
+                //.hsail64 => return Function(.hsail64).generateSymbol(bin_file, src, typed_value, code),
+                //.spir => return Function(.spir).generateSymbol(bin_file, src, typed_value, code),
+                //.spir64 => return Function(.spir64).generateSymbol(bin_file, src, typed_value, code),
+                //.kalimba => return Function(.kalimba).generateSymbol(bin_file, src, typed_value, code),
+                //.shave => return Function(.shave).generateSymbol(bin_file, src, typed_value, code),
+                //.lanai => return Function(.lanai).generateSymbol(bin_file, src, typed_value, code),
+                //.wasm32 => return Function(.wasm32).generateSymbol(bin_file, src, typed_value, code),
+                //.wasm64 => return Function(.wasm64).generateSymbol(bin_file, src, typed_value, code),
+                //.renderscript32 => return Function(.renderscript32).generateSymbol(bin_file, src, typed_value, code),
+                //.renderscript64 => return Function(.renderscript64).generateSymbol(bin_file, src, typed_value, code),
+                //.ve => return Function(.ve).generateSymbol(bin_file, src, typed_value, code),
+                else => @panic("Backend architectures that don't have good support yet are commented out, to improve compilation performance. If you are interested in one of these other backends feel free to uncomment them. Eventually these will be completed, but stage1 is slow and a memory hog."),
             }
         },
         .Array => {
@@ -141,7 +143,7 @@ pub fn generateSymbol(
                 // TODO handle the dependency of this symbol on the decl's vaddr.
                 // If the decl changes vaddr, then this symbol needs to get regenerated.
                 const vaddr = bin_file.local_symbols.items[decl.link.local_sym_index].st_value;
-                const endian = bin_file.options.target.cpu.arch.endian();
+                const endian = bin_file.base.options.target.cpu.arch.endian();
                 switch (bin_file.ptr_width) {
                     .p32 => {
                         try code.resize(4);
@@ -164,7 +166,7 @@ pub fn generateSymbol(
             };
         },
         .Int => {
-            const info = typed_value.ty.intInfo(bin_file.options.target);
+            const info = typed_value.ty.intInfo(bin_file.base.options.target);
             if (info.bits == 8 and !info.signed) {
                 const x = typed_value.val.toUnsignedInt();
                 try code.append(@intCast(u8, x));
@@ -206,8 +208,16 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         code: *std.ArrayList(u8),
         err_msg: ?*ErrorMsg,
         args: []MCValue,
+        ret_mcv: MCValue,
+        fn_type: Type,
         arg_index: usize,
         src: usize,
+        stack_align: u32,
+
+        /// The value is an offset into the `Function` `code` from the beginning.
+        /// To perform the reloc, write 32-bit signed little-endian integer
+        /// which is a relative jump, based on the address following the reloc.
+        exitlude_jump_relocs: std.ArrayListUnmanaged(usize) = .{},
 
         /// Whenever there is a runtime branch, we push a Branch onto this stack,
         /// and pop it off when the runtime branch joins. This provides an "overlay"
@@ -225,22 +235,32 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             unreach,
             /// No more references to this value remain.
             dead,
+            /// The value is undefined.
+            undef,
             /// A pointer-sized integer that fits in a register.
+            /// If the type is a pointer, this is the pointer address in virtual address space.
             immediate: u64,
             /// The constant was emitted into the code, at this offset.
+            /// If the type is a pointer, it means the pointer address is embedded in the code.
             embedded_in_code: usize,
+            /// The value is a pointer to a constant which was emitted into the code, at this offset.
+            ptr_embedded_in_code: usize,
             /// The value is in a target-specific register.
             register: Register,
             /// The value is in memory at a hard-coded address.
+            /// If the type is a pointer, it means the pointer address is at this memory location.
             memory: u64,
             /// The value is one of the stack variables.
-            stack_offset: u64,
+            /// If the type is a pointer, it means the pointer address is in the stack at this offset.
+            stack_offset: u32,
+            /// The value is a pointer to one of the stack variables (payload is stack offset).
+            ptr_stack_offset: u32,
             /// The value is in the compare flags assuming an unsigned operation,
             /// with this operator applied on top of it.
-            compare_flags_unsigned: std.math.CompareOperator,
+            compare_flags_unsigned: math.CompareOperator,
             /// The value is in the compare flags assuming a signed operation,
             /// with this operator applied on top of it.
-            compare_flags_signed: std.math.CompareOperator,
+            compare_flags_signed: math.CompareOperator,
 
             fn isMemory(mcv: MCValue) bool {
                 return switch (mcv) {
@@ -267,6 +287,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     .memory,
                     .compare_flags_unsigned,
                     .compare_flags_signed,
+                    .ptr_stack_offset,
+                    .ptr_embedded_in_code,
+                    .undef,
                     => false,
 
                     .register,
@@ -279,10 +302,10 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         const Branch = struct {
             inst_table: std.AutoHashMapUnmanaged(*ir.Inst, MCValue) = .{},
             registers: std.AutoHashMapUnmanaged(Register, RegisterAllocation) = .{},
-            free_registers: FreeRegInt = std.math.maxInt(FreeRegInt),
+            free_registers: FreeRegInt = math.maxInt(FreeRegInt),
 
             /// Maps offset to what is stored there.
-            stack: std.AutoHashMapUnmanaged(usize, StackAllocation) = .{},
+            stack: std.AutoHashMapUnmanaged(u32, StackAllocation) = .{},
             /// Offset from the stack base, representing the end of the stack frame.
             max_end_stack: u32 = 0,
             /// Represents the current end stack offset. If there is no existing slot
@@ -292,7 +315,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             fn markRegUsed(self: *Branch, reg: Register) void {
                 if (FreeRegInt == u0) return;
                 const index = reg.allocIndex() orelse return;
-                const ShiftInt = std.math.Log2Int(FreeRegInt);
+                const ShiftInt = math.Log2Int(FreeRegInt);
                 const shift = @intCast(ShiftInt, index);
                 self.free_registers &= ~(@as(FreeRegInt, 1) << shift);
             }
@@ -300,9 +323,22 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             fn markRegFree(self: *Branch, reg: Register) void {
                 if (FreeRegInt == u0) return;
                 const index = reg.allocIndex() orelse return;
-                const ShiftInt = std.math.Log2Int(FreeRegInt);
+                const ShiftInt = math.Log2Int(FreeRegInt);
                 const shift = @intCast(ShiftInt, index);
                 self.free_registers |= @as(FreeRegInt, 1) << shift;
+            }
+
+            /// Before calling, must ensureCapacity + 1 on branch.registers.
+            /// Returns `null` if all registers are allocated.
+            fn allocReg(self: *Branch, inst: *ir.Inst) ?Register {
+                const free_index = @ctz(FreeRegInt, self.free_registers);
+                if (free_index >= callee_preserved_regs.len) {
+                    return null;
+                }
+                self.free_registers &= ~(@as(FreeRegInt, 1) << free_index);
+                const reg = callee_preserved_regs[free_index];
+                self.registers.putAssumeCapacityNoClobber(reg, .{ .inst = inst });
+                return reg;
             }
 
             fn deinit(self: *Branch, gpa: *Allocator) void {
@@ -333,11 +369,6 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             const module_fn = typed_value.val.cast(Value.Payload.Function).?.func;
 
             const fn_type = module_fn.owner_decl.typed_value.most_recent.typed_value.ty;
-            const param_types = try bin_file.allocator.alloc(Type, fn_type.fnParamLen());
-            defer bin_file.allocator.free(param_types);
-            fn_type.fnParamTypes(param_types);
-            var mc_args = try bin_file.allocator.alloc(MCValue, param_types.len);
-            defer bin_file.allocator.free(mc_args);
 
             var branch_stack = std.ArrayList(Branch).init(bin_file.allocator);
             defer {
@@ -350,22 +381,31 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
 
             var function = Self{
                 .gpa = bin_file.allocator,
-                .target = &bin_file.options.target,
+                .target = &bin_file.base.options.target,
                 .bin_file = bin_file,
                 .mod_fn = module_fn,
                 .code = code,
                 .err_msg = null,
-                .args = mc_args,
+                .args = undefined, // populated after `resolveCallingConventionValues`
+                .ret_mcv = undefined, // populated after `resolveCallingConventionValues`
+                .fn_type = fn_type,
                 .arg_index = 0,
                 .branch_stack = &branch_stack,
                 .src = src,
+                .stack_align = undefined,
             };
+            defer function.exitlude_jump_relocs.deinit(bin_file.allocator);
 
-            const cc = fn_type.fnCallingConvention();
-            branch.max_end_stack = function.resolveParameters(src, cc, param_types, mc_args) catch |err| switch (err) {
+            var call_info = function.resolveCallingConventionValues(src, fn_type) catch |err| switch (err) {
                 error.CodegenFail => return Result{ .fail = function.err_msg.? },
                 else => |e| return e,
             };
+            defer call_info.deinit(&function);
+
+            function.args = call_info.args;
+            function.ret_mcv = call_info.return_value;
+            function.stack_align = call_info.stack_align;
+            branch.max_end_stack = call_info.stack_byte_count;
 
             function.gen() catch |err| switch (err) {
                 error.CodegenFail => return Result{ .fail = function.err_msg.? },
@@ -380,28 +420,78 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         }
 
         fn gen(self: *Self) !void {
-            try self.code.ensureCapacity(self.code.items.len + 11);
+            switch (arch) {
+                .x86_64 => {
+                    try self.code.ensureCapacity(self.code.items.len + 11);
 
-            // push rbp
-            // mov rbp, rsp
-            self.code.appendSliceAssumeCapacity(&[_]u8{ 0x55, 0x48, 0x89, 0xe5 });
+                    const cc = self.fn_type.fnCallingConvention();
+                    if (cc != .Naked) {
+                        // We want to subtract the aligned stack frame size from rsp here, but we don't
+                        // yet know how big it will be, so we leave room for a 4-byte stack size.
+                        // TODO During semantic analysis, check if there are no function calls. If there
+                        // are none, here we can omit the part where we subtract and then add rsp.
+                        self.code.appendSliceAssumeCapacity(&[_]u8{
+                            // push rbp
+                            0x55,
+                            // mov rbp, rsp
+                            0x48,
+                            0x89,
+                            0xe5,
+                            // sub rsp, imm32 (with reloc)
+                            0x48,
+                            0x81,
+                            0xec,
+                        });
+                        const reloc_index = self.code.items.len;
+                        self.code.items.len += 4;
 
-            // sub rsp, x
-            const stack_end = self.branch_stack.items[0].max_end_stack;
-            if (stack_end > std.math.maxInt(i32)) {
-                return self.fail(self.src, "too much stack used in call parameters", .{});
-            } else if (stack_end > std.math.maxInt(i8)) {
-                // 48 83 ec xx    sub rsp,0x10
-                self.code.appendSliceAssumeCapacity(&[_]u8{ 0x48, 0x81, 0xec });
-                const x = @intCast(u32, stack_end);
-                mem.writeIntLittle(u32, self.code.addManyAsArrayAssumeCapacity(4), x);
-            } else if (stack_end != 0) {
-                // 48 81 ec xx xx xx xx   sub rsp,0x80
-                const x = @intCast(u8, stack_end);
-                self.code.appendSliceAssumeCapacity(&[_]u8{ 0x48, 0x83, 0xec, x });
+                        try self.genBody(self.mod_fn.analysis.success);
+
+                        const stack_end = self.branch_stack.items[0].max_end_stack;
+                        if (stack_end > math.maxInt(i32))
+                            return self.fail(self.src, "too much stack used in call parameters", .{});
+                        const aligned_stack_end = mem.alignForward(stack_end, self.stack_align);
+                        mem.writeIntLittle(u32, self.code.items[reloc_index..][0..4], @intCast(u32, aligned_stack_end));
+
+                        if (self.code.items.len >= math.maxInt(i32)) {
+                            return self.fail(self.src, "unable to perform relocation: jump too far", .{});
+                        }
+                        for (self.exitlude_jump_relocs.items) |jmp_reloc| {
+                            const amt = self.code.items.len - (jmp_reloc + 4);
+                            // If it wouldn't jump at all, elide it.
+                            if (amt == 0) {
+                                self.code.items.len -= 5;
+                                continue;
+                            }
+                            const s32_amt = @intCast(i32, amt);
+                            mem.writeIntLittle(i32, self.code.items[jmp_reloc..][0..4], s32_amt);
+                        }
+
+                        try self.code.ensureCapacity(self.code.items.len + 9);
+                        // add rsp, x
+                        if (aligned_stack_end > math.maxInt(i8)) {
+                            // example: 48 81 c4 ff ff ff 7f  add    rsp,0x7fffffff
+                            self.code.appendSliceAssumeCapacity(&[_]u8{ 0x48, 0x81, 0xc4 });
+                            const x = @intCast(u32, aligned_stack_end);
+                            mem.writeIntLittle(u32, self.code.addManyAsArrayAssumeCapacity(4), x);
+                        } else if (aligned_stack_end != 0) {
+                            // example: 48 83 c4 7f           add    rsp,0x7f
+                            const x = @intCast(u8, aligned_stack_end);
+                            self.code.appendSliceAssumeCapacity(&[_]u8{ 0x48, 0x83, 0xc4, x });
+                        }
+
+                        self.code.appendSliceAssumeCapacity(&[_]u8{
+                            0x5d, // pop rbp
+                            0xc3, // ret
+                        });
+                    } else {
+                        try self.genBody(self.mod_fn.analysis.success);
+                    }
+                },
+                else => {
+                    try self.genBody(self.mod_fn.analysis.success);
+                },
             }
-
-            try self.genBody(self.mod_fn.analysis.success);
         }
 
         fn genBody(self: *Self, body: ir.Body) InnerError!void {
@@ -425,8 +515,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             entry.value = .dead;
             switch (prev_value) {
                 .register => |reg| {
-                    _ = branch.registers.remove(reg);
-                    branch.markRegFree(reg);
+                    const reg64 = reg.to64();
+                    _ = branch.registers.remove(reg64);
+                    branch.markRegFree(reg64);
                 },
                 else => {}, // TODO process stack allocation death
             }
@@ -435,6 +526,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         fn genFuncInst(self: *Self, inst: *ir.Inst) !MCValue {
             switch (inst.tag) {
                 .add => return self.genAdd(inst.castTag(.add).?),
+                .alloc => return self.genAlloc(inst.castTag(.alloc).?),
                 .arg => return self.genArg(inst.castTag(.arg).?),
                 .assembly => return self.genAsm(inst.castTag(.assembly).?),
                 .bitcast => return self.genBitCast(inst.castTag(.bitcast).?),
@@ -451,17 +543,88 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 .cmp_neq => return self.genCmp(inst.castTag(.cmp_neq).?, .neq),
                 .condbr => return self.genCondBr(inst.castTag(.condbr).?),
                 .constant => unreachable, // excluded from function bodies
-                .isnonnull => return self.genIsNonNull(inst.castTag(.isnonnull).?),
-                .isnull => return self.genIsNull(inst.castTag(.isnull).?),
-                .ptrtoint => return self.genPtrToInt(inst.castTag(.ptrtoint).?),
-                .ret => return self.genRet(inst.castTag(.ret).?),
-                .retvoid => return self.genRetVoid(inst.castTag(.retvoid).?),
-                .sub => return self.genSub(inst.castTag(.sub).?),
-                .unreach => return MCValue{ .unreach = {} },
-                .not => return self.genNot(inst.castTag(.not).?),
                 .floatcast => return self.genFloatCast(inst.castTag(.floatcast).?),
                 .intcast => return self.genIntCast(inst.castTag(.intcast).?),
+                .isnonnull => return self.genIsNonNull(inst.castTag(.isnonnull).?),
+                .isnull => return self.genIsNull(inst.castTag(.isnull).?),
+                .load => return self.genLoad(inst.castTag(.load).?),
+                .not => return self.genNot(inst.castTag(.not).?),
+                .ptrtoint => return self.genPtrToInt(inst.castTag(.ptrtoint).?),
+                .ref => return self.genRef(inst.castTag(.ref).?),
+                .ret => return self.genRet(inst.castTag(.ret).?),
+                .retvoid => return self.genRetVoid(inst.castTag(.retvoid).?),
+                .store => return self.genStore(inst.castTag(.store).?),
+                .sub => return self.genSub(inst.castTag(.sub).?),
+                .unreach => return MCValue{ .unreach = {} },
             }
+        }
+
+        fn allocMem(self: *Self, inst: *ir.Inst, abi_size: u32, abi_align: u32) !u32 {
+            if (abi_align > self.stack_align)
+                self.stack_align = abi_align;
+            const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
+            // TODO find a free slot instead of always appending
+            const offset = mem.alignForwardGeneric(u32, branch.next_stack_offset, abi_align);
+            branch.next_stack_offset = offset + abi_size;
+            if (branch.next_stack_offset > branch.max_end_stack)
+                branch.max_end_stack = branch.next_stack_offset;
+            try branch.stack.putNoClobber(self.gpa, offset, .{
+                .inst = inst,
+                .size = abi_size,
+            });
+            return offset;
+        }
+
+        /// Use a pointer instruction as the basis for allocating stack memory.
+        fn allocMemPtr(self: *Self, inst: *ir.Inst) !u32 {
+            const elem_ty = inst.ty.elemType();
+            const abi_size = math.cast(u32, elem_ty.abiSize(self.target.*)) catch {
+                return self.fail(inst.src, "type '{}' too big to fit into stack frame", .{elem_ty});
+            };
+            // TODO swap this for inst.ty.ptrAlign
+            const abi_align = elem_ty.abiAlignment(self.target.*);
+            return self.allocMem(inst, abi_size, abi_align);
+        }
+
+        fn allocRegOrMem(self: *Self, inst: *ir.Inst) !MCValue {
+            const elem_ty = inst.ty;
+            const abi_size = math.cast(u32, elem_ty.abiSize(self.target.*)) catch {
+                return self.fail(inst.src, "type '{}' too big to fit into stack frame", .{elem_ty});
+            };
+            const abi_align = elem_ty.abiAlignment(self.target.*);
+            if (abi_align > self.stack_align)
+                self.stack_align = abi_align;
+            const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
+
+            // Make sure the type can fit in a register before we try to allocate one.
+            const ptr_bits = arch.ptrBitWidth();
+            const ptr_bytes: u64 = @divExact(ptr_bits, 8);
+            if (abi_size <= ptr_bytes) {
+                try branch.registers.ensureCapacity(self.gpa, branch.registers.items().len + 1);
+                if (branch.allocReg(inst)) |reg| {
+                    return MCValue{ .register = registerAlias(reg, abi_size) };
+                }
+            }
+            const stack_offset = try self.allocMem(inst, abi_size, abi_align);
+            return MCValue{ .stack_offset = stack_offset };
+        }
+
+        /// Does not "move" the instruction.
+        fn copyToNewRegister(self: *Self, inst: *ir.Inst) !MCValue {
+            const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
+            try branch.registers.ensureCapacity(self.gpa, branch.registers.items().len + 1);
+
+            const reg = branch.allocReg(inst) orelse
+                return self.fail(inst.src, "TODO implement spilling register to stack", .{});
+            const old_mcv = branch.inst_table.get(inst).?;
+            const new_mcv: MCValue = .{ .register = reg };
+            try self.genSetReg(inst.src, reg, old_mcv);
+            return new_mcv;
+        }
+
+        fn genAlloc(self: *Self, inst: *ir.Inst.NoOp) !MCValue {
+            const stack_offset = try self.allocMemPtr(&inst.base);
+            return MCValue{ .ptr_stack_offset = stack_offset };
         }
 
         fn genFloatCast(self: *Self, inst: *ir.Inst.UnOp) !MCValue {
@@ -542,6 +705,87 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             }
         }
 
+        fn genLoad(self: *Self, inst: *ir.Inst.UnOp) !MCValue {
+            const elem_ty = inst.base.ty;
+            if (!elem_ty.hasCodeGenBits())
+                return MCValue.none;
+            const ptr = try self.resolveInst(inst.operand);
+            const is_volatile = inst.operand.ty.isVolatilePtr();
+            if (inst.base.isUnused() and !is_volatile)
+                return MCValue.dead;
+            const dst_mcv: MCValue = blk: {
+                if (inst.base.operandDies(0) and ptr.isMutable()) {
+                    // The MCValue that holds the pointer can be re-used as the value.
+                    // TODO track this in the register/stack allocation metadata.
+                    break :blk ptr;
+                } else {
+                    break :blk try self.allocRegOrMem(&inst.base);
+                }
+            };
+            switch (ptr) {
+                .none => unreachable,
+                .undef => unreachable,
+                .unreach => unreachable,
+                .dead => unreachable,
+                .compare_flags_unsigned => unreachable,
+                .compare_flags_signed => unreachable,
+                .immediate => |imm| try self.setRegOrMem(inst.base.src, elem_ty, dst_mcv, .{ .memory = imm }),
+                .ptr_stack_offset => |off| try self.setRegOrMem(inst.base.src, elem_ty, dst_mcv, .{ .stack_offset = off }),
+                .ptr_embedded_in_code => |off| {
+                    try self.setRegOrMem(inst.base.src, elem_ty, dst_mcv, .{ .embedded_in_code = off });
+                },
+                .embedded_in_code => {
+                    return self.fail(inst.base.src, "TODO implement loading from MCValue.embedded_in_code", .{});
+                },
+                .register => {
+                    return self.fail(inst.base.src, "TODO implement loading from MCValue.register", .{});
+                },
+                .memory => {
+                    return self.fail(inst.base.src, "TODO implement loading from MCValue.memory", .{});
+                },
+                .stack_offset => {
+                    return self.fail(inst.base.src, "TODO implement loading from MCValue.stack_offset", .{});
+                },
+            }
+            return dst_mcv;
+        }
+
+        fn genStore(self: *Self, inst: *ir.Inst.BinOp) !MCValue {
+            const ptr = try self.resolveInst(inst.lhs);
+            const value = try self.resolveInst(inst.rhs);
+            const elem_ty = inst.rhs.ty;
+            switch (ptr) {
+                .none => unreachable,
+                .undef => unreachable,
+                .unreach => unreachable,
+                .dead => unreachable,
+                .compare_flags_unsigned => unreachable,
+                .compare_flags_signed => unreachable,
+                .immediate => |imm| {
+                    try self.setRegOrMem(inst.base.src, elem_ty, .{ .memory = imm }, value);
+                },
+                .ptr_stack_offset => |off| {
+                    try self.genSetStack(inst.base.src, elem_ty, off, value);
+                },
+                .ptr_embedded_in_code => |off| {
+                    try self.setRegOrMem(inst.base.src, elem_ty, .{ .embedded_in_code = off }, value);
+                },
+                .embedded_in_code => {
+                    return self.fail(inst.base.src, "TODO implement storing to MCValue.embedded_in_code", .{});
+                },
+                .register => {
+                    return self.fail(inst.base.src, "TODO implement storing to MCValue.register", .{});
+                },
+                .memory => {
+                    return self.fail(inst.base.src, "TODO implement storing to MCValue.memory", .{});
+                },
+                .stack_offset => {
+                    return self.fail(inst.base.src, "TODO implement storing to MCValue.stack_offset", .{});
+                },
+            }
+            return .none;
+        }
+
         fn genSub(self: *Self, inst: *ir.Inst.BinOp) !MCValue {
             // No side effects, so if it's unreferenced, do nothing.
             if (inst.base.isUnused())
@@ -609,7 +853,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             // and as a register.
             switch (src_mcv) {
                 .immediate => |imm| {
-                    if (imm > std.math.maxInt(u31)) {
+                    if (imm > math.maxInt(u31)) {
                         src_mcv = try self.copyToNewRegister(src_inst);
                     }
                 },
@@ -624,13 +868,19 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         fn genX8664BinMathCode(self: *Self, src: usize, dst_mcv: MCValue, src_mcv: MCValue, opx: u8, mr: u8) !void {
             switch (dst_mcv) {
                 .none => unreachable,
+                .undef => unreachable,
                 .dead, .unreach, .immediate => unreachable,
                 .compare_flags_unsigned => unreachable,
                 .compare_flags_signed => unreachable,
+                .ptr_stack_offset => unreachable,
+                .ptr_embedded_in_code => unreachable,
                 .register => |dst_reg| {
                     switch (src_mcv) {
                         .none => unreachable,
+                        .undef => try self.genSetReg(src, dst_reg, .undef),
                         .dead, .unreach => unreachable,
+                        .ptr_stack_offset => unreachable,
+                        .ptr_embedded_in_code => unreachable,
                         .register => |src_reg| {
                             self.rex(.{ .b = dst_reg.isExtended(), .r = src_reg.isExtended(), .w = dst_reg.size() == 64 });
                             self.code.appendSliceAssumeCapacity(&[_]u8{ mr + 0x1, 0xC0 | (@as(u8, src_reg.id() & 0b111) << 3) | @as(u8, dst_reg.id() & 0b111) });
@@ -638,7 +888,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         .immediate => |imm| {
                             const imm32 = @intCast(u31, imm); // This case must be handled before calling genX8664BinMathCode.
                             // 81 /opx id
-                            if (imm32 <= std.math.maxInt(u7)) {
+                            if (imm32 <= math.maxInt(u7)) {
                                 self.rex(.{ .b = dst_reg.isExtended(), .w = dst_reg.size() == 64 });
                                 self.code.appendSliceAssumeCapacity(&[_]u8{
                                     0x83,
@@ -705,20 +955,16 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         }
 
         fn genCall(self: *Self, inst: *ir.Inst.Call) !MCValue {
-            const fn_ty = inst.func.ty;
-            const cc = fn_ty.fnCallingConvention();
-            const param_types = try self.gpa.alloc(Type, fn_ty.fnParamLen());
-            defer self.gpa.free(param_types);
-            fn_ty.fnParamTypes(param_types);
-            var mc_args = try self.gpa.alloc(MCValue, param_types.len);
-            defer self.gpa.free(mc_args);
-            const stack_byte_count = try self.resolveParameters(inst.base.src, cc, param_types, mc_args);
+            var info = try self.resolveCallingConventionValues(inst.base.src, inst.func.ty);
+            defer info.deinit(self);
 
             switch (arch) {
                 .x86_64 => {
-                    for (mc_args) |mc_arg, arg_i| {
+                    for (info.args) |mc_arg, arg_i| {
                         const arg = inst.args[arg_i];
                         const arg_mcv = try self.resolveInst(inst.args[arg_i]);
+                        // Here we do not use setRegOrMem even though the logic is similar, because
+                        // the function call will move the stack pointer, so the offsets are different.
                         switch (mc_arg) {
                             .none => continue,
                             .register => |reg| {
@@ -730,6 +976,13 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                                 // mov     qword ptr [rsp + stack_offset], x
                                 return self.fail(inst.base.src, "TODO implement calling with parameters in memory", .{});
                             },
+                            .ptr_stack_offset => {
+                                return self.fail(inst.base.src, "TODO implement calling with MCValue.ptr_stack_offset arg", .{});
+                            },
+                            .ptr_embedded_in_code => {
+                                return self.fail(inst.base.src, "TODO implement calling with MCValue.ptr_embedded_in_code arg", .{});
+                            },
+                            .undef => unreachable,
                             .immediate => unreachable,
                             .unreach => unreachable,
                             .dead => unreachable,
@@ -761,27 +1014,50 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 else => return self.fail(inst.base.src, "TODO implement call for {}", .{self.target.cpu.arch}),
             }
 
-            const return_type = fn_ty.fnReturnType();
-            switch (return_type.zigTypeTag()) {
-                .Void => return MCValue{ .none = {} },
-                .NoReturn => return MCValue{ .unreach = {} },
-                else => return self.fail(inst.base.src, "TODO implement fn call with non-void return value", .{}),
+            return info.return_value;
+        }
+
+        fn genRef(self: *Self, inst: *ir.Inst.UnOp) !MCValue {
+            const operand = try self.resolveInst(inst.operand);
+            switch (operand) {
+                .unreach => unreachable,
+                .dead => unreachable,
+                .none => return .none,
+
+                .immediate,
+                .register,
+                .ptr_stack_offset,
+                .ptr_embedded_in_code,
+                .compare_flags_unsigned,
+                .compare_flags_signed,
+                => {
+                    const stack_offset = try self.allocMemPtr(&inst.base);
+                    try self.genSetStack(inst.base.src, inst.operand.ty, stack_offset, operand);
+                    return MCValue{ .ptr_stack_offset = stack_offset };
+                },
+
+                .stack_offset => |offset| return MCValue{ .ptr_stack_offset = offset },
+                .embedded_in_code => |offset| return MCValue{ .ptr_embedded_in_code = offset },
+                .memory => |vaddr| return MCValue{ .immediate = vaddr },
+
+                .undef => return self.fail(inst.base.src, "TODO implement ref on an undefined value", .{}),
             }
         }
 
         fn ret(self: *Self, src: usize, mcv: MCValue) !MCValue {
-            if (mcv != .none) {
-                return self.fail(src, "TODO implement return with non-void operand", .{});
-            }
+            const ret_ty = self.fn_type.fnReturnType();
+            try self.setRegOrMem(src, ret_ty, self.ret_mcv, mcv);
             switch (arch) {
                 .i386 => {
                     try self.code.append(0xc3); // ret
                 },
                 .x86_64 => {
-                    try self.code.appendSlice(&[_]u8{
-                        0x5d, // pop rbp
-                        0xc3, // ret
-                    });
+                    // TODO when implementing defer, this will need to jump to the appropriate defer expression.
+                    // TODO optimization opportunity: figure out when we can emit this as a 2 byte instruction
+                    // which is available if the jump is 127 bytes or less forward.
+                    try self.code.resize(self.code.items.len + 5);
+                    self.code.items[self.code.items.len - 5] = 0xe9; // jmp rel32
+                    try self.exitlude_jump_relocs.append(self.gpa, self.code.items.len - 4);
                 },
                 else => return self.fail(src, "TODO implement return for {}", .{self.target.cpu.arch}),
             }
@@ -797,7 +1073,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             return self.ret(inst.base.src, .none);
         }
 
-        fn genCmp(self: *Self, inst: *ir.Inst.BinOp, op: std.math.CompareOperator) !MCValue {
+        fn genCmp(self: *Self, inst: *ir.Inst.BinOp, op: math.CompareOperator) !MCValue {
             // No side effects, so if it's unreferenced, do nothing.
             if (inst.base.isUnused())
                 return MCValue.dead;
@@ -865,7 +1141,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             // test reg, 1
                             // TODO detect al, ax, eax
                             try self.code.ensureCapacity(self.code.items.len + 4);
-                            self.rex(.{ .b = reg.isExtended(), .w = reg.size() == 64 });
+                            // TODO audit this codegen: we force w = true here to make
+                            // the value affect the big register
+                            self.rex(.{ .b = reg.isExtended(), .w = true });
                             self.code.appendSliceAssumeCapacity(&[_]u8{
                                 0xf6,
                                 @as(u8, 0xC0) | (0 << 3) | @truncate(u3, reg.id()),
@@ -921,7 +1199,12 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             switch (reloc) {
                 .rel32 => |pos| {
                     const amt = self.code.items.len - (pos + 4);
-                    const s32_amt = std.math.cast(i32, amt) catch
+                    // If it wouldn't jump at all, elide it.
+                    if (amt == 0) {
+                        self.code.items.len -= 5;
+                        return;
+                    }
+                    const s32_amt = math.cast(i32, amt) catch
                         return self.fail(src, "unable to perform relocation: jump too far", .{});
                     mem.writeIntLittle(i32, self.code.items[pos..][0..4], s32_amt);
                 },
@@ -1024,15 +1307,142 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             }
         }
 
-        fn genSetReg(self: *Self, src: usize, reg: Register, mcv: MCValue) error{ CodegenFail, OutOfMemory }!void {
+        /// Sets the value without any modifications to register allocation metadata or stack allocation metadata.
+        fn setRegOrMem(self: *Self, src: usize, ty: Type, loc: MCValue, val: MCValue) !void {
+            switch (loc) {
+                .none => return,
+                .register => |reg| return self.genSetReg(src, reg, val),
+                .stack_offset => |off| return self.genSetStack(src, ty, off, val),
+                .memory => {
+                    return self.fail(src, "TODO implement setRegOrMem for memory", .{});
+                },
+                else => unreachable,
+            }
+        }
+
+        fn genSetStack(self: *Self, src: usize, ty: Type, stack_offset: u32, mcv: MCValue) InnerError!void {
             switch (arch) {
                 .x86_64 => switch (mcv) {
                     .dead => unreachable,
-                    .none => unreachable,
-                    .unreach => unreachable,
+                    .ptr_stack_offset => unreachable,
+                    .ptr_embedded_in_code => unreachable,
+                    .unreach, .none => return, // Nothing to do.
+                    .undef => {
+                        if (!self.wantSafety())
+                            return; // The already existing value will do just fine.
+                        // TODO Upgrade this to a memset call when we have that available.
+                        switch (ty.abiSize(self.target.*)) {
+                            1 => return self.genSetStack(src, ty, stack_offset, .{ .immediate = 0xaa }),
+                            2 => return self.genSetStack(src, ty, stack_offset, .{ .immediate = 0xaaaa }),
+                            4 => return self.genSetStack(src, ty, stack_offset, .{ .immediate = 0xaaaaaaaa }),
+                            8 => return self.genSetStack(src, ty, stack_offset, .{ .immediate = 0xaaaaaaaaaaaaaaaa }),
+                            else => return self.fail(src, "TODO implement memset", .{}),
+                        }
+                    },
+                    .compare_flags_unsigned => |op| {
+                        return self.fail(src, "TODO implement set stack variable with compare flags value (unsigned)", .{});
+                    },
+                    .compare_flags_signed => |op| {
+                        return self.fail(src, "TODO implement set stack variable with compare flags value (signed)", .{});
+                    },
+                    .immediate => |x_big| {
+                        const abi_size = ty.abiSize(self.target.*);
+                        const adj_off = stack_offset + abi_size;
+                        if (adj_off > 128) {
+                            return self.fail(src, "TODO implement set stack variable with large stack offset", .{});
+                        }
+                        try self.code.ensureCapacity(self.code.items.len + 8);
+                        switch (abi_size) {
+                            1 => {
+                                return self.fail(src, "TODO implement set abi_size=1 stack variable with immediate", .{});
+                            },
+                            2 => {
+                                return self.fail(src, "TODO implement set abi_size=2 stack variable with immediate", .{});
+                            },
+                            4 => {
+                                const x = @intCast(u32, x_big);
+                                // We have a positive stack offset value but we want a twos complement negative
+                                // offset from rbp, which is at the top of the stack frame.
+                                const negative_offset = @intCast(i8, -@intCast(i32, adj_off));
+                                const twos_comp = @bitCast(u8, negative_offset);
+                                // mov    DWORD PTR [rbp+offset], immediate
+                                self.code.appendSliceAssumeCapacity(&[_]u8{ 0xc7, 0x45, twos_comp });
+                                mem.writeIntLittle(u32, self.code.addManyAsArrayAssumeCapacity(4), x);
+                            },
+                            8 => {
+                                return self.fail(src, "TODO implement set abi_size=8 stack variable with immediate", .{});
+                            },
+                            else => {
+                                return self.fail(src, "TODO implement set abi_size=large stack variable with immediate", .{});
+                            },
+                        }
+                        if (x_big <= math.maxInt(u32)) {} else {
+                            return self.fail(src, "TODO implement set stack variable with large immediate", .{});
+                        }
+                    },
+                    .embedded_in_code => |code_offset| {
+                        return self.fail(src, "TODO implement set stack variable from embedded_in_code", .{});
+                    },
+                    .register => |reg| {
+                        const abi_size = ty.abiSize(self.target.*);
+                        const adj_off = stack_offset + abi_size;
+                        try self.code.ensureCapacity(self.code.items.len + 7);
+                        self.rex(.{ .w = reg.size() == 64, .b = reg.isExtended() });
+                        const reg_id: u8 = @truncate(u3, reg.id());
+                        if (adj_off <= 128) {
+                            // example: 48 89 55 7f           mov    QWORD PTR [rbp+0x7f],rdx
+                            const RM = @as(u8, 0b01_000_101) | (reg_id << 3);
+                            const negative_offset = @intCast(i8, -@intCast(i32, adj_off));
+                            const twos_comp = @bitCast(u8, negative_offset);
+                            self.code.appendSliceAssumeCapacity(&[_]u8{ 0x89, RM, twos_comp });
+                        } else if (adj_off <= 2147483648) {
+                            // example: 48 89 95 80 00 00 00  mov    QWORD PTR [rbp+0x80],rdx
+                            const RM = @as(u8, 0b10_000_101) | (reg_id << 3);
+                            const negative_offset = @intCast(i32, -@intCast(i33, adj_off));
+                            const twos_comp = @bitCast(u32, negative_offset);
+                            self.code.appendSliceAssumeCapacity(&[_]u8{ 0x89, RM });
+                            mem.writeIntLittle(u32, self.code.addManyAsArrayAssumeCapacity(4), twos_comp);
+                        } else {
+                            return self.fail(src, "stack offset too large", .{});
+                        }
+                    },
+                    .memory => |vaddr| {
+                        return self.fail(src, "TODO implement set stack variable from memory vaddr", .{});
+                    },
+                    .stack_offset => |off| {
+                        if (stack_offset == off)
+                            return; // Copy stack variable to itself; nothing to do.
+                        return self.fail(src, "TODO implement copy stack variable to stack variable", .{});
+                    },
+                },
+                else => return self.fail(src, "TODO implement getSetStack for {}", .{self.target.cpu.arch}),
+            }
+        }
+
+        fn genSetReg(self: *Self, src: usize, reg: Register, mcv: MCValue) InnerError!void {
+            switch (arch) {
+                .x86_64 => switch (mcv) {
+                    .dead => unreachable,
+                    .ptr_stack_offset => unreachable,
+                    .ptr_embedded_in_code => unreachable,
+                    .unreach, .none => return, // Nothing to do.
+                    .undef => {
+                        if (!self.wantSafety())
+                            return; // The already existing value will do just fine.
+                        // Write the debug undefined value.
+                        switch (reg.size()) {
+                            8 => return self.genSetReg(src, reg, .{ .immediate = 0xaa }),
+                            16 => return self.genSetReg(src, reg, .{ .immediate = 0xaaaa }),
+                            32 => return self.genSetReg(src, reg, .{ .immediate = 0xaaaaaaaa }),
+                            64 => return self.genSetReg(src, reg, .{ .immediate = 0xaaaaaaaaaaaaaaaa }),
+                            else => unreachable,
+                        }
+                    },
                     .compare_flags_unsigned => |op| {
                         try self.code.ensureCapacity(self.code.items.len + 3);
-                        self.rex(.{ .b = reg.isExtended(), .w = reg.size() == 64 });
+                        // TODO audit this codegen: we force w = true here to make
+                        // the value affect the big register
+                        self.rex(.{ .b = reg.isExtended(), .w = true });
                         const opcode: u8 = switch (op) {
                             .gte => 0x93,
                             .gt => 0x97,
@@ -1048,9 +1458,6 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         return self.fail(src, "TODO set register with compare flags value (signed)", .{});
                     },
                     .immediate => |x| {
-                        if (reg.size() != 64) {
-                            return self.fail(src, "TODO decide whether to implement non-64-bit loads", .{});
-                        }
                         // 32-bit moves zero-extend to 64-bit, so xoring the 32-bit
                         // register is the fastest way to zero a register.
                         if (x == 0) {
@@ -1071,7 +1478,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             self.code.appendSliceAssumeCapacity(&[_]u8{ 0x31, 0xC0 | id << 3 | id });
                             return;
                         }
-                        if (x <= std.math.maxInt(u32)) {
+                        if (x <= math.maxInt(u32)) {
                             // Next best case: if we set the lower four bytes, the upper four will be zeroed.
                             //
                             // The encoding for `mov IMM32 -> REG` is (0xB8 + R) IMM.
@@ -1103,16 +1510,13 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         //
                         // In this case, the encoding of the REX byte is 0b0100100B
                         try self.code.ensureCapacity(self.code.items.len + 10);
-                        self.rex(.{ .w = true, .b = reg.isExtended() });
+                        self.rex(.{ .w = reg.size() == 64, .b = reg.isExtended() });
                         self.code.items.len += 9;
                         self.code.items[self.code.items.len - 9] = 0xB8 | @as(u8, reg.id() & 0b111);
                         const imm_ptr = self.code.items[self.code.items.len - 8 ..][0..8];
                         mem.writeIntLittle(u64, imm_ptr, x);
                     },
                     .embedded_in_code => |code_offset| {
-                        if (reg.size() != 64) {
-                            return self.fail(src, "TODO decide whether to implement non-64-bit loads", .{});
-                        }
                         // We need the offset from RIP in a signed i32 twos complement.
                         // The instruction is 7 bytes long and RIP points to the next instruction.
                         try self.code.ensureCapacity(self.code.items.len + 7);
@@ -1120,7 +1524,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         // but the operation size is unchanged. Since we're using a disp32, we want mode 0 and lower three
                         // bits as five.
                         // REX 0x8D 0b00RRR101, where RRR is the lower three bits of the id.
-                        self.rex(.{ .w = true, .b = reg.isExtended() });
+                        self.rex(.{ .w = reg.size() == 64, .b = reg.isExtended() });
                         self.code.items.len += 6;
                         const rip = self.code.items.len;
                         const big_offset = @intCast(i64, code_offset) - @intCast(i64, rip);
@@ -1131,9 +1535,10 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         mem.writeIntLittle(i32, imm_ptr, offset);
                     },
                     .register => |src_reg| {
-                        if (reg.size() != 64) {
-                            return self.fail(src, "TODO decide whether to implement non-64-bit loads", .{});
-                        }
+                        // If the registers are the same, nothing to do.
+                        if (src_reg.id() == reg.id())
+                            return;
+
                         // This is a variant of 8B /r. Since we're using 64-bit moves, we require a REX.
                         // This is thus three bytes: REX 0x8B R/M.
                         // If the destination is extended, the R field must be 1.
@@ -1141,15 +1546,12 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         // Since the register is being accessed directly, the R/M mode is three. The reg field (the middle
                         // three bits) contain the destination, and the R/M field (the lower three bits) contain the source.
                         try self.code.ensureCapacity(self.code.items.len + 3);
-                        self.rex(.{ .w = true, .r = reg.isExtended(), .b = src_reg.isExtended() });
+                        self.rex(.{ .w = reg.size() == 64, .r = reg.isExtended(), .b = src_reg.isExtended() });
                         const R = 0xC0 | (@as(u8, reg.id() & 0b111) << 3) | @as(u8, src_reg.id() & 0b111);
                         self.code.appendSliceAssumeCapacity(&[_]u8{ 0x8B, R });
                     },
                     .memory => |x| {
-                        if (reg.size() != 64) {
-                            return self.fail(src, "TODO decide whether to implement non-64-bit loads", .{});
-                        }
-                        if (x <= std.math.maxInt(u32)) {
+                        if (x <= math.maxInt(u32)) {
                             // Moving from memory to a register is a variant of `8B /r`.
                             // Since we're using 64-bit moves, we require a REX.
                             // This variant also requires a SIB, as it would otherwise be RIP-relative.
@@ -1158,7 +1560,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             // 0b00RRR100, where RRR is the lower three bits of the register ID.
                             // The instruction is thus eight bytes; REX 0x8B 0b00RRR100 0x25 followed by a four-byte disp32.
                             try self.code.ensureCapacity(self.code.items.len + 8);
-                            self.rex(.{ .w = true, .b = reg.isExtended() });
+                            self.rex(.{ .w = reg.size() == 64, .b = reg.isExtended() });
                             self.code.appendSliceAssumeCapacity(&[_]u8{
                                 0x8B,
                                 0x04 | (@as(u8, reg.id() & 0b111) << 3), // R
@@ -1186,7 +1588,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                                 // is no way to possibly encode it. This means that RSP, RBP, R12, and R13 cannot be used with
                                 // this instruction.
                                 const id3 = @truncate(u3, reg.id());
-                                std.debug.assert(id3 != 4 and id3 != 5);
+                                assert(id3 != 4 and id3 != 5);
 
                                 // Rather than duplicate the logic used for the move, we just use a self-call with a new MCValue.
                                 try self.genSetReg(src, reg, MCValue{ .immediate = x });
@@ -1201,17 +1603,37 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                                 //
                                 // Furthermore, if this is an extended register, both B and R must be set in the REX byte, as *both*
                                 // register operands need to be marked as extended.
-                                self.rex(.{ .w = true, .b = reg.isExtended(), .r = reg.isExtended() });
+                                self.rex(.{ .w = reg.size() == 64, .b = reg.isExtended(), .r = reg.isExtended() });
                                 const RM = (@as(u8, reg.id() & 0b111) << 3) | @truncate(u3, reg.id());
                                 self.code.appendSliceAssumeCapacity(&[_]u8{ 0x8B, RM });
                             }
                         }
                     },
-                    .stack_offset => |off| {
-                        return self.fail(src, "TODO implement genSetReg for stack variables", .{});
+                    .stack_offset => |unadjusted_off| {
+                        try self.code.ensureCapacity(self.code.items.len + 7);
+                        const size_bytes = @divExact(reg.size(), 8);
+                        const off = unadjusted_off + size_bytes;
+                        self.rex(.{ .w = reg.size() == 64, .r = reg.isExtended() });
+                        const reg_id: u8 = @truncate(u3, reg.id());
+                        if (off <= 128) {
+                            // Example: 48 8b 4d 7f           mov    rcx,QWORD PTR [rbp+0x7f]
+                            const RM = @as(u8, 0b01_000_101) | (reg_id << 3);
+                            const negative_offset = @intCast(i8, -@intCast(i32, off));
+                            const twos_comp = @bitCast(u8, negative_offset);
+                            self.code.appendSliceAssumeCapacity(&[_]u8{ 0x8b, RM, twos_comp });
+                        } else if (off <= 2147483648) {
+                            // Example: 48 8b 8d 80 00 00 00  mov    rcx,QWORD PTR [rbp+0x80]
+                            const RM = @as(u8, 0b10_000_101) | (reg_id << 3);
+                            const negative_offset = @intCast(i32, -@intCast(i33, off));
+                            const twos_comp = @bitCast(u32, negative_offset);
+                            self.code.appendSliceAssumeCapacity(&[_]u8{ 0x8b, RM });
+                            mem.writeIntLittle(u32, self.code.addManyAsArrayAssumeCapacity(4), twos_comp);
+                        } else {
+                            return self.fail(src, "stack offset too large", .{});
+                        }
                     },
                 },
-                else => return self.fail(src, "TODO implement genSetReg for more architectures", .{}),
+                else => return self.fail(src, "TODO implement getSetReg for {}", .{self.target.cpu.arch}),
             }
         }
 
@@ -1247,24 +1669,6 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             }
         }
 
-        /// Does not "move" the instruction.
-        fn copyToNewRegister(self: *Self, inst: *ir.Inst) !MCValue {
-            const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
-            try branch.registers.ensureCapacity(self.gpa, branch.registers.items().len + 1);
-            try branch.inst_table.ensureCapacity(self.gpa, branch.inst_table.items().len + 1);
-
-            const free_index = @ctz(FreeRegInt, branch.free_registers);
-            if (free_index >= callee_preserved_regs.len)
-                return self.fail(inst.src, "TODO implement spilling register to stack", .{});
-            branch.free_registers &= ~(@as(FreeRegInt, 1) << free_index);
-            const reg = callee_preserved_regs[free_index];
-            branch.registers.putAssumeCapacityNoClobber(reg, .{ .inst = inst });
-            const old_mcv = branch.inst_table.get(inst).?;
-            const new_mcv: MCValue = .{ .register = reg };
-            try self.genSetReg(inst.src, reg, old_mcv);
-            return new_mcv;
-        }
-
         /// If the MCValue is an immediate, and it does not fit within this type,
         /// we put it in a register.
         /// A potential opportunity for future optimization here would be keeping track
@@ -1282,7 +1686,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             .is_signed = false,
                         },
                     });
-                    if (imm >= std.math.maxInt(U)) {
+                    if (imm >= math.maxInt(U)) {
                         return self.copyToNewRegister(inst);
                     }
                 },
@@ -1292,6 +1696,8 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         }
 
         fn genTypedValue(self: *Self, src: usize, typed_value: TypedValue) !MCValue {
+            if (typed_value.val.isUndef())
+                return MCValue.undef;
             const ptr_bits = self.target.cpu.arch.ptrBitWidth();
             const ptr_bytes: u64 = @divExact(ptr_bits, 8);
             switch (typed_value.ty.zigTypeTag()) {
@@ -1320,19 +1726,44 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             }
         }
 
-        fn resolveParameters(
-            self: *Self,
-            src: usize,
-            cc: std.builtin.CallingConvention,
-            param_types: []const Type,
-            results: []MCValue,
-        ) !u32 {
+        const CallMCValues = struct {
+            args: []MCValue,
+            return_value: MCValue,
+            stack_byte_count: u32,
+            stack_align: u32,
+
+            fn deinit(self: *CallMCValues, func: *Self) void {
+                func.gpa.free(self.args);
+                self.* = undefined;
+            }
+        };
+
+        /// Caller must call `CallMCValues.deinit`.
+        fn resolveCallingConventionValues(self: *Self, src: usize, fn_ty: Type) !CallMCValues {
+            const cc = fn_ty.fnCallingConvention();
+            const param_types = try self.gpa.alloc(Type, fn_ty.fnParamLen());
+            defer self.gpa.free(param_types);
+            fn_ty.fnParamTypes(param_types);
+            var result: CallMCValues = .{
+                .args = try self.gpa.alloc(MCValue, param_types.len),
+                // These undefined values must be populated before returning from this function.
+                .return_value = undefined,
+                .stack_byte_count = undefined,
+                .stack_align = undefined,
+            };
+            errdefer self.gpa.free(result.args);
+
+            const ret_ty = fn_ty.fnReturnType();
+
             switch (arch) {
                 .x86_64 => {
                     switch (cc) {
                         .Naked => {
-                            assert(results.len == 0);
-                            return 0;
+                            assert(result.args.len == 0);
+                            result.return_value = .{ .unreach = {} };
+                            result.stack_byte_count = 0;
+                            result.stack_align = 1;
+                            return result;
                         },
                         .Unspecified, .C => {
                             var next_int_reg: usize = 0;
@@ -1341,24 +1772,58 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             for (param_types) |ty, i| {
                                 switch (ty.zigTypeTag()) {
                                     .Bool, .Int => {
+                                        const param_size = @intCast(u32, ty.abiSize(self.target.*));
                                         if (next_int_reg >= c_abi_int_param_regs.len) {
-                                            results[i] = .{ .stack_offset = next_stack_offset };
-                                            next_stack_offset += @intCast(u32, ty.abiSize(self.target.*));
+                                            result.args[i] = .{ .stack_offset = next_stack_offset };
+                                            next_stack_offset += param_size;
                                         } else {
-                                            results[i] = .{ .register = c_abi_int_param_regs[next_int_reg] };
+                                            const aliased_reg = registerAlias(
+                                                c_abi_int_param_regs[next_int_reg],
+                                                param_size,
+                                            );
+                                            result.args[i] = .{ .register = aliased_reg };
                                             next_int_reg += 1;
                                         }
                                     },
                                     else => return self.fail(src, "TODO implement function parameters of type {}", .{@tagName(ty.zigTypeTag())}),
                                 }
                             }
-                            return next_stack_offset;
+                            result.stack_byte_count = next_stack_offset;
+                            result.stack_align = 16;
                         },
                         else => return self.fail(src, "TODO implement function parameters for {}", .{cc}),
                     }
                 },
-                else => return self.fail(src, "TODO implement C ABI support for {}", .{self.target.cpu.arch}),
+                else => return self.fail(src, "TODO implement codegen parameters for {}", .{self.target.cpu.arch}),
             }
+
+            if (ret_ty.zigTypeTag() == .NoReturn) {
+                result.return_value = .{ .unreach = {} };
+            } else if (!ret_ty.hasCodeGenBits()) {
+                result.return_value = .{ .none = {} };
+            } else switch (arch) {
+                .x86_64 => switch (cc) {
+                    .Naked => unreachable,
+                    .Unspecified, .C => {
+                        const ret_ty_size = @intCast(u32, ret_ty.abiSize(self.target.*));
+                        const aliased_reg = registerAlias(c_abi_int_return_regs[0], ret_ty_size);
+                        result.return_value = .{ .register = aliased_reg };
+                    },
+                    else => return self.fail(src, "TODO implement function return values for {}", .{cc}),
+                },
+                else => return self.fail(src, "TODO implement codegen return values for {}", .{self.target.cpu.arch}),
+            }
+            return result;
+        }
+
+        /// TODO support scope overrides. Also note this logic is duplicated with `Module.wantSafety`.
+        fn wantSafety(self: *Self) bool {
+            return switch (self.bin_file.base.options.optimize_mode) {
+                .Debug => true,
+                .ReleaseSafe => true,
+                .ReleaseFast => false,
+                .ReleaseSmall => false,
+            };
         }
 
         fn fail(self: *Self, src: usize, comptime format: []const u8, args: anytype) error{ CodegenFail, OutOfMemory } {
@@ -1388,6 +1853,20 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
 
         fn parseRegName(name: []const u8) ?Register {
             return std.meta.stringToEnum(Register, name);
+        }
+
+        fn registerAlias(reg: Register, size_bytes: u32) Register {
+            switch (arch) {
+                // For x86_64 we have to pick a smaller register alias depending on abi size.
+                .x86_64 => switch (size_bytes) {
+                    1 => return reg.to8(),
+                    2 => return reg.to16(),
+                    4 => return reg.to32(),
+                    8 => return reg.to64(),
+                    else => unreachable,
+                },
+                else => return reg,
+            }
         }
     };
 }

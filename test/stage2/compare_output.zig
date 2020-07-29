@@ -169,8 +169,37 @@ pub fn addCases(ctx: *TestContext) !void {
         ,
             "",
         );
+    }
 
-        // Tests the assert() function.
+    {
+        var case = ctx.exe("substracting numbers at runtime", linux_x64);
+        case.addCompareOutput(
+            \\export fn _start() noreturn {
+            \\    sub(7, 4);
+            \\
+            \\    exit();
+            \\}
+            \\
+            \\fn sub(a: u32, b: u32) void {
+            \\    if (a - b != 3) unreachable;
+            \\}
+            \\
+            \\fn exit() noreturn {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (231),
+            \\          [arg1] "{rdi}" (0)
+            \\        : "rcx", "r11", "memory"
+            \\    );
+            \\    unreachable;
+            \\}
+        ,
+            "",
+        );
+    }
+
+    {
+        var case = ctx.exe("assert function", linux_x64);
         case.addCompareOutput(
             \\export fn _start() noreturn {
             \\    add(3, 4);
@@ -286,6 +315,70 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    const i = g + h; // 100
             \\    const j = i + d; // 110
             \\    assert(j == 110);
+            \\}
+            \\
+            \\pub fn assert(ok: bool) void {
+            \\    if (!ok) unreachable; // assertion failure
+            \\}
+            \\
+            \\fn exit() noreturn {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (231),
+            \\          [arg1] "{rdi}" (0)
+            \\        : "rcx", "r11", "memory"
+            \\    );
+            \\    unreachable;
+            \\}
+        ,
+            "",
+        );
+
+        // Now we test integer return values.
+        case.addCompareOutput(
+            \\export fn _start() noreturn {
+            \\    assert(add(3, 4) == 7);
+            \\    assert(add(20, 10) == 30);
+            \\
+            \\    exit();
+            \\}
+            \\
+            \\fn add(a: u32, b: u32) u32 {
+            \\    return a + b;
+            \\}
+            \\
+            \\pub fn assert(ok: bool) void {
+            \\    if (!ok) unreachable; // assertion failure
+            \\}
+            \\
+            \\fn exit() noreturn {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (231),
+            \\          [arg1] "{rdi}" (0)
+            \\        : "rcx", "r11", "memory"
+            \\    );
+            \\    unreachable;
+            \\}
+        ,
+            "",
+        );
+
+        // Local mutable variables.
+        case.addCompareOutput(
+            \\export fn _start() noreturn {
+            \\    assert(add(3, 4) == 7);
+            \\    assert(add(20, 10) == 30);
+            \\
+            \\    exit();
+            \\}
+            \\
+            \\fn add(a: u32, b: u32) u32 {
+            \\    var x: u32 = undefined;
+            \\    x = 0;
+            \\    x += a;
+            \\    x += b;
+            \\    return x;
             \\}
             \\
             \\pub fn assert(ok: bool) void {

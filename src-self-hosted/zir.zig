@@ -34,18 +34,77 @@ pub const Inst = struct {
 
     /// These names are used directly as the instruction names in the text format.
     pub const Tag = enum {
+        /// Arithmetic addition, asserts no integer overflow.
+        add,
+        /// Twos complement wrapping integer addition.
+        addwrap,
+        /// Allocates stack local memory. Its lifetime ends when the block ends that contains
+        /// this instruction. The operand is the type of the allocated object.
+        alloc,
+        /// Same as `alloc` except the type is inferred.
+        alloc_inferred,
+        /// Array concatenation. `a ++ b`
+        array_cat,
+        /// Array multiplication `a ** b`
+        array_mul,
         /// Function parameter value. These must be first in a function's main block,
         /// in respective order with the parameters.
         arg,
+        /// Type coercion.
+        as,
+        /// Inline assembly.
+        @"asm",
+        /// Bitwise AND. `&`
+        bitand,
+        /// TODO delete this instruction, it has no purpose.
+        bitcast,
+        /// An arbitrary typed pointer, which is to be used as an L-Value, is pointer-casted
+        /// to a new L-Value. The destination type is given by LHS. The cast is to be evaluated
+        /// as if it were a bit-cast operation from the operand pointer element type to the
+        /// provided destination type.
+        bitcast_lvalue,
+        /// A typed result location pointer is bitcasted to a new result location pointer.
+        /// The new result location pointer has an inferred type.
+        bitcast_result_ptr,
+        /// Bitwise OR. `|`
+        bitor,
         /// A labeled block of code, which can return a value.
         block,
+        /// Boolean NOT. See also `bitnot`.
+        boolnot,
         /// Return a value from a `Block`.
         @"break",
         breakpoint,
         /// Same as `break` but without an operand; the operand is assumed to be the void value.
         breakvoid,
+        /// Function call.
         call,
+        /// `<`
+        cmp_lt,
+        /// `<=`
+        cmp_lte,
+        /// `==`
+        cmp_eq,
+        /// `>=`
+        cmp_gte,
+        /// `>`
+        cmp_gt,
+        /// `!=`
+        cmp_neq,
+        /// Coerces a result location pointer to a new element type. It is evaluated "backwards"-
+        /// as type coercion from the new element type to the old element type.
+        /// LHS is destination element type, RHS is result pointer.
+        coerce_result_ptr,
+        /// This instruction does a `coerce_result_ptr` operation on a `Block`'s
+        /// result location pointer, whose type is inferred by peer type resolution on the
+        /// `Block`'s corresponding `break` instructions.
+        coerce_result_block_ptr,
+        /// Equivalent to `as(ptr_child_type(typeof(ptr)), value)`.
+        coerce_to_ptr_elem,
+        /// Emit an error message and fail compilation.
         compileerror,
+        /// Conditional branch. Splits control flow based on a boolean condition value.
+        condbr,
         /// Special case, has no textual representation.
         @"const",
         /// Represents a pointer to a global decl by name.
@@ -57,45 +116,107 @@ pub const Inst = struct {
         declval,
         /// Same as declval but the parameter is a `*Module.Decl` rather than a name.
         declval_in_module,
-        boolnot,
+        /// Load the value from a pointer.
+        deref,
+        /// Arithmetic division. Asserts no integer overflow.
+        div,
+        /// Given a pointer to an array, slice, or pointer, returns a pointer to the element at
+        /// the provided index.
+        elemptr,
+        /// Emits a compile error if the operand is not `void`.
+        ensure_result_used,
+        /// Emits a compile error if an error is ignored.
+        ensure_result_non_error,
+        /// Export the provided Decl as the provided name in the compilation's output object file.
+        @"export",
+        /// Given a pointer to a struct or object that contains virtual fields, returns a pointer
+        /// to the named field.
+        fieldptr,
+        /// Convert a larger float type to any other float type, possibly causing a loss of precision.
+        floatcast,
+        /// Declare a function body.
+        @"fn",
+        /// Returns a function type.
+        fntype,
+        /// Integer literal.
+        int,
+        /// Convert an integer value to another integer type, asserting that the destination type
+        /// can hold the same mathematical value.
+        intcast,
+        /// Make an integer type out of signedness and bit count.
+        inttype,
+        /// Return a boolean false if an optional is null. `x != null`
+        isnonnull,
+        /// Return a boolean true if an optional is null. `x == null`
+        isnull,
+        /// Ambiguously remainder division or modulus. If the computation would possibly have
+        /// a different value depending on whether the operation is remainder division or modulus,
+        /// a compile error is emitted. Otherwise the computation is performed.
+        mod_rem,
+        /// Arithmetic multiplication. Asserts no integer overflow.
+        mul,
+        /// Twos complement wrapping integer multiplication.
+        mulwrap,
+        /// Given a reference to a function and a parameter index, returns the
+        /// type of the parameter. TODO what happens when the parameter is `anytype`?
+        param_type,
+        /// An alternative to using `const` for simple primitive values such as `true` or `u8`.
+        /// TODO flatten so that each primitive has its own ZIR Inst Tag.
+        primitive,
+        /// Convert a pointer to a `usize` integer.
+        ptrtoint,
+        /// Turns an R-Value into a const L-Value. In other words, it takes a value,
+        /// stores it in a memory location, and returns a const pointer to it. If the value
+        /// is `comptime`, the memory location is global static constant data. Otherwise,
+        /// the memory location is in the stack frame, local to the scope containing the
+        /// instruction.
+        ref,
+        /// Obtains a pointer to the return value.
+        ret_ptr,
+        /// Obtains the return type of the in-scope function.
+        ret_type,
+        /// Sends control flow back to the function's callee. Takes an operand as the return value.
+        @"return",
+        /// Same as `return` but there is no operand; the operand is implicitly the void value.
+        returnvoid,
+        /// Integer shift-left. Zeroes are shifted in from the right hand side.
+        shl,
+        /// Integer shift-right. Arithmetic or logical depending on the signedness of the integer type.
+        shr,
+        /// Create a const pointer type based on the element type. `*const T`
+        single_const_ptr_type,
+        /// Create a mutable pointer type based on the element type. `*T`
+        single_mut_ptr_type,
+        /// Write a value to a pointer. For loading, see `deref`.
+        store,
         /// String Literal. Makes an anonymous Decl and then takes a pointer to it.
         str,
-        int,
-        inttype,
-        ptrtoint,
-        fieldptr,
-        deref,
-        as,
-        @"asm",
-        @"unreachable",
-        @"return",
-        returnvoid,
-        @"fn",
-        fntype,
-        @"export",
-        primitive,
-        intcast,
-        bitcast,
-        floatcast,
-        elemptr,
-        add,
+        /// Arithmetic subtraction. Asserts no integer overflow.
         sub,
-        cmp_lt,
-        cmp_lte,
-        cmp_eq,
-        cmp_gte,
-        cmp_gt,
-        cmp_neq,
-        condbr,
-        isnull,
-        isnonnull,
+        /// Twos complement wrapping integer subtraction.
+        subwrap,
+        /// Returns the type of a value.
+        typeof,
+        /// Asserts control-flow will not reach this instruction. Not safety checked - the compiler
+        /// will assume the correctness of this instruction.
+        unreach_nocheck,
+        /// Asserts control-flow will not reach this instruction. In safety-checked modes,
+        /// this will generate a call to the panic function unless it can be proven unreachable
+        /// by the compiler.
+        @"unreachable",
+        /// Bitwise XOR. `^`
+        xor,
 
         pub fn Type(tag: Tag) type {
             return switch (tag) {
                 .arg,
                 .breakpoint,
-                .@"unreachable",
                 .returnvoid,
+                .alloc_inferred,
+                .ret_ptr,
+                .ret_type,
+                .unreach_nocheck,
+                .@"unreachable",
                 => NoOp,
 
                 .boolnot,
@@ -103,42 +224,69 @@ pub const Inst = struct {
                 .@"return",
                 .isnull,
                 .isnonnull,
+                .ptrtoint,
+                .alloc,
+                .ensure_result_used,
+                .ensure_result_non_error,
+                .bitcast_result_ptr,
+                .ref,
+                .bitcast_lvalue,
+                .typeof,
+                .single_const_ptr_type,
+                .single_mut_ptr_type,
                 => UnOp,
 
                 .add,
+                .addwrap,
+                .array_cat,
+                .array_mul,
+                .bitand,
+                .bitor,
+                .div,
+                .mod_rem,
+                .mul,
+                .mulwrap,
+                .shl,
+                .shr,
+                .store,
                 .sub,
+                .subwrap,
                 .cmp_lt,
                 .cmp_lte,
                 .cmp_eq,
                 .cmp_gte,
                 .cmp_gt,
                 .cmp_neq,
+                .as,
+                .floatcast,
+                .intcast,
+                .bitcast,
+                .coerce_result_ptr,
+                .xor,
                 => BinOp,
 
                 .block => Block,
                 .@"break" => Break,
                 .breakvoid => BreakVoid,
                 .call => Call,
+                .coerce_to_ptr_elem => CoerceToPtrElem,
                 .declref => DeclRef,
                 .declref_str => DeclRefStr,
                 .declval => DeclVal,
                 .declval_in_module => DeclValInModule,
+                .coerce_result_block_ptr => CoerceResultBlockPtr,
                 .compileerror => CompileError,
                 .@"const" => Const,
                 .str => Str,
                 .int => Int,
                 .inttype => IntType,
-                .ptrtoint => PtrToInt,
                 .fieldptr => FieldPtr,
-                .as => As,
                 .@"asm" => Asm,
                 .@"fn" => Fn,
                 .@"export" => Export,
+                .param_type => ParamType,
                 .primitive => Primitive,
                 .fntype => FnType,
-                .intcast => IntCast,
-                .bitcast => BitCast,
-                .floatcast => FloatCast,
                 .elemptr => ElemPtr,
                 .condbr => CondBr,
             };
@@ -148,51 +296,82 @@ pub const Inst = struct {
         /// Function calls do not count.
         pub fn isNoReturn(tag: Tag) bool {
             return switch (tag) {
+                .add,
+                .addwrap,
+                .alloc,
+                .alloc_inferred,
+                .array_cat,
+                .array_mul,
                 .arg,
-                .block,
-                .breakpoint,
-                .call,
-                .@"const",
-                .declref,
-                .declref_str,
-                .declval,
-                .declval_in_module,
-                .str,
-                .int,
-                .inttype,
-                .ptrtoint,
-                .fieldptr,
-                .deref,
                 .as,
                 .@"asm",
-                .@"fn",
-                .fntype,
-                .@"export",
-                .primitive,
-                .intcast,
+                .bitand,
                 .bitcast,
-                .floatcast,
-                .elemptr,
-                .add,
-                .sub,
+                .bitcast_lvalue,
+                .bitcast_result_ptr,
+                .bitor,
+                .block,
+                .boolnot,
+                .breakpoint,
+                .call,
                 .cmp_lt,
                 .cmp_lte,
                 .cmp_eq,
                 .cmp_gte,
                 .cmp_gt,
                 .cmp_neq,
-                .isnull,
+                .coerce_result_ptr,
+                .coerce_result_block_ptr,
+                .coerce_to_ptr_elem,
+                .@"const",
+                .declref,
+                .declref_str,
+                .declval,
+                .declval_in_module,
+                .deref,
+                .div,
+                .elemptr,
+                .ensure_result_used,
+                .ensure_result_non_error,
+                .@"export",
+                .floatcast,
+                .fieldptr,
+                .@"fn",
+                .fntype,
+                .int,
+                .intcast,
+                .inttype,
                 .isnonnull,
-                .boolnot,
+                .isnull,
+                .mod_rem,
+                .mul,
+                .mulwrap,
+                .param_type,
+                .primitive,
+                .ptrtoint,
+                .ref,
+                .ret_ptr,
+                .ret_type,
+                .shl,
+                .shr,
+                .single_const_ptr_type,
+                .single_mut_ptr_type,
+                .store,
+                .str,
+                .sub,
+                .subwrap,
+                .typeof,
+                .xor,
                 => false,
 
-                .condbr,
-                .@"unreachable",
-                .@"return",
-                .returnvoid,
                 .@"break",
                 .breakvoid,
+                .condbr,
                 .compileerror,
+                .@"return",
+                .returnvoid,
+                .unreach_nocheck,
+                .@"unreachable",
                 => true,
             };
         }
@@ -292,6 +471,17 @@ pub const Inst = struct {
         },
     };
 
+    pub const CoerceToPtrElem = struct {
+        pub const base_tag = Tag.coerce_to_ptr_elem;
+        base: Inst,
+
+        positionals: struct {
+            ptr: *Inst,
+            value: *Inst,
+        },
+        kw_args: struct {},
+    };
+
     pub const DeclRef = struct {
         pub const base_tag = Tag.declref;
         base: Inst,
@@ -328,6 +518,17 @@ pub const Inst = struct {
 
         positionals: struct {
             decl: *IrModule.Decl,
+        },
+        kw_args: struct {},
+    };
+
+    pub const CoerceResultBlockPtr = struct {
+        pub const base_tag = Tag.coerce_result_block_ptr;
+        base: Inst,
+
+        positionals: struct {
+            dest_type: *Inst,
+            block: *Block,
         },
         kw_args: struct {},
     };
@@ -372,17 +573,6 @@ pub const Inst = struct {
         kw_args: struct {},
     };
 
-    pub const PtrToInt = struct {
-        pub const builtin_name = "@ptrToInt";
-        pub const base_tag = Tag.ptrtoint;
-        base: Inst,
-
-        positionals: struct {
-            operand: *Inst,
-        },
-        kw_args: struct {},
-    };
-
     pub const FieldPtr = struct {
         pub const base_tag = Tag.fieldptr;
         base: Inst,
@@ -390,18 +580,6 @@ pub const Inst = struct {
         positionals: struct {
             object_ptr: *Inst,
             field_name: *Inst,
-        },
-        kw_args: struct {},
-    };
-
-    pub const As = struct {
-        pub const base_tag = Tag.as;
-        pub const builtin_name = "@as";
-        base: Inst,
-
-        positionals: struct {
-            dest_type: *Inst,
-            value: *Inst,
         },
         kw_args: struct {},
     };
@@ -465,6 +643,17 @@ pub const Inst = struct {
         positionals: struct {
             symbol_name: *Inst,
             decl_name: []const u8,
+        },
+        kw_args: struct {},
+    };
+
+    pub const ParamType = struct {
+        pub const base_tag = Tag.param_type;
+        base: Inst,
+
+        positionals: struct {
+            func: *Inst,
+            arg_index: usize,
         },
         kw_args: struct {},
     };
@@ -553,46 +742,10 @@ pub const Inst = struct {
                     .@"false" => .{ .ty = Type.initTag(.bool), .val = Value.initTag(.bool_false) },
                     .@"null" => .{ .ty = Type.initTag(.@"null"), .val = Value.initTag(.null_value) },
                     .@"undefined" => .{ .ty = Type.initTag(.@"undefined"), .val = Value.initTag(.undef) },
-                    .void_value => .{ .ty = Type.initTag(.void), .val = Value.initTag(.the_one_possible_value) },
+                    .void_value => .{ .ty = Type.initTag(.void), .val = Value.initTag(.void_value) },
                 };
             }
         };
-    };
-
-    pub const FloatCast = struct {
-        pub const base_tag = Tag.floatcast;
-        pub const builtin_name = "@floatCast";
-        base: Inst,
-
-        positionals: struct {
-            dest_type: *Inst,
-            operand: *Inst,
-        },
-        kw_args: struct {},
-    };
-
-    pub const IntCast = struct {
-        pub const base_tag = Tag.intcast;
-        pub const builtin_name = "@intCast";
-        base: Inst,
-
-        positionals: struct {
-            dest_type: *Inst,
-            operand: *Inst,
-        },
-        kw_args: struct {},
-    };
-
-    pub const BitCast = struct {
-        pub const base_tag = Tag.bitcast;
-        pub const builtin_name = "@bitCast";
-        base: Inst,
-
-        positionals: struct {
-            dest_type: *Inst,
-            operand: *Inst,
-        },
-        kw_args: struct {},
     };
 
     pub const ElemPtr = struct {
@@ -1445,6 +1598,21 @@ const EmitZIR = struct {
             const decl = decl_ref.decl;
             return try self.emitUnnamedDecl(try self.emitDeclRef(src, decl));
         }
+        if (typed_value.val.isUndef()) {
+            const as_inst = try self.arena.allocator.create(Inst.BinOp);
+            as_inst.* = .{
+                .base = .{
+                    .tag = .as,
+                    .src = src,
+                },
+                .positionals = .{
+                    .lhs = (try self.emitType(src, typed_value.ty)).inst,
+                    .rhs = (try self.emitPrimitive(src, .@"undefined")).inst,
+                },
+                .kw_args = .{},
+            };
+            return self.emitUnnamedDecl(&as_inst.base);
+        }
         switch (typed_value.ty.zigTypeTag()) {
             .Pointer => {
                 const ptr_elem_type = typed_value.ty.elemType();
@@ -1467,15 +1635,15 @@ const EmitZIR = struct {
             },
             .ComptimeInt => return self.emitComptimeIntVal(src, typed_value.val),
             .Int => {
-                const as_inst = try self.arena.allocator.create(Inst.As);
+                const as_inst = try self.arena.allocator.create(Inst.BinOp);
                 as_inst.* = .{
                     .base = .{
+                        .tag = .as,
                         .src = src,
-                        .tag = Inst.As.base_tag,
                     },
                     .positionals = .{
-                        .dest_type = (try self.emitType(src, typed_value.ty)).inst,
-                        .value = (try self.emitComptimeIntVal(src, typed_value.val)).inst,
+                        .lhs = (try self.emitType(src, typed_value.ty)).inst,
+                        .rhs = (try self.emitComptimeIntVal(src, typed_value.val)).inst,
                     },
                     .kw_args = .{},
                 };
@@ -1640,17 +1808,17 @@ const EmitZIR = struct {
         src: usize,
         new_body: ZirBody,
         old_inst: *ir.Inst.UnOp,
-        comptime I: type,
+        tag: Inst.Tag,
     ) Allocator.Error!*Inst {
-        const new_inst = try self.arena.allocator.create(I);
+        const new_inst = try self.arena.allocator.create(Inst.BinOp);
         new_inst.* = .{
             .base = .{
                 .src = src,
-                .tag = I.base_tag,
+                .tag = tag,
             },
             .positionals = .{
-                .dest_type = (try self.emitType(src, old_inst.base.ty)).inst,
-                .operand = try self.resolveInst(new_body, old_inst.operand),
+                .lhs = (try self.emitType(old_inst.base.src, old_inst.base.ty)).inst,
+                .rhs = try self.resolveInst(new_body, old_inst.operand),
             },
             .kw_args = .{},
         };
@@ -1681,9 +1849,12 @@ const EmitZIR = struct {
                 .ptrtoint => try self.emitUnOp(inst.src, new_body, inst.castTag(.ptrtoint).?, .ptrtoint),
                 .isnull => try self.emitUnOp(inst.src, new_body, inst.castTag(.isnull).?, .isnull),
                 .isnonnull => try self.emitUnOp(inst.src, new_body, inst.castTag(.isnonnull).?, .isnonnull),
+                .load => try self.emitUnOp(inst.src, new_body, inst.castTag(.load).?, .deref),
+                .ref => try self.emitUnOp(inst.src, new_body, inst.castTag(.ref).?, .ref),
 
                 .add => try self.emitBinOp(inst.src, new_body, inst.castTag(.add).?, .add),
                 .sub => try self.emitBinOp(inst.src, new_body, inst.castTag(.sub).?, .sub),
+                .store => try self.emitBinOp(inst.src, new_body, inst.castTag(.store).?, .store),
                 .cmp_lt => try self.emitBinOp(inst.src, new_body, inst.castTag(.cmp_lt).?, .cmp_lt),
                 .cmp_lte => try self.emitBinOp(inst.src, new_body, inst.castTag(.cmp_lte).?, .cmp_lte),
                 .cmp_eq => try self.emitBinOp(inst.src, new_body, inst.castTag(.cmp_eq).?, .cmp_eq),
@@ -1691,9 +1862,24 @@ const EmitZIR = struct {
                 .cmp_gt => try self.emitBinOp(inst.src, new_body, inst.castTag(.cmp_gt).?, .cmp_gt),
                 .cmp_neq => try self.emitBinOp(inst.src, new_body, inst.castTag(.cmp_neq).?, .cmp_neq),
 
-                .bitcast => try self.emitCast(inst.src, new_body, inst.castTag(.bitcast).?, Inst.BitCast),
-                .intcast => try self.emitCast(inst.src, new_body, inst.castTag(.intcast).?, Inst.IntCast),
-                .floatcast => try self.emitCast(inst.src, new_body, inst.castTag(.floatcast).?, Inst.FloatCast),
+                .bitcast => try self.emitCast(inst.src, new_body, inst.castTag(.bitcast).?, .bitcast),
+                .intcast => try self.emitCast(inst.src, new_body, inst.castTag(.intcast).?, .intcast),
+                .floatcast => try self.emitCast(inst.src, new_body, inst.castTag(.floatcast).?, .floatcast),
+
+                .alloc => blk: {
+                    const new_inst = try self.arena.allocator.create(Inst.UnOp);
+                    new_inst.* = .{
+                        .base = .{
+                            .src = inst.src,
+                            .tag = .alloc,
+                        },
+                        .positionals = .{
+                            .operand = (try self.emitType(inst.src, inst.ty)).inst,
+                        },
+                        .kw_args = .{},
+                    };
+                    break :blk &new_inst.base;
+                },
 
                 .block => blk: {
                     const old_inst = inst.castTag(.block).?;
@@ -1931,6 +2117,25 @@ const EmitZIR = struct {
                         .kw_args = .{},
                     };
                     return self.emitUnnamedDecl(&inttype_inst.base);
+                },
+                .Pointer => {
+                    if (ty.isSinglePointer()) {
+                        const inst = try self.arena.allocator.create(Inst.UnOp);
+                        const tag: Inst.Tag = if (ty.isConstPtr()) .single_const_ptr_type else .single_mut_ptr_type;
+                        inst.* = .{
+                            .base = .{
+                                .src = src,
+                                .tag = tag,
+                            },
+                            .positionals = .{
+                                .operand = (try self.emitType(src, ty.elemType())).inst,
+                            },
+                            .kw_args = .{},
+                        };
+                        return self.emitUnnamedDecl(&inst.base);
+                    } else {
+                        std.debug.panic("TODO implement emitType for {}", .{ty});
+                    }
                 },
                 else => std.debug.panic("TODO implement emitType for {}", .{ty}),
             },
