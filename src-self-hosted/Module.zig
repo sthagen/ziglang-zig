@@ -6,6 +6,7 @@ const Value = @import("value.zig").Value;
 const Type = @import("type.zig").Type;
 const TypedValue = @import("TypedValue.zig");
 const assert = std.debug.assert;
+const log = std.log;
 const BigIntConst = std.math.big.int.Const;
 const BigIntMutable = std.math.big.int.Mutable;
 const Target = std.Target;
@@ -88,6 +89,9 @@ const WorkItem = union(enum) {
     /// It may have already be analyzed, or it may have been determined
     /// to be outdated; in this case perform semantic analysis again.
     analyze_decl: *Decl,
+    /// The source file containing the Decl has been updated, and so the
+    /// Decl may need its line number information updated in the debug info.
+    update_line_number: *Decl,
 };
 
 pub const Export = struct {
@@ -173,7 +177,14 @@ pub const Decl = struct {
 
     /// Represents the position of the code in the output file.
     /// This is populated regardless of semantic analysis and code generation.
-    link: link.File.Elf.TextBlock = link.File.Elf.TextBlock.empty,
+    link: link.File.LinkBlock,
+
+    /// Represents the function in the linked output file, if the `Decl` is a function.
+    /// This is stored here and not in `Fn` because `Decl` survives across updates but
+    /// `Fn` does not.
+    /// TODO Look into making `Fn` a longer lived structure and moving this field there
+    /// to save on memory usage.
+    fn_link: link.File.LinkFn,
 
     contents_hash: std.zig.SrcHash,
 
@@ -235,7 +246,7 @@ pub const Decl = struct {
 
     pub fn dump(self: *Decl) void {
         const loc = std.zig.findLineColumn(self.scope.source.bytes, self.src);
-        std.debug.warn("{}:{}:{} name={} status={}", .{
+        std.debug.print("{}:{}:{} name={} status={}", .{
             self.scope.sub_file_path,
             loc.line + 1,
             loc.column + 1,
@@ -243,9 +254,9 @@ pub const Decl = struct {
             @tagName(self.analysis),
         });
         if (self.typedValueManaged()) |tvm| {
-            std.debug.warn(" ty={} val={}", .{ tvm.typed_value.ty, tvm.typed_value.val });
+            std.debug.print(" ty={} val={}", .{ tvm.typed_value.ty, tvm.typed_value.val });
         }
-        std.debug.warn("\n", .{});
+        std.debug.print("\n", .{});
     }
 
     pub fn typedValueManaged(self: *Decl) ?*TypedValue.Managed {
@@ -290,6 +301,23 @@ pub const Fn = struct {
         body: zir.Module.Body,
         arena: std.heap.ArenaAllocator.State,
     };
+
+    /// For debugging purposes.
+    pub fn dump(self: *Fn, mod: Module) void {
+        std.debug.print("Module.Function(name={}) ", .{self.owner_decl.name});
+        switch (self.analysis) {
+            .queued => {
+                std.debug.print("queued\n", .{});
+            },
+            .in_progress => {
+                std.debug.print("in_progress\n", .{});
+            },
+            else => {
+                std.debug.print("\n", .{});
+                zir.dumpFn(mod, self);
+            },
+        }
+    }
 };
 
 pub const Scope = struct {
@@ -541,7 +569,7 @@ pub const Scope = struct {
 
         pub fn dumpSrc(self: *File, src: usize) void {
             const loc = std.zig.findLineColumn(self.source.bytes, src);
-            std.debug.warn("{}:{}:{}\n", .{ self.sub_file_path, loc.line + 1, loc.column + 1 });
+            std.debug.print("{}:{}:{}\n", .{ self.sub_file_path, loc.line + 1, loc.column + 1 });
         }
 
         pub fn getSource(self: *File, module: *Module) ![:0]const u8 {
@@ -643,7 +671,7 @@ pub const Scope = struct {
 
         pub fn dumpSrc(self: *ZIRModule, src: usize) void {
             const loc = std.zig.findLineColumn(self.source.bytes, src);
-            std.debug.warn("{}:{}:{}\n", .{ self.sub_file_path, loc.line + 1, loc.column + 1 });
+            std.debug.print("{}:{}:{}\n", .{ self.sub_file_path, loc.line + 1, loc.column + 1 });
         }
 
         pub fn getSource(self: *ZIRModule, module: *Module) ![:0]const u8 {
@@ -709,6 +737,7 @@ pub const Scope = struct {
         arena: *Allocator,
         /// The first N instructions in a function body ZIR are arg instructions.
         instructions: std.ArrayListUnmanaged(*zir.Inst) = .{},
+        label: ?ast.TokenIndex = null,
     };
 
     /// This is always a `const` local and importantly the `inst` is a value type, not a pointer.
@@ -790,9 +819,9 @@ pub fn init(gpa: *Allocator, options: InitOptions) !Module {
     errdefer gpa.free(root_name);
 
     const bin_file_dir = options.bin_file_dir orelse std.fs.cwd();
-    const bin_file = try link.openBinFilePath(gpa, bin_file_dir, options.bin_file_path, .{
+    const bin_file = try link.File.openPath(gpa, bin_file_dir, options.bin_file_path, .{
         .root_name = root_name,
-        .root_src_dir_path = options.root_pkg.root_src_dir_path,
+        .root_pkg = options.root_pkg,
         .target = options.target,
         .output_mode = options.output_mode,
         .link_mode = options.link_mode orelse .Static,
@@ -885,6 +914,7 @@ pub fn deinit(self: *Module) void {
 
 fn freeExportList(gpa: *Allocator, export_list: []*Export) void {
     for (export_list) |exp| {
+        gpa.free(exp.options.name);
         gpa.destroy(exp);
     }
     gpa.free(export_list);
@@ -937,13 +967,10 @@ pub fn update(self: *Module) !void {
         try self.deleteDecl(decl);
     }
 
-    if (self.totalErrorCount() == 0) {
-        // This is needed before reading the error flags.
-        try self.bin_file.flush();
-    }
+    // This is needed before reading the error flags.
+    try self.bin_file.flush();
 
     self.link_error_flags = self.bin_file.errorFlags();
-    std.log.debug(.module, "link_error_flags: {}\n", .{self.link_error_flags});
 
     // If there are any errors, we anticipate the source files being loaded
     // to report error messages. Otherwise we unload all source files to save memory.
@@ -1057,22 +1084,14 @@ pub fn performAllTheWork(self: *Module) error{OutOfMemory}!void {
                     error.AnalysisFail => {
                         decl.analysis = .dependency_failure;
                     },
-                    error.CGenFailure => {
-                        // Error is handled by CBE, don't try adding it again
-                    },
                     else => {
                         try self.failed_decls.ensureCapacity(self.gpa, self.failed_decls.items().len + 1);
-                        const result = self.failed_decls.getOrPutAssumeCapacity(decl);
-                        if (result.found_existing) {
-                            std.debug.panic("Internal error: attempted to override error '{}' with 'unable to codegen: {}'", .{ result.entry.value.msg, @errorName(err) });
-                        } else {
-                            result.entry.value = try ErrorMsg.create(
-                                self.gpa,
-                                decl.src(),
-                                "unable to codegen: {}",
-                                .{@errorName(err)},
-                            );
-                        }
+                        self.failed_decls.putAssumeCapacityNoClobber(decl, try ErrorMsg.create(
+                            self.gpa,
+                            decl.src(),
+                            "unable to codegen: {}",
+                            .{@errorName(err)},
+                        ));
                         decl.analysis = .codegen_failure_retryable;
                     },
                 };
@@ -1082,6 +1101,18 @@ pub fn performAllTheWork(self: *Module) error{OutOfMemory}!void {
             self.ensureDeclAnalyzed(decl) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.AnalysisFail => continue,
+            };
+        },
+        .update_line_number => |decl| {
+            self.bin_file.updateDeclLineNumber(self, decl) catch |err| {
+                try self.failed_decls.ensureCapacity(self.gpa, self.failed_decls.items().len + 1);
+                self.failed_decls.putAssumeCapacityNoClobber(decl, try ErrorMsg.create(
+                    self.gpa,
+                    decl.src(),
+                    "unable to update line number: {}",
+                    .{@errorName(err)},
+                ));
+                decl.analysis = .codegen_failure_retryable;
             };
         },
     };
@@ -1101,12 +1132,10 @@ pub fn ensureDeclAnalyzed(self: *Module, decl: *Decl) InnerError!void {
         .codegen_failure_retryable,
         => return error.AnalysisFail,
 
-        .complete, .outdated => blk: {
-            if (decl.generation == self.generation) {
-                assert(decl.analysis == .complete);
-                return;
-            }
-            //std.debug.warn("re-analyzing {}\n", .{decl.name});
+        .complete => return,
+
+        .outdated => blk: {
+            log.debug(.module, "re-analyzing {}\n", .{decl.name});
 
             // The exports this Decl performs will be re-discovered, so we remove them here
             // prior to re-analysis.
@@ -1290,14 +1319,16 @@ fn astGenAndAnalyzeDecl(self: *Module, decl: *Decl) !bool {
                 for (fn_proto.params()) |param, i| {
                     const name_token = param.name_token.?;
                     const src = tree.token_locs[name_token].start;
-                    const param_name = tree.tokenSlice(name_token);
-                    const arg = try gen_scope_arena.allocator.create(zir.Inst.NoOp);
+                    const param_name = tree.tokenSlice(name_token); // TODO: call identifierTokenString
+                    const arg = try gen_scope_arena.allocator.create(zir.Inst.Arg);
                     arg.* = .{
                         .base = .{
                             .tag = .arg,
                             .src = src,
                         },
-                        .positionals = .{},
+                        .positionals = .{
+                            .name = param_name,
+                        },
                         .kw_args = .{},
                     };
                     gen_scope.instructions.items[i] = &arg.base;
@@ -1315,8 +1346,8 @@ fn astGenAndAnalyzeDecl(self: *Module, decl: *Decl) !bool {
 
                 try astgen.blockExpr(self, params_scope, body_block);
 
-                if (!fn_type.fnReturnType().isNoReturn() and (gen_scope.instructions.items.len == 0 or
-                    !gen_scope.instructions.items[gen_scope.instructions.items.len - 1].tag.isNoReturn()))
+                if (gen_scope.instructions.items.len == 0 or
+                    !gen_scope.instructions.items[gen_scope.instructions.items.len - 1].tag.isNoReturn())
                 {
                     const src = tree.token_locs[body_block.rbrace].start;
                     _ = try astgen.addZIRNoOp(self, &gen_scope.base, src, .returnvoid);
@@ -1481,6 +1512,9 @@ fn getAstTree(self: *Module, root_scope: *Scope.File) !*ast.Tree {
 }
 
 fn analyzeRootSrcFile(self: *Module, root_scope: *Scope.File) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     // We may be analyzing it for the first time, or this may be
     // an incremental update. This code handles both cases.
     const tree = try self.getAstTree(root_scope);
@@ -1522,6 +1556,13 @@ fn analyzeRootSrcFile(self: *Module, root_scope: *Scope.File) !void {
                     if (!srcHashEql(decl.contents_hash, contents_hash)) {
                         try self.markOutdatedDecl(decl);
                         decl.contents_hash = contents_hash;
+                    } else switch (self.bin_file.tag) {
+                        .elf => if (decl.fn_link.elf.len != 0) {
+                            // TODO Look into detecting when this would be unnecessary by storing enough state
+                            // in `Decl` to notice that the line number did not change.
+                            self.work_queue.writeItemAssumeCapacity(.{ .update_line_number = decl });
+                        },
+                        .c => {},
                     }
                 }
             } else {
@@ -1540,7 +1581,7 @@ fn analyzeRootSrcFile(self: *Module, root_scope: *Scope.File) !void {
     // Handle explicitly deleted decls from the source code. Not to be confused
     // with when we delete decls because they are no longer referenced.
     for (deleted_decls.items()) |entry| {
-        //std.debug.warn("noticed '{}' deleted from source\n", .{entry.key.name});
+        log.debug(.module, "noticed '{}' deleted from source\n", .{entry.key.name});
         try self.deleteDecl(entry.key);
     }
 }
@@ -1569,7 +1610,6 @@ fn analyzeRootZIRModule(self: *Module, root_scope: *Scope.ZIRModule) !void {
         const name_hash = root_scope.fullyQualifiedNameHash(src_decl.name);
         if (self.decl_table.get(name_hash)) |decl| {
             deleted_decls.removeAssertDiscard(decl);
-            //std.debug.warn("'{}' contents: '{}'\n", .{ src_decl.name, src_decl.contents });
             if (!srcHashEql(src_decl.contents_hash, decl.contents_hash)) {
                 try self.markOutdatedDecl(decl);
                 decl.contents_hash = src_decl.contents_hash;
@@ -1594,7 +1634,7 @@ fn analyzeRootZIRModule(self: *Module, root_scope: *Scope.ZIRModule) !void {
     // Handle explicitly deleted decls from the source code. Not to be confused
     // with when we delete decls because they are no longer referenced.
     for (deleted_decls.items()) |entry| {
-        //std.debug.warn("noticed '{}' deleted from source\n", .{entry.key.name});
+        log.debug(.module, "noticed '{}' deleted from source\n", .{entry.key.name});
         try self.deleteDecl(entry.key);
     }
 }
@@ -1606,7 +1646,7 @@ fn deleteDecl(self: *Module, decl: *Decl) !void {
     // not be present in the set, and this does nothing.
     decl.scope.removeDecl(decl);
 
-    //std.debug.warn("deleting decl '{}'\n", .{decl.name});
+    log.debug(.module, "deleting decl '{}'\n", .{decl.name});
     const name_hash = decl.fullyQualifiedNameHash();
     self.decl_table.removeAssertDiscard(name_hash);
     // Remove itself from its dependencies, because we are about to destroy the decl pointer.
@@ -1668,6 +1708,7 @@ fn deleteDeclExports(self: *Module, decl: *Decl) void {
             entry.value.destroy(self.gpa);
         }
         _ = self.symbol_exports.remove(exp.options.name);
+        self.gpa.free(exp.options.name);
         self.gpa.destroy(exp);
     }
     self.gpa.free(kv.value);
@@ -1692,17 +1733,17 @@ fn analyzeFnBody(self: *Module, decl: *Decl, func: *Fn) !void {
     const fn_zir = func.analysis.queued;
     defer fn_zir.arena.promote(self.gpa).deinit();
     func.analysis = .{ .in_progress = {} };
-    //std.debug.warn("set {} to in_progress\n", .{decl.name});
+    log.debug(.module, "set {} to in_progress\n", .{decl.name});
 
     try zir_sema.analyzeBody(self, &inner_block.base, fn_zir.body);
 
     const instructions = try arena.allocator.dupe(*Inst, inner_block.instructions.items);
     func.analysis = .{ .success = .{ .instructions = instructions } };
-    //std.debug.warn("set {} to success\n", .{decl.name});
+    log.debug(.module, "set {} to success\n", .{decl.name});
 }
 
 fn markOutdatedDecl(self: *Module, decl: *Decl) !void {
-    //std.debug.warn("mark {} outdated\n", .{decl.name});
+    log.debug(.module, "mark {} outdated\n", .{decl.name});
     try self.work_queue.writeItem(.{ .analyze_decl = decl });
     if (self.failed_decls.remove(decl)) |entry| {
         entry.value.destroy(self.gpa);
@@ -1725,7 +1766,14 @@ fn allocateNewDecl(
         .analysis = .unreferenced,
         .deletion_flag = false,
         .contents_hash = contents_hash,
-        .link = link.File.Elf.TextBlock.empty,
+        .link = switch (self.bin_file.tag) {
+            .elf => .{ .elf = link.File.Elf.TextBlock.empty },
+            .c => .{ .c = {} },
+        },
+        .fn_link = switch (self.bin_file.tag) {
+            .elf => .{ .elf = link.File.Elf.SrcFn.empty },
+            .c => .{ .c = {} },
+        },
         .generation = 0,
     };
     return new_decl;
@@ -1768,7 +1816,7 @@ pub fn resolveDefinedValue(self: *Module, scope: *Scope, base: *Inst) !?Value {
     return null;
 }
 
-pub fn analyzeExport(self: *Module, scope: *Scope, src: usize, symbol_name: []const u8, exported_decl: *Decl) !void {
+pub fn analyzeExport(self: *Module, scope: *Scope, src: usize, borrowed_symbol_name: []const u8, exported_decl: *Decl) !void {
     try self.ensureDeclAnalyzed(exported_decl);
     const typed_value = exported_decl.typed_value.most_recent.typed_value;
     switch (typed_value.ty.zigTypeTag()) {
@@ -1782,6 +1830,9 @@ pub fn analyzeExport(self: *Module, scope: *Scope, src: usize, symbol_name: []co
     const new_export = try self.gpa.create(Export);
     errdefer self.gpa.destroy(new_export);
 
+    const symbol_name = try self.gpa.dupe(u8, borrowed_symbol_name);
+    errdefer self.gpa.free(symbol_name);
+
     const owner_decl = scope.decl().?;
 
     new_export.* = .{
@@ -1794,7 +1845,7 @@ pub fn analyzeExport(self: *Module, scope: *Scope, src: usize, symbol_name: []co
     };
 
     // Add to export_owners table.
-    const eo_gop = self.export_owners.getOrPut(self.gpa, owner_decl) catch unreachable;
+    const eo_gop = self.export_owners.getOrPutAssumeCapacity(owner_decl);
     if (!eo_gop.found_existing) {
         eo_gop.entry.value = &[0]*Export{};
     }
@@ -1803,7 +1854,7 @@ pub fn analyzeExport(self: *Module, scope: *Scope, src: usize, symbol_name: []co
     errdefer eo_gop.entry.value = self.gpa.shrink(eo_gop.entry.value, eo_gop.entry.value.len - 1);
 
     // Add to exported_decl table.
-    const de_gop = self.decl_exports.getOrPut(self.gpa, exported_decl) catch unreachable;
+    const de_gop = self.decl_exports.getOrPutAssumeCapacity(exported_decl);
     if (!de_gop.found_existing) {
         de_gop.entry.value = &[0]*Export{};
     }
@@ -1898,6 +1949,20 @@ pub fn addBinOp(
         },
         .lhs = lhs,
         .rhs = rhs,
+    };
+    try block.instructions.append(self.gpa, &inst.base);
+    return &inst.base;
+}
+
+pub fn addArg(self: *Module, block: *Scope.Block, src: usize, ty: Type, name: [*:0]const u8) !*Inst {
+    const inst = try block.arena.create(Inst.Arg);
+    inst.* = .{
+        .base = .{
+            .tag = .arg,
+            .ty = ty,
+            .src = src,
+        },
+        .name = name,
     };
     try block.instructions.append(self.gpa, &inst.base);
     return &inst.base;
@@ -2172,11 +2237,6 @@ pub fn wantSafety(self: *Module, scope: *Scope) bool {
     };
 }
 
-pub fn analyzeUnreach(self: *Module, scope: *Scope, src: usize) InnerError!*Inst {
-    const b = try self.requireRuntimeBlock(scope, src);
-    return self.addNoOp(b, src, Type.initTag(.noreturn), .unreach);
-}
-
 pub fn analyzeIsNull(
     self: *Module,
     scope: *Scope,
@@ -2429,6 +2489,24 @@ pub fn coerce(self: *Module, scope: *Scope, dest_type: Type, inst: *Inst) !*Inst
     }
     assert(inst.ty.zigTypeTag() != .Undefined);
 
+    // null to ?T
+    if (dest_type.zigTypeTag() == .Optional and inst.ty.zigTypeTag() == .Null) {
+        return self.constInst(scope, inst.src, .{ .ty = dest_type, .val = Value.initTag(.null_value) });
+    }
+
+    // T to ?T
+    if (dest_type.zigTypeTag() == .Optional) {
+        const child_type = dest_type.elemType();
+        if (inst.value()) |val| {
+            if (child_type.eql(inst.ty)) {
+                return self.constInst(scope, inst.src, .{ .ty = dest_type, .val = val });
+            }
+            return self.fail(scope, inst.src, "TODO optional wrap {} to {}", .{ val, dest_type });
+        } else if (child_type.eql(inst.ty)) {
+            return self.fail(scope, inst.src, "TODO optional wrap {}", .{dest_type});
+        }
+    }
+
     // *[N]T to []T
     if (inst.ty.isSinglePointer() and dest_type.isSlice() and
         (!inst.ty.isConstPtr() or dest_type.isConstPtr()))
@@ -2504,7 +2582,7 @@ pub fn coerce(self: *Module, scope: *Scope, dest_type: Type, inst: *Inst) !*Inst
         }
     }
 
-    return self.fail(scope, inst.src, "TODO implement type coercion from {} to {}", .{ inst.ty, dest_type });
+    return self.fail(scope, inst.src, "expected {}, found {}", .{ dest_type, inst.ty });
 }
 
 pub fn storePtr(self: *Module, scope: *Scope, src: usize, ptr: *Inst, uncasted_value: *Inst) !*Inst {
@@ -2751,7 +2829,7 @@ pub fn floatAdd(self: *Module, scope: *Scope, float_type: Type, src: usize, lhs:
             val_payload.* = .{ .val = lhs_val + rhs_val };
             break :blk &val_payload.base;
         },
-        128 => blk: {
+        128 => {
             return self.fail(scope, src, "TODO Implement addition for big floats", .{});
         },
         else => unreachable,
@@ -2785,7 +2863,7 @@ pub fn floatSub(self: *Module, scope: *Scope, float_type: Type, src: usize, lhs:
             val_payload.* = .{ .val = lhs_val - rhs_val };
             break :blk &val_payload.base;
         },
-        128 => blk: {
+        128 => {
             return self.fail(scope, src, "TODO Implement substraction for big floats", .{});
         },
         else => unreachable,
@@ -2811,7 +2889,7 @@ pub fn dumpInst(self: *Module, scope: *Scope, inst: *Inst) void {
     const source = zir_module.getSource(self) catch @panic("dumpInst failed to get source");
     const loc = std.zig.findLineColumn(source, inst.src);
     if (inst.tag == .constant) {
-        std.debug.warn("constant ty={} val={} src={}:{}:{}\n", .{
+        std.debug.print("constant ty={} val={} src={}:{}:{}\n", .{
             inst.ty,
             inst.castTag(.constant).?.val,
             zir_module.subFilePath(),
@@ -2819,7 +2897,7 @@ pub fn dumpInst(self: *Module, scope: *Scope, inst: *Inst) void {
             loc.column + 1,
         });
     } else if (inst.deaths == 0) {
-        std.debug.warn("{} ty={} src={}:{}:{}\n", .{
+        std.debug.print("{} ty={} src={}:{}:{}\n", .{
             @tagName(inst.tag),
             inst.ty,
             zir_module.subFilePath(),
@@ -2827,7 +2905,7 @@ pub fn dumpInst(self: *Module, scope: *Scope, inst: *Inst) void {
             loc.column + 1,
         });
     } else {
-        std.debug.warn("{} ty={} deaths={b} src={}:{}:{}\n", .{
+        std.debug.print("{} ty={} deaths={b} src={}:{}:{}\n", .{
             @tagName(inst.tag),
             inst.ty,
             inst.deaths,
@@ -2836,4 +2914,71 @@ pub fn dumpInst(self: *Module, scope: *Scope, inst: *Inst) void {
             loc.column + 1,
         });
     }
+}
+
+pub const PanicId = enum {
+    unreach,
+    unwrap_null,
+};
+
+pub fn addSafetyCheck(mod: *Module, parent_block: *Scope.Block, ok: *Inst, panic_id: PanicId) !void {
+    const block_inst = try parent_block.arena.create(Inst.Block);
+    block_inst.* = .{
+        .base = .{
+            .tag = Inst.Block.base_tag,
+            .ty = Type.initTag(.void),
+            .src = ok.src,
+        },
+        .body = .{
+            .instructions = try parent_block.arena.alloc(*Inst, 1), // Only need space for the condbr.
+        },
+    };
+
+    const ok_body: ir.Body = .{
+        .instructions = try parent_block.arena.alloc(*Inst, 1), // Only need space for the brvoid.
+    };
+    const brvoid = try parent_block.arena.create(Inst.BrVoid);
+    brvoid.* = .{
+        .base = .{
+            .tag = .brvoid,
+            .ty = Type.initTag(.noreturn),
+            .src = ok.src,
+        },
+        .block = block_inst,
+    };
+    ok_body.instructions[0] = &brvoid.base;
+
+    var fail_block: Scope.Block = .{
+        .parent = parent_block,
+        .func = parent_block.func,
+        .decl = parent_block.decl,
+        .instructions = .{},
+        .arena = parent_block.arena,
+    };
+    defer fail_block.instructions.deinit(mod.gpa);
+
+    _ = try mod.safetyPanic(&fail_block, ok.src, panic_id);
+
+    const fail_body: ir.Body = .{ .instructions = try parent_block.arena.dupe(*Inst, fail_block.instructions.items) };
+
+    const condbr = try parent_block.arena.create(Inst.CondBr);
+    condbr.* = .{
+        .base = .{
+            .tag = .condbr,
+            .ty = Type.initTag(.noreturn),
+            .src = ok.src,
+        },
+        .condition = ok,
+        .then_body = ok_body,
+        .else_body = fail_body,
+    };
+    block_inst.body.instructions[0] = &condbr.base;
+
+    try parent_block.instructions.append(mod.gpa, &block_inst.base);
+}
+
+pub fn safetyPanic(mod: *Module, block: *Scope.Block, src: usize, panic_id: PanicId) !*Inst {
+    // TODO Once we have a panic function to call, call it here instead of breakpoint.
+    _ = try mod.addNoOp(block, src, Type.initTag(.void), .breakpoint);
+    return mod.addNoOp(block, src, Type.initTag(.noreturn), .unreach);
 }

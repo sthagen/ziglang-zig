@@ -12,6 +12,11 @@ const ErrorMsg = Module.ErrorMsg;
 const Target = std.Target;
 const Allocator = mem.Allocator;
 const trace = @import("tracy.zig").trace;
+const DW = std.dwarf;
+const leb128 = std.debug.leb;
+
+// TODO Turn back on zig fmt when https://github.com/ziglang/zig/issues/5948 is implemented.
+// zig fmt: off
 
 /// The codegen-related data that is stored in `ir.Inst.Block` instructions.
 pub const BlockData = struct {
@@ -44,6 +49,9 @@ pub fn generateSymbol(
     src: usize,
     typed_value: TypedValue,
     code: *std.ArrayList(u8),
+    dbg_line: *std.ArrayList(u8),
+    dbg_info: *std.ArrayList(u8),
+    dbg_info_type_relocs: *link.File.Elf.DbgInfoTypeRelocsTable,
 ) GenerateSymbolError!Result {
     const tracy = trace(@src());
     defer tracy.end();
@@ -51,61 +59,62 @@ pub fn generateSymbol(
     switch (typed_value.ty.zigTypeTag()) {
         .Fn => {
             switch (bin_file.base.options.target.cpu.arch) {
-                //.arm => return Function(.arm).generateSymbol(bin_file, src, typed_value, code),
-                //.armeb => return Function(.armeb).generateSymbol(bin_file, src, typed_value, code),
-                //.aarch64 => return Function(.aarch64).generateSymbol(bin_file, src, typed_value, code),
-                //.aarch64_be => return Function(.aarch64_be).generateSymbol(bin_file, src, typed_value, code),
-                //.aarch64_32 => return Function(.aarch64_32).generateSymbol(bin_file, src, typed_value, code),
-                //.arc => return Function(.arc).generateSymbol(bin_file, src, typed_value, code),
-                //.avr => return Function(.avr).generateSymbol(bin_file, src, typed_value, code),
-                //.bpfel => return Function(.bpfel).generateSymbol(bin_file, src, typed_value, code),
-                //.bpfeb => return Function(.bpfeb).generateSymbol(bin_file, src, typed_value, code),
-                //.hexagon => return Function(.hexagon).generateSymbol(bin_file, src, typed_value, code),
-                //.mips => return Function(.mips).generateSymbol(bin_file, src, typed_value, code),
-                //.mipsel => return Function(.mipsel).generateSymbol(bin_file, src, typed_value, code),
-                //.mips64 => return Function(.mips64).generateSymbol(bin_file, src, typed_value, code),
-                //.mips64el => return Function(.mips64el).generateSymbol(bin_file, src, typed_value, code),
-                //.msp430 => return Function(.msp430).generateSymbol(bin_file, src, typed_value, code),
-                //.powerpc => return Function(.powerpc).generateSymbol(bin_file, src, typed_value, code),
-                //.powerpc64 => return Function(.powerpc64).generateSymbol(bin_file, src, typed_value, code),
-                //.powerpc64le => return Function(.powerpc64le).generateSymbol(bin_file, src, typed_value, code),
-                //.r600 => return Function(.r600).generateSymbol(bin_file, src, typed_value, code),
-                //.amdgcn => return Function(.amdgcn).generateSymbol(bin_file, src, typed_value, code),
-                //.riscv32 => return Function(.riscv32).generateSymbol(bin_file, src, typed_value, code),
-                //.riscv64 => return Function(.riscv64).generateSymbol(bin_file, src, typed_value, code),
-                //.sparc => return Function(.sparc).generateSymbol(bin_file, src, typed_value, code),
-                //.sparcv9 => return Function(.sparcv9).generateSymbol(bin_file, src, typed_value, code),
-                //.sparcel => return Function(.sparcel).generateSymbol(bin_file, src, typed_value, code),
-                //.s390x => return Function(.s390x).generateSymbol(bin_file, src, typed_value, code),
-                //.tce => return Function(.tce).generateSymbol(bin_file, src, typed_value, code),
-                //.tcele => return Function(.tcele).generateSymbol(bin_file, src, typed_value, code),
-                //.thumb => return Function(.thumb).generateSymbol(bin_file, src, typed_value, code),
-                //.thumbeb => return Function(.thumbeb).generateSymbol(bin_file, src, typed_value, code),
-                //.i386 => return Function(.i386).generateSymbol(bin_file, src, typed_value, code),
-                .x86_64 => return Function(.x86_64).generateSymbol(bin_file, src, typed_value, code),
-                //.xcore => return Function(.xcore).generateSymbol(bin_file, src, typed_value, code),
-                //.nvptx => return Function(.nvptx).generateSymbol(bin_file, src, typed_value, code),
-                //.nvptx64 => return Function(.nvptx64).generateSymbol(bin_file, src, typed_value, code),
-                //.le32 => return Function(.le32).generateSymbol(bin_file, src, typed_value, code),
-                //.le64 => return Function(.le64).generateSymbol(bin_file, src, typed_value, code),
-                //.amdil => return Function(.amdil).generateSymbol(bin_file, src, typed_value, code),
-                //.amdil64 => return Function(.amdil64).generateSymbol(bin_file, src, typed_value, code),
-                //.hsail => return Function(.hsail).generateSymbol(bin_file, src, typed_value, code),
-                //.hsail64 => return Function(.hsail64).generateSymbol(bin_file, src, typed_value, code),
-                //.spir => return Function(.spir).generateSymbol(bin_file, src, typed_value, code),
-                //.spir64 => return Function(.spir64).generateSymbol(bin_file, src, typed_value, code),
-                //.kalimba => return Function(.kalimba).generateSymbol(bin_file, src, typed_value, code),
-                //.shave => return Function(.shave).generateSymbol(bin_file, src, typed_value, code),
-                //.lanai => return Function(.lanai).generateSymbol(bin_file, src, typed_value, code),
-                //.wasm32 => return Function(.wasm32).generateSymbol(bin_file, src, typed_value, code),
-                //.wasm64 => return Function(.wasm64).generateSymbol(bin_file, src, typed_value, code),
-                //.renderscript32 => return Function(.renderscript32).generateSymbol(bin_file, src, typed_value, code),
-                //.renderscript64 => return Function(.renderscript64).generateSymbol(bin_file, src, typed_value, code),
-                //.ve => return Function(.ve).generateSymbol(bin_file, src, typed_value, code),
+                //.arm => return Function(.arm).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.armeb => return Function(.armeb).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.aarch64 => return Function(.aarch64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.aarch64_be => return Function(.aarch64_be).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.aarch64_32 => return Function(.aarch64_32).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.arc => return Function(.arc).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.avr => return Function(.avr).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.bpfel => return Function(.bpfel).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.bpfeb => return Function(.bpfeb).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.hexagon => return Function(.hexagon).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.mips => return Function(.mips).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.mipsel => return Function(.mipsel).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.mips64 => return Function(.mips64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.mips64el => return Function(.mips64el).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.msp430 => return Function(.msp430).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.powerpc => return Function(.powerpc).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.powerpc64 => return Function(.powerpc64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.powerpc64le => return Function(.powerpc64le).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.r600 => return Function(.r600).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.amdgcn => return Function(.amdgcn).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.riscv32 => return Function(.riscv32).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                .riscv64 => return Function(.riscv64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.sparc => return Function(.sparc).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.sparcv9 => return Function(.sparcv9).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.sparcel => return Function(.sparcel).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.s390x => return Function(.s390x).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.tce => return Function(.tce).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.tcele => return Function(.tcele).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.thumb => return Function(.thumb).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.thumbeb => return Function(.thumbeb).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.i386 => return Function(.i386).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                .x86_64 => return Function(.x86_64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.xcore => return Function(.xcore).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.nvptx => return Function(.nvptx).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.nvptx64 => return Function(.nvptx64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.le32 => return Function(.le32).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.le64 => return Function(.le64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.amdil => return Function(.amdil).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.amdil64 => return Function(.amdil64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.hsail => return Function(.hsail).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.hsail64 => return Function(.hsail64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.spir => return Function(.spir).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.spir64 => return Function(.spir64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.kalimba => return Function(.kalimba).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.shave => return Function(.shave).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.lanai => return Function(.lanai).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.wasm32 => return Function(.wasm32).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.wasm64 => return Function(.wasm64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.renderscript32 => return Function(.renderscript32).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.renderscript64 => return Function(.renderscript64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+                //.ve => return Function(.ve).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
                 else => @panic("Backend architectures that don't have good support yet are commented out, to improve compilation performance. If you are interested in one of these other backends feel free to uncomment them. Eventually these will be completed, but stage1 is slow and a memory hog."),
             }
         },
         .Array => {
+            // TODO populate .debug_info for the array
             if (typed_value.val.cast(Value.Payload.Bytes)) |payload| {
                 if (typed_value.ty.arraySentinel()) |sentinel| {
                     try code.ensureCapacity(code.items.len + payload.data.len + 1);
@@ -114,7 +123,7 @@ pub fn generateSymbol(
                     switch (try generateSymbol(bin_file, src, .{
                         .ty = typed_value.ty.elemType(),
                         .val = sentinel,
-                    }, code)) {
+                    }, code, dbg_line, dbg_info, dbg_info_type_relocs)) {
                         .appended => return Result{ .appended = {} },
                         .externally_managed => |slice| {
                             code.appendSliceAssumeCapacity(slice);
@@ -128,7 +137,7 @@ pub fn generateSymbol(
             }
             return Result{
                 .fail = try ErrorMsg.create(
-                    bin_file.allocator,
+                    bin_file.base.allocator,
                     src,
                     "TODO implement generateSymbol for more kinds of arrays",
                     .{},
@@ -136,29 +145,36 @@ pub fn generateSymbol(
             };
         },
         .Pointer => {
+            // TODO populate .debug_info for the pointer
+
             if (typed_value.val.cast(Value.Payload.DeclRef)) |payload| {
                 const decl = payload.decl;
                 if (decl.analysis != .complete) return error.AnalysisFail;
-                assert(decl.link.local_sym_index != 0);
+                assert(decl.link.elf.local_sym_index != 0);
                 // TODO handle the dependency of this symbol on the decl's vaddr.
                 // If the decl changes vaddr, then this symbol needs to get regenerated.
-                const vaddr = bin_file.local_symbols.items[decl.link.local_sym_index].st_value;
+                const vaddr = bin_file.local_symbols.items[decl.link.elf.local_sym_index].st_value;
                 const endian = bin_file.base.options.target.cpu.arch.endian();
-                switch (bin_file.ptr_width) {
-                    .p32 => {
+                switch (bin_file.base.options.target.cpu.arch.ptrBitWidth()) {
+                    16 => {
+                        try code.resize(2);
+                        mem.writeInt(u16, code.items[0..2], @intCast(u16, vaddr), endian);
+                    },
+                    32 => {
                         try code.resize(4);
                         mem.writeInt(u32, code.items[0..4], @intCast(u32, vaddr), endian);
                     },
-                    .p64 => {
+                    64 => {
                         try code.resize(8);
                         mem.writeInt(u64, code.items[0..8], vaddr, endian);
                     },
+                    else => unreachable,
                 }
                 return Result{ .appended = {} };
             }
             return Result{
                 .fail = try ErrorMsg.create(
-                    bin_file.allocator,
+                    bin_file.base.allocator,
                     src,
                     "TODO implement generateSymbol for pointer {}",
                     .{typed_value.val},
@@ -166,6 +182,8 @@ pub fn generateSymbol(
             };
         },
         .Int => {
+            // TODO populate .debug_info for the integer
+
             const info = typed_value.ty.intInfo(bin_file.base.options.target);
             if (info.bits == 8 and !info.signed) {
                 const x = typed_value.val.toUnsignedInt();
@@ -174,7 +192,7 @@ pub fn generateSymbol(
             }
             return Result{
                 .fail = try ErrorMsg.create(
-                    bin_file.allocator,
+                    bin_file.base.allocator,
                     src,
                     "TODO implement generateSymbol for int type '{}'",
                     .{typed_value.ty},
@@ -184,7 +202,7 @@ pub fn generateSymbol(
         else => |t| {
             return Result{
                 .fail = try ErrorMsg.create(
-                    bin_file.allocator,
+                    bin_file.base.allocator,
                     src,
                     "TODO implement generateSymbol for type '{}'",
                     .{@tagName(t)},
@@ -206,6 +224,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         target: *const std.Target,
         mod_fn: *const Module.Fn,
         code: *std.ArrayList(u8),
+        dbg_line: *std.ArrayList(u8),
+        dbg_info: *std.ArrayList(u8),
+        dbg_info_type_relocs: *link.File.Elf.DbgInfoTypeRelocsTable,
         err_msg: ?*ErrorMsg,
         args: []MCValue,
         ret_mcv: MCValue,
@@ -213,6 +234,15 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         arg_index: usize,
         src: usize,
         stack_align: u32,
+
+        /// Byte offset within the source file.
+        prev_di_src: usize,
+        /// Relative to the beginning of `code`.
+        prev_di_pc: usize,
+        /// Used to find newlines and count line deltas.
+        source: []const u8,
+        /// Byte offset within the source file of the ending curly.
+        rbrace_src: usize,
 
         /// The value is an offset into the `Function` `code` from the beginning.
         /// To perform the reloc, write 32-bit signed little-endian integer
@@ -365,26 +395,48 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             src: usize,
             typed_value: TypedValue,
             code: *std.ArrayList(u8),
+            dbg_line: *std.ArrayList(u8),
+            dbg_info: *std.ArrayList(u8),
+            dbg_info_type_relocs: *link.File.Elf.DbgInfoTypeRelocsTable,
         ) GenerateSymbolError!Result {
             const module_fn = typed_value.val.cast(Value.Payload.Function).?.func;
 
             const fn_type = module_fn.owner_decl.typed_value.most_recent.typed_value.ty;
 
-            var branch_stack = std.ArrayList(Branch).init(bin_file.allocator);
+            var branch_stack = std.ArrayList(Branch).init(bin_file.base.allocator);
             defer {
                 assert(branch_stack.items.len == 1);
-                branch_stack.items[0].deinit(bin_file.allocator);
+                branch_stack.items[0].deinit(bin_file.base.allocator);
                 branch_stack.deinit();
             }
             const branch = try branch_stack.addOne();
             branch.* = .{};
 
+            const src_data: struct {lbrace_src: usize, rbrace_src: usize, source: []const u8} = blk: {
+                if (module_fn.owner_decl.scope.cast(Module.Scope.File)) |scope_file| {
+                    const tree = scope_file.contents.tree;
+                    const fn_proto = tree.root_node.decls()[module_fn.owner_decl.src_index].castTag(.FnProto).?;
+                    const block = fn_proto.body().?.castTag(.Block).?;
+                    const lbrace_src = tree.token_locs[block.lbrace].start;
+                    const rbrace_src = tree.token_locs[block.rbrace].start;
+                    break :blk .{ .lbrace_src = lbrace_src, .rbrace_src = rbrace_src, .source = tree.source };
+                } else if (module_fn.owner_decl.scope.cast(Module.Scope.ZIRModule)) |zir_module| {
+                    const byte_off = zir_module.contents.module.decls[module_fn.owner_decl.src_index].inst.src;
+                    break :blk .{ .lbrace_src = byte_off, .rbrace_src = byte_off, .source = zir_module.source.bytes };
+                } else {
+                    unreachable;
+                }
+            };
+
             var function = Self{
-                .gpa = bin_file.allocator,
+                .gpa = bin_file.base.allocator,
                 .target = &bin_file.base.options.target,
                 .bin_file = bin_file,
                 .mod_fn = module_fn,
                 .code = code,
+                .dbg_line = dbg_line,
+                .dbg_info = dbg_info,
+                .dbg_info_type_relocs = dbg_info_type_relocs,
                 .err_msg = null,
                 .args = undefined, // populated after `resolveCallingConventionValues`
                 .ret_mcv = undefined, // populated after `resolveCallingConventionValues`
@@ -393,8 +445,12 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 .branch_stack = &branch_stack,
                 .src = src,
                 .stack_align = undefined,
+                .prev_di_pc = 0,
+                .prev_di_src = src_data.lbrace_src,
+                .rbrace_src = src_data.rbrace_src,
+                .source = src_data.source,
             };
-            defer function.exitlude_jump_relocs.deinit(bin_file.allocator);
+            defer function.exitlude_jump_relocs.deinit(bin_file.base.allocator);
 
             var call_info = function.resolveCallingConventionValues(src, fn_type) catch |err| switch (err) {
                 error.CodegenFail => return Result{ .fail = function.err_msg.? },
@@ -431,20 +487,14 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         // TODO During semantic analysis, check if there are no function calls. If there
                         // are none, here we can omit the part where we subtract and then add rsp.
                         self.code.appendSliceAssumeCapacity(&[_]u8{
-                            // push rbp
-                            0x55,
-                            // mov rbp, rsp
-                            0x48,
-                            0x89,
-                            0xe5,
-                            // sub rsp, imm32 (with reloc)
-                            0x48,
-                            0x81,
-                            0xec,
+                            0x55, // push rbp
+                            0x48, 0x89, 0xe5, // mov rbp, rsp
+                            0x48, 0x81, 0xec, // sub rsp, imm32 (with reloc)
                         });
                         const reloc_index = self.code.items.len;
                         self.code.items.len += 4;
 
+                        try self.dbgSetPrologueEnd();
                         try self.genBody(self.mod_fn.analysis.success);
 
                         const stack_end = self.branch_stack.items[0].max_end_stack;
@@ -467,6 +517,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             mem.writeIntLittle(i32, self.code.items[jmp_reloc..][0..4], s32_amt);
                         }
 
+                        // Important to be after the possible self.code.items.len -= 5 above.
+                        try self.dbgSetEpilogueBegin();
+
                         try self.code.ensureCapacity(self.code.items.len + 9);
                         // add rsp, x
                         if (aligned_stack_end > math.maxInt(i8)) {
@@ -485,17 +538,24 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             0xc3, // ret
                         });
                     } else {
+                        try self.dbgSetPrologueEnd();
                         try self.genBody(self.mod_fn.analysis.success);
+                        try self.dbgSetEpilogueBegin();
                     }
                 },
                 else => {
+                    try self.dbgSetPrologueEnd();
                     try self.genBody(self.mod_fn.analysis.success);
+                    try self.dbgSetEpilogueBegin();
                 },
             }
+            // Drop them off at the rbrace.
+            try self.dbgAdvancePCAndLine(self.rbrace_src);
         }
 
         fn genBody(self: *Self, body: ir.Body) InnerError!void {
-            const inst_table = &self.branch_stack.items[0].inst_table;
+            const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
+            const inst_table = &branch.inst_table;
             for (body.instructions) |inst| {
                 const new_inst = try self.genFuncInst(inst);
                 try inst_table.putNoClobber(self.gpa, inst, new_inst);
@@ -508,6 +568,38 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             }
         }
 
+        fn dbgSetPrologueEnd(self: *Self) InnerError!void {
+            try self.dbg_line.append(DW.LNS_set_prologue_end);
+            try self.dbgAdvancePCAndLine(self.prev_di_src);
+        }
+
+        fn dbgSetEpilogueBegin(self: *Self) InnerError!void {
+            try self.dbg_line.append(DW.LNS_set_epilogue_begin);
+            try self.dbgAdvancePCAndLine(self.prev_di_src);
+        }
+
+        fn dbgAdvancePCAndLine(self: *Self, src: usize) InnerError!void {
+            // TODO Look into improving the performance here by adding a token-index-to-line
+            // lookup table, and changing ir.Inst from storing byte offset to token. Currently
+            // this involves scanning over the source code for newlines
+            // (but only from the previous byte offset to the new one).
+            const delta_line = std.zig.lineDelta(self.source, self.prev_di_src, src);
+            const delta_pc = self.code.items.len - self.prev_di_pc;
+            self.prev_di_src = src;
+            self.prev_di_pc = self.code.items.len;
+            // TODO Look into using the DWARF special opcodes to compress this data. It lets you emit
+            // single-byte opcodes that add different numbers to both the PC and the line number
+            // at the same time.
+            try self.dbg_line.ensureCapacity(self.dbg_line.items.len + 11);
+            self.dbg_line.appendAssumeCapacity(DW.LNS_advance_pc);
+            leb128.writeULEB128(self.dbg_line.writer(), delta_pc) catch unreachable;
+            if (delta_line != 0) {
+                self.dbg_line.appendAssumeCapacity(DW.LNS_advance_line);
+                leb128.writeILEB128(self.dbg_line.writer(), delta_line) catch unreachable;
+            }
+            self.dbg_line.appendAssumeCapacity(DW.LNS_copy);
+        }
+
         fn processDeath(self: *Self, inst: *ir.Inst) void {
             const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
             const entry = branch.inst_table.getEntry(inst) orelse return;
@@ -515,12 +607,29 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             entry.value = .dead;
             switch (prev_value) {
                 .register => |reg| {
-                    const reg64 = reg.to64();
-                    _ = branch.registers.remove(reg64);
-                    branch.markRegFree(reg64);
+                    const canon_reg = toCanonicalReg(reg);
+                    _ = branch.registers.remove(canon_reg);
+                    branch.markRegFree(canon_reg);
                 },
                 else => {}, // TODO process stack allocation death
             }
+        }
+
+        /// Adds a Type to the .debug_info at the current position. The bytes will be populated later,
+        /// after codegen for this symbol is done.
+        fn addDbgInfoTypeReloc(self: *Self, ty: Type) !void {
+            assert(ty.hasCodeGenBits());
+            const index = self.dbg_info.items.len;
+            try self.dbg_info.resize(index + 4); // DW.AT_type,  DW.FORM_ref4
+
+            const gop = try self.dbg_info_type_relocs.getOrPut(self.gpa, ty);
+            if (!gop.found_existing) {
+                gop.entry.value = .{
+                    .off = undefined,
+                    .relocs = .{},
+                };
+            }
+            try gop.entry.value.relocs.append(self.gpa, @intCast(u32, index));
         }
 
         fn genFuncInst(self: *Self, inst: *ir.Inst) !MCValue {
@@ -543,11 +652,13 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 .cmp_neq => return self.genCmp(inst.castTag(.cmp_neq).?, .neq),
                 .condbr => return self.genCondBr(inst.castTag(.condbr).?),
                 .constant => unreachable, // excluded from function bodies
+                .dbg_stmt => return self.genDbgStmt(inst.castTag(.dbg_stmt).?),
                 .floatcast => return self.genFloatCast(inst.castTag(.floatcast).?),
                 .intcast => return self.genIntCast(inst.castTag(.intcast).?),
                 .isnonnull => return self.genIsNonNull(inst.castTag(.isnonnull).?),
                 .isnull => return self.genIsNull(inst.castTag(.isnull).?),
                 .load => return self.genLoad(inst.castTag(.load).?),
+                .loop => return self.genLoop(inst.castTag(.loop).?),
                 .not => return self.genNot(inst.castTag(.not).?),
                 .ptrtoint => return self.genPtrToInt(inst.castTag(.ptrtoint).?),
                 .ref => return self.genRef(inst.castTag(.ref).?),
@@ -556,6 +667,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 .store => return self.genStore(inst.castTag(.store).?),
                 .sub => return self.genSub(inst.castTag(.sub).?),
                 .unreach => return MCValue{ .unreach = {} },
+                .unwrap_optional => return self.genUnwrapOptional(inst.castTag(.unwrap_optional).?),
             }
         }
 
@@ -702,6 +814,15 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     return try self.genX8664BinMath(&inst.base, inst.lhs, inst.rhs, 0, 0x00);
                 },
                 else => return self.fail(inst.base.src, "TODO implement add for {}", .{self.target.cpu.arch}),
+            }
+        }
+
+        fn genUnwrapOptional(self: *Self, inst: *ir.Inst.UnOp) !MCValue {
+            // No side effects, so if it's unreferenced, do nothing.
+            if (inst.base.isUnused())
+                return MCValue.dead;
+            switch (arch) {
+                else => return self.fail(inst.base.src, "TODO implement unwrap optional for {}", .{self.target.cpu.arch}),
             }
         }
 
@@ -921,7 +1042,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             }
         }
 
-        fn genArg(self: *Self, inst: *ir.Inst.NoOp) !MCValue {
+        fn genArg(self: *Self, inst: *ir.Inst.Arg) !MCValue {
             if (FreeRegInt == u0) {
                 return self.fail(inst.base.src, "TODO implement Register enum for {}", .{self.target.cpu.arch});
             }
@@ -934,10 +1055,20 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             const result = self.args[self.arg_index];
             self.arg_index += 1;
 
+            const name_with_null = inst.name[0..mem.lenZ(inst.name) + 1];
             switch (result) {
                 .register => |reg| {
                     branch.registers.putAssumeCapacityNoClobber(reg, .{ .inst = &inst.base });
                     branch.markRegUsed(reg);
+
+                    try self.dbg_info.ensureCapacity(self.dbg_info.items.len + 8 + name_with_null.len);
+                    self.dbg_info.appendAssumeCapacity(link.File.Elf.abbrev_parameter);
+                    self.dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT_location, DW.FORM_exprloc
+                        1, // ULEB128 dwarf expression length
+                        reg.dwarfLocOp(),
+                    });
+                    try self.addDbgInfoTypeReloc(inst.base.ty); // DW.AT_type,  DW.FORM_ref4
+                    self.dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT_name, DW.FORM_string
                 },
                 else => {},
             }
@@ -948,6 +1079,13 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             switch (arch) {
                 .i386, .x86_64 => {
                     try self.code.append(0xcc); // int3
+                },
+                .riscv64 => {
+                    const full = @bitCast(u32, instructions.CallBreak{
+                        .mode = @enumToInt(instructions.CallBreak.Mode.ebreak),
+                    });
+
+                    mem.writeIntLittle(u32, try self.code.addManyAsArray(4), full);
                 },
                 else => return self.fail(src, "TODO implement @breakpoint() for {}", .{self.target.cpu.arch}),
             }
@@ -999,11 +1137,36 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             const got = &self.bin_file.program_headers.items[self.bin_file.phdr_got_index.?];
                             const ptr_bits = self.target.cpu.arch.ptrBitWidth();
                             const ptr_bytes: u64 = @divExact(ptr_bits, 8);
-                            const got_addr = @intCast(u32, got.p_vaddr + func.owner_decl.link.offset_table_index * ptr_bytes);
+                            const got_addr = @intCast(u32, got.p_vaddr + func.owner_decl.link.elf.offset_table_index * ptr_bytes);
                             // ff 14 25 xx xx xx xx    call [addr]
                             try self.code.ensureCapacity(self.code.items.len + 7);
                             self.code.appendSliceAssumeCapacity(&[3]u8{ 0xff, 0x14, 0x25 });
                             mem.writeIntLittle(u32, self.code.addManyAsArrayAssumeCapacity(4), got_addr);
+                        } else {
+                            return self.fail(inst.base.src, "TODO implement calling bitcasted functions", .{});
+                        }
+                    } else {
+                        return self.fail(inst.base.src, "TODO implement calling runtime known function pointer", .{});
+                    }
+                },
+                .riscv64 => {
+                    if (info.args.len > 0) return self.fail(inst.base.src, "TODO implement fn args for {}", .{self.target.cpu.arch});
+
+                    if (inst.func.cast(ir.Inst.Constant)) |func_inst| {
+                        if (func_inst.val.cast(Value.Payload.Function)) |func_val| {
+                            const func = func_val.func;
+                            const got = &self.bin_file.program_headers.items[self.bin_file.phdr_got_index.?];
+                            const ptr_bits = self.target.cpu.arch.ptrBitWidth();
+                            const ptr_bytes: u64 = @divExact(ptr_bits, 8);
+                            const got_addr = @intCast(u32, got.p_vaddr + func.owner_decl.link.elf.offset_table_index * ptr_bytes);
+
+                            try self.genSetReg(inst.base.src, .ra, .{ .memory = got_addr });
+                            const jalr = instructions.Jalr{
+                                .rd = Register.ra.id(),
+                                .rs1 = Register.ra.id(),
+                                .offset = 0,
+                            };
+                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), @bitCast(u32, jalr));
                         } else {
                             return self.fail(inst.base.src, "TODO implement calling bitcasted functions", .{});
                         }
@@ -1059,6 +1222,14 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     self.code.items[self.code.items.len - 5] = 0xe9; // jmp rel32
                     try self.exitlude_jump_relocs.append(self.gpa, self.code.items.len - 4);
                 },
+                .riscv64 => {
+                    const jalr = instructions.Jalr{
+                        .rd = Register.zero.id(),
+                        .rs1 = Register.ra.id(),
+                        .offset = 0,
+                    };
+                    mem.writeIntLittle(u32, try self.code.addManyAsArray(4), @bitCast(u32, jalr));
+                },
                 else => return self.fail(src, "TODO implement return for {}", .{self.target.cpu.arch}),
             }
             return .unreach;
@@ -1106,7 +1277,13 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             }
         }
 
+        fn genDbgStmt(self: *Self, inst: *ir.Inst.NoOp) !MCValue {
+            try self.dbgAdvancePCAndLine(inst.base.src);
+            return MCValue.none;
+        }
+
         fn genCondBr(self: *Self, inst: *ir.Inst.CondBr) !MCValue {
+            // TODO Rework this so that the arch-independent logic isn't buried and duplicated.
             switch (arch) {
                 .x86_64 => {
                     try self.code.ensureCapacity(self.code.items.len + 6);
@@ -1159,6 +1336,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         }
 
         fn genX86CondBr(self: *Self, inst: *ir.Inst.CondBr, opcode: u8) !MCValue {
+            // TODO deal with liveness / deaths condbr's then_entry_deaths and else_entry_deaths
             self.code.appendSliceAssumeCapacity(&[_]u8{ 0x0f, opcode });
             const reloc = Reloc{ .rel32 = self.code.items.len };
             self.code.items.len += 4;
@@ -1182,11 +1360,37 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             }
         }
 
+        fn genLoop(self: *Self, inst: *ir.Inst.Loop) !MCValue {
+            // A loop is a setup to be able to jump back to the beginning.
+            const start_index = self.code.items.len;
+            try self.genBody(inst.body);
+            try self.jump(inst.base.src, start_index);
+            return MCValue.unreach;
+        }
+
+        /// Send control flow to the `index` of `self.code`.
+        fn jump(self: *Self, src: usize, index: usize) !void {
+            switch (arch) {
+                .i386, .x86_64 => {
+                    try self.code.ensureCapacity(self.code.items.len + 5);
+                    if (math.cast(i8, @intCast(i32, index) - (@intCast(i32, self.code.items.len + 2)))) |delta| {
+                        self.code.appendAssumeCapacity(0xeb); // jmp rel8
+                        self.code.appendAssumeCapacity(@bitCast(u8, delta));
+                    } else |_| {
+                        const delta = @intCast(i32, index) - (@intCast(i32, self.code.items.len + 5));
+                        self.code.appendAssumeCapacity(0xe9); // jmp rel32
+                        mem.writeIntLittle(i32, self.code.addManyAsArrayAssumeCapacity(4), delta);
+                    }
+                },
+                else => return self.fail(src, "TODO implement jump for {}", .{self.target.cpu.arch}),
+            }
+        }
+
         fn genBlock(self: *Self, inst: *ir.Inst.Block) !MCValue {
             if (inst.base.ty.hasCodeGenBits()) {
                 return self.fail(inst.base.src, "TODO codegen Block with non-void type", .{});
             }
-            // A block is nothing but a setup to be able to jump to the end.
+            // A block is a setup to be able to jump to the end.
             defer inst.codegen.relocs.deinit(self.gpa);
             try self.genBody(inst.body);
 
@@ -1246,36 +1450,72 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         fn genAsm(self: *Self, inst: *ir.Inst.Assembly) !MCValue {
             if (!inst.is_volatile and inst.base.isUnused())
                 return MCValue.dead;
-            if (arch != .x86_64 and arch != .i386) {
-                return self.fail(inst.base.src, "TODO implement inline asm support for more architectures", .{});
-            }
-            for (inst.inputs) |input, i| {
-                if (input.len < 3 or input[0] != '{' or input[input.len - 1] != '}') {
-                    return self.fail(inst.base.src, "unrecognized asm input constraint: '{}'", .{input});
-                }
-                const reg_name = input[1 .. input.len - 1];
-                const reg = parseRegName(reg_name) orelse
-                    return self.fail(inst.base.src, "unrecognized register: '{}'", .{reg_name});
-                const arg = try self.resolveInst(inst.args[i]);
-                try self.genSetReg(inst.base.src, reg, arg);
-            }
+            switch (arch) {
+                .riscv64 => {
+                    for (inst.inputs) |input, i| {
+                        if (input.len < 3 or input[0] != '{' or input[input.len - 1] != '}') {
+                            return self.fail(inst.base.src, "unrecognized asm input constraint: '{}'", .{input});
+                        }
+                        const reg_name = input[1 .. input.len - 1];
+                        const reg = parseRegName(reg_name) orelse
+                            return self.fail(inst.base.src, "unrecognized register: '{}'", .{reg_name});
+                        const arg = try self.resolveInst(inst.args[i]);
+                        try self.genSetReg(inst.base.src, reg, arg);
+                    }
 
-            if (mem.eql(u8, inst.asm_source, "syscall")) {
-                try self.code.appendSlice(&[_]u8{ 0x0f, 0x05 });
-            } else {
-                return self.fail(inst.base.src, "TODO implement support for more x86 assembly instructions", .{});
-            }
+                    if (mem.eql(u8, inst.asm_source, "ecall")) {
+                        const full = @bitCast(u32, instructions.CallBreak{
+                            .mode = @enumToInt(instructions.CallBreak.Mode.ecall),
+                        });
 
-            if (inst.output) |output| {
-                if (output.len < 4 or output[0] != '=' or output[1] != '{' or output[output.len - 1] != '}') {
-                    return self.fail(inst.base.src, "unrecognized asm output constraint: '{}'", .{output});
-                }
-                const reg_name = output[2 .. output.len - 1];
-                const reg = parseRegName(reg_name) orelse
-                    return self.fail(inst.base.src, "unrecognized register: '{}'", .{reg_name});
-                return MCValue{ .register = reg };
-            } else {
-                return MCValue.none;
+                        mem.writeIntLittle(u32, try self.code.addManyAsArray(4), full);
+                    } else {
+                        return self.fail(inst.base.src, "TODO implement support for more riscv64 assembly instructions", .{});
+                    }
+
+                    if (inst.output) |output| {
+                        if (output.len < 4 or output[0] != '=' or output[1] != '{' or output[output.len - 1] != '}') {
+                            return self.fail(inst.base.src, "unrecognized asm output constraint: '{}'", .{output});
+                        }
+                        const reg_name = output[2 .. output.len - 1];
+                        const reg = parseRegName(reg_name) orelse
+                            return self.fail(inst.base.src, "unrecognized register: '{}'", .{reg_name});
+                        return MCValue{ .register = reg };
+                    } else {
+                        return MCValue.none;
+                    }
+                },
+                .x86_64, .i386 => {
+                    for (inst.inputs) |input, i| {
+                        if (input.len < 3 or input[0] != '{' or input[input.len - 1] != '}') {
+                            return self.fail(inst.base.src, "unrecognized asm input constraint: '{}'", .{input});
+                        }
+                        const reg_name = input[1 .. input.len - 1];
+                        const reg = parseRegName(reg_name) orelse
+                            return self.fail(inst.base.src, "unrecognized register: '{}'", .{reg_name});
+                        const arg = try self.resolveInst(inst.args[i]);
+                        try self.genSetReg(inst.base.src, reg, arg);
+                    }
+
+                    if (mem.eql(u8, inst.asm_source, "syscall")) {
+                        try self.code.appendSlice(&[_]u8{ 0x0f, 0x05 });
+                    } else {
+                        return self.fail(inst.base.src, "TODO implement support for more x86 assembly instructions", .{});
+                    }
+
+                    if (inst.output) |output| {
+                        if (output.len < 4 or output[0] != '=' or output[1] != '{' or output[output.len - 1] != '}') {
+                            return self.fail(inst.base.src, "unrecognized asm output constraint: '{}'", .{output});
+                        }
+                        const reg_name = output[2 .. output.len - 1];
+                        const reg = parseRegName(reg_name) orelse
+                            return self.fail(inst.base.src, "unrecognized register: '{}'", .{reg_name});
+                        return MCValue{ .register = reg };
+                    } else {
+                        return MCValue.none;
+                    }
+                },
+                else => return self.fail(inst.base.src, "TODO implement inline asm support for more architectures", .{}),
             }
         }
 
@@ -1421,6 +1661,75 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
 
         fn genSetReg(self: *Self, src: usize, reg: Register, mcv: MCValue) InnerError!void {
             switch (arch) {
+                .riscv64 => switch (mcv) {
+                    .dead => unreachable,
+                    .ptr_stack_offset => unreachable,
+                    .ptr_embedded_in_code => unreachable,
+                    .unreach, .none => return, // Nothing to do.
+                    .undef => {
+                        if (!self.wantSafety())
+                            return; // The already existing value will do just fine.
+                        // Write the debug undefined value.
+                        return self.genSetReg(src, reg, .{ .immediate = 0xaaaaaaaaaaaaaaaa });
+                    },
+                    .immediate => |unsigned_x| {
+                        const x = @bitCast(i64, unsigned_x);
+                        if (math.minInt(i12) <= x and x <= math.maxInt(i12)) {
+                            const instruction = @bitCast(u32, instructions.Addi{
+                                .mode = @enumToInt(instructions.Addi.Mode.addi),
+                                .imm = @truncate(i12, x),
+                                .rs1 = Register.zero.id(),
+                                .rd = reg.id(),
+                            });
+
+                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), instruction);
+                            return;
+                        }
+                        if (math.minInt(i32) <= x and x <= math.maxInt(i32)) {
+                            const split = @bitCast(packed struct {
+                                low12: i12,
+                                up20: i20,
+                            }, @truncate(i32, x));
+                            if (split.low12 < 0) return self.fail(src, "TODO support riscv64 genSetReg i32 immediates with 12th bit set to 1", .{});
+
+                            const lui = @bitCast(u32, instructions.Lui{
+                                .imm = split.up20,
+                                .rd = reg.id(),
+                            });
+                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), lui);
+
+                            const addi = @bitCast(u32, instructions.Addi{
+                                .mode = @enumToInt(instructions.Addi.Mode.addi),
+                                .imm = @truncate(i12, split.low12),
+                                .rs1 = reg.id(),
+                                .rd = reg.id(),
+                            });
+                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), addi);
+                            return;
+                        }
+                        // li rd, immediate
+                        // "Myriad sequences"
+                        return self.fail(src, "TODO genSetReg 33-64 bit immediates for riscv64", .{}); // glhf
+                    },
+                    .memory => |addr| {
+                        // The value is in memory at a hard-coded address.
+                        // If the type is a pointer, it means the pointer address is at this memory location.
+                        try self.genSetReg(src, reg, .{ .immediate = addr });
+
+                        const ld = @bitCast(u32, instructions.Load{
+                            .mode = @enumToInt(instructions.Load.Mode.ld),
+                            .rs1 = reg.id(),
+                            .rd = reg.id(),
+                            .offset = 0,
+                        });
+
+                        mem.writeIntLittle(u32, try self.code.addManyAsArray(4), ld);
+                        // LOAD imm=[i12 offset = 0], rs1 =
+
+                        // return self.fail("TODO implement genSetReg memory for riscv64");
+                    },
+                    else => return self.fail(src, "TODO implement getSetReg for riscv64 {}", .{mcv}),
+                },
                 .x86_64 => switch (mcv) {
                     .dead => unreachable,
                     .ptr_stack_offset => unreachable,
@@ -1705,7 +2014,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     if (typed_value.val.cast(Value.Payload.DeclRef)) |payload| {
                         const got = &self.bin_file.program_headers.items[self.bin_file.phdr_got_index.?];
                         const decl = payload.decl;
-                        const got_addr = got.p_vaddr + decl.link.offset_table_index * ptr_bytes;
+                        const got_addr = got.p_vaddr + decl.link.elf.offset_table_index * ptr_bytes;
                         return MCValue{ .memory = got_addr };
                     }
                     return self.fail(src, "TODO codegen more kinds of const pointers", .{});
@@ -1794,7 +2103,8 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         else => return self.fail(src, "TODO implement function parameters for {}", .{cc}),
                     }
                 },
-                else => return self.fail(src, "TODO implement codegen parameters for {}", .{self.target.cpu.arch}),
+                else => if (param_types.len != 0)
+                    return self.fail(src, "TODO implement codegen parameters for {}", .{self.target.cpu.arch}),
             }
 
             if (ret_ty.zigTypeTag() == .NoReturn) {
@@ -1829,13 +2139,14 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         fn fail(self: *Self, src: usize, comptime format: []const u8, args: anytype) error{ CodegenFail, OutOfMemory } {
             @setCold(true);
             assert(self.err_msg == null);
-            self.err_msg = try ErrorMsg.create(self.bin_file.allocator, src, format, args);
+            self.err_msg = try ErrorMsg.create(self.bin_file.base.allocator, src, format, args);
             return error.CodegenFail;
         }
 
         usingnamespace switch (arch) {
             .i386 => @import("codegen/x86.zig"),
             .x86_64 => @import("codegen/x86_64.zig"),
+            .riscv64 => @import("codegen/riscv64.zig"),
             else => struct {
                 pub const Register = enum {
                     dummy,
@@ -1852,6 +2163,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         const FreeRegInt = @Type(.{ .Int = .{ .is_signed = false, .bits = callee_preserved_regs.len } });
 
         fn parseRegName(name: []const u8) ?Register {
+            if (@hasDecl(Register, "parseRegName")) {
+                return Register.parseRegName(name);
+            }
             return std.meta.stringToEnum(Register, name);
         }
 
@@ -1867,6 +2181,15 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 },
                 else => return reg,
             }
+        }
+
+        /// For most architectures this does nothing. For x86_64 it resolves any aliased registers
+        /// to the 64-bit wide ones.
+        fn toCanonicalReg(reg: Register) Register {
+            return switch (arch) {
+                .x86_64 => reg.to64(),
+                else => reg,
+            };
         }
     };
 }

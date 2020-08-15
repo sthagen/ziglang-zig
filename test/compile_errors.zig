@@ -2,6 +2,55 @@ const tests = @import("tests.zig");
 const std = @import("std");
 
 pub fn addCases(cases: *tests.CompileErrorContext) void {
+    cases.addTest("duplicate/unused labels",
+        \\comptime {
+        \\    blk: { blk: while (false) {} }
+        \\    blk: while (false) { blk: for (@as([0]void, undefined)) |_| {} }
+        \\    blk: for (@as([0]void, undefined)) |_| { blk: {} }
+        \\}
+        \\comptime {
+        \\    blk: {}
+        \\    blk: while(false) {}
+        \\    blk: for(@as([0]void, undefined)) |_| {}
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:17: error: redeclaration of label 'blk'",
+        "tmp.zig:2:10: note: previous declaration is here",
+        "tmp.zig:3:31: error: redeclaration of label 'blk'",
+        "tmp.zig:3:10: note: previous declaration is here",
+        "tmp.zig:4:51: error: redeclaration of label 'blk'",
+        "tmp.zig:4:10: note: previous declaration is here",
+        "tmp.zig:7:10: error: unused block label",
+        "tmp.zig:8:10: error: unused while label",
+        "tmp.zig:9:10: error: unused for label",
+    });
+
+    cases.addTest("@alignCast of zero sized types",
+        \\export fn foo() void {
+        \\    const a: *void = undefined;
+        \\    _ = @alignCast(2, a);
+        \\}
+        \\export fn bar() void {
+        \\    const a: ?*void = undefined;
+        \\    _ = @alignCast(2, a);
+        \\}
+        \\export fn baz() void {
+        \\    const a: []void = undefined;
+        \\    _ = @alignCast(2, a);
+        \\}
+        \\export fn qux() void {
+        \\    const a = struct {
+        \\        fn a(comptime b: u32) void {}
+        \\    }.a;
+        \\    _ = @alignCast(2, a);
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:3:23: error: cannot adjust alignment of zero sized type '*void'",
+        "tmp.zig:7:23: error: cannot adjust alignment of zero sized type '?*void'",
+        "tmp.zig:11:23: error: cannot adjust alignment of zero sized type '[]void'",
+        "tmp.zig:17:23: error: cannot adjust alignment of zero sized type 'fn(u32) anytype'",
+    });
+
     cases.addTest("invalid pointer with @Type",
         \\export fn entry() void {
         \\    _ = @Type(.{ .Pointer = .{

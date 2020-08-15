@@ -70,6 +70,11 @@ pub const Type = extern union {
             .single_mut_pointer => return .Pointer,
             .single_const_pointer_to_comptime_int => return .Pointer,
             .const_slice_u8 => return .Pointer,
+
+            .optional,
+            .optional_single_const_pointer,
+            .optional_single_mut_pointer,
+            => return .Optional,
         }
     }
 
@@ -103,7 +108,6 @@ pub const Type = extern union {
     }
 
     pub fn eql(a: Type, b: Type) bool {
-        //std.debug.warn("test {} == {}\n", .{ a, b });
         // As a shortcut, if the small tags / addresses match, we're done.
         if (a.tag_if_small_enough == b.tag_if_small_enough)
             return true;
@@ -180,9 +184,11 @@ pub const Type = extern union {
                 }
                 return true;
             },
+            .Optional => {
+                return a.elemType().eql(b.elemType());
+            },
             .Float,
             .Struct,
-            .Optional,
             .ErrorUnion,
             .ErrorSet,
             .Enum,
@@ -195,6 +201,73 @@ pub const Type = extern union {
             .EnumLiteral,
             => std.debug.panic("TODO implement Type equality comparison of {} and {}", .{ a, b }),
         }
+    }
+
+    pub fn hash(self: Type) u32 {
+        var hasher = std.hash.Wyhash.init(0);
+        const zig_type_tag = self.zigTypeTag();
+        std.hash.autoHash(&hasher, zig_type_tag);
+        switch (zig_type_tag) {
+            .Type,
+            .Void,
+            .Bool,
+            .NoReturn,
+            .ComptimeFloat,
+            .ComptimeInt,
+            .Undefined,
+            .Null,
+            => {}, // The zig type tag is all that is needed to distinguish.
+
+            .Pointer => {
+                // TODO implement more pointer type hashing
+            },
+            .Int => {
+                // Detect that e.g. u64 != usize, even if the bits match on a particular target.
+                if (self.isNamedInt()) {
+                    std.hash.autoHash(&hasher, self.tag());
+                } else {
+                    // Remaining cases are arbitrary sized integers.
+                    // The target will not be branched upon, because we handled target-dependent cases above.
+                    const info = self.intInfo(@as(Target, undefined));
+                    std.hash.autoHash(&hasher, info.signed);
+                    std.hash.autoHash(&hasher, info.bits);
+                }
+            },
+            .Array => {
+                std.hash.autoHash(&hasher, self.arrayLen());
+                std.hash.autoHash(&hasher, self.elemType().hash());
+                // TODO hash array sentinel
+            },
+            .Fn => {
+                std.hash.autoHash(&hasher, self.fnReturnType().hash());
+                std.hash.autoHash(&hasher, self.fnCallingConvention());
+                const params_len = self.fnParamLen();
+                std.hash.autoHash(&hasher, params_len);
+                var i: usize = 0;
+                while (i < params_len) : (i += 1) {
+                    std.hash.autoHash(&hasher, self.fnParamType(i).hash());
+                }
+            },
+            .Optional => {
+                std.hash.autoHash(&hasher, self.elemType().hash());
+            },
+            .Float,
+            .Struct,
+            .ErrorUnion,
+            .ErrorSet,
+            .Enum,
+            .Union,
+            .BoundFn,
+            .Opaque,
+            .Frame,
+            .AnyFrame,
+            .Vector,
+            .EnumLiteral,
+            => {
+                // TODO implement more type hashing
+            },
+        }
+        return @truncate(u32, hasher.final());
     }
 
     pub fn copy(self: Type, allocator: *Allocator) error{OutOfMemory}!Type {
@@ -253,24 +326,8 @@ pub const Type = extern union {
                 };
                 return Type{ .ptr_otherwise = &new_payload.base };
             },
-            .single_const_pointer => {
-                const payload = @fieldParentPtr(Payload.SingleConstPointer, "base", self.ptr_otherwise);
-                const new_payload = try allocator.create(Payload.SingleConstPointer);
-                new_payload.* = .{
-                    .base = payload.base,
-                    .pointee_type = try payload.pointee_type.copy(allocator),
-                };
-                return Type{ .ptr_otherwise = &new_payload.base };
-            },
-            .single_mut_pointer => {
-                const payload = @fieldParentPtr(Payload.SingleMutPointer, "base", self.ptr_otherwise);
-                const new_payload = try allocator.create(Payload.SingleMutPointer);
-                new_payload.* = .{
-                    .base = payload.base,
-                    .pointee_type = try payload.pointee_type.copy(allocator),
-                };
-                return Type{ .ptr_otherwise = &new_payload.base };
-            },
+            .single_const_pointer => return self.copyPayloadSingleField(allocator, Payload.SingleConstPointer, "pointee_type"),
+            .single_mut_pointer => return self.copyPayloadSingleField(allocator, Payload.SingleMutPointer, "pointee_type"),
             .int_signed => return self.copyPayloadShallow(allocator, Payload.IntSigned),
             .int_unsigned => return self.copyPayloadShallow(allocator, Payload.IntUnsigned),
             .function => {
@@ -288,6 +345,9 @@ pub const Type = extern union {
                 };
                 return Type{ .ptr_otherwise = &new_payload.base };
             },
+            .optional => return self.copyPayloadSingleField(allocator, Payload.Optional, "child_type"),
+            .optional_single_mut_pointer => return self.copyPayloadSingleField(allocator, Payload.OptionalSingleMutPointer, "pointee_type"),
+            .optional_single_const_pointer => return self.copyPayloadSingleField(allocator, Payload.OptionalSingleConstPointer, "pointee_type"),
         }
     }
 
@@ -295,6 +355,14 @@ pub const Type = extern union {
         const payload = @fieldParentPtr(T, "base", self.ptr_otherwise);
         const new_payload = try allocator.create(T);
         new_payload.* = payload.*;
+        return Type{ .ptr_otherwise = &new_payload.base };
+    }
+
+    fn copyPayloadSingleField(self: Type, allocator: *Allocator, comptime T: type, comptime field_name: []const u8) error{OutOfMemory}!Type {
+        const payload = @fieldParentPtr(T, "base", self.ptr_otherwise);
+        const new_payload = try allocator.create(T);
+        new_payload.base = payload.base;
+        @field(new_payload, field_name) = try @field(payload, field_name).copy(allocator);
         return Type{ .ptr_otherwise = &new_payload.base };
     }
 
@@ -392,6 +460,24 @@ pub const Type = extern union {
                     const payload = @fieldParentPtr(Payload.IntUnsigned, "base", ty.ptr_otherwise);
                     return out_stream.print("u{}", .{payload.bits});
                 },
+                .optional => {
+                    const payload = @fieldParentPtr(Payload.Optional, "base", ty.ptr_otherwise);
+                    try out_stream.writeByte('?');
+                    ty = payload.child_type;
+                    continue;
+                },
+                .optional_single_const_pointer => {
+                    const payload = @fieldParentPtr(Payload.OptionalSingleConstPointer, "base", ty.ptr_otherwise);
+                    try out_stream.writeAll("?*const ");
+                    ty = payload.pointee_type;
+                    continue;
+                },
+                .optional_single_mut_pointer => {
+                    const payload = @fieldParentPtr(Payload.OptionalSingleMutPointer, "base", ty.ptr_otherwise);
+                    try out_stream.writeAll("?*");
+                    ty = payload.pointee_type;
+                    continue;
+                },
             }
             unreachable;
         }
@@ -481,12 +567,16 @@ pub const Type = extern union {
             .single_const_pointer_to_comptime_int,
             .const_slice_u8,
             .array_u8_sentinel_0,
-            .array, // TODO check for zero bits
-            .single_const_pointer,
-            .single_mut_pointer,
-            .int_signed, // TODO check for zero bits
-            .int_unsigned, // TODO check for zero bits
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => true,
+            // TODO lazy types
+            .array => self.elemType().hasCodeGenBits() and self.arrayLen() != 0,
+            .single_const_pointer => self.elemType().hasCodeGenBits(),
+            .single_mut_pointer => self.elemType().hasCodeGenBits(),
+            .int_signed => self.cast(Payload.IntSigned).?.bits == 0,
+            .int_unsigned => self.cast(Payload.IntUnsigned).?.bits == 0,
 
             .c_void,
             .void,
@@ -510,13 +600,18 @@ pub const Type = extern union {
             .u8,
             .i8,
             .bool,
+            .array_u8_sentinel_0,
+            => return 1,
+
             .fn_noreturn_no_args, // represents machine code; not a pointer
             .fn_void_no_args, // represents machine code; not a pointer
             .fn_naked_noreturn_no_args, // represents machine code; not a pointer
             .fn_ccc_void_no_args, // represents machine code; not a pointer
             .function, // represents machine code; not a pointer
-            .array_u8_sentinel_0,
-            => return 1,
+            => return switch (target.cpu.arch) {
+                .riscv64 => 2,
+                else => 1,
+            },
 
             .i16, .u16 => return 2,
             .i32, .u32 => return 4,
@@ -528,6 +623,8 @@ pub const Type = extern union {
             .const_slice_u8,
             .single_const_pointer,
             .single_mut_pointer,
+            .optional_single_const_pointer,
+            .optional_single_mut_pointer,
             => return @divExact(target.cpu.arch.ptrBitWidth(), 8),
 
             .c_short => return @divExact(CType.short.sizeInBits(target), 8),
@@ -558,6 +655,16 @@ pub const Type = extern union {
                     unreachable;
 
                 return std.math.ceilPowerOfTwoPromote(u16, (bits + 7) / 8);
+            },
+
+            .optional => {
+                const child_type = self.cast(Payload.Optional).?.child_type;
+                if (!child_type.hasCodeGenBits()) return 1;
+
+                if (child_type.zigTypeTag() == .Pointer and !child_type.isCPtr())
+                    return @divExact(target.cpu.arch.ptrBitWidth(), 8);
+
+                return child_type.abiAlignment(target);
             },
 
             .c_void,
@@ -610,6 +717,8 @@ pub const Type = extern union {
             .const_slice_u8,
             .single_const_pointer,
             .single_mut_pointer,
+            .optional_single_const_pointer,
+            .optional_single_mut_pointer,
             => return @divExact(target.cpu.arch.ptrBitWidth(), 8),
 
             .c_short => return @divExact(CType.short.sizeInBits(target), 8),
@@ -638,6 +747,20 @@ pub const Type = extern union {
                     unreachable;
 
                 return std.math.ceilPowerOfTwoPromote(u16, (bits + 7) / 8);
+            },
+
+            .optional => {
+                const child_type = self.cast(Payload.Optional).?.child_type;
+                if (!child_type.hasCodeGenBits()) return 1;
+
+                if (child_type.zigTypeTag() == .Pointer and !child_type.isCPtr())
+                    return @divExact(target.cpu.arch.ptrBitWidth(), 8);
+
+                // Optional types are represented as a struct with the child type as the first
+                // field and a boolean as the second. Since the child type's abi alignment is
+                // guaranteed to be >= that of bool's (1 byte) the added size is exactly equal
+                // to the child type's ABI alignment.
+                return child_type.abiAlignment(target) + child_type.abiSize(target);
             },
         };
     }
@@ -687,6 +810,9 @@ pub const Type = extern union {
             .function,
             .int_unsigned,
             .int_signed,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => false,
 
             .single_const_pointer,
@@ -743,6 +869,9 @@ pub const Type = extern union {
             .function,
             .int_unsigned,
             .int_signed,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => false,
 
             .const_slice_u8 => true,
@@ -794,6 +923,9 @@ pub const Type = extern union {
             .int_unsigned,
             .int_signed,
             .single_mut_pointer,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => false,
 
             .single_const_pointer,
@@ -851,11 +983,14 @@ pub const Type = extern union {
             .single_const_pointer,
             .single_const_pointer_to_comptime_int,
             .const_slice_u8,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => false,
         };
     }
 
-    /// Asserts the type is a pointer or array type.
+    /// Asserts the type is a pointer, optional or array type.
     pub fn elemType(self: Type) Type {
         return switch (self.tag()) {
             .u8,
@@ -905,6 +1040,9 @@ pub const Type = extern union {
             .single_mut_pointer => self.cast(Payload.SingleMutPointer).?.pointee_type,
             .array_u8_sentinel_0, .const_slice_u8 => Type.initTag(.u8),
             .single_const_pointer_to_comptime_int => Type.initTag(.comptime_int),
+            .optional => self.cast(Payload.Optional).?.child_type,
+            .optional_single_mut_pointer => self.cast(Payload.OptionalSingleMutPointer).?.pointee_type,
+            .optional_single_const_pointer => self.cast(Payload.OptionalSingleConstPointer).?.pointee_type,
         };
     }
 
@@ -955,6 +1093,9 @@ pub const Type = extern union {
             .const_slice_u8,
             .int_unsigned,
             .int_signed,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => unreachable,
 
             .array => self.cast(Payload.Array).?.len,
@@ -1009,6 +1150,9 @@ pub const Type = extern union {
             .const_slice_u8,
             .int_unsigned,
             .int_signed,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => unreachable,
 
             .array => return null,
@@ -1060,6 +1204,9 @@ pub const Type = extern union {
             .u16,
             .u32,
             .u64,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => false,
 
             .int_signed,
@@ -1115,6 +1262,9 @@ pub const Type = extern union {
             .i16,
             .i32,
             .i64,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => false,
 
             .int_unsigned,
@@ -1160,6 +1310,9 @@ pub const Type = extern union {
             .single_const_pointer_to_comptime_int,
             .array_u8_sentinel_0,
             .const_slice_u8,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => unreachable,
 
             .int_unsigned => .{ .signed = false, .bits = self.cast(Payload.IntUnsigned).?.bits },
@@ -1223,6 +1376,9 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => false,
 
             .usize,
@@ -1315,6 +1471,9 @@ pub const Type = extern union {
             .c_ulonglong,
             .int_unsigned,
             .int_signed,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => unreachable,
         };
     }
@@ -1373,6 +1532,9 @@ pub const Type = extern union {
             .c_ulonglong,
             .int_unsigned,
             .int_signed,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => unreachable,
         }
     }
@@ -1430,6 +1592,9 @@ pub const Type = extern union {
             .c_ulonglong,
             .int_unsigned,
             .int_signed,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => unreachable,
         }
     }
@@ -1487,6 +1652,9 @@ pub const Type = extern union {
             .c_ulonglong,
             .int_unsigned,
             .int_signed,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => unreachable,
         };
     }
@@ -1541,6 +1709,9 @@ pub const Type = extern union {
             .c_ulonglong,
             .int_unsigned,
             .int_signed,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => unreachable,
         };
     }
@@ -1595,6 +1766,9 @@ pub const Type = extern union {
             .c_ulonglong,
             .int_unsigned,
             .int_signed,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => unreachable,
         };
     }
@@ -1649,6 +1823,9 @@ pub const Type = extern union {
             .single_const_pointer_to_comptime_int,
             .array_u8_sentinel_0,
             .const_slice_u8,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => false,
         };
     }
@@ -1693,6 +1870,9 @@ pub const Type = extern union {
             .array_u8_sentinel_0,
             .const_slice_u8,
             .c_void,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => return null,
 
             .void => return Value.initTag(.void_value),
@@ -1782,6 +1962,9 @@ pub const Type = extern union {
             .array,
             .single_const_pointer,
             .single_mut_pointer,
+            .optional,
+            .optional_single_mut_pointer,
+            .optional_single_const_pointer,
             => return false,
         };
     }
@@ -1842,6 +2025,9 @@ pub const Type = extern union {
         int_signed,
         int_unsigned,
         function,
+        optional,
+        optional_single_mut_pointer,
+        optional_single_const_pointer,
 
         pub const last_no_payload_tag = Tag.const_slice_u8;
         pub const no_payload_count = @enumToInt(last_no_payload_tag) + 1;
@@ -1893,6 +2079,24 @@ pub const Type = extern union {
             param_types: []Type,
             return_type: Type,
             cc: std.builtin.CallingConvention,
+        };
+
+        pub const Optional = struct {
+            base: Payload = Payload{ .tag = .optional },
+
+            child_type: Type,
+        };
+
+        pub const OptionalSingleConstPointer = struct {
+            base: Payload = Payload{ .tag = .optional_single_const_pointer },
+
+            pointee_type: Type,
+        };
+
+        pub const OptionalSingleMutPointer = struct {
+            base: Payload = Payload{ .tag = .optional_single_mut_pointer },
+
+            pointee_type: Type,
         };
     };
 };

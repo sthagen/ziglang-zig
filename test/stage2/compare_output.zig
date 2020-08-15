@@ -7,6 +7,11 @@ const linux_x64 = std.zig.CrossTarget{
     .os_tag = .linux,
 };
 
+const linux_riscv64 = std.zig.CrossTarget{
+    .cpu_arch = .riscv64,
+    .os_tag = .linux,
+};
+
 pub fn addCases(ctx: *TestContext) !void {
     if (std.Target.current.os.tag != .linux or
         std.Target.current.cpu.arch != .x86_64)
@@ -18,6 +23,14 @@ pub fn addCases(ctx: *TestContext) !void {
 
     {
         var case = ctx.exe("hello world with updates", linux_x64);
+
+        case.addError("", &[_][]const u8{":1:1: error: no entry point found"});
+
+        case.addError(
+            \\export fn _start() noreturn {
+            \\}
+        , &[_][]const u8{":2:1: error: expected noreturn, found void"});
+
         // Regular old hello world
         case.addCompareOutput(
             \\export fn _start() noreturn {
@@ -116,6 +129,42 @@ pub fn addCases(ctx: *TestContext) !void {
             \\What is up? This is a longer message that will force the data to be relocated in virtual address space.
             \\What is up? This is a longer message that will force the data to be relocated in virtual address space.
             \\
+        );
+    }
+
+    {
+        var case = ctx.exe("hello world", linux_riscv64);
+        // Regular old hello world
+        case.addCompareOutput(
+            \\export fn _start() noreturn {
+            \\    print();
+            \\
+            \\    exit();
+            \\}
+            \\
+            \\fn print() void {
+            \\    asm volatile ("ecall"
+            \\        :
+            \\        : [number] "{a7}" (64),
+            \\          [arg1] "{a0}" (1),
+            \\          [arg2] "{a1}" (@ptrToInt("Hello, World!\n")),
+            \\          [arg3] "{a2}" ("Hello, World!\n".len)
+            \\        : "rcx", "r11", "memory"
+            \\    );
+            \\    return;
+            \\}
+            \\
+            \\fn exit() noreturn {
+            \\    asm volatile ("ecall"
+            \\        :
+            \\        : [number] "{a7}" (94),
+            \\          [arg1] "{a0}" (0)
+            \\        : "rcx", "r11", "memory"
+            \\    );
+            \\    unreachable;
+            \\}
+        ,
+            "Hello, World!\n",
         );
     }
 
@@ -396,6 +445,69 @@ pub fn addCases(ctx: *TestContext) !void {
             \\}
         ,
             "",
+        );
+
+        // Optionals
+        case.addCompareOutput(
+            \\export fn _start() noreturn {
+            \\    const a: u32 = 2;
+            \\    const b: ?u32 = a;
+            \\    const c = b.?;
+            \\    if (c != 2) unreachable;
+            \\
+            \\    exit();
+            \\}
+            \\
+            \\fn exit() noreturn {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (231),
+            \\          [arg1] "{rdi}" (0)
+            \\        : "rcx", "r11", "memory"
+            \\    );
+            \\    unreachable;
+            \\}
+        ,
+            "",
+        );
+
+        // While loops
+        case.addCompareOutput(
+            \\export fn _start() noreturn {
+            \\    var i: u32 = 0;
+            \\    while (i < 4) : (i += 1) print();
+            \\    assert(i == 4);
+            \\
+            \\    exit();
+            \\}
+            \\
+            \\fn print() void {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (1),
+            \\          [arg1] "{rdi}" (1),
+            \\          [arg2] "{rsi}" (@ptrToInt("hello\n")),
+            \\          [arg3] "{rdx}" (6)
+            \\        : "rcx", "r11", "memory"
+            \\    );
+            \\    return;
+            \\}
+            \\
+            \\pub fn assert(ok: bool) void {
+            \\    if (!ok) unreachable; // assertion failure
+            \\}
+            \\
+            \\fn exit() noreturn {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (231),
+            \\          [arg1] "{rdi}" (0)
+            \\        : "rcx", "r11", "memory"
+            \\    );
+            \\    unreachable;
+            \\}
+        ,
+            "hello\nhello\nhello\nhello\n",
         );
     }
 }

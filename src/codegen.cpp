@@ -3480,8 +3480,9 @@ static LLVMValueRef ir_render_widen_or_shorten(CodeGen *g, IrExecutableGen *exec
 static LLVMValueRef ir_render_int_to_ptr(CodeGen *g, IrExecutableGen *executable, IrInstGenIntToPtr *instruction) {
     ZigType *wanted_type = instruction->base.value->type;
     LLVMValueRef target_val = ir_llvm_value(g, instruction->target);
+    const uint32_t align_bytes = get_ptr_align(g, wanted_type);
 
-    if (ir_want_runtime_safety(g, &instruction->base)) {
+    if (ir_want_runtime_safety(g, &instruction->base) && align_bytes > 1) {
         ZigType *usize = g->builtin_types.entry_usize;
         LLVMValueRef zero = LLVMConstNull(usize->llvm_type);
 
@@ -3498,7 +3499,6 @@ static LLVMValueRef ir_render_int_to_ptr(CodeGen *g, IrExecutableGen *executable
         }
 
         {
-            const uint32_t align_bytes = get_ptr_align(g, wanted_type);
             LLVMValueRef alignment_minus_1 = LLVMConstInt(usize->llvm_type, align_bytes - 1, false);
             LLVMValueRef anded_val = LLVMBuildAnd(g->builder, target_val, alignment_minus_1, "");
             LLVMValueRef is_ok_bit = LLVMBuildICmp(g->builder, LLVMIntEQ, anded_val, zero, "");
@@ -5886,6 +5886,12 @@ static LLVMValueRef ir_render_breakpoint(CodeGen *g, IrExecutableGen *executable
 static LLVMValueRef ir_render_return_address(CodeGen *g, IrExecutableGen *executable,
         IrInstGenReturnAddress *instruction)
 {
+    if (target_is_wasm(g->zig_target) && g->zig_target->os != OsEmscripten) {
+        // I got this error from LLVM 10:
+        // "Non-Emscripten WebAssembly hasn't implemented __builtin_return_address"
+        return LLVMConstNull(get_llvm_type(g, instruction->base.value->type));
+    }
+
     LLVMValueRef zero = LLVMConstNull(g->builtin_types.entry_i32->llvm_type);
     LLVMValueRef ptr_val = LLVMBuildCall(g->builder, get_return_address_fn_val(g), &zero, 1, "");
     return LLVMBuildPtrToInt(g->builder, ptr_val, g->builtin_types.entry_usize->llvm_type, "");

@@ -773,6 +773,14 @@ pub const ZigClangExpr_ConstExprUsage = extern enum {
     EvaluateForMangling,
 };
 
+pub const ZigClangUnaryExprOrTypeTrait_Kind = extern enum {
+    SizeOf,
+    AlignOf,
+    VecStep,
+    OpenMPRequiredSimdAlign,
+    PreferredAlignOf,
+};
+
 pub extern fn ZigClangSourceManager_getSpellingLoc(self: ?*const struct_ZigClangSourceManager, Loc: struct_ZigClangSourceLocation) struct_ZigClangSourceLocation;
 pub extern fn ZigClangSourceManager_getFilename(self: *const struct_ZigClangSourceManager, SpellingLoc: struct_ZigClangSourceLocation) ?[*:0]const u8;
 pub extern fn ZigClangSourceManager_getSpellingLineNumber(self: ?*const struct_ZigClangSourceManager, Loc: struct_ZigClangSourceLocation) c_uint;
@@ -1078,6 +1086,7 @@ pub extern fn ZigClangVarDecl_getTypeSourceInfo_getType(self: *const struct_ZigC
 
 pub extern fn ZigClangIntegerLiteral_EvaluateAsInt(*const ZigClangIntegerLiteral, *ZigClangExprEvalResult, *const ZigClangASTContext) bool;
 pub extern fn ZigClangIntegerLiteral_getBeginLoc(*const ZigClangIntegerLiteral) ZigClangSourceLocation;
+pub extern fn ZigClangIntegerLiteral_isZero(*const ZigClangIntegerLiteral, *bool, *const ZigClangASTContext) bool;
 
 pub extern fn ZigClangReturnStmt_getRetValue(*const ZigClangReturnStmt) ?*const ZigClangExpr;
 
@@ -1170,6 +1179,7 @@ pub extern fn ZigClangCallExpr_getArgs(*const ZigClangCallExpr) [*]const *const 
 
 pub extern fn ZigClangUnaryExprOrTypeTraitExpr_getTypeOfArgument(*const ZigClangUnaryExprOrTypeTraitExpr) ZigClangQualType;
 pub extern fn ZigClangUnaryExprOrTypeTraitExpr_getBeginLoc(*const ZigClangUnaryExprOrTypeTraitExpr) ZigClangSourceLocation;
+pub extern fn ZigClangUnaryExprOrTypeTraitExpr_getKind(*const ZigClangUnaryExprOrTypeTraitExpr) ZigClangUnaryExprOrTypeTrait_Kind;
 
 pub extern fn ZigClangUnaryOperator_getOpcode(*const ZigClangUnaryOperator) ZigClangUO;
 pub extern fn ZigClangUnaryOperator_getType(*const ZigClangUnaryOperator) ZigClangQualType;
