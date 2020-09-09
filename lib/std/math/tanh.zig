@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 // Ported from musl, which is licensed under the MIT license:
 // https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
 //
@@ -62,7 +67,7 @@ fn tanh32(x: f32) f32 {
     }
     // |x| is subnormal
     else {
-        math.forceEval(x * x);
+        math.doNotOptimizeAway(x * x);
         t = x;
     }
 
@@ -107,7 +112,7 @@ fn tanh64(x: f64) f64 {
     }
     // |x| is subnormal
     else {
-        math.forceEval(@floatCast(f32, x));
+        math.doNotOptimizeAway(@floatCast(f32, x));
         t = x;
     }
 

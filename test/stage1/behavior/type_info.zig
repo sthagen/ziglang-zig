@@ -153,7 +153,6 @@ fn testErrorSet() void {
     expect(error_set_info == .ErrorSet);
     expect(error_set_info.ErrorSet.?.len == 3);
     expect(mem.eql(u8, error_set_info.ErrorSet.?[0].name, "First"));
-    expect(error_set_info.ErrorSet.?[2].value == @errorToInt(TestErrorSet.Third));
 
     const error_union_info = @typeInfo(TestErrorSet!usize);
     expect(error_union_info == .ErrorUnion);
@@ -238,7 +237,6 @@ fn testStruct() void {
     expect(struct_info == .Struct);
     expect(struct_info.Struct.layout == .Packed);
     expect(struct_info.Struct.fields.len == 4);
-    expect(struct_info.Struct.fields[1].offset == null);
     expect(struct_info.Struct.fields[2].field_type == *TestStruct);
     expect(struct_info.Struct.fields[2].default_value == null);
     expect(struct_info.Struct.fields[3].default_value.? == 4);
@@ -318,16 +316,6 @@ fn testAnyFrame() void {
         expect(anyframe_info == .AnyFrame);
         expect(anyframe_info.AnyFrame.child == null);
     }
-}
-
-test "type info: optional field unwrapping" {
-    const Struct = struct {
-        cdOffset: u32,
-    };
-
-    const field = @typeInfo(Struct).Struct.fields[0];
-
-    _ = field.offset orelse 0;
 }
 
 test "type info: pass to function" {
@@ -429,4 +417,10 @@ test "Declarations are returned in declaration order" {
 test "Struct.is_tuple" {
     expect(@typeInfo(@TypeOf(.{0})).Struct.is_tuple);
     expect(!@typeInfo(@TypeOf(.{ .a = 0 })).Struct.is_tuple);
+}
+
+test "StructField.is_comptime" {
+    const info = @typeInfo(struct { x: u8 = 3, comptime y: u32 = 5 }).Struct;
+    expect(!info.fields[0].is_comptime);
+    expect(info.fields[1].is_comptime);
 }

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 //! # General Purpose Allocator
 //!
 //! ## Design Priorities
@@ -93,6 +98,7 @@
 //! in a `std.HashMap` using the backing allocator.
 
 const std = @import("std");
+const log = std.log.scoped(.std);
 const math = std.math;
 const assert = std.debug.assert;
 const mem = std.mem;
@@ -141,6 +147,11 @@ pub const Config = struct {
 
     /// Whether the allocator may be used simultaneously from multiple threads.
     thread_safe: bool = !std.builtin.single_threaded,
+
+    /// This is a temporary debugging trick you can use to turn segfaults into more helpful
+    /// logged error messages with stack trace details. The downside is that every allocation
+    /// will be leaked!
+    never_unmap: bool = false,
 };
 
 pub fn GeneralPurposeAllocator(comptime config: Config) type {
@@ -288,7 +299,7 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
                         if (is_used) {
                             const slot_index = @intCast(SlotIndex, used_bits_byte * 8 + bit_index);
                             const stack_trace = bucketStackTrace(bucket, size_class, slot_index, .alloc);
-                            std.log.err(.std, "Memory leak detected: {}", .{stack_trace});
+                            log.err("Memory leak detected: {}", .{stack_trace});
                             leaks = true;
                         }
                         if (bit_index == math.maxInt(u3))
@@ -314,8 +325,9 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
                         break;
                 }
             }
-            for (self.large_allocations.items()) |*large_alloc| {
-                std.log.err(.std, "Memory leak detected: {}", .{large_alloc.value.getStackTrace()});
+            var it = self.large_allocations.iterator();
+            while (it.next()) |large_alloc| {
+                log.err("Memory leak detected: {}", .{large_alloc.value.getStackTrace()});
                 leaks = true;
             }
             return leaks;
@@ -391,40 +403,6 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
             }
         }
 
-        fn freeSlot(
-            self: *Self,
-            bucket: *BucketHeader,
-            bucket_index: usize,
-            size_class: usize,
-            slot_index: SlotIndex,
-            used_byte: *u8,
-            used_bit_index: u3,
-            trace_addr: usize,
-        ) void {
-            // Capture stack trace to be the "first free", in case a double free happens.
-            bucket.captureStackTrace(trace_addr, size_class, slot_index, .free);
-
-            used_byte.* &= ~(@as(u8, 1) << used_bit_index);
-            bucket.used_count -= 1;
-            if (bucket.used_count == 0) {
-                if (bucket.next == bucket) {
-                    // it's the only bucket and therefore the current one
-                    self.buckets[bucket_index] = null;
-                } else {
-                    bucket.next.prev = bucket.prev;
-                    bucket.prev.next = bucket.next;
-                    self.buckets[bucket_index] = bucket.prev;
-                }
-                self.backing_allocator.free(bucket.page[0..page_size]);
-                const bucket_size = bucketSize(size_class);
-                const bucket_slice = @ptrCast([*]align(@alignOf(BucketHeader)) u8, bucket)[0..bucket_size];
-                self.backing_allocator.free(bucket_slice);
-            } else {
-                // TODO Set the slot data to undefined.
-                // Related: https://github.com/ziglang/zig/issues/4298
-            }
-        }
-
         /// This function assumes the object is in the large object storage regardless
         /// of the parameters.
         fn resizeLarge(
@@ -450,7 +428,7 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
                     .index = 0,
                 };
                 std.debug.captureStackTrace(ret_addr, &free_stack_trace);
-                std.log.err(.std, "Allocation size {} bytes does not match free size {}. Allocation: {} Free: {}", .{
+                log.err("Allocation size {} bytes does not match free size {}. Allocation: {} Free: {}", .{
                     entry.value.bytes.len,
                     old_mem.len,
                     entry.value.getStackTrace(),
@@ -533,7 +511,7 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
                         .index = 0,
                     };
                     std.debug.captureStackTrace(ret_addr, &second_free_stack_trace);
-                    std.log.err(.std, "Double free detected. Allocation: {} First free: {} Second free: {}", .{
+                    log.err("Double free detected. Allocation: {} First free: {} Second free: {}", .{
                         alloc_stack_trace,
                         free_stack_trace,
                         second_free_stack_trace,
@@ -548,15 +526,53 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
                 }
             }
             if (new_size == 0) {
-                self.freeSlot(bucket, bucket_index, size_class, slot_index, used_byte, used_bit_index, ret_addr);
+                // Capture stack trace to be the "first free", in case a double free happens.
+                bucket.captureStackTrace(ret_addr, size_class, slot_index, .free);
+
+                used_byte.* &= ~(@as(u8, 1) << used_bit_index);
+                bucket.used_count -= 1;
+                if (bucket.used_count == 0) {
+                    if (bucket.next == bucket) {
+                        // it's the only bucket and therefore the current one
+                        self.buckets[bucket_index] = null;
+                    } else {
+                        bucket.next.prev = bucket.prev;
+                        bucket.prev.next = bucket.next;
+                        self.buckets[bucket_index] = bucket.prev;
+                    }
+                    if (!config.never_unmap) {
+                        self.backing_allocator.free(bucket.page[0..page_size]);
+                    }
+                    const bucket_size = bucketSize(size_class);
+                    const bucket_slice = @ptrCast([*]align(@alignOf(BucketHeader)) u8, bucket)[0..bucket_size];
+                    self.backing_allocator.free(bucket_slice);
+                } else {
+                    @memset(old_mem.ptr, undefined, old_mem.len);
+                }
                 return @as(usize, 0);
             }
             const new_aligned_size = math.max(new_size, old_align);
             const new_size_class = math.ceilPowerOfTwoAssert(usize, new_aligned_size);
             if (new_size_class <= size_class) {
+                if (old_mem.len > new_size) {
+                    @memset(old_mem.ptr + new_size, undefined, old_mem.len - new_size);
+                }
                 return new_size;
             }
             return error.OutOfMemory;
+        }
+
+        // Returns true if an allocation of `size` bytes is within the specified
+        // limits if enable_memory_limit is true
+        fn isAllocationAllowed(self: *Self, size: usize) bool {
+            if (config.enable_memory_limit) {
+                const new_req_bytes = self.total_requested_bytes + size;
+                if (new_req_bytes > self.requested_memory_limit)
+                    return false;
+                self.total_requested_bytes = new_req_bytes;
+            }
+
+            return true;
         }
 
         fn alloc(allocator: *Allocator, len: usize, ptr_align: u29, len_align: u29, ret_addr: usize) Error![]u8 {
@@ -565,26 +581,23 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
             const held = self.mutex.acquire();
             defer held.release();
 
-            const prev_req_bytes = self.total_requested_bytes;
-            if (config.enable_memory_limit) {
-                const new_req_bytes = prev_req_bytes + len;
-                if (new_req_bytes > self.requested_memory_limit) {
-                    return error.OutOfMemory;
-                }
-                self.total_requested_bytes = new_req_bytes;
-            }
-            errdefer if (config.enable_memory_limit) {
-                self.total_requested_bytes = prev_req_bytes;
-            };
-
             const new_aligned_size = math.max(len, ptr_align);
             if (new_aligned_size > largest_bucket_object_size) {
                 try self.large_allocations.ensureCapacity(
                     self.backing_allocator,
-                    self.large_allocations.entries.items.len + 1,
+                    self.large_allocations.count() + 1,
                 );
 
                 const slice = try self.backing_allocator.allocFn(self.backing_allocator, len, ptr_align, len_align, ret_addr);
+
+                // The backing allocator may return a memory block bigger than
+                // `len`, use the effective size for bookkeeping purposes
+                if (!self.isAllocationAllowed(slice.len)) {
+                    // Free the block so no memory is leaked
+                    const new_len = try self.backing_allocator.resizeFn(self.backing_allocator, slice, ptr_align, 0, 0, ret_addr);
+                    assert(new_len == 0);
+                    return error.OutOfMemory;
+                }
 
                 const gop = self.large_allocations.getOrPutAssumeCapacity(@ptrToInt(slice.ptr));
                 assert(!gop.found_existing); // This would mean the kernel double-mapped pages.
@@ -592,11 +605,15 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
                 collectStackTrace(ret_addr, &gop.entry.value.stack_addresses);
 
                 return slice;
-            } else {
-                const new_size_class = math.ceilPowerOfTwoAssert(usize, new_aligned_size);
-                const ptr = try self.allocSlot(new_size_class, ret_addr);
-                return ptr[0..len];
             }
+
+            if (!self.isAllocationAllowed(len)) {
+                return error.OutOfMemory;
+            }
+
+            const new_size_class = math.ceilPowerOfTwoAssert(usize, new_aligned_size);
+            const ptr = try self.allocSlot(new_size_class, ret_addr);
+            return ptr[0..len];
         }
 
         fn createBucket(self: *Self, size_class: usize, bucket_index: usize) Error!*BucketHeader {

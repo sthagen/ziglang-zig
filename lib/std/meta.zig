@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("std.zig");
 const builtin = @import("builtin");
 const debug = std.debug;
@@ -700,34 +705,34 @@ pub fn Vector(comptime len: u32, comptime child: type) type {
 pub fn cast(comptime DestType: type, target: anytype) DestType {
     const TargetType = @TypeOf(target);
     switch (@typeInfo(DestType)) {
-        .Pointer => {
+        .Pointer => |dest_ptr| {
             switch (@typeInfo(TargetType)) {
                 .Int, .ComptimeInt => {
                     return @intToPtr(DestType, target);
                 },
                 .Pointer => |ptr| {
-                    return @ptrCast(DestType, @alignCast(ptr.alignment, target));
+                    return @ptrCast(DestType, @alignCast(dest_ptr.alignment, target));
                 },
                 .Optional => |opt| {
                     if (@typeInfo(opt.child) == .Pointer) {
-                        return @ptrCast(DestType, @alignCast(@alignOf(opt.child.Child), target));
+                        return @ptrCast(DestType, @alignCast(dest_ptr, target));
                     }
                 },
                 else => {},
             }
         },
-        .Optional => |opt| {
-            if (@typeInfo(opt.child) == .Pointer) {
+        .Optional => |dest_opt| {
+            if (@typeInfo(dest_opt.child) == .Pointer) {
                 switch (@typeInfo(TargetType)) {
                     .Int, .ComptimeInt => {
                         return @intToPtr(DestType, target);
                     },
-                    .Pointer => |ptr| {
-                        return @ptrCast(DestType, @alignCast(ptr.alignment, target));
+                    .Pointer => {
+                        return @ptrCast(DestType, @alignCast(@alignOf(dest_opt.child.Child), target));
                     },
                     .Optional => |target_opt| {
                         if (@typeInfo(target_opt.child) == .Pointer) {
-                            return @ptrCast(DestType, @alignCast(@alignOf(target_opt.child.Child), target));
+                            return @ptrCast(DestType, @alignCast(@alignOf(dest_opt.child.Child), target));
                         }
                     },
                     else => {},

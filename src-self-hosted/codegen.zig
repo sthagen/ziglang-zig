@@ -14,6 +14,7 @@ const Allocator = mem.Allocator;
 const trace = @import("tracy.zig").trace;
 const DW = std.dwarf;
 const leb128 = std.debug.leb;
+const log = std.log.scoped(.codegen);
 
 // TODO Turn back on zig fmt when https://github.com/ziglang/zig/issues/5948 is implemented.
 // zig fmt: off
@@ -58,86 +59,94 @@ pub const GenerateSymbolError = error{
     AnalysisFail,
 };
 
+pub const DebugInfoOutput = union(enum) {
+    dwarf: struct {
+        dbg_line: *std.ArrayList(u8),
+        dbg_info: *std.ArrayList(u8),
+        dbg_info_type_relocs: *link.File.DbgInfoTypeRelocsTable,
+    },
+    none,
+};
+
 pub fn generateSymbol(
-    bin_file: *link.File.Elf,
+    bin_file: *link.File,
     src: usize,
     typed_value: TypedValue,
     code: *std.ArrayList(u8),
-    dbg_line: *std.ArrayList(u8),
-    dbg_info: *std.ArrayList(u8),
-    dbg_info_type_relocs: *link.File.Elf.DbgInfoTypeRelocsTable,
+    debug_output: DebugInfoOutput,
 ) GenerateSymbolError!Result {
     const tracy = trace(@src());
     defer tracy.end();
 
     switch (typed_value.ty.zigTypeTag()) {
         .Fn => {
-            switch (bin_file.base.options.target.cpu.arch) {
-                //.arm => return Function(.arm).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.armeb => return Function(.armeb).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.aarch64 => return Function(.aarch64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.aarch64_be => return Function(.aarch64_be).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.aarch64_32 => return Function(.aarch64_32).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.arc => return Function(.arc).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.avr => return Function(.avr).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.bpfel => return Function(.bpfel).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.bpfeb => return Function(.bpfeb).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.hexagon => return Function(.hexagon).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.mips => return Function(.mips).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.mipsel => return Function(.mipsel).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.mips64 => return Function(.mips64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.mips64el => return Function(.mips64el).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.msp430 => return Function(.msp430).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.powerpc => return Function(.powerpc).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.powerpc64 => return Function(.powerpc64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.powerpc64le => return Function(.powerpc64le).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.r600 => return Function(.r600).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.amdgcn => return Function(.amdgcn).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.riscv32 => return Function(.riscv32).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                .riscv64 => return Function(.riscv64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.sparc => return Function(.sparc).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.sparcv9 => return Function(.sparcv9).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.sparcel => return Function(.sparcel).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.s390x => return Function(.s390x).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.tce => return Function(.tce).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.tcele => return Function(.tcele).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.thumb => return Function(.thumb).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.thumbeb => return Function(.thumbeb).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.i386 => return Function(.i386).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                .x86_64 => return Function(.x86_64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.xcore => return Function(.xcore).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.nvptx => return Function(.nvptx).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.nvptx64 => return Function(.nvptx64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.le32 => return Function(.le32).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.le64 => return Function(.le64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.amdil => return Function(.amdil).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.amdil64 => return Function(.amdil64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.hsail => return Function(.hsail).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.hsail64 => return Function(.hsail64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.spir => return Function(.spir).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.spir64 => return Function(.spir64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.kalimba => return Function(.kalimba).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.shave => return Function(.shave).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.lanai => return Function(.lanai).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.wasm32 => return Function(.wasm32).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.wasm64 => return Function(.wasm64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.renderscript32 => return Function(.renderscript32).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.renderscript64 => return Function(.renderscript64).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
-                //.ve => return Function(.ve).generateSymbol(bin_file, src, typed_value, code, dbg_line, dbg_info, dbg_info_type_relocs),
+            switch (bin_file.options.target.cpu.arch) {
+                .wasm32 => unreachable, // has its own code path
+                .wasm64 => unreachable, // has its own code path
+                .arm => return Function(.arm).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                .armeb => return Function(.armeb).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.aarch64 => return Function(.aarch64).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.aarch64_be => return Function(.aarch64_be).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.aarch64_32 => return Function(.aarch64_32).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.arc => return Function(.arc).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.avr => return Function(.avr).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.bpfel => return Function(.bpfel).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.bpfeb => return Function(.bpfeb).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.hexagon => return Function(.hexagon).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.mips => return Function(.mips).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.mipsel => return Function(.mipsel).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.mips64 => return Function(.mips64).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.mips64el => return Function(.mips64el).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.msp430 => return Function(.msp430).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.powerpc => return Function(.powerpc).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.powerpc64 => return Function(.powerpc64).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.powerpc64le => return Function(.powerpc64le).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.r600 => return Function(.r600).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.amdgcn => return Function(.amdgcn).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.riscv32 => return Function(.riscv32).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                .riscv64 => return Function(.riscv64).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.sparc => return Function(.sparc).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.sparcv9 => return Function(.sparcv9).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.sparcel => return Function(.sparcel).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.s390x => return Function(.s390x).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                .spu_2 => return Function(.spu_2).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.tce => return Function(.tce).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.tcele => return Function(.tcele).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.thumb => return Function(.thumb).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.thumbeb => return Function(.thumbeb).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.i386 => return Function(.i386).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                .x86_64 => return Function(.x86_64).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.xcore => return Function(.xcore).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.nvptx => return Function(.nvptx).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.nvptx64 => return Function(.nvptx64).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.le32 => return Function(.le32).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.le64 => return Function(.le64).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.amdil => return Function(.amdil).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.amdil64 => return Function(.amdil64).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.hsail => return Function(.hsail).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.hsail64 => return Function(.hsail64).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.spir => return Function(.spir).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.spir64 => return Function(.spir64).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.kalimba => return Function(.kalimba).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.shave => return Function(.shave).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.lanai => return Function(.lanai).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.renderscript32 => return Function(.renderscript32).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.renderscript64 => return Function(.renderscript64).generateSymbol(bin_file, src, typed_value, code, debug_output),
+                //.ve => return Function(.ve).generateSymbol(bin_file, src, typed_value, code, debug_output),
                 else => @panic("Backend architectures that don't have good support yet are commented out, to improve compilation performance. If you are interested in one of these other backends feel free to uncomment them. Eventually these will be completed, but stage1 is slow and a memory hog."),
             }
         },
         .Array => {
             // TODO populate .debug_info for the array
             if (typed_value.val.cast(Value.Payload.Bytes)) |payload| {
-                if (typed_value.ty.arraySentinel()) |sentinel| {
+                if (typed_value.ty.sentinel()) |sentinel| {
                     try code.ensureCapacity(code.items.len + payload.data.len + 1);
                     code.appendSliceAssumeCapacity(payload.data);
                     const prev_len = code.items.len;
                     switch (try generateSymbol(bin_file, src, .{
                         .ty = typed_value.ty.elemType(),
                         .val = sentinel,
-                    }, code, dbg_line, dbg_info, dbg_info_type_relocs)) {
+                    }, code, debug_output)) {
                         .appended => return Result{ .appended = {} },
                         .externally_managed => |slice| {
                             code.appendSliceAssumeCapacity(slice);
@@ -151,7 +160,7 @@ pub fn generateSymbol(
             }
             return Result{
                 .fail = try ErrorMsg.create(
-                    bin_file.base.allocator,
+                    bin_file.allocator,
                     src,
                     "TODO implement generateSymbol for more kinds of arrays",
                     .{},
@@ -164,12 +173,11 @@ pub fn generateSymbol(
             if (typed_value.val.cast(Value.Payload.DeclRef)) |payload| {
                 const decl = payload.decl;
                 if (decl.analysis != .complete) return error.AnalysisFail;
-                assert(decl.link.elf.local_sym_index != 0);
                 // TODO handle the dependency of this symbol on the decl's vaddr.
                 // If the decl changes vaddr, then this symbol needs to get regenerated.
-                const vaddr = bin_file.local_symbols.items[decl.link.elf.local_sym_index].st_value;
-                const endian = bin_file.base.options.target.cpu.arch.endian();
-                switch (bin_file.base.options.target.cpu.arch.ptrBitWidth()) {
+                const vaddr = bin_file.getDeclVAddr(decl);
+                const endian = bin_file.options.target.cpu.arch.endian();
+                switch (bin_file.options.target.cpu.arch.ptrBitWidth()) {
                     16 => {
                         try code.resize(2);
                         mem.writeInt(u16, code.items[0..2], @intCast(u16, vaddr), endian);
@@ -188,7 +196,7 @@ pub fn generateSymbol(
             }
             return Result{
                 .fail = try ErrorMsg.create(
-                    bin_file.base.allocator,
+                    bin_file.allocator,
                     src,
                     "TODO implement generateSymbol for pointer {}",
                     .{typed_value.val},
@@ -198,7 +206,7 @@ pub fn generateSymbol(
         .Int => {
             // TODO populate .debug_info for the integer
 
-            const info = typed_value.ty.intInfo(bin_file.base.options.target);
+            const info = typed_value.ty.intInfo(bin_file.options.target);
             if (info.bits == 8 and !info.signed) {
                 const x = typed_value.val.toUnsignedInt();
                 try code.append(@intCast(u8, x));
@@ -206,7 +214,7 @@ pub fn generateSymbol(
             }
             return Result{
                 .fail = try ErrorMsg.create(
-                    bin_file.base.allocator,
+                    bin_file.allocator,
                     src,
                     "TODO implement generateSymbol for int type '{}'",
                     .{typed_value.ty},
@@ -216,7 +224,7 @@ pub fn generateSymbol(
         else => |t| {
             return Result{
                 .fail = try ErrorMsg.create(
-                    bin_file.base.allocator,
+                    bin_file.allocator,
                     src,
                     "TODO implement generateSymbol for type '{}'",
                     .{@tagName(t)},
@@ -234,13 +242,11 @@ const InnerError = error{
 fn Function(comptime arch: std.Target.Cpu.Arch) type {
     return struct {
         gpa: *Allocator,
-        bin_file: *link.File.Elf,
+        bin_file: *link.File,
         target: *const std.Target,
         mod_fn: *const Module.Fn,
         code: *std.ArrayList(u8),
-        dbg_line: *std.ArrayList(u8),
-        dbg_info: *std.ArrayList(u8),
-        dbg_info_type_relocs: *link.File.Elf.DbgInfoTypeRelocsTable,
+        debug_output: DebugInfoOutput,
         err_msg: ?*ErrorMsg,
         args: []MCValue,
         ret_mcv: MCValue,
@@ -272,8 +278,22 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         /// across each runtime branch upon joining.
         branch_stack: *std.ArrayList(Branch),
 
+        /// The key must be canonical register.
+        registers: std.AutoHashMapUnmanaged(Register, *ir.Inst) = .{},
+        free_registers: FreeRegInt = math.maxInt(FreeRegInt),
+        /// Maps offset to what is stored there.
+        stack: std.AutoHashMapUnmanaged(u32, StackAllocation) = .{},
+
+        /// Offset from the stack base, representing the end of the stack frame.
+        max_end_stack: u32 = 0,
+        /// Represents the current end stack offset. If there is no existing slot
+        /// to place a new stack allocation, it goes here, and then bumps `max_end_stack`.
+        next_stack_offset: u32 = 0,
+
         const MCValue = union(enum) {
             /// No runtime bits. `void` types, empty structs, u0, enums with 1 tag, etc.
+            /// TODO Look into deleting this tag and using `dead` instead, since every use
+            /// of MCValue.none should be instead looking at the type and noticing it is 0 bits.
             none,
             /// Control flow will not allow this value to be observed.
             unreach,
@@ -344,93 +364,85 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         };
 
         const Branch = struct {
-            inst_table: std.AutoHashMapUnmanaged(*ir.Inst, MCValue) = .{},
-            registers: std.AutoHashMapUnmanaged(Register, RegisterAllocation) = .{},
-            free_registers: FreeRegInt = math.maxInt(FreeRegInt),
-
-            /// Maps offset to what is stored there.
-            stack: std.AutoHashMapUnmanaged(u32, StackAllocation) = .{},
-            /// Offset from the stack base, representing the end of the stack frame.
-            max_end_stack: u32 = 0,
-            /// Represents the current end stack offset. If there is no existing slot
-            /// to place a new stack allocation, it goes here, and then bumps `max_end_stack`.
-            next_stack_offset: u32 = 0,
-
-            fn markRegUsed(self: *Branch, reg: Register) void {
-                if (FreeRegInt == u0) return;
-                const index = reg.allocIndex() orelse return;
-                const ShiftInt = math.Log2Int(FreeRegInt);
-                const shift = @intCast(ShiftInt, index);
-                self.free_registers &= ~(@as(FreeRegInt, 1) << shift);
-            }
-
-            fn markRegFree(self: *Branch, reg: Register) void {
-                if (FreeRegInt == u0) return;
-                const index = reg.allocIndex() orelse return;
-                const ShiftInt = math.Log2Int(FreeRegInt);
-                const shift = @intCast(ShiftInt, index);
-                self.free_registers |= @as(FreeRegInt, 1) << shift;
-            }
-
-            /// Before calling, must ensureCapacity + 1 on branch.registers.
-            /// Returns `null` if all registers are allocated.
-            fn allocReg(self: *Branch, inst: *ir.Inst) ?Register {
-                const free_index = @ctz(FreeRegInt, self.free_registers);
-                if (free_index >= callee_preserved_regs.len) {
-                    return null;
-                }
-                self.free_registers &= ~(@as(FreeRegInt, 1) << free_index);
-                const reg = callee_preserved_regs[free_index];
-                self.registers.putAssumeCapacityNoClobber(reg, .{ .inst = inst });
-                return reg;
-            }
+            inst_table: std.AutoArrayHashMapUnmanaged(*ir.Inst, MCValue) = .{},
 
             fn deinit(self: *Branch, gpa: *Allocator) void {
                 self.inst_table.deinit(gpa);
-                self.registers.deinit(gpa);
-                self.stack.deinit(gpa);
                 self.* = undefined;
             }
         };
 
-        const RegisterAllocation = struct {
-            inst: *ir.Inst,
-        };
+        fn markRegUsed(self: *Self, reg: Register) void {
+            if (FreeRegInt == u0) return;
+            const index = reg.allocIndex() orelse return;
+            const ShiftInt = math.Log2Int(FreeRegInt);
+            const shift = @intCast(ShiftInt, index);
+            self.free_registers &= ~(@as(FreeRegInt, 1) << shift);
+        }
+
+        fn markRegFree(self: *Self, reg: Register) void {
+            if (FreeRegInt == u0) return;
+            const index = reg.allocIndex() orelse return;
+            const ShiftInt = math.Log2Int(FreeRegInt);
+            const shift = @intCast(ShiftInt, index);
+            self.free_registers |= @as(FreeRegInt, 1) << shift;
+        }
+
+        /// Before calling, must ensureCapacity + 1 on self.registers.
+        /// Returns `null` if all registers are allocated.
+        fn allocReg(self: *Self, inst: *ir.Inst) ?Register {
+            const free_index = @ctz(FreeRegInt, self.free_registers);
+            if (free_index >= callee_preserved_regs.len) {
+                return null;
+            }
+            self.free_registers &= ~(@as(FreeRegInt, 1) << free_index);
+            const reg = callee_preserved_regs[free_index];
+            self.registers.putAssumeCapacityNoClobber(reg, inst);
+            log.debug("alloc {} => {*}", .{reg, inst});
+            return reg;
+        }
+
+        /// Does not track the register.
+        fn findUnusedReg(self: *Self) ?Register {
+            const free_index = @ctz(FreeRegInt, self.free_registers);
+            if (free_index >= callee_preserved_regs.len) {
+                return null;
+            }
+            return callee_preserved_regs[free_index];
+        }
 
         const StackAllocation = struct {
             inst: *ir.Inst,
+            /// TODO do we need size? should be determined by inst.ty.abiSize()
             size: u32,
         };
 
         const Self = @This();
 
         fn generateSymbol(
-            bin_file: *link.File.Elf,
+            bin_file: *link.File,
             src: usize,
             typed_value: TypedValue,
             code: *std.ArrayList(u8),
-            dbg_line: *std.ArrayList(u8),
-            dbg_info: *std.ArrayList(u8),
-            dbg_info_type_relocs: *link.File.Elf.DbgInfoTypeRelocsTable,
+            debug_output: DebugInfoOutput,
         ) GenerateSymbolError!Result {
             const module_fn = typed_value.val.cast(Value.Payload.Function).?.func;
 
             const fn_type = module_fn.owner_decl.typed_value.most_recent.typed_value.ty;
 
-            var branch_stack = std.ArrayList(Branch).init(bin_file.base.allocator);
+            var branch_stack = std.ArrayList(Branch).init(bin_file.allocator);
             defer {
                 assert(branch_stack.items.len == 1);
-                branch_stack.items[0].deinit(bin_file.base.allocator);
+                branch_stack.items[0].deinit(bin_file.allocator);
                 branch_stack.deinit();
             }
-            const branch = try branch_stack.addOne();
-            branch.* = .{};
+            try branch_stack.append(.{});
 
             const src_data: struct {lbrace_src: usize, rbrace_src: usize, source: []const u8} = blk: {
-                if (module_fn.owner_decl.scope.cast(Module.Scope.File)) |scope_file| {
-                    const tree = scope_file.contents.tree;
+                if (module_fn.owner_decl.scope.cast(Module.Scope.Container)) |container_scope| {
+                    const tree = container_scope.file_scope.contents.tree;
                     const fn_proto = tree.root_node.decls()[module_fn.owner_decl.src_index].castTag(.FnProto).?;
-                    const block = fn_proto.body().?.castTag(.Block).?;
+                    const block = fn_proto.getBodyNode().?.castTag(.Block).?;
                     const lbrace_src = tree.token_locs[block.lbrace].start;
                     const rbrace_src = tree.token_locs[block.rbrace].start;
                     break :blk .{ .lbrace_src = lbrace_src, .rbrace_src = rbrace_src, .source = tree.source };
@@ -443,14 +455,12 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             };
 
             var function = Self{
-                .gpa = bin_file.base.allocator,
-                .target = &bin_file.base.options.target,
+                .gpa = bin_file.allocator,
+                .target = &bin_file.options.target,
                 .bin_file = bin_file,
                 .mod_fn = module_fn,
                 .code = code,
-                .dbg_line = dbg_line,
-                .dbg_info = dbg_info,
-                .dbg_info_type_relocs = dbg_info_type_relocs,
+                .debug_output = debug_output,
                 .err_msg = null,
                 .args = undefined, // populated after `resolveCallingConventionValues`
                 .ret_mcv = undefined, // populated after `resolveCallingConventionValues`
@@ -464,7 +474,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 .rbrace_src = src_data.rbrace_src,
                 .source = src_data.source,
             };
-            defer function.exitlude_jump_relocs.deinit(bin_file.base.allocator);
+            defer function.registers.deinit(bin_file.allocator);
+            defer function.stack.deinit(bin_file.allocator);
+            defer function.exitlude_jump_relocs.deinit(bin_file.allocator);
 
             var call_info = function.resolveCallingConventionValues(src, fn_type) catch |err| switch (err) {
                 error.CodegenFail => return Result{ .fail = function.err_msg.? },
@@ -475,7 +487,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             function.args = call_info.args;
             function.ret_mcv = call_info.return_value;
             function.stack_align = call_info.stack_align;
-            branch.max_end_stack = call_info.stack_byte_count;
+            function.max_end_stack = call_info.stack_byte_count;
 
             function.gen() catch |err| switch (err) {
                 error.CodegenFail => return Result{ .fail = function.err_msg.? },
@@ -511,7 +523,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         try self.dbgSetPrologueEnd();
                         try self.genBody(self.mod_fn.analysis.success);
 
-                        const stack_end = self.branch_stack.items[0].max_end_stack;
+                        const stack_end = self.max_end_stack;
                         if (stack_end > math.maxInt(i32))
                             return self.fail(self.src, "too much stack used in call parameters", .{});
                         const aligned_stack_end = mem.alignForward(stack_end, self.stack_align);
@@ -568,11 +580,15 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         }
 
         fn genBody(self: *Self, body: ir.Body) InnerError!void {
-            const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
-            const inst_table = &branch.inst_table;
             for (body.instructions) |inst| {
-                const new_inst = try self.genFuncInst(inst);
-                try inst_table.putNoClobber(self.gpa, inst, new_inst);
+                try self.ensureProcessDeathCapacity(@popCount(@TypeOf(inst.deaths), inst.deaths));
+
+                const mcv = try self.genFuncInst(inst);
+                if (!inst.isUnused()) {
+                    log.debug("{*} => {}", .{inst, mcv});
+                    const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
+                    try branch.inst_table.putNoClobber(self.gpa, inst, mcv);
+                }
 
                 var i: ir.Inst.DeathsBitIndex = 0;
                 while (inst.getOperand(i)) |operand| : (i += 1) {
@@ -583,67 +599,94 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         }
 
         fn dbgSetPrologueEnd(self: *Self) InnerError!void {
-            try self.dbg_line.append(DW.LNS_set_prologue_end);
-            try self.dbgAdvancePCAndLine(self.prev_di_src);
+            switch (self.debug_output) {
+                .dwarf => |dbg_out| {
+                    try dbg_out.dbg_line.append(DW.LNS_set_prologue_end);
+                    try self.dbgAdvancePCAndLine(self.prev_di_src);
+                },
+                .none => {},
+            }
         }
 
         fn dbgSetEpilogueBegin(self: *Self) InnerError!void {
-            try self.dbg_line.append(DW.LNS_set_epilogue_begin);
-            try self.dbgAdvancePCAndLine(self.prev_di_src);
+            switch (self.debug_output) {
+                .dwarf => |dbg_out| {
+                    try dbg_out.dbg_line.append(DW.LNS_set_epilogue_begin);
+                    try self.dbgAdvancePCAndLine(self.prev_di_src);
+                },
+                .none => {},
+            }
         }
 
         fn dbgAdvancePCAndLine(self: *Self, src: usize) InnerError!void {
-            // TODO Look into improving the performance here by adding a token-index-to-line
-            // lookup table, and changing ir.Inst from storing byte offset to token. Currently
-            // this involves scanning over the source code for newlines
-            // (but only from the previous byte offset to the new one).
-            const delta_line = std.zig.lineDelta(self.source, self.prev_di_src, src);
-            const delta_pc = self.code.items.len - self.prev_di_pc;
             self.prev_di_src = src;
             self.prev_di_pc = self.code.items.len;
-            // TODO Look into using the DWARF special opcodes to compress this data. It lets you emit
-            // single-byte opcodes that add different numbers to both the PC and the line number
-            // at the same time.
-            try self.dbg_line.ensureCapacity(self.dbg_line.items.len + 11);
-            self.dbg_line.appendAssumeCapacity(DW.LNS_advance_pc);
-            leb128.writeULEB128(self.dbg_line.writer(), delta_pc) catch unreachable;
-            if (delta_line != 0) {
-                self.dbg_line.appendAssumeCapacity(DW.LNS_advance_line);
-                leb128.writeILEB128(self.dbg_line.writer(), delta_line) catch unreachable;
+            switch (self.debug_output) {
+                .dwarf => |dbg_out| {
+                    // TODO Look into improving the performance here by adding a token-index-to-line
+                    // lookup table, and changing ir.Inst from storing byte offset to token. Currently
+                    // this involves scanning over the source code for newlines
+                    // (but only from the previous byte offset to the new one).
+                    const delta_line = std.zig.lineDelta(self.source, self.prev_di_src, src);
+                    const delta_pc = self.code.items.len - self.prev_di_pc;
+                    // TODO Look into using the DWARF special opcodes to compress this data. It lets you emit
+                    // single-byte opcodes that add different numbers to both the PC and the line number
+                    // at the same time.
+                    try dbg_out.dbg_line.ensureCapacity(dbg_out.dbg_line.items.len + 11);
+                    dbg_out.dbg_line.appendAssumeCapacity(DW.LNS_advance_pc);
+                    leb128.writeULEB128(dbg_out.dbg_line.writer(), delta_pc) catch unreachable;
+                    if (delta_line != 0) {
+                        dbg_out.dbg_line.appendAssumeCapacity(DW.LNS_advance_line);
+                        leb128.writeILEB128(dbg_out.dbg_line.writer(), delta_line) catch unreachable;
+                    }
+                    dbg_out.dbg_line.appendAssumeCapacity(DW.LNS_copy);
+                },
+                .none => {},
             }
-            self.dbg_line.appendAssumeCapacity(DW.LNS_copy);
         }
 
+        /// Asserts there is already capacity to insert into top branch inst_table.
         fn processDeath(self: *Self, inst: *ir.Inst) void {
+            if (inst.tag == .constant) return; // Constants are immortal.
+            // When editing this function, note that the logic must synchronize with `reuseOperand`.
+            const prev_value = self.getResolvedInstValue(inst);
             const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
-            const entry = branch.inst_table.getEntry(inst) orelse return;
-            const prev_value = entry.value;
-            entry.value = .dead;
+            branch.inst_table.putAssumeCapacity(inst, .dead);
             switch (prev_value) {
                 .register => |reg| {
                     const canon_reg = toCanonicalReg(reg);
-                    _ = branch.registers.remove(canon_reg);
-                    branch.markRegFree(canon_reg);
+                    _ = self.registers.remove(canon_reg);
+                    self.markRegFree(canon_reg);
                 },
                 else => {}, // TODO process stack allocation death
             }
         }
 
+        fn ensureProcessDeathCapacity(self: *Self, additional_count: usize) !void {
+            const table = &self.branch_stack.items[self.branch_stack.items.len - 1].inst_table;
+            try table.ensureCapacity(self.gpa, table.items().len + additional_count);
+        }
+
         /// Adds a Type to the .debug_info at the current position. The bytes will be populated later,
         /// after codegen for this symbol is done.
         fn addDbgInfoTypeReloc(self: *Self, ty: Type) !void {
-            assert(ty.hasCodeGenBits());
-            const index = self.dbg_info.items.len;
-            try self.dbg_info.resize(index + 4); // DW.AT_type,  DW.FORM_ref4
+            switch (self.debug_output) {
+                .dwarf => |dbg_out| {
+                    assert(ty.hasCodeGenBits());
+                    const index = dbg_out.dbg_info.items.len;
+                    try dbg_out.dbg_info.resize(index + 4); // DW.AT_type,  DW.FORM_ref4
 
-            const gop = try self.dbg_info_type_relocs.getOrPut(self.gpa, ty);
-            if (!gop.found_existing) {
-                gop.entry.value = .{
-                    .off = undefined,
-                    .relocs = .{},
-                };
+                    const gop = try dbg_out.dbg_info_type_relocs.getOrPut(self.gpa, ty);
+                    if (!gop.found_existing) {
+                        gop.entry.value = .{
+                            .off = undefined,
+                            .relocs = .{},
+                        };
+                    }
+                    try gop.entry.value.relocs.append(self.gpa, @intCast(u32, index));
+                },
+                .none => {},
             }
-            try gop.entry.value.relocs.append(self.gpa, @intCast(u32, index));
         }
 
         fn genFuncInst(self: *Self, inst: *ir.Inst) !MCValue {
@@ -671,6 +714,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 .intcast => return self.genIntCast(inst.castTag(.intcast).?),
                 .isnonnull => return self.genIsNonNull(inst.castTag(.isnonnull).?),
                 .isnull => return self.genIsNull(inst.castTag(.isnull).?),
+                .iserr => return self.genIsErr(inst.castTag(.iserr).?),
                 .load => return self.genLoad(inst.castTag(.load).?),
                 .loop => return self.genLoop(inst.castTag(.loop).?),
                 .not => return self.genNot(inst.castTag(.not).?),
@@ -682,19 +726,20 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 .sub => return self.genSub(inst.castTag(.sub).?),
                 .unreach => return MCValue{ .unreach = {} },
                 .unwrap_optional => return self.genUnwrapOptional(inst.castTag(.unwrap_optional).?),
+                .wrap_optional => return self.genWrapOptional(inst.castTag(.wrap_optional).?),
+                .varptr => return self.genVarPtr(inst.castTag(.varptr).?),
             }
         }
 
         fn allocMem(self: *Self, inst: *ir.Inst, abi_size: u32, abi_align: u32) !u32 {
             if (abi_align > self.stack_align)
                 self.stack_align = abi_align;
-            const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
             // TODO find a free slot instead of always appending
-            const offset = mem.alignForwardGeneric(u32, branch.next_stack_offset, abi_align);
-            branch.next_stack_offset = offset + abi_size;
-            if (branch.next_stack_offset > branch.max_end_stack)
-                branch.max_end_stack = branch.next_stack_offset;
-            try branch.stack.putNoClobber(self.gpa, offset, .{
+            const offset = mem.alignForwardGeneric(u32, self.next_stack_offset, abi_align);
+            self.next_stack_offset = offset + abi_size;
+            if (self.next_stack_offset > self.max_end_stack)
+                self.max_end_stack = self.next_stack_offset;
+            try self.stack.putNoClobber(self.gpa, offset, .{
                 .inst = inst,
                 .size = abi_size,
             });
@@ -712,7 +757,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             return self.allocMem(inst, abi_size, abi_align);
         }
 
-        fn allocRegOrMem(self: *Self, inst: *ir.Inst) !MCValue {
+        fn allocRegOrMem(self: *Self, inst: *ir.Inst, reg_ok: bool) !MCValue {
             const elem_ty = inst.ty;
             const abi_size = math.cast(u32, elem_ty.abiSize(self.target.*)) catch {
                 return self.fail(inst.src, "type '{}' too big to fit into stack frame", .{elem_ty});
@@ -720,32 +765,71 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             const abi_align = elem_ty.abiAlignment(self.target.*);
             if (abi_align > self.stack_align)
                 self.stack_align = abi_align;
-            const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
 
-            // Make sure the type can fit in a register before we try to allocate one.
-            const ptr_bits = arch.ptrBitWidth();
-            const ptr_bytes: u64 = @divExact(ptr_bits, 8);
-            if (abi_size <= ptr_bytes) {
-                try branch.registers.ensureCapacity(self.gpa, branch.registers.items().len + 1);
-                if (branch.allocReg(inst)) |reg| {
-                    return MCValue{ .register = registerAlias(reg, abi_size) };
+            if (reg_ok) {
+                // Make sure the type can fit in a register before we try to allocate one.
+                const ptr_bits = arch.ptrBitWidth();
+                const ptr_bytes: u64 = @divExact(ptr_bits, 8);
+                if (abi_size <= ptr_bytes) {
+                    try self.registers.ensureCapacity(self.gpa, self.registers.count() + 1);
+                    if (self.allocReg(inst)) |reg| {
+                        return MCValue{ .register = registerAlias(reg, abi_size) };
+                    }
                 }
             }
             const stack_offset = try self.allocMem(inst, abi_size, abi_align);
             return MCValue{ .stack_offset = stack_offset };
         }
 
-        /// Does not "move" the instruction.
-        fn copyToNewRegister(self: *Self, inst: *ir.Inst) !MCValue {
-            const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
-            try branch.registers.ensureCapacity(self.gpa, branch.registers.items().len + 1);
+        /// Copies a value to a register without tracking the register. The register is not considered
+        /// allocated. A second call to `copyToTmpRegister` may return the same register.
+        /// This can have a side effect of spilling instructions to the stack to free up a register.
+        fn copyToTmpRegister(self: *Self, src: usize, mcv: MCValue) !Register {
+            const reg = self.findUnusedReg() orelse b: {
+                // We'll take over the first register. Move the instruction that was previously
+                // there to a stack allocation.
+                const reg = callee_preserved_regs[0];
+                const regs_entry = self.registers.remove(reg).?;
+                const spilled_inst = regs_entry.value;
 
-            const reg = branch.allocReg(inst) orelse
-                return self.fail(inst.src, "TODO implement spilling register to stack", .{});
-            const old_mcv = branch.inst_table.get(inst).?;
-            const new_mcv: MCValue = .{ .register = reg };
-            try self.genSetReg(inst.src, reg, old_mcv);
-            return new_mcv;
+                const stack_mcv = try self.allocRegOrMem(spilled_inst, false);
+                const reg_mcv = self.getResolvedInstValue(spilled_inst);
+                assert(reg == toCanonicalReg(reg_mcv.register));
+                const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
+                try branch.inst_table.put(self.gpa, spilled_inst, stack_mcv);
+                try self.genSetStack(src, spilled_inst.ty, stack_mcv.stack_offset, reg_mcv);
+
+                break :b reg;
+            };
+            try self.genSetReg(src, reg, mcv);
+            return reg;
+        }
+
+        /// Allocates a new register and copies `mcv` into it.
+        /// `reg_owner` is the instruction that gets associated with the register in the register table.
+        /// This can have a side effect of spilling instructions to the stack to free up a register.
+        fn copyToNewRegister(self: *Self, reg_owner: *ir.Inst, mcv: MCValue) !MCValue {
+            try self.registers.ensureCapacity(self.gpa, @intCast(u32, self.registers.count() + 1));
+
+            const reg = self.allocReg(reg_owner) orelse b: {
+                // We'll take over the first register. Move the instruction that was previously
+                // there to a stack allocation.
+                const reg = callee_preserved_regs[0];
+                const regs_entry = self.registers.getEntry(reg).?;
+                const spilled_inst = regs_entry.value;
+                regs_entry.value = reg_owner;
+
+                const stack_mcv = try self.allocRegOrMem(spilled_inst, false);
+                const reg_mcv = self.getResolvedInstValue(spilled_inst);
+                assert(reg == toCanonicalReg(reg_mcv.register));
+                const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
+                try branch.inst_table.put(self.gpa, spilled_inst, stack_mcv);
+                try self.genSetStack(reg_owner.src, spilled_inst.ty, stack_mcv.stack_offset, reg_mcv);
+
+                break :b reg;
+            };
+            try self.genSetReg(reg_owner.src, reg, mcv);
+            return MCValue{ .register = reg };
         }
 
         fn genAlloc(self: *Self, inst: *ir.Inst.NoOp) !MCValue {
@@ -766,6 +850,16 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             // No side effects, so if it's unreferenced, do nothing.
             if (inst.base.isUnused())
                 return MCValue.dead;
+            
+            const operand = try self.resolveInst(inst.operand);
+            const info_a = inst.operand.ty.intInfo(self.target.*);
+            const info_b = inst.base.ty.intInfo(self.target.*);
+            if (info_a.signed != info_b.signed)
+                return self.fail(inst.base.src, "TODO gen intcast sign safety in semantic analysis", .{});
+
+            if (info_a.bits == info_b.bits)
+                return operand;
+
             switch (arch) {
                 else => return self.fail(inst.base.src, "TODO implement intCast for {}", .{self.target.cpu.arch}),
             }
@@ -840,6 +934,62 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             }
         }
 
+        fn genWrapOptional(self: *Self, inst: *ir.Inst.UnOp) !MCValue {
+            const optional_ty = inst.base.ty;
+
+            // No side effects, so if it's unreferenced, do nothing.
+            if (inst.base.isUnused())
+                return MCValue.dead;
+
+            // Optional type is just a boolean true
+            if (optional_ty.abiSize(self.target.*) == 1)
+                return MCValue{ .immediate = 1 };
+
+            switch (arch) {
+                else => return self.fail(inst.base.src, "TODO implement wrap optional for {}", .{self.target.cpu.arch}),
+            }
+        }
+
+        fn genVarPtr(self: *Self, inst: *ir.Inst.VarPtr) !MCValue {
+            // No side effects, so if it's unreferenced, do nothing.
+            if (inst.base.isUnused())
+                return MCValue.dead;
+
+            switch (arch) {
+                else => return self.fail(inst.base.src, "TODO implement varptr for {}", .{self.target.cpu.arch}),
+            }
+        }
+
+        fn reuseOperand(self: *Self, inst: *ir.Inst, op_index: ir.Inst.DeathsBitIndex, mcv: MCValue) bool {
+            if (!inst.operandDies(op_index))
+                return false;
+
+            switch (mcv) {
+                .register => |reg| {
+                    // If it's in the registers table, need to associate the register with the
+                    // new instruction.
+                    if (self.registers.getEntry(toCanonicalReg(reg))) |entry| {
+                        entry.value = inst;
+                    }
+                    log.debug("reusing {} => {*}", .{reg, inst});
+                },
+                .stack_offset => |off| {
+                    log.debug("reusing stack offset {} => {*}", .{off, inst});
+                    return true;
+                },
+                else => return false,
+            }
+
+            // Prevent the operand deaths processing code from deallocating it.
+            inst.clearOperandDeath(op_index);
+
+            // That makes us responsible for doing the rest of the stuff that processDeath would have done.
+            const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
+            branch.inst_table.putAssumeCapacity(inst.getOperand(op_index).?, .dead);
+
+            return true;
+        }
+
         fn genLoad(self: *Self, inst: *ir.Inst.UnOp) !MCValue {
             const elem_ty = inst.base.ty;
             if (!elem_ty.hasCodeGenBits())
@@ -849,12 +999,11 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             if (inst.base.isUnused() and !is_volatile)
                 return MCValue.dead;
             const dst_mcv: MCValue = blk: {
-                if (inst.base.operandDies(0) and ptr.isMutable()) {
+                if (self.reuseOperand(&inst.base, 0, ptr)) {
                     // The MCValue that holds the pointer can be re-used as the value.
-                    // TODO track this in the register/stack allocation metadata.
                     break :blk ptr;
                 } else {
-                    break :blk try self.allocRegOrMem(&inst.base);
+                    break :blk try self.allocRegOrMem(&inst.base, true);
                 }
             };
             switch (ptr) {
@@ -948,23 +1097,23 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             var dst_mcv: MCValue = undefined;
             var src_mcv: MCValue = undefined;
             var src_inst: *ir.Inst = undefined;
-            if (inst.operandDies(0) and lhs.isMutable()) {
+            if (self.reuseOperand(inst, 0, lhs)) {
                 // LHS dies; use it as the destination.
                 // Both operands cannot be memory.
                 src_inst = op_rhs;
                 if (lhs.isMemory() and rhs.isMemory()) {
-                    dst_mcv = try self.copyToNewRegister(op_lhs);
+                    dst_mcv = try self.copyToNewRegister(inst, lhs);
                     src_mcv = rhs;
                 } else {
                     dst_mcv = lhs;
                     src_mcv = rhs;
                 }
-            } else if (inst.operandDies(1) and rhs.isMutable()) {
+            } else if (self.reuseOperand(inst, 1, rhs)) {
                 // RHS dies; use it as the destination.
                 // Both operands cannot be memory.
                 src_inst = op_lhs;
                 if (lhs.isMemory() and rhs.isMemory()) {
-                    dst_mcv = try self.copyToNewRegister(op_rhs);
+                    dst_mcv = try self.copyToNewRegister(inst, rhs);
                     src_mcv = lhs;
                 } else {
                     dst_mcv = rhs;
@@ -972,11 +1121,11 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 }
             } else {
                 if (lhs.isMemory()) {
-                    dst_mcv = try self.copyToNewRegister(op_lhs);
+                    dst_mcv = try self.copyToNewRegister(inst, lhs);
                     src_mcv = rhs;
                     src_inst = op_rhs;
                 } else {
-                    dst_mcv = try self.copyToNewRegister(op_rhs);
+                    dst_mcv = try self.copyToNewRegister(inst, rhs);
                     src_mcv = lhs;
                     src_inst = op_lhs;
                 }
@@ -989,18 +1138,26 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             switch (src_mcv) {
                 .immediate => |imm| {
                     if (imm > math.maxInt(u31)) {
-                        src_mcv = try self.copyToNewRegister(src_inst);
+                        src_mcv = MCValue{ .register = try self.copyToTmpRegister(src_inst.src, src_mcv) };
                     }
                 },
                 else => {},
             }
 
-            try self.genX8664BinMathCode(inst.src, dst_mcv, src_mcv, opx, mr);
+            try self.genX8664BinMathCode(inst.src, inst.ty, dst_mcv, src_mcv, opx, mr);
 
             return dst_mcv;
         }
 
-        fn genX8664BinMathCode(self: *Self, src: usize, dst_mcv: MCValue, src_mcv: MCValue, opx: u8, mr: u8) !void {
+        fn genX8664BinMathCode(
+            self: *Self,
+            src: usize,
+            dst_ty: Type,
+            dst_mcv: MCValue,
+            src_mcv: MCValue,
+            opx: u8,
+            mr: u8,
+        ) !void {
             switch (dst_mcv) {
                 .none => unreachable,
                 .undef => unreachable,
@@ -1050,9 +1207,57 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         },
                     }
                 },
-                .embedded_in_code, .memory, .stack_offset => {
+                .stack_offset => |off| {
+                    switch (src_mcv) {
+                        .none => unreachable,
+                        .undef => return self.genSetStack(src, dst_ty, off, .undef),
+                        .dead, .unreach => unreachable,
+                        .ptr_stack_offset => unreachable,
+                        .ptr_embedded_in_code => unreachable,
+                        .register => |src_reg| {
+                            try self.genX8664ModRMRegToStack(src, dst_ty, off, src_reg, mr + 0x1);
+                        },
+                        .immediate => |imm| {
+                            return self.fail(src, "TODO implement x86 ADD/SUB/CMP source immediate", .{});
+                        },
+                        .embedded_in_code, .memory, .stack_offset => {
+                            return self.fail(src, "TODO implement x86 ADD/SUB/CMP source memory", .{});
+                        },
+                        .compare_flags_unsigned => {
+                            return self.fail(src, "TODO implement x86 ADD/SUB/CMP source compare flag (unsigned)", .{});
+                        },
+                        .compare_flags_signed => {
+                            return self.fail(src, "TODO implement x86 ADD/SUB/CMP source compare flag (signed)", .{});
+                        },
+                    }
+                },
+                .embedded_in_code, .memory => {
                     return self.fail(src, "TODO implement x86 ADD/SUB/CMP destination memory", .{});
                 },
+            }
+        }
+
+        fn genX8664ModRMRegToStack(self: *Self, src: usize, ty: Type, off: u32, reg: Register, opcode: u8) !void {
+            const abi_size = ty.abiSize(self.target.*);
+            const adj_off = off + abi_size;
+            try self.code.ensureCapacity(self.code.items.len + 7);
+            self.rex(.{ .w = reg.size() == 64, .r = reg.isExtended() });
+            const reg_id: u8 = @truncate(u3, reg.id());
+            if (adj_off <= 128) {
+                // example: 48 89 55 7f           mov    QWORD PTR [rbp+0x7f],rdx
+                const RM = @as(u8, 0b01_000_101) | (reg_id << 3);
+                const negative_offset = @intCast(i8, -@intCast(i32, adj_off));
+                const twos_comp = @bitCast(u8, negative_offset);
+                self.code.appendSliceAssumeCapacity(&[_]u8{ opcode, RM, twos_comp });
+            } else if (adj_off <= 2147483648) {
+                // example: 48 89 95 80 00 00 00  mov    QWORD PTR [rbp+0x80],rdx
+                const RM = @as(u8, 0b10_000_101) | (reg_id << 3);
+                const negative_offset = @intCast(i32, -@intCast(i33, adj_off));
+                const twos_comp = @bitCast(u32, negative_offset);
+                self.code.appendSliceAssumeCapacity(&[_]u8{ opcode, RM });
+                mem.writeIntLittle(u32, self.code.addManyAsArrayAssumeCapacity(4), twos_comp);
+            } else {
+                return self.fail(src, "stack offset too large", .{});
             }
         }
 
@@ -1063,8 +1268,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             if (inst.base.isUnused())
                 return MCValue.dead;
 
-            const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
-            try branch.registers.ensureCapacity(self.gpa, branch.registers.items().len + 1);
+            try self.registers.ensureCapacity(self.gpa, self.registers.count() + 1);
 
             const result = self.args[self.arg_index];
             self.arg_index += 1;
@@ -1072,17 +1276,22 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             const name_with_null = inst.name[0..mem.lenZ(inst.name) + 1];
             switch (result) {
                 .register => |reg| {
-                    branch.registers.putAssumeCapacityNoClobber(reg, .{ .inst = &inst.base });
-                    branch.markRegUsed(reg);
+                    self.registers.putAssumeCapacityNoClobber(toCanonicalReg(reg), &inst.base);
+                    self.markRegUsed(reg);
 
-                    try self.dbg_info.ensureCapacity(self.dbg_info.items.len + 8 + name_with_null.len);
-                    self.dbg_info.appendAssumeCapacity(link.File.Elf.abbrev_parameter);
-                    self.dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT_location, DW.FORM_exprloc
-                        1, // ULEB128 dwarf expression length
-                        reg.dwarfLocOp(),
-                    });
-                    try self.addDbgInfoTypeReloc(inst.base.ty); // DW.AT_type,  DW.FORM_ref4
-                    self.dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT_name, DW.FORM_string
+                    switch (self.debug_output) {
+                        .dwarf => |dbg_out| {
+                            try dbg_out.dbg_info.ensureCapacity(dbg_out.dbg_info.items.len + 8 + name_with_null.len);
+                            dbg_out.dbg_info.appendAssumeCapacity(link.File.Elf.abbrev_parameter);
+                            dbg_out.dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT_location, DW.FORM_exprloc
+                                1, // ULEB128 dwarf expression length
+                                reg.dwarfLocOp(),
+                            });
+                            try self.addDbgInfoTypeReloc(inst.base.ty); // DW.AT_type,  DW.FORM_ref4
+                            dbg_out.dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT_name, DW.FORM_string
+                        },
+                        .none => {},
+                    }
                 },
                 else => {},
             }
@@ -1095,11 +1304,18 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     try self.code.append(0xcc); // int3
                 },
                 .riscv64 => {
-                    const full = @bitCast(u32, instructions.CallBreak{
-                        .mode = @enumToInt(instructions.CallBreak.Mode.ebreak),
-                    });
-
-                    mem.writeIntLittle(u32, try self.code.addManyAsArray(4), full);
+                    mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.ebreak.toU32());
+                },
+                .spu_2 => {
+                    try self.code.resize(self.code.items.len + 2);
+                    var instr = Instruction{ .condition = .always, .input0 = .zero, .input1 = .zero, .modify_flags = false, .output = .discard, .command = .undefined1 };
+                    mem.writeIntLittle(u16, self.code.items[self.code.items.len - 2 ..][0..2], @bitCast(u16, instr));
+                },
+                .arm => {
+                    mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.bkpt(0).toU32());
+                },
+                .armeb => {
+                    mem.writeIntBig(u32, try self.code.addManyAsArray(4), Instruction.bkpt(0).toU32());
                 },
                 else => return self.fail(src, "TODO implement @breakpoint() for {}", .{self.target.cpu.arch}),
             }
@@ -1110,85 +1326,229 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             var info = try self.resolveCallingConventionValues(inst.base.src, inst.func.ty);
             defer info.deinit(self);
 
-            switch (arch) {
-                .x86_64 => {
-                    for (info.args) |mc_arg, arg_i| {
-                        const arg = inst.args[arg_i];
-                        const arg_mcv = try self.resolveInst(inst.args[arg_i]);
-                        // Here we do not use setRegOrMem even though the logic is similar, because
-                        // the function call will move the stack pointer, so the offsets are different.
-                        switch (mc_arg) {
-                            .none => continue,
-                            .register => |reg| {
-                                try self.genSetReg(arg.src, reg, arg_mcv);
-                                // TODO interact with the register allocator to mark the instruction as moved.
-                            },
-                            .stack_offset => {
-                                // Here we need to emit instructions like this:
-                                // mov     qword ptr [rsp + stack_offset], x
-                                return self.fail(inst.base.src, "TODO implement calling with parameters in memory", .{});
-                            },
-                            .ptr_stack_offset => {
-                                return self.fail(inst.base.src, "TODO implement calling with MCValue.ptr_stack_offset arg", .{});
-                            },
-                            .ptr_embedded_in_code => {
-                                return self.fail(inst.base.src, "TODO implement calling with MCValue.ptr_embedded_in_code arg", .{});
-                            },
-                            .undef => unreachable,
-                            .immediate => unreachable,
-                            .unreach => unreachable,
-                            .dead => unreachable,
-                            .embedded_in_code => unreachable,
-                            .memory => unreachable,
-                            .compare_flags_signed => unreachable,
-                            .compare_flags_unsigned => unreachable,
+            // Due to incremental compilation, how function calls are generated depends
+            // on linking.
+            if (self.bin_file.tag == link.File.Elf.base_tag or self.bin_file.tag == link.File.Coff.base_tag) {
+                switch (arch) {
+                    .x86_64 => {
+                        for (info.args) |mc_arg, arg_i| {
+                            const arg = inst.args[arg_i];
+                            const arg_mcv = try self.resolveInst(inst.args[arg_i]);
+                            // Here we do not use setRegOrMem even though the logic is similar, because
+                            // the function call will move the stack pointer, so the offsets are different.
+                            switch (mc_arg) {
+                                .none => continue,
+                                .register => |reg| {
+                                    try self.genSetReg(arg.src, reg, arg_mcv);
+                                    // TODO interact with the register allocator to mark the instruction as moved.
+                                },
+                                .stack_offset => {
+                                    // Here we need to emit instructions like this:
+                                    // mov     qword ptr [rsp + stack_offset], x
+                                    return self.fail(inst.base.src, "TODO implement calling with parameters in memory", .{});
+                                },
+                                .ptr_stack_offset => {
+                                    return self.fail(inst.base.src, "TODO implement calling with MCValue.ptr_stack_offset arg", .{});
+                                },
+                                .ptr_embedded_in_code => {
+                                    return self.fail(inst.base.src, "TODO implement calling with MCValue.ptr_embedded_in_code arg", .{});
+                                },
+                                .undef => unreachable,
+                                .immediate => unreachable,
+                                .unreach => unreachable,
+                                .dead => unreachable,
+                                .embedded_in_code => unreachable,
+                                .memory => unreachable,
+                                .compare_flags_signed => unreachable,
+                                .compare_flags_unsigned => unreachable,
+                            }
                         }
-                    }
 
-                    if (inst.func.cast(ir.Inst.Constant)) |func_inst| {
-                        if (func_inst.val.cast(Value.Payload.Function)) |func_val| {
-                            const func = func_val.func;
-                            const got = &self.bin_file.program_headers.items[self.bin_file.phdr_got_index.?];
-                            const ptr_bits = self.target.cpu.arch.ptrBitWidth();
-                            const ptr_bytes: u64 = @divExact(ptr_bits, 8);
-                            const got_addr = @intCast(u32, got.p_vaddr + func.owner_decl.link.elf.offset_table_index * ptr_bytes);
-                            // ff 14 25 xx xx xx xx    call [addr]
-                            try self.code.ensureCapacity(self.code.items.len + 7);
-                            self.code.appendSliceAssumeCapacity(&[3]u8{ 0xff, 0x14, 0x25 });
-                            mem.writeIntLittle(u32, self.code.addManyAsArrayAssumeCapacity(4), got_addr);
+                        if (inst.func.cast(ir.Inst.Constant)) |func_inst| {
+                            if (func_inst.val.cast(Value.Payload.Function)) |func_val| {
+                                const func = func_val.func;
+
+                                const ptr_bits = self.target.cpu.arch.ptrBitWidth();
+                                const ptr_bytes: u64 = @divExact(ptr_bits, 8);
+                                const got_addr = if (self.bin_file.cast(link.File.Elf)) |elf_file| blk: {
+                                    const got = &elf_file.program_headers.items[elf_file.phdr_got_index.?];
+                                    break :blk @intCast(u32, got.p_vaddr + func.owner_decl.link.elf.offset_table_index * ptr_bytes);
+                                } else if (self.bin_file.cast(link.File.Coff)) |coff_file|
+                                    @intCast(u32, coff_file.offset_table_virtual_address + func.owner_decl.link.coff.offset_table_index * ptr_bytes)
+                                else
+                                    unreachable;
+
+                                // ff 14 25 xx xx xx xx    call [addr]
+                                try self.code.ensureCapacity(self.code.items.len + 7);
+                                self.code.appendSliceAssumeCapacity(&[3]u8{ 0xff, 0x14, 0x25 });
+                                mem.writeIntLittle(u32, self.code.addManyAsArrayAssumeCapacity(4), got_addr);
+                            } else {
+                                return self.fail(inst.base.src, "TODO implement calling bitcasted functions", .{});
+                            }
                         } else {
-                            return self.fail(inst.base.src, "TODO implement calling bitcasted functions", .{});
+                            return self.fail(inst.base.src, "TODO implement calling runtime known function pointer", .{});
                         }
-                    } else {
-                        return self.fail(inst.base.src, "TODO implement calling runtime known function pointer", .{});
-                    }
-                },
-                .riscv64 => {
-                    if (info.args.len > 0) return self.fail(inst.base.src, "TODO implement fn args for {}", .{self.target.cpu.arch});
+                    },
+                    .riscv64 => {
+                        if (info.args.len > 0) return self.fail(inst.base.src, "TODO implement fn args for {}", .{self.target.cpu.arch});
 
-                    if (inst.func.cast(ir.Inst.Constant)) |func_inst| {
-                        if (func_inst.val.cast(Value.Payload.Function)) |func_val| {
-                            const func = func_val.func;
-                            const got = &self.bin_file.program_headers.items[self.bin_file.phdr_got_index.?];
-                            const ptr_bits = self.target.cpu.arch.ptrBitWidth();
-                            const ptr_bytes: u64 = @divExact(ptr_bits, 8);
-                            const got_addr = @intCast(u32, got.p_vaddr + func.owner_decl.link.elf.offset_table_index * ptr_bytes);
+                        if (inst.func.cast(ir.Inst.Constant)) |func_inst| {
+                            if (func_inst.val.cast(Value.Payload.Function)) |func_val| {
+                                const func = func_val.func;
 
-                            try self.genSetReg(inst.base.src, .ra, .{ .memory = got_addr });
-                            const jalr = instructions.Jalr{
-                                .rd = Register.ra.id(),
-                                .rs1 = Register.ra.id(),
-                                .offset = 0,
-                            };
-                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), @bitCast(u32, jalr));
+                                const ptr_bits = self.target.cpu.arch.ptrBitWidth();
+                                const ptr_bytes: u64 = @divExact(ptr_bits, 8);
+                                const got_addr = if (self.bin_file.cast(link.File.Elf)) |elf_file| blk: {
+                                    const got = &elf_file.program_headers.items[elf_file.phdr_got_index.?];
+                                    break :blk @intCast(u32, got.p_vaddr + func.owner_decl.link.elf.offset_table_index * ptr_bytes);
+                                } else if (self.bin_file.cast(link.File.Coff)) |coff_file|
+                                    coff_file.offset_table_virtual_address + func.owner_decl.link.coff.offset_table_index * ptr_bytes
+                                else
+                                    unreachable;
+
+                                try self.genSetReg(inst.base.src, .ra, .{ .memory = got_addr });
+                                mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.jalr(.ra, 0, .ra).toU32());
+                            } else {
+                                return self.fail(inst.base.src, "TODO implement calling bitcasted functions", .{});
+                            }
                         } else {
-                            return self.fail(inst.base.src, "TODO implement calling bitcasted functions", .{});
+                            return self.fail(inst.base.src, "TODO implement calling runtime known function pointer", .{});
                         }
-                    } else {
-                        return self.fail(inst.base.src, "TODO implement calling runtime known function pointer", .{});
-                    }
-                },
-                else => return self.fail(inst.base.src, "TODO implement call for {}", .{self.target.cpu.arch}),
+                    },
+                    .spu_2 => {
+                        if (inst.func.cast(ir.Inst.Constant)) |func_inst| {
+                            if (info.args.len != 0) {
+                                return self.fail(inst.base.src, "TODO implement call with more than 0 parameters", .{});
+                            }
+                            if (func_inst.val.cast(Value.Payload.Function)) |func_val| {
+                                const func = func_val.func;
+                                const got_addr = if (self.bin_file.cast(link.File.Elf)) |elf_file| blk: {
+                                    const got = &elf_file.program_headers.items[elf_file.phdr_got_index.?];
+                                    break :blk @intCast(u16, got.p_vaddr + func.owner_decl.link.elf.offset_table_index * 2);
+                                } else if (self.bin_file.cast(link.File.Coff)) |coff_file|
+                                    @intCast(u16, coff_file.offset_table_virtual_address + func.owner_decl.link.coff.offset_table_index * 2)
+                                else
+                                    unreachable;
+
+                                const return_type = func.owner_decl.typed_value.most_recent.typed_value.ty.fnReturnType();
+                                // First, push the return address, then jump; if noreturn, don't bother with the first step
+                                // TODO: implement packed struct -> u16 at comptime and move the bitcast here
+                                var instr = Instruction{ .condition = .always, .input0 = .immediate, .input1 = .zero, .modify_flags = false, .output = .jump, .command = .load16 };
+                                if (return_type.zigTypeTag() == .NoReturn) {
+                                    try self.code.resize(self.code.items.len + 4);
+                                    mem.writeIntLittle(u16, self.code.items[self.code.items.len - 4 ..][0..2], @bitCast(u16, instr));
+                                    mem.writeIntLittle(u16, self.code.items[self.code.items.len - 2 ..][0..2], got_addr);
+                                    return MCValue.unreach;
+                                } else {
+                                    try self.code.resize(self.code.items.len + 8);
+                                    var push = Instruction{ .condition = .always, .input0 = .immediate, .input1 = .zero, .modify_flags = false, .output = .push, .command = .ipget };
+                                    mem.writeIntLittle(u16, self.code.items[self.code.items.len - 8 ..][0..2], @bitCast(u16, push));
+                                    mem.writeIntLittle(u16, self.code.items[self.code.items.len - 6 ..][0..2], @as(u16, 4));
+                                    mem.writeIntLittle(u16, self.code.items[self.code.items.len - 4 ..][0..2], @bitCast(u16, instr));
+                                    mem.writeIntLittle(u16, self.code.items[self.code.items.len - 2 ..][0..2], got_addr);
+                                    switch (return_type.zigTypeTag()) {
+                                        .Void => return MCValue{ .none = {} },
+                                        .NoReturn => unreachable,
+                                        else => return self.fail(inst.base.src, "TODO implement fn call with non-void return value", .{}),
+                                    }
+                                }
+                            } else {
+                                return self.fail(inst.base.src, "TODO implement calling bitcasted functions", .{});
+                            }
+                        } else {
+                            return self.fail(inst.base.src, "TODO implement calling runtime known function pointer", .{});
+                        }
+                    },
+                    .arm => {
+                        if (info.args.len > 0) return self.fail(inst.base.src, "TODO implement fn args for {}", .{self.target.cpu.arch});
+
+                        if (inst.func.cast(ir.Inst.Constant)) |func_inst| {
+                            if (func_inst.val.cast(Value.Payload.Function)) |func_val| {
+                                const func = func_val.func;
+                                const ptr_bits = self.target.cpu.arch.ptrBitWidth();
+                                const ptr_bytes: u64 = @divExact(ptr_bits, 8);
+                                const got_addr = if (self.bin_file.cast(link.File.Elf)) |elf_file| blk: {
+                                    const got = &elf_file.program_headers.items[elf_file.phdr_got_index.?];
+                                    break :blk @intCast(u32, got.p_vaddr + func.owner_decl.link.elf.offset_table_index * ptr_bytes);
+                                } else if (self.bin_file.cast(link.File.Coff)) |coff_file|
+                                    coff_file.offset_table_virtual_address + func.owner_decl.link.coff.offset_table_index * ptr_bytes
+                                else
+                                    unreachable;
+
+                                // TODO only works with leaf functions
+                                // at the moment, which works fine for
+                                // Hello World, but not for real code
+                                // of course. Add pushing lr to stack
+                                // and popping after call
+                                try self.genSetReg(inst.base.src, .lr, .{ .memory = got_addr });
+                                mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.blx(.al, .lr).toU32());
+                            } else {
+                                return self.fail(inst.base.src, "TODO implement calling bitcasted functions", .{});
+                            }
+                        } else {
+                            return self.fail(inst.base.src, "TODO implement calling runtime known function pointer", .{});
+                        }
+                    },
+                    else => return self.fail(inst.base.src, "TODO implement call for {}", .{self.target.cpu.arch}),
+                }
+            } else if (self.bin_file.cast(link.File.MachO)) |macho_file| {
+                switch (arch) {
+                    .x86_64 => {
+                        for (info.args) |mc_arg, arg_i| {
+                            const arg = inst.args[arg_i];
+                            const arg_mcv = try self.resolveInst(inst.args[arg_i]);
+                            // Here we do not use setRegOrMem even though the logic is similar, because
+                            // the function call will move the stack pointer, so the offsets are different.
+                            switch (mc_arg) {
+                                .none => continue,
+                                .register => |reg| {
+                                    try self.genSetReg(arg.src, reg, arg_mcv);
+                                    // TODO interact with the register allocator to mark the instruction as moved.
+                                },
+                                .stack_offset => {
+                                    // Here we need to emit instructions like this:
+                                    // mov     qword ptr [rsp + stack_offset], x
+                                    return self.fail(inst.base.src, "TODO implement calling with parameters in memory", .{});
+                                },
+                                .ptr_stack_offset => {
+                                    return self.fail(inst.base.src, "TODO implement calling with MCValue.ptr_stack_offset arg", .{});
+                                },
+                                .ptr_embedded_in_code => {
+                                    return self.fail(inst.base.src, "TODO implement calling with MCValue.ptr_embedded_in_code arg", .{});
+                                },
+                                .undef => unreachable,
+                                .immediate => unreachable,
+                                .unreach => unreachable,
+                                .dead => unreachable,
+                                .embedded_in_code => unreachable,
+                                .memory => unreachable,
+                                .compare_flags_signed => unreachable,
+                                .compare_flags_unsigned => unreachable,
+                            }
+                        }
+
+                        if (inst.func.cast(ir.Inst.Constant)) |func_inst| {
+                            if (func_inst.val.cast(Value.Payload.Function)) |func_val| {
+                                const func = func_val.func;
+                                const got = &macho_file.sections.items[macho_file.got_section_index.?];
+                                const ptr_bytes = 8;
+                                const got_addr = @intCast(u32, got.addr + func.owner_decl.link.macho.offset_table_index.? * ptr_bytes);
+                                // ff 14 25 xx xx xx xx    call [addr]
+                                try self.code.ensureCapacity(self.code.items.len + 7);
+                                self.code.appendSliceAssumeCapacity(&[3]u8{ 0xff, 0x14, 0x25 });
+                                mem.writeIntLittle(u32, self.code.addManyAsArrayAssumeCapacity(4), got_addr);
+                            } else {
+                                return self.fail(inst.base.src, "TODO implement calling bitcasted functions", .{});
+                            }
+                        } else {
+                            return self.fail(inst.base.src, "TODO implement calling runtime known function pointer", .{});
+                        }
+                    },
+                    .aarch64 => return self.fail(inst.base.src, "TODO implement codegen for call when linking with MachO for aarch64 arch", .{}),
+                    else => unreachable,
+                }
+            } else {
+                unreachable;
             }
 
             return info.return_value;
@@ -1237,12 +1597,10 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     try self.exitlude_jump_relocs.append(self.gpa, self.code.items.len - 4);
                 },
                 .riscv64 => {
-                    const jalr = instructions.Jalr{
-                        .rd = Register.zero.id(),
-                        .rs1 = Register.ra.id(),
-                        .offset = 0,
-                    };
-                    mem.writeIntLittle(u32, try self.code.addManyAsArray(4), @bitCast(u32, jalr));
+                    mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.jalr(.zero, 0, .ra).toU32());
+                },
+                .arm => {
+                    mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.bx(.al, .lr).toU32());
                 },
                 else => return self.fail(src, "TODO implement return for {}", .{self.target.cpu.arch}),
             }
@@ -1273,13 +1631,13 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     // Either one, but not both, can be a memory operand.
                     // Source operand can be an immediate, 8 bits or 32 bits.
                     const dst_mcv = if (lhs.isImmediate() or (lhs.isMemory() and rhs.isMemory()))
-                        try self.copyToNewRegister(inst.lhs)
+                        try self.copyToNewRegister(&inst.base, lhs)
                     else
                         lhs;
                     // This instruction supports only signed 32-bit immediates at most.
                     const src_mcv = try self.limitImmediateType(inst.rhs, i32);
 
-                    try self.genX8664BinMathCode(inst.base.src, dst_mcv, src_mcv, 7, 0x38);
+                    try self.genX8664BinMathCode(inst.base.src, inst.base.ty, dst_mcv, src_mcv, 7, 0x38);
                     const info = inst.lhs.ty.intInfo(self.target.*);
                     if (info.signed) {
                         return MCValue{ .compare_flags_signed = op };
@@ -1293,18 +1651,19 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
 
         fn genDbgStmt(self: *Self, inst: *ir.Inst.NoOp) !MCValue {
             try self.dbgAdvancePCAndLine(inst.base.src);
-            return MCValue.none;
+            assert(inst.base.isUnused());
+            return MCValue.dead;
         }
 
         fn genCondBr(self: *Self, inst: *ir.Inst.CondBr) !MCValue {
-            // TODO Rework this so that the arch-independent logic isn't buried and duplicated.
-            switch (arch) {
-                .x86_64 => {
+            const cond = try self.resolveInst(inst.condition);
+
+            const reloc: Reloc = switch (arch) {
+                .i386, .x86_64 => reloc: {
                     try self.code.ensureCapacity(self.code.items.len + 6);
 
-                    const cond = try self.resolveInst(inst.condition);
-                    switch (cond) {
-                        .compare_flags_signed => |cmp_op| {
+                    const opcode: u8 = switch (cond) {
+                        .compare_flags_signed => |cmp_op| blk: {
                             // Here we map to the opposite opcode because the jump is to the false branch.
                             const opcode: u8 = switch (cmp_op) {
                                 .gte => 0x8c,
@@ -1314,9 +1673,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                                 .lte => 0x8f,
                                 .eq => 0x85,
                             };
-                            return self.genX86CondBr(inst, opcode);
+                            break :blk opcode;
                         },
-                        .compare_flags_unsigned => |cmp_op| {
+                        .compare_flags_unsigned => |cmp_op| blk: {
                             // Here we map to the opposite opcode because the jump is to the false branch.
                             const opcode: u8 = switch (cmp_op) {
                                 .gte => 0x82,
@@ -1326,9 +1685,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                                 .lte => 0x87,
                                 .eq => 0x85,
                             };
-                            return self.genX86CondBr(inst, opcode);
+                            break :blk opcode;
                         },
-                        .register => |reg| {
+                        .register => |reg| blk: {
                             // test reg, 1
                             // TODO detect al, ax, eax
                             try self.code.ensureCapacity(self.code.items.len + 4);
@@ -1340,23 +1699,128 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                                 @as(u8, 0xC0) | (0 << 3) | @truncate(u3, reg.id()),
                                 0x01,
                             });
-                            return self.genX86CondBr(inst, 0x84);
+                            break :blk 0x84;
                         },
                         else => return self.fail(inst.base.src, "TODO implement condbr {} when condition is {}", .{ self.target.cpu.arch, @tagName(cond) }),
-                    }
+                    };
+                    self.code.appendSliceAssumeCapacity(&[_]u8{ 0x0f, opcode });
+                    const reloc = Reloc{ .rel32 = self.code.items.len };
+                    self.code.items.len += 4;
+                    break :reloc reloc;
                 },
-                else => return self.fail(inst.base.src, "TODO implement condbr for {}", .{self.target.cpu.arch}),
-            }
-        }
+                else => return self.fail(inst.base.src, "TODO implement condbr {}", .{ self.target.cpu.arch }),
+            };
 
-        fn genX86CondBr(self: *Self, inst: *ir.Inst.CondBr, opcode: u8) !MCValue {
-            // TODO deal with liveness / deaths condbr's then_entry_deaths and else_entry_deaths
-            self.code.appendSliceAssumeCapacity(&[_]u8{ 0x0f, opcode });
-            const reloc = Reloc{ .rel32 = self.code.items.len };
-            self.code.items.len += 4;
+            // Capture the state of register and stack allocation state so that we can revert to it.
+            const parent_next_stack_offset = self.next_stack_offset;
+            const parent_free_registers = self.free_registers;
+            var parent_stack = try self.stack.clone(self.gpa);
+            defer parent_stack.deinit(self.gpa);
+            var parent_registers = try self.registers.clone(self.gpa);
+            defer parent_registers.deinit(self.gpa);
+
+            try self.branch_stack.append(.{});
+
+            const then_deaths = inst.thenDeaths();
+            try self.ensureProcessDeathCapacity(then_deaths.len);
+            for (then_deaths) |operand| {
+                self.processDeath(operand);
+            }
             try self.genBody(inst.then_body);
+
+            // Revert to the previous register and stack allocation state.
+
+            var saved_then_branch = self.branch_stack.pop();
+            defer saved_then_branch.deinit(self.gpa);
+
+            self.registers.deinit(self.gpa);
+            self.registers = parent_registers;
+            parent_registers = .{};
+
+            self.stack.deinit(self.gpa);
+            self.stack = parent_stack;
+            parent_stack = .{};
+
+            self.next_stack_offset = parent_next_stack_offset;
+            self.free_registers = parent_free_registers;
+
             try self.performReloc(inst.base.src, reloc);
+            const else_branch = self.branch_stack.addOneAssumeCapacity();
+            else_branch.* = .{};
+
+            const else_deaths = inst.elseDeaths();
+            try self.ensureProcessDeathCapacity(else_deaths.len);
+            for (else_deaths) |operand| {
+                self.processDeath(operand);
+            }
             try self.genBody(inst.else_body);
+
+            // At this point, each branch will possibly have conflicting values for where
+            // each instruction is stored. They agree, however, on which instructions are alive/dead.
+            // We use the first ("then") branch as canonical, and here emit
+            // instructions into the second ("else") branch to make it conform.
+            // We continue respect the data structure semantic guarantees of the else_branch so
+            // that we can use all the code emitting abstractions. This is why at the bottom we
+            // assert that parent_branch.free_registers equals the saved_then_branch.free_registers
+            // rather than assigning it.
+            const parent_branch = &self.branch_stack.items[self.branch_stack.items.len - 2];
+            try parent_branch.inst_table.ensureCapacity(self.gpa, parent_branch.inst_table.items().len +
+                else_branch.inst_table.items().len);
+            for (else_branch.inst_table.items()) |else_entry| {
+                const canon_mcv = if (saved_then_branch.inst_table.remove(else_entry.key)) |then_entry| blk: {
+                    // The instruction's MCValue is overridden in both branches.
+                    parent_branch.inst_table.putAssumeCapacity(else_entry.key, then_entry.value);
+                    if (else_entry.value == .dead) {
+                        assert(then_entry.value == .dead);
+                        continue;
+                    }
+                    break :blk then_entry.value;
+                } else blk: {
+                    if (else_entry.value == .dead)
+                        continue;
+                    // The instruction is only overridden in the else branch.
+                    var i: usize = self.branch_stack.items.len - 2;
+                    while (true) {
+                        i -= 1; // If this overflows, the question is: why wasn't the instruction marked dead?
+                        if (self.branch_stack.items[i].inst_table.get(else_entry.key)) |mcv| {
+                            assert(mcv != .dead);
+                            break :blk mcv;
+                        }
+                    }
+                };
+                log.debug("consolidating else_entry {*} {}=>{}", .{else_entry.key, else_entry.value, canon_mcv});
+                // TODO make sure the destination stack offset / register does not already have something
+                // going on there.
+                try self.setRegOrMem(inst.base.src, else_entry.key.ty, canon_mcv, else_entry.value);
+                // TODO track the new register / stack allocation
+            }
+            try parent_branch.inst_table.ensureCapacity(self.gpa, parent_branch.inst_table.items().len +
+                saved_then_branch.inst_table.items().len);
+            for (saved_then_branch.inst_table.items()) |then_entry| {
+                // We already deleted the items from this table that matched the else_branch.
+                // So these are all instructions that are only overridden in the then branch.
+                parent_branch.inst_table.putAssumeCapacity(then_entry.key, then_entry.value);
+                if (then_entry.value == .dead)
+                    continue;
+                const parent_mcv = blk: {
+                    var i: usize = self.branch_stack.items.len - 2;
+                    while (true) {
+                        i -= 1;
+                        if (self.branch_stack.items[i].inst_table.get(then_entry.key)) |mcv| {
+                            assert(mcv != .dead);
+                            break :blk mcv;
+                        }
+                    }
+                };
+                log.debug("consolidating then_entry {*} {}=>{}", .{then_entry.key, parent_mcv, then_entry.value});
+                // TODO make sure the destination stack offset / register does not already have something
+                // going on there.
+                try self.setRegOrMem(inst.base.src, then_entry.key.ty, parent_mcv, then_entry.value);
+                // TODO track the new register / stack allocation
+            }
+
+            self.branch_stack.pop().deinit(self.gpa);
+
             return MCValue.unreach;
         }
 
@@ -1371,6 +1835,12 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             // will call genIsNull and invert the result.
             switch (arch) {
                 else => return self.fail(inst.base.src, "TODO call genIsNull and invert the result ", .{}),
+            }
+        }
+
+        fn genIsErr(self: *Self, inst: *ir.Inst.UnOp) !MCValue {
+            switch (arch) {
+                else => return self.fail(inst.base.src, "TODO implement iserr for {}", .{self.target.cpu.arch}),
             }
         }
 
@@ -1424,11 +1894,12 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             switch (reloc) {
                 .rel32 => |pos| {
                     const amt = self.code.items.len - (pos + 4);
-                    // If it wouldn't jump at all, elide it.
-                    if (amt == 0) {
-                        self.code.items.len -= 5;
-                        return;
-                    }
+                    // Here it would be tempting to implement testing for amt == 0 and then elide the
+                    // jump. However, that will cause a problem because other jumps may assume that they
+                    // can jump to this code. Or maybe I didn't understand something when I was debugging.
+                    // It could be worth another look. Anyway, that's why that isn't done here. Probably the
+                    // best place to elide jumps will be in semantic analysis, by inlining blocks that only
+                    // only have 1 break instruction.
                     const s32_amt = math.cast(i32, amt) catch
                         return self.fail(src, "unable to perform relocation: jump too far", .{});
                     mem.writeIntLittle(i32, self.code.items[pos..][0..4], s32_amt);
@@ -1475,6 +1946,49 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             if (!inst.is_volatile and inst.base.isUnused())
                 return MCValue.dead;
             switch (arch) {
+                .spu_2 => {
+                    if (inst.inputs.len > 0 or inst.output != null) {
+                        return self.fail(inst.base.src, "TODO implement inline asm inputs / outputs for SPU Mark II", .{});
+                    }
+                    if (mem.eql(u8, inst.asm_source, "undefined0")) {
+                        try self.code.resize(self.code.items.len + 2);
+                        var instr = Instruction{ .condition = .always, .input0 = .zero, .input1 = .zero, .modify_flags = false, .output = .discard, .command = .undefined0 };
+                        mem.writeIntLittle(u16, self.code.items[self.code.items.len - 2 ..][0..2], @bitCast(u16, instr));
+                        return MCValue.none;
+                    } else {
+                        return self.fail(inst.base.src, "TODO implement support for more SPU II assembly instructions", .{});
+                    }
+                },
+                .arm => {
+                    for (inst.inputs) |input, i| {
+                        if (input.len < 3 or input[0] != '{' or input[input.len - 1] != '}') {
+                            return self.fail(inst.base.src, "unrecognized asm input constraint: '{}'", .{input});
+                        }
+                        const reg_name = input[1 .. input.len - 1];
+                        const reg = parseRegName(reg_name) orelse
+                            return self.fail(inst.base.src, "unrecognized register: '{}'", .{reg_name});
+                        const arg = try self.resolveInst(inst.args[i]);
+                        try self.genSetReg(inst.base.src, reg, arg);
+                    }
+
+                    if (mem.eql(u8, inst.asm_source, "svc #0")) {
+                        mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.svc(.al, 0).toU32());
+                    } else {
+                        return self.fail(inst.base.src, "TODO implement support for more arm assembly instructions", .{});
+                    }
+
+                    if (inst.output) |output| {
+                        if (output.len < 4 or output[0] != '=' or output[1] != '{' or output[output.len - 1] != '}') {
+                            return self.fail(inst.base.src, "unrecognized asm output constraint: '{}'", .{output});
+                        }
+                        const reg_name = output[2 .. output.len - 1];
+                        const reg = parseRegName(reg_name) orelse
+                            return self.fail(inst.base.src, "unrecognized register: '{}'", .{reg_name});
+                        return MCValue{ .register = reg };
+                    } else {
+                        return MCValue.none;
+                    }
+                },
                 .riscv64 => {
                     for (inst.inputs) |input, i| {
                         if (input.len < 3 or input[0] != '{' or input[input.len - 1] != '}') {
@@ -1488,11 +2002,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     }
 
                     if (mem.eql(u8, inst.asm_source, "ecall")) {
-                        const full = @bitCast(u32, instructions.CallBreak{
-                            .mode = @enumToInt(instructions.CallBreak.Mode.ecall),
-                        });
-
-                        mem.writeIntLittle(u32, try self.code.addManyAsArray(4), full);
+                        mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.ecall.toU32());
                     } else {
                         return self.fail(inst.base.src, "TODO implement support for more riscv64 assembly instructions", .{});
                     }
@@ -1523,7 +2033,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
 
                     if (mem.eql(u8, inst.asm_source, "syscall")) {
                         try self.code.appendSlice(&[_]u8{ 0x0f, 0x05 });
-                    } else {
+                    } else if (inst.asm_source.len != 0) {
                         return self.fail(inst.base.src, "TODO implement support for more x86 assembly instructions", .{});
                     }
 
@@ -1551,7 +2061,12 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         /// resulting REX is meaningful, but will remain the same if it is not.
         /// * Deliberately inserting a "meaningless REX" requires explicit usage of
         /// 0x40, and cannot be done via this function.
+        /// W => 64 bit mode
+        /// R => extension to the MODRM.reg field
+        /// X => extension to the SIB.index field
+        /// B => extension to the MODRM.rm field or the SIB.base field
         fn rex(self: *Self, arg: struct { b: bool = false, w: bool = false, x: bool = false, r: bool = false }) void {
+            comptime assert(arch == .x86_64);
             //  From section 2.2.1.2 of the manual, REX is encoded as b0100WRXB.
             var value: u8 = 0x40;
             if (arg.b) {
@@ -1634,41 +2149,35 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                                 mem.writeIntLittle(u32, self.code.addManyAsArrayAssumeCapacity(4), x);
                             },
                             8 => {
-                                return self.fail(src, "TODO implement set abi_size=8 stack variable with immediate", .{});
+                                // We have a positive stack offset value but we want a twos complement negative
+                                // offset from rbp, which is at the top of the stack frame.
+                                const negative_offset = @intCast(i8, -@intCast(i32, adj_off));
+                                const twos_comp = @bitCast(u8, negative_offset);
+
+                                // 64 bit write to memory would take two mov's anyways so we
+                                // insted just use two 32 bit writes to avoid register allocation
+                                try self.code.ensureCapacity(self.code.items.len + 14);
+                                var buf: [8]u8 = undefined;
+                                mem.writeIntLittle(u64, &buf, x_big);
+
+                                // mov    DWORD PTR [rbp+offset+4], immediate
+                                self.code.appendSliceAssumeCapacity(&[_]u8{ 0xc7, 0x45, twos_comp + 4});
+                                self.code.appendSliceAssumeCapacity(buf[4..8]);
+
+                                // mov    DWORD PTR [rbp+offset], immediate
+                                self.code.appendSliceAssumeCapacity(&[_]u8{ 0xc7, 0x45, twos_comp });
+                                self.code.appendSliceAssumeCapacity(buf[0..4]);
                             },
                             else => {
                                 return self.fail(src, "TODO implement set abi_size=large stack variable with immediate", .{});
                             },
-                        }
-                        if (x_big <= math.maxInt(u32)) {} else {
-                            return self.fail(src, "TODO implement set stack variable with large immediate", .{});
                         }
                     },
                     .embedded_in_code => |code_offset| {
                         return self.fail(src, "TODO implement set stack variable from embedded_in_code", .{});
                     },
                     .register => |reg| {
-                        const abi_size = ty.abiSize(self.target.*);
-                        const adj_off = stack_offset + abi_size;
-                        try self.code.ensureCapacity(self.code.items.len + 7);
-                        self.rex(.{ .w = reg.size() == 64, .b = reg.isExtended() });
-                        const reg_id: u8 = @truncate(u3, reg.id());
-                        if (adj_off <= 128) {
-                            // example: 48 89 55 7f           mov    QWORD PTR [rbp+0x7f],rdx
-                            const RM = @as(u8, 0b01_000_101) | (reg_id << 3);
-                            const negative_offset = @intCast(i8, -@intCast(i32, adj_off));
-                            const twos_comp = @bitCast(u8, negative_offset);
-                            self.code.appendSliceAssumeCapacity(&[_]u8{ 0x89, RM, twos_comp });
-                        } else if (adj_off <= 2147483648) {
-                            // example: 48 89 95 80 00 00 00  mov    QWORD PTR [rbp+0x80],rdx
-                            const RM = @as(u8, 0b10_000_101) | (reg_id << 3);
-                            const negative_offset = @intCast(i32, -@intCast(i33, adj_off));
-                            const twos_comp = @bitCast(u32, negative_offset);
-                            self.code.appendSliceAssumeCapacity(&[_]u8{ 0x89, RM });
-                            mem.writeIntLittle(u32, self.code.addManyAsArrayAssumeCapacity(4), twos_comp);
-                        } else {
-                            return self.fail(src, "stack offset too large", .{});
-                        }
+                        try self.genX8664ModRMRegToStack(src, ty, stack_offset, reg, 0x89);
                     },
                     .memory => |vaddr| {
                         return self.fail(src, "TODO implement set stack variable from memory vaddr", .{});
@@ -1676,7 +2185,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     .stack_offset => |off| {
                         if (stack_offset == off)
                             return; // Copy stack variable to itself; nothing to do.
-                        return self.fail(src, "TODO implement copy stack variable to stack variable", .{});
+
+                        const reg = try self.copyToTmpRegister(src, mcv);
+                        return self.genSetStack(src, ty, stack_offset, MCValue{ .register = reg });
                     },
                 },
                 else => return self.fail(src, "TODO implement getSetStack for {}", .{self.target.cpu.arch}),
@@ -1685,6 +2196,58 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
 
         fn genSetReg(self: *Self, src: usize, reg: Register, mcv: MCValue) InnerError!void {
             switch (arch) {
+                .arm => switch (mcv) {
+                    .dead => unreachable,
+                    .ptr_stack_offset => unreachable,
+                    .ptr_embedded_in_code => unreachable,
+                    .unreach, .none => return, // Nothing to do.
+                    .undef => {
+                        if (!self.wantSafety())
+                            return; // The already existing value will do just fine.
+                        // Write the debug undefined value.
+                        return self.genSetReg(src, reg, .{ .immediate = 0xaaaaaaaa });
+                    },
+                    .immediate => |x| {
+                        // TODO better analysis of x to determine the
+                        // least amount of necessary instructions (use
+                        // more intelligent rotating)
+                        if (x <= math.maxInt(u8)) {
+                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.mov(.al, 0, reg, Instruction.Operand.imm(@truncate(u8, x), 0)).toU32());
+                            return;
+                        } else if (x <= math.maxInt(u16)) {
+                            // TODO Use movw Note: Not supported on
+                            // all ARM targets!
+
+                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.mov(.al, 0, reg, Instruction.Operand.imm(@truncate(u8, x), 0)).toU32());
+                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.orr(.al, 0, reg, reg, Instruction.Operand.imm(@truncate(u8, x >> 8), 12)).toU32());
+                        } else if (x <= math.maxInt(u32)) {
+                            // TODO Use movw and movt Note: Not
+                            // supported on all ARM targets! Also TODO
+                            // write constant to code and load
+                            // relative to pc
+
+                            // immediate: 0xaabbccdd
+                            // mov reg, #0xaa
+                            // orr reg, reg, #0xbb, 24
+                            // orr reg, reg, #0xcc, 16
+                            // orr reg, reg, #0xdd, 8
+                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.mov(.al, 0, reg, Instruction.Operand.imm(@truncate(u8, x), 0)).toU32());
+                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.orr(.al, 0, reg, reg, Instruction.Operand.imm(@truncate(u8, x >> 8), 12)).toU32());
+                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.orr(.al, 0, reg, reg, Instruction.Operand.imm(@truncate(u8, x >> 16), 8)).toU32());
+                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.orr(.al, 0, reg, reg, Instruction.Operand.imm(@truncate(u8, x >> 24), 4)).toU32());
+                            return;
+                        } else {
+                            return self.fail(src, "ARM registers are 32-bit wide", .{});
+                        }
+                    },
+                    .memory => |addr| {
+                        // The value is in memory at a hard-coded address.
+                        // If the type is a pointer, it means the pointer address is at this memory location.
+                        try self.genSetReg(src, reg, .{ .immediate = addr });
+                        mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.ldr(.al, reg, reg, Instruction.Offset.none).toU32());
+                    },
+                    else => return self.fail(src, "TODO implement getSetReg for arm {}", .{mcv}),
+                },
                 .riscv64 => switch (mcv) {
                     .dead => unreachable,
                     .ptr_stack_offset => unreachable,
@@ -1699,36 +2262,17 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     .immediate => |unsigned_x| {
                         const x = @bitCast(i64, unsigned_x);
                         if (math.minInt(i12) <= x and x <= math.maxInt(i12)) {
-                            const instruction = @bitCast(u32, instructions.Addi{
-                                .mode = @enumToInt(instructions.Addi.Mode.addi),
-                                .imm = @truncate(i12, x),
-                                .rs1 = Register.zero.id(),
-                                .rd = reg.id(),
-                            });
-
-                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), instruction);
+                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.addi(reg, .zero, @truncate(i12, x)).toU32());
                             return;
                         }
                         if (math.minInt(i32) <= x and x <= math.maxInt(i32)) {
-                            const split = @bitCast(packed struct {
-                                low12: i12,
-                                up20: i20,
-                            }, @truncate(i32, x));
-                            if (split.low12 < 0) return self.fail(src, "TODO support riscv64 genSetReg i32 immediates with 12th bit set to 1", .{});
+                            const lo12 = @truncate(i12, x);
+                            const carry: i32 = if (lo12 < 0) 1 else 0;
+                            const hi20 = @truncate(i20, (x >> 12) +% carry);
 
-                            const lui = @bitCast(u32, instructions.Lui{
-                                .imm = split.up20,
-                                .rd = reg.id(),
-                            });
-                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), lui);
-
-                            const addi = @bitCast(u32, instructions.Addi{
-                                .mode = @enumToInt(instructions.Addi.Mode.addi),
-                                .imm = @truncate(i12, split.low12),
-                                .rs1 = reg.id(),
-                                .rd = reg.id(),
-                            });
-                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), addi);
+                            // TODO: add test case for 32-bit immediate
+                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.lui(reg, hi20).toU32());
+                            mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.addi(reg, reg, lo12).toU32());
                             return;
                         }
                         // li rd, immediate
@@ -1740,14 +2284,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         // If the type is a pointer, it means the pointer address is at this memory location.
                         try self.genSetReg(src, reg, .{ .immediate = addr });
 
-                        const ld = @bitCast(u32, instructions.Load{
-                            .mode = @enumToInt(instructions.Load.Mode.ld),
-                            .rs1 = reg.id(),
-                            .rd = reg.id(),
-                            .offset = 0,
-                        });
-
-                        mem.writeIntLittle(u32, try self.code.addManyAsArray(4), ld);
+                        mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.ld(reg, 0, reg).toU32());
                         // LOAD imm=[i12 offset = 0], rs1 =
 
                         // return self.fail("TODO implement genSetReg memory for riscv64");
@@ -1981,8 +2518,12 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         }
 
         fn resolveInst(self: *Self, inst: *ir.Inst) !MCValue {
+            // If the type has no codegen bits, no need to store it.
+            if (!inst.ty.hasCodeGenBits())
+                return MCValue.none;
+
             // Constants have static lifetimes, so they are always memoized in the outer most table.
-            if (inst.cast(ir.Inst.Constant)) |const_inst| {
+            if (inst.castTag(.constant)) |const_inst| {
                 const branch = &self.branch_stack.items[0];
                 const gop = try branch.inst_table.getOrPut(self.gpa, inst);
                 if (!gop.found_existing) {
@@ -1991,6 +2532,10 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 return gop.entry.value;
             }
 
+            return self.getResolvedInstValue(inst);
+        }
+
+        fn getResolvedInstValue(self: *Self, inst: *ir.Inst) MCValue {
             // Treat each stack item as a "layer" on top of the previous one.
             var i: usize = self.branch_stack.items.len;
             while (true) {
@@ -2020,7 +2565,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         },
                     });
                     if (imm >= math.maxInt(U)) {
-                        return self.copyToNewRegister(inst);
+                        return MCValue{ .register = try self.copyToTmpRegister(inst.src, mcv) };
                     }
                 },
                 else => {},
@@ -2028,18 +2573,31 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             return mcv;
         }
 
-        fn genTypedValue(self: *Self, src: usize, typed_value: TypedValue) !MCValue {
+        fn genTypedValue(self: *Self, src: usize, typed_value: TypedValue) InnerError!MCValue {
             if (typed_value.val.isUndef())
-                return MCValue.undef;
+                return MCValue{ .undef = {} };
             const ptr_bits = self.target.cpu.arch.ptrBitWidth();
             const ptr_bytes: u64 = @divExact(ptr_bits, 8);
             switch (typed_value.ty.zigTypeTag()) {
                 .Pointer => {
                     if (typed_value.val.cast(Value.Payload.DeclRef)) |payload| {
-                        const got = &self.bin_file.program_headers.items[self.bin_file.phdr_got_index.?];
-                        const decl = payload.decl;
-                        const got_addr = got.p_vaddr + decl.link.elf.offset_table_index * ptr_bytes;
-                        return MCValue{ .memory = got_addr };
+                        if (self.bin_file.cast(link.File.Elf)) |elf_file| {
+                            const decl = payload.decl;
+                            const got = &elf_file.program_headers.items[elf_file.phdr_got_index.?];
+                            const got_addr = got.p_vaddr + decl.link.elf.offset_table_index * ptr_bytes;
+                            return MCValue{ .memory = got_addr };
+                        } else if (self.bin_file.cast(link.File.MachO)) |macho_file| {
+                            const decl = payload.decl;
+                            const got = &macho_file.sections.items[macho_file.got_section_index.?];
+                            const got_addr = got.addr + decl.link.macho.offset_table_index.? * ptr_bytes;
+                            return MCValue{ .memory = got_addr };
+                        } else if (self.bin_file.cast(link.File.Coff)) |coff_file| {
+                            const decl = payload.decl;
+                            const got_addr = coff_file.offset_table_virtual_address + decl.link.coff.offset_table_index * ptr_bytes;
+                            return MCValue{ .memory = got_addr };
+                        } else {
+                            return self.fail(src, "TODO codegen non-ELF const Decl pointer", .{});
+                        }
                     }
                     return self.fail(src, "TODO codegen more kinds of const pointers", .{});
                 },
@@ -2055,6 +2613,21 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 },
                 .ComptimeInt => unreachable, // semantic analysis prevents this
                 .ComptimeFloat => unreachable, // semantic analysis prevents this
+                .Optional => {
+                    if (typed_value.ty.isPtrLikeOptional()) {
+                        if (typed_value.val.isNull())
+                            return MCValue{ .immediate = 0 };
+
+                        var buf: Type.Payload.PointerSimple = undefined;
+                        return self.genTypedValue(src, .{
+                            .ty = typed_value.ty.optionalChild(&buf),
+                            .val = typed_value.val,
+                        });
+                    } else if (typed_value.ty.abiSize(self.target.*) == 1) {
+                        return MCValue{ .immediate = @boolToInt(typed_value.val.isNull()) };
+                    }
+                    return self.fail(src, "TODO non pointer optionals", .{});
+                },
                 else => return self.fail(src, "TODO implement const of type '{}'", .{typed_value.ty}),
             }
         }
@@ -2124,7 +2697,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             result.stack_byte_count = next_stack_offset;
                             result.stack_align = 16;
                         },
-                        else => return self.fail(src, "TODO implement function parameters for {}", .{cc}),
+                        else => return self.fail(src, "TODO implement function parameters for {} on x86_64", .{cc}),
                     }
                 },
                 else => if (param_types.len != 0)
@@ -2152,7 +2725,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
 
         /// TODO support scope overrides. Also note this logic is duplicated with `Module.wantSafety`.
         fn wantSafety(self: *Self) bool {
-            return switch (self.bin_file.base.options.optimize_mode) {
+            return switch (self.bin_file.options.optimize_mode) {
                 .Debug => true,
                 .ReleaseSafe => true,
                 .ReleaseFast => false,
@@ -2160,10 +2733,10 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             };
         }
 
-        fn fail(self: *Self, src: usize, comptime format: []const u8, args: anytype) error{ CodegenFail, OutOfMemory } {
+        fn fail(self: *Self, src: usize, comptime format: []const u8, args: anytype) InnerError {
             @setCold(true);
             assert(self.err_msg == null);
-            self.err_msg = try ErrorMsg.create(self.bin_file.base.allocator, src, format, args);
+            self.err_msg = try ErrorMsg.create(self.bin_file.allocator, src, format, args);
             return error.CodegenFail;
         }
 
@@ -2171,6 +2744,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             .i386 => @import("codegen/x86.zig"),
             .x86_64 => @import("codegen/x86_64.zig"),
             .riscv64 => @import("codegen/riscv64.zig"),
+            .spu_2 => @import("codegen/spu-mk2.zig"),
+            .arm => @import("codegen/arm.zig"),
+            .armeb => @import("codegen/arm.zig"),
             else => struct {
                 pub const Register = enum {
                     dummy,

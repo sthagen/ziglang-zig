@@ -28,7 +28,7 @@ pub fn addCases(ctx: *TestContext) !void {
         \\@unnamed$5 = export(@unnamed$4, "entry")
         \\@unnamed$6 = fntype([], @void, cc=C)
         \\@entry = fn(@unnamed$6, {
-        \\  %0 = returnvoid()
+        \\  %0 = returnvoid() ; deaths=0b1000000000000000
         \\})
         \\
     );
@@ -43,10 +43,11 @@ pub fn addCases(ctx: *TestContext) !void {
         \\
         \\@entry = fn(@fnty, {
         \\  %a = str("\x32\x08\x01\x0a")
-        \\  %eptr0 = elemptr(%a, @0)
-        \\  %eptr1 = elemptr(%a, @1)
-        \\  %eptr2 = elemptr(%a, @2)
-        \\  %eptr3 = elemptr(%a, @3)
+        \\  %a_ref = ref(%a)
+        \\  %eptr0 = elemptr(%a_ref, @0)
+        \\  %eptr1 = elemptr(%a_ref, @1)
+        \\  %eptr2 = elemptr(%a_ref, @2)
+        \\  %eptr3 = elemptr(%a_ref, @3)
         \\  %v0 = deref(%eptr0)
         \\  %v1 = deref(%eptr1)
         \\  %v2 = deref(%eptr2)
@@ -75,7 +76,7 @@ pub fn addCases(ctx: *TestContext) !void {
         \\@3 = int(3)
         \\@unnamed$6 = fntype([], @void, cc=C)
         \\@entry = fn(@unnamed$6, {
-        \\  %0 = returnvoid()
+        \\  %0 = returnvoid() ; deaths=0b1000000000000000
         \\})
         \\@entry__anon_1 = str("2\x08\x01\n")
         \\@9 = declref("9__anon_0")
@@ -117,18 +118,18 @@ pub fn addCases(ctx: *TestContext) !void {
             \\@unnamed$5 = export(@unnamed$4, "entry")
             \\@unnamed$6 = fntype([], @void, cc=C)
             \\@entry = fn(@unnamed$6, {
-            \\  %0 = call(@a, [], modifier=auto)
-            \\  %1 = returnvoid()
+            \\  %0 = call(@a, [], modifier=auto) ; deaths=0b1000000000000001
+            \\  %1 = returnvoid() ; deaths=0b1000000000000000
             \\})
             \\@unnamed$8 = fntype([], @void, cc=C)
             \\@a = fn(@unnamed$8, {
-            \\  %0 = call(@b, [], modifier=auto)
-            \\  %1 = returnvoid()
+            \\  %0 = call(@b, [], modifier=auto) ; deaths=0b1000000000000001
+            \\  %1 = returnvoid() ; deaths=0b1000000000000000
             \\})
             \\@unnamed$10 = fntype([], @void, cc=C)
             \\@b = fn(@unnamed$10, {
-            \\  %0 = call(@a, [], modifier=auto)
-            \\  %1 = returnvoid()
+            \\  %0 = call(@a, [], modifier=auto) ; deaths=0b1000000000000001
+            \\  %1 = returnvoid() ; deaths=0b1000000000000000
             \\})
             \\
         );
@@ -193,7 +194,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\@unnamed$5 = export(@unnamed$4, "entry")
             \\@unnamed$6 = fntype([], @void, cc=C)
             \\@entry = fn(@unnamed$6, {
-            \\  %0 = returnvoid()
+            \\  %0 = returnvoid() ; deaths=0b1000000000000000
             \\})
             \\
         );

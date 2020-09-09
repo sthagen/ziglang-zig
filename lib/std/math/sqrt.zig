@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("../std.zig");
 const math = std.math;
 const expect = std.testing.expect;
@@ -31,10 +36,10 @@ pub fn sqrt(x: anytype) Sqrt(@TypeOf(x)) {
     }
 }
 
-fn sqrt_int(comptime T: type, value: T) std.meta.Int(false, T.bit_count / 2) {
+fn sqrt_int(comptime T: type, value: T) std.meta.Int(false, @typeInfo(T).Int.bits / 2) {
     var op = value;
     var res: T = 0;
-    var one: T = 1 << (T.bit_count - 2);
+    var one: T = 1 << (@typeInfo(T).Int.bits - 2);
 
     // "one" starts at the highest power of four <= than the argument.
     while (one > op) {
@@ -50,7 +55,7 @@ fn sqrt_int(comptime T: type, value: T) std.meta.Int(false, T.bit_count / 2) {
         one >>= 2;
     }
 
-    const ResultType = std.meta.Int(false, T.bit_count / 2);
+    const ResultType = std.meta.Int(false, @typeInfo(T).Int.bits / 2);
     return @intCast(ResultType, res);
 }
 

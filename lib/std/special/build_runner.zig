@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const root = @import("@build");
 const std = @import("std");
 const builtin = @import("builtin");
@@ -128,7 +133,7 @@ pub fn main() !void {
 }
 
 fn runBuild(builder: *Builder) anyerror!void {
-    switch (@typeInfo(@TypeOf(root.build).ReturnType)) {
+    switch (@typeInfo(@typeInfo(@TypeOf(root.build)).Fn.return_type.?)) {
         .Void => root.build(builder),
         .ErrorUnion => try root.build(builder),
         else => @compileError("expected return type of build to be 'void' or '!void'"),

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("std.zig");
 const cstr = std.cstr;
 const unicode = std.unicode;
@@ -39,10 +44,10 @@ pub const ChildProcess = struct {
     stderr_behavior: StdIo,
 
     /// Set to change the user id when spawning the child process.
-    uid: if (builtin.os.tag == .windows) void else ?u32,
+    uid: if (builtin.os.tag == .windows or builtin.os.tag == .wasi) void else ?os.uid_t,
 
     /// Set to change the group id when spawning the child process.
-    gid: if (builtin.os.tag == .windows) void else ?u32,
+    gid: if (builtin.os.tag == .windows or builtin.os.tag == .wasi) void else ?os.gid_t,
 
     /// Set to change the current working directory when spawning the child process.
     cwd: ?[]const u8,
@@ -270,9 +275,7 @@ pub const ChildProcess = struct {
     }
 
     fn handleWaitResult(self: *ChildProcess, status: u32) void {
-        // TODO https://github.com/ziglang/zig/issues/3190
-        var term = self.cleanupAfterWait(status);
-        self.term = term;
+        self.term = self.cleanupAfterWait(status);
     }
 
     fn cleanupStreams(self: *ChildProcess) void {
@@ -391,12 +394,12 @@ pub const ChildProcess = struct {
         // and execve from the child process to the parent process.
         const err_pipe = blk: {
             if (builtin.os.tag == .linux) {
-                const fd = try os.eventfd(0, 0);
+                const fd = try os.eventfd(0, os.EFD_CLOEXEC);
                 // There's no distinction between the readable and the writeable
                 // end with eventfd
                 break :blk [2]os.fd_t{ fd, fd };
             } else {
-                break :blk try os.pipe();
+                break :blk try os.pipe2(os.O_CLOEXEC);
             }
         };
         errdefer destroyPipe(err_pipe);
@@ -482,8 +485,8 @@ pub const ChildProcess = struct {
         const any_ignore = (self.stdin_behavior == StdIo.Ignore or self.stdout_behavior == StdIo.Ignore or self.stderr_behavior == StdIo.Ignore);
 
         const nul_handle = if (any_ignore)
-            windows.OpenFile(&[_]u16{ 'N', 'U', 'L' }, .{
-                .dir = std.fs.cwd().fd,
+            // "\Device\Null" or "\??\NUL"
+            windows.OpenFile(&[_]u16{ '\\', 'D', 'e', 'v', 'i', 'c', 'e', '\\', 'N', 'u', 'l', 'l' }, .{
                 .access_mask = windows.GENERIC_READ | windows.SYNCHRONIZE,
                 .share_access = windows.FILE_SHARE_READ,
                 .creation = windows.OPEN_EXISTING,

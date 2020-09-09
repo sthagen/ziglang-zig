@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("std.zig");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
@@ -1159,7 +1164,7 @@ fn linuxLookupNameFromDnsSearch(
     }
 
     const search = if (rc.search.isNull() or dots >= rc.ndots or mem.endsWith(u8, name, "."))
-        &[_]u8{}
+        ""
     else
         rc.search.span();
 
@@ -1635,6 +1640,9 @@ pub const StreamServer = struct {
         /// Not enough free memory.  This often means that the memory allocation  is  limited
         /// by the socket buffer limits, not by the system memory.
         SystemResources,
+
+        /// Socket is not listening for new connections.
+        SocketNotListening,
 
         ProtocolFailure,
 

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("std");
 const io = std.io;
 const builtin = @import("builtin");
@@ -23,7 +28,7 @@ pub fn main() anyerror!void {
 
     var leaks: usize = 0;
     for (test_fn_list) |test_fn, i| {
-        std.testing.allocator_instance = std.heap.GeneralPurposeAllocator(.{}){};
+        std.testing.allocator_instance = .{};
         defer {
             if (std.testing.allocator_instance.deinit()) {
                 leaks += 1;
@@ -35,7 +40,7 @@ pub fn main() anyerror!void {
         test_node.activate();
         progress.refresh();
         if (progress.terminal == null) {
-            std.debug.print("{}/{} {}...", .{ i + 1, test_fn_list.len, test_fn.name });
+            std.debug.print("{}/{} {}... ", .{ i + 1, test_fn_list.len, test_fn.name });
         }
         const result = if (test_fn.async_frame_size) |size| switch (io_mode) {
             .evented => blk: {

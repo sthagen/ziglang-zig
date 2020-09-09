@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
@@ -108,7 +113,7 @@ pub fn hash(hasher: anytype, key: anytype, comptime strat: HashStrategy) void {
         .Array => hashArray(hasher, key, strat),
 
         .Vector => |info| {
-            if (info.child.bit_count % 8 == 0) {
+            if (std.meta.bitCount(info.child) % 8 == 0) {
                 // If there's no unused bits in the child type, we can just hash
                 // this as an array of bytes.
                 hasher.update(mem.asBytes(&key));

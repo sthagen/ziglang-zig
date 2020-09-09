@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("../std.zig");
 const testing = std.testing;
 const builtin = std.builtin;
@@ -20,12 +25,20 @@ test "Dir.readLink" {
 
     {
         // Create symbolic link by path
-        try tmp.dir.symLink("file.txt", "symlink1", .{});
+        tmp.dir.symLink("file.txt", "symlink1", .{}) catch |err| switch (err) {
+            // Symlink requires admin privileges on windows, so this test can legitimately fail.
+            error.AccessDenied => return error.SkipZigTest,
+            else => return err,
+        };
         try testReadLink(tmp.dir, "file.txt", "symlink1");
     }
     {
         // Create symbolic link by path
-        try tmp.dir.symLink("subdir", "symlink2", .{ .is_directory = true });
+        tmp.dir.symLink("subdir", "symlink2", .{ .is_directory = true }) catch |err| switch (err) {
+            // Symlink requires admin privileges on windows, so this test can legitimately fail.
+            error.AccessDenied => return error.SkipZigTest,
+            else => return err,
+        };
         try testReadLink(tmp.dir, "subdir", "symlink2");
     }
 }
@@ -61,7 +74,11 @@ test "readLinkAbsolute" {
         const symlink_path = try fs.path.join(allocator, &[_][]const u8{ base_path, "symlink1" });
 
         // Create symbolic link by path
-        try fs.symLinkAbsolute(target_path, symlink_path, .{});
+        fs.symLinkAbsolute(target_path, symlink_path, .{}) catch |err| switch (err) {
+            // Symlink requires admin privileges on windows, so this test can legitimately fail.
+            error.AccessDenied => return error.SkipZigTest,
+            else => return err,
+        };
         try testReadLinkAbsolute(target_path, symlink_path);
     }
     {
@@ -69,7 +86,11 @@ test "readLinkAbsolute" {
         const symlink_path = try fs.path.join(allocator, &[_][]const u8{ base_path, "symlink2" });
 
         // Create symbolic link by path
-        try fs.symLinkAbsolute(target_path, symlink_path, .{ .is_directory = true });
+        fs.symLinkAbsolute(target_path, symlink_path, .{ .is_directory = true }) catch |err| switch (err) {
+            // Symlink requires admin privileges on windows, so this test can legitimately fail.
+            error.AccessDenied => return error.SkipZigTest,
+            else => return err,
+        };
         try testReadLinkAbsolute(target_path, symlink_path);
     }
 }
@@ -167,30 +188,30 @@ test "readAllAlloc" {
     var file = try tmp_dir.dir.createFile("test_file", .{ .read = true });
     defer file.close();
 
-    const buf1 = try file.readAllAlloc(testing.allocator, 0, 1024);
+    const buf1 = try file.readToEndAlloc(testing.allocator, 1024);
     defer testing.allocator.free(buf1);
     testing.expect(buf1.len == 0);
 
     const write_buf: []const u8 = "this is a test.\nthis is a test.\nthis is a test.\nthis is a test.\n";
     try file.writeAll(write_buf);
     try file.seekTo(0);
-    const file_size = try file.getEndPos();
 
     // max_bytes > file_size
-    const buf2 = try file.readAllAlloc(testing.allocator, file_size, 1024);
+    const buf2 = try file.readToEndAlloc(testing.allocator, 1024);
     defer testing.allocator.free(buf2);
     testing.expectEqual(write_buf.len, buf2.len);
     testing.expect(std.mem.eql(u8, write_buf, buf2));
     try file.seekTo(0);
 
     // max_bytes == file_size
-    const buf3 = try file.readAllAlloc(testing.allocator, file_size, write_buf.len);
+    const buf3 = try file.readToEndAlloc(testing.allocator, write_buf.len);
     defer testing.allocator.free(buf3);
     testing.expectEqual(write_buf.len, buf3.len);
     testing.expect(std.mem.eql(u8, write_buf, buf3));
+    try file.seekTo(0);
 
     // max_bytes < file_size
-    testing.expectError(error.FileTooBig, file.readAllAlloc(testing.allocator, file_size, write_buf.len - 1));
+    testing.expectError(error.FileTooBig, file.readToEndAlloc(testing.allocator, write_buf.len - 1));
 }
 
 test "directory operations on files" {

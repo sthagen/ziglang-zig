@@ -10,7 +10,7 @@ const enable_wine: bool = build_options.enable_wine;
 const enable_wasmtime: bool = build_options.enable_wasmtime;
 const glibc_multi_install_dir: ?[]const u8 = build_options.glibc_multi_install_dir;
 
-const cheader = @embedFile("cbe.h");
+const cheader = @embedFile("link/cbe.h");
 
 test "self-hosted" {
     var ctx = TestContext.init();
@@ -421,7 +421,7 @@ pub const TestContext = struct {
     }
 
     fn runOneCase(self: *TestContext, allocator: *Allocator, root_node: *std.Progress.Node, case: Case) !void {
-        const target_info = try std.zig.system.NativeTargetInfo.detect(std.testing.allocator, case.target);
+        const target_info = try std.zig.system.NativeTargetInfo.detect(allocator, case.target);
         const target = target_info.target;
 
         var arena_allocator = std.heap.ArenaAllocator.init(allocator);
@@ -474,15 +474,15 @@ pub const TestContext = struct {
                 var all_errors = try module.getAllErrorsAlloc();
                 defer all_errors.deinit(allocator);
                 if (all_errors.list.len != 0) {
-                    std.debug.warn("\nErrors occurred updating the module:\n================\n", .{});
+                    std.debug.print("\nErrors occurred updating the module:\n================\n", .{});
                     for (all_errors.list) |err| {
-                        std.debug.warn(":{}:{}: error: {}\n================\n", .{ err.line + 1, err.column + 1, err.msg });
+                        std.debug.print(":{}:{}: error: {}\n================\n", .{ err.line + 1, err.column + 1, err.msg });
                     }
                     if (case.cbe) {
                         const C = module.bin_file.cast(link.File.C).?;
-                        std.debug.warn("Generated C: \n===============\n{}\n\n===========\n\n", .{C.main.items});
+                        std.debug.print("Generated C: \n===============\n{}\n\n===========\n\n", .{C.main.items});
                     }
-                    std.debug.warn("Test failed.\n", .{});
+                    std.debug.print("Test failed.\n", .{});
                     std.process.exit(1);
                 }
             }
@@ -497,12 +497,12 @@ pub const TestContext = struct {
                         var out = file.reader().readAllAlloc(arena, 1024 * 1024) catch @panic("Unable to read C output!");
 
                         if (expected_output.len != out.len) {
-                            std.debug.warn("\nTransformed C length differs:\n================\nExpected:\n================\n{}\n================\nFound:\n================\n{}\n================\nTest failed.\n", .{ expected_output, out });
+                            std.debug.print("\nTransformed C length differs:\n================\nExpected:\n================\n{}\n================\nFound:\n================\n{}\n================\nTest failed.\n", .{ expected_output, out });
                             std.process.exit(1);
                         }
                         for (expected_output) |e, i| {
                             if (out[i] != e) {
-                                std.debug.warn("\nTransformed C differs:\n================\nExpected:\n================\n{}\n================\nFound:\n================\n{}\n================\nTest failed.\n", .{ expected_output, out });
+                                std.debug.print("\nTransformed C differs:\n================\nExpected:\n================\n{}\n================\nFound:\n================\n{}\n================\nTest failed.\n", .{ expected_output, out });
                                 std.process.exit(1);
                             }
                         }
@@ -526,12 +526,12 @@ pub const TestContext = struct {
                         defer test_node.end();
 
                         if (expected_output.len != out_zir.items.len) {
-                            std.debug.warn("{}\nTransformed ZIR length differs:\n================\nExpected:\n================\n{}\n================\nFound:\n================\n{}\n================\nTest failed.\n", .{ case.name, expected_output, out_zir.items });
+                            std.debug.print("{}\nTransformed ZIR length differs:\n================\nExpected:\n================\n{}\n================\nFound:\n================\n{}\n================\nTest failed.\n", .{ case.name, expected_output, out_zir.items });
                             std.process.exit(1);
                         }
                         for (expected_output) |e, i| {
                             if (out_zir.items[i] != e) {
-                                std.debug.warn("{}\nTransformed ZIR differs:\n================\nExpected:\n================\n{}\n================\nFound:\n================\n{}\n================\nTest failed.\n", .{ case.name, expected_output, out_zir.items });
+                                std.debug.print("{}\nTransformed ZIR differs:\n================\nExpected:\n================\n{}\n================\nFound:\n================\n{}\n================\nTest failed.\n", .{ case.name, expected_output, out_zir.items });
                                 std.process.exit(1);
                             }
                         }
@@ -554,7 +554,7 @@ pub const TestContext = struct {
                                 break;
                             }
                         } else {
-                            std.debug.warn("{}\nUnexpected error:\n================\n:{}:{}: error: {}\n================\nTest failed.\n", .{ case.name, a.line + 1, a.column + 1, a.msg });
+                            std.debug.print("{}\nUnexpected error:\n================\n:{}:{}: error: {}\n================\nTest failed.\n", .{ case.name, a.line + 1, a.column + 1, a.msg });
                             std.process.exit(1);
                         }
                     }
@@ -562,7 +562,7 @@ pub const TestContext = struct {
                     for (handled_errors) |h, i| {
                         if (!h) {
                             const er = e[i];
-                            std.debug.warn("{}\nDid not receive error:\n================\n{}:{}: {}\n================\nTest failed.\n", .{ case.name, er.line, er.column, er.msg });
+                            std.debug.print("{}\nDid not receive error:\n================\n{}:{}: {}\n================\nTest failed.\n", .{ case.name, er.line, er.column, er.msg });
                             std.process.exit(1);
                         }
                     }
@@ -583,7 +583,10 @@ pub const TestContext = struct {
 
                         switch (case.target.getExternalExecutor()) {
                             .native => try argv.append(exe_path),
-                            .unavailable => return, // No executor available; pass test.
+                            .unavailable => {
+                                try self.runInterpreterIfAvailable(allocator, &exec_node, case, tmp.dir, bin_name);
+                                return; // Pass test.
+                            },
 
                             .qemu => |qemu_bin_name| if (enable_qemu) {
                                 // TODO Ability for test cases to specify whether to link libc.
@@ -635,13 +638,12 @@ pub const TestContext = struct {
                     var test_node = update_node.start("test", null);
                     test_node.activate();
                     defer test_node.end();
-
                     defer allocator.free(exec_result.stdout);
                     defer allocator.free(exec_result.stderr);
                     switch (exec_result.term) {
                         .Exited => |code| {
                             if (code != 0) {
-                                std.debug.warn("elf file exited with code {}\n", .{code});
+                                std.debug.print("elf file exited with code {}\n", .{code});
                                 return error.BinaryBadExitCode;
                             }
                         },
@@ -654,6 +656,117 @@ pub const TestContext = struct {
                         );
                     }
                 },
+            }
+        }
+    }
+
+    fn runInterpreterIfAvailable(
+        self: *TestContext,
+        gpa: *Allocator,
+        node: *std.Progress.Node,
+        case: Case,
+        tmp_dir: std.fs.Dir,
+        bin_name: []const u8,
+    ) !void {
+        const arch = case.target.cpu_arch orelse return;
+        switch (arch) {
+            .spu_2 => return self.runSpu2Interpreter(gpa, node, case, tmp_dir, bin_name),
+            else => return,
+        }
+    }
+
+    fn runSpu2Interpreter(
+        self: *TestContext,
+        gpa: *Allocator,
+        update_node: *std.Progress.Node,
+        case: Case,
+        tmp_dir: std.fs.Dir,
+        bin_name: []const u8,
+    ) !void {
+        const spu = @import("codegen/spu-mk2.zig");
+        if (case.target.os_tag) |os| {
+            if (os != .freestanding) {
+                std.debug.panic("Only freestanding makes sense for SPU-II tests!", .{});
+            }
+        } else {
+            std.debug.panic("SPU_2 has no native OS, check the test!", .{});
+        }
+
+        var interpreter = spu.Interpreter(struct {
+                RAM: [0x10000]u8 = undefined,
+
+                pub fn read8(bus: @This(), addr: u16) u8 {
+                    return bus.RAM[addr];
+                }
+                pub fn read16(bus: @This(), addr: u16) u16 {
+                    return std.mem.readIntLittle(u16, bus.RAM[addr..][0..2]);
+                }
+
+                pub fn write8(bus: *@This(), addr: u16, val: u8) void {
+                    bus.RAM[addr] = val;
+                }
+
+                pub fn write16(bus: *@This(), addr: u16, val: u16) void {
+                    std.mem.writeIntLittle(u16, bus.RAM[addr..][0..2], val);
+                }
+            }){
+            .bus = .{},
+        };
+
+        {
+            var load_node = update_node.start("load", null);
+            load_node.activate();
+            defer load_node.end();
+
+            var file = try tmp_dir.openFile(bin_name, .{ .read = true });
+            defer file.close();
+
+            const header = try std.elf.readHeader(file);
+            var iterator = header.program_header_iterator(file);
+
+            var none_loaded = true;
+
+            while (try iterator.next()) |phdr| {
+                if (phdr.p_type != std.elf.PT_LOAD) {
+                    std.debug.print("Encountered unexpected ELF program header: type {}\n", .{phdr.p_type});
+                    std.process.exit(1);
+                }
+                if (phdr.p_paddr != phdr.p_vaddr) {
+                    std.debug.print("Physical address does not match virtual address in ELF header!\n", .{});
+                    std.process.exit(1);
+                }
+                if (phdr.p_filesz != phdr.p_memsz) {
+                    std.debug.print("Physical size does not match virtual size in ELF header!\n", .{});
+                    std.process.exit(1);
+                }
+                if ((try file.pread(interpreter.bus.RAM[phdr.p_paddr .. phdr.p_paddr + phdr.p_filesz], phdr.p_offset)) != phdr.p_filesz) {
+                    std.debug.print("Read less than expected from ELF file!", .{});
+                    std.process.exit(1);
+                }
+                std.log.scoped(.spu2_test).debug("Loaded 0x{x} bytes to 0x{x:0<4}\n", .{ phdr.p_filesz, phdr.p_paddr });
+                none_loaded = false;
+            }
+            if (none_loaded) {
+                std.debug.print("No data found in ELF file!\n", .{});
+                std.process.exit(1);
+            }
+        }
+
+        var exec_node = update_node.start("execute", null);
+        exec_node.activate();
+        defer exec_node.end();
+
+        var blocks: u16 = 1000;
+        const block_size = 1000;
+        while (!interpreter.undefined0) {
+            const pre_ip = interpreter.ip;
+            if (blocks > 0) {
+                blocks -= 1;
+                try interpreter.ExecuteBlock(block_size);
+                if (pre_ip == interpreter.ip) {
+                    std.debug.print("Infinite loop detected in SPU II test!\n", .{});
+                    std.process.exit(1);
+                }
             }
         }
     }

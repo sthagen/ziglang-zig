@@ -30,6 +30,7 @@ const usage =
     \\  build-obj  [source]      Create object from source or assembly
     \\  fmt        [source]      Parse file and render in canonical zig format
     \\  targets                  List available compilation targets
+    \\  env                      Print lib path, std path, compiler id and version
     \\  version                  Print version number and exit
     \\  zen                      Print zen of zig and exit
     \\
@@ -95,8 +96,9 @@ pub fn main() !void {
         const stdout = io.getStdOut().outStream();
         return @import("print_targets.zig").cmdTargets(arena, cmd_args, stdout, info.target);
     } else if (mem.eql(u8, cmd, "version")) {
-        std.io.getStdOut().writeAll(build_options.version ++ "\n") catch process.exit(1);
-        return;
+        try std.io.getStdOut().writeAll(build_options.version ++ "\n");
+    } else if (mem.eql(u8, cmd, "env")) {
+        try @import("print_env.zig").cmdEnv(arena, cmd_args, io.getStdOut().outStream());
     } else if (mem.eql(u8, cmd, "zen")) {
         try io.getStdOut().writeAll(info_zen);
     } else if (mem.eql(u8, cmd, "help")) {
@@ -150,8 +152,9 @@ const usage_build_generic =
     \\  -ofmt=[mode]              Override target object format
     \\    elf                     Executable and Linking Format
     \\    c                       Compile to C source code
+    \\    wasm                    WebAssembly
+    \\    pe                      Portable Executable (Windows)
     \\    coff   (planned)        Common Object File Format (Windows)
-    \\    pe     (planned)        Portable Executable (Windows)
     \\    macho  (planned)        macOS relocatables
     \\    hex    (planned)        Intel IHEX
     \\    raw    (planned)        Dump machine code directly
@@ -448,7 +451,7 @@ fn buildOutputType(
         } else if (mem.eql(u8, ofmt, "coff")) {
             break :blk .coff;
         } else if (mem.eql(u8, ofmt, "pe")) {
-            break :blk .coff;
+            break :blk .pe;
         } else if (mem.eql(u8, ofmt, "macho")) {
             break :blk .macho;
         } else if (mem.eql(u8, ofmt, "wasm")) {
@@ -521,17 +524,19 @@ fn buildOutputType(
             try stderr.print("\nUnable to parse command: {}\n", .{@errorName(err)});
             continue;
         }) |line| {
-            if (mem.eql(u8, line, "update")) {
+            const actual_line = mem.trimRight(u8, line, "\r\n ");
+
+            if (mem.eql(u8, actual_line, "update")) {
                 if (output_mode == .Exe) {
                     try module.makeBinFileWritable();
                 }
                 try updateModule(gpa, &module, zir_out_path);
-            } else if (mem.eql(u8, line, "exit")) {
+            } else if (mem.eql(u8, actual_line, "exit")) {
                 break;
-            } else if (mem.eql(u8, line, "help")) {
+            } else if (mem.eql(u8, actual_line, "help")) {
                 try stderr.writeAll(repl_help);
             } else {
-                try stderr.print("unknown command: {}\n", .{line});
+                try stderr.print("unknown command: {}\n", .{actual_line});
             }
         } else {
             break;
@@ -557,7 +562,7 @@ fn updateModule(gpa: *Allocator, module: *Module, zir_out_path: ?[]const u8) !vo
             });
         }
     } else {
-        std.log.info(.compiler, "Update completed in {} ms\n", .{update_nanos / std.time.ns_per_ms});
+        std.log.scoped(.compiler).info("Update completed in {} ms\n", .{update_nanos / std.time.ns_per_ms});
     }
 
     if (zir_out_path) |zop| {
@@ -739,6 +744,8 @@ const FmtError = error{
     LinkQuotaExceeded,
     FileBusy,
     EndOfStream,
+    Unseekable,
+    NotOpenForWriting,
 } || fs.File.OpenError;
 
 fn fmtPath(fmt: *Fmt, file_path: []const u8, check_mode: bool, dir: fs.Dir, sub_path: []const u8) FmtError!void {
@@ -801,9 +808,16 @@ fn fmtPathFile(
     if (stat.kind == .Directory)
         return error.IsDir;
 
-    const source_code = source_file.readAllAlloc(fmt.gpa, stat.size, max_src_size) catch |err| switch (err) {
+    const source_code = source_file.readToEndAllocOptions(
+        fmt.gpa,
+        max_src_size,
+        stat.size,
+        @alignOf(u8),
+        null,
+    ) catch |err| switch (err) {
         error.ConnectionResetByPeer => unreachable,
         error.ConnectionTimedOut => unreachable,
+        error.NotOpenForReading => unreachable,
         else => |e| return e,
     };
     source_file.close();
@@ -834,7 +848,8 @@ fn fmtPathFile(
         // As a heuristic, we make enough capacity for the same as the input source.
         try fmt.out_buffer.ensureCapacity(source_code.len);
         fmt.out_buffer.items.len = 0;
-        const anything_changed = try std.zig.render(fmt.gpa, fmt.out_buffer.writer(), tree);
+        const writer = fmt.out_buffer.writer();
+        const anything_changed = try std.zig.render(fmt.gpa, writer, tree);
         if (!anything_changed)
             return; // Good thing we didn't waste any file system access on this.
 
@@ -906,7 +921,7 @@ pub const info_zen =
     \\ * Reduce the amount one must remember.
     \\ * Minimize energy spent on coding style.
     \\ * Resource deallocation must succeed.
-    \\ * Together we serve end users.
+    \\ * Together we serve the users.
     \\
     \\
 ;

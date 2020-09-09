@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 // This file contains thin wrappers around OS-specific APIs, with these
 // specific goals in mind:
 // * Convert "errno"-style error codes into Zig errors.
@@ -296,6 +301,7 @@ pub const ReadError = error{
     BrokenPipe,
     ConnectionResetByPeer,
     ConnectionTimedOut,
+    NotOpenForReading,
 
     /// This error occurs when no global event loop is configured,
     /// and reading from the file descriptor would block.
@@ -332,7 +338,7 @@ pub fn read(fd: fd_t, buf: []u8) ReadError!usize {
             wasi.EINVAL => unreachable,
             wasi.EFAULT => unreachable,
             wasi.EAGAIN => unreachable,
-            wasi.EBADF => unreachable, // Always a race condition.
+            wasi.EBADF => return error.NotOpenForReading, // Can be a race condition.
             wasi.EIO => return error.InputOutput,
             wasi.EISDIR => return error.IsDir,
             wasi.ENOBUFS => return error.SystemResources,
@@ -364,7 +370,7 @@ pub fn read(fd: fd_t, buf: []u8) ReadError!usize {
             } else {
                 return error.WouldBlock;
             },
-            EBADF => unreachable, // Always a race condition.
+            EBADF => return error.NotOpenForReading, // Can be a race condition.
             EIO => return error.InputOutput,
             EISDIR => return error.IsDir,
             ENOBUFS => return error.SystemResources,
@@ -402,7 +408,7 @@ pub fn readv(fd: fd_t, iov: []const iovec) ReadError!usize {
             wasi.EINVAL => unreachable,
             wasi.EFAULT => unreachable,
             wasi.EAGAIN => unreachable, // currently not support in WASI
-            wasi.EBADF => unreachable, // always a race condition
+            wasi.EBADF => return error.NotOpenForReading, // can be a race condition
             wasi.EIO => return error.InputOutput,
             wasi.EISDIR => return error.IsDir,
             wasi.ENOBUFS => return error.SystemResources,
@@ -426,7 +432,7 @@ pub fn readv(fd: fd_t, iov: []const iovec) ReadError!usize {
             } else {
                 return error.WouldBlock;
             },
-            EBADF => unreachable, // always a race condition
+            EBADF => return error.NotOpenForReading, // can be a race condition
             EIO => return error.InputOutput,
             EISDIR => return error.IsDir,
             ENOBUFS => return error.SystemResources,
@@ -463,7 +469,7 @@ pub fn pread(fd: fd_t, buf: []u8, offset: u64) PReadError!usize {
             wasi.EINVAL => unreachable,
             wasi.EFAULT => unreachable,
             wasi.EAGAIN => unreachable,
-            wasi.EBADF => unreachable, // Always a race condition.
+            wasi.EBADF => return error.NotOpenForReading, // Can be a race condition.
             wasi.EIO => return error.InputOutput,
             wasi.EISDIR => return error.IsDir,
             wasi.ENOBUFS => return error.SystemResources,
@@ -490,7 +496,7 @@ pub fn pread(fd: fd_t, buf: []u8, offset: u64) PReadError!usize {
             } else {
                 return error.WouldBlock;
             },
-            EBADF => unreachable, // Always a race condition.
+            EBADF => return error.NotOpenForReading, // Can be a race condition.
             EIO => return error.InputOutput,
             EISDIR => return error.IsDir,
             ENOBUFS => return error.SystemResources,
@@ -607,7 +613,7 @@ pub fn preadv(fd: fd_t, iov: []const iovec, offset: u64) PReadError!usize {
             wasi.EINVAL => unreachable,
             wasi.EFAULT => unreachable,
             wasi.EAGAIN => unreachable,
-            wasi.EBADF => unreachable, // always a race condition
+            wasi.EBADF => return error.NotOpenForReading, // can be a race condition
             wasi.EIO => return error.InputOutput,
             wasi.EISDIR => return error.IsDir,
             wasi.ENOBUFS => return error.SystemResources,
@@ -635,7 +641,7 @@ pub fn preadv(fd: fd_t, iov: []const iovec, offset: u64) PReadError!usize {
             } else {
                 return error.WouldBlock;
             },
-            EBADF => unreachable, // always a race condition
+            EBADF => return error.NotOpenForReading, // can be a race condition
             EIO => return error.InputOutput,
             EISDIR => return error.IsDir,
             ENOBUFS => return error.SystemResources,
@@ -660,6 +666,7 @@ pub const WriteError = error{
     BrokenPipe,
     SystemResources,
     OperationAborted,
+    NotOpenForWriting,
 
     /// This error occurs when no global event loop is configured,
     /// and reading from the file descriptor would block.
@@ -704,7 +711,7 @@ pub fn write(fd: fd_t, bytes: []const u8) WriteError!usize {
             wasi.EINVAL => unreachable,
             wasi.EFAULT => unreachable,
             wasi.EAGAIN => unreachable,
-            wasi.EBADF => unreachable, // Always a race condition.
+            wasi.EBADF => return error.NotOpenForWriting, // can be a race condition.
             wasi.EDESTADDRREQ => unreachable, // `connect` was never called.
             wasi.EDQUOT => return error.DiskQuota,
             wasi.EFBIG => return error.FileTooBig,
@@ -736,7 +743,7 @@ pub fn write(fd: fd_t, bytes: []const u8) WriteError!usize {
             } else {
                 return error.WouldBlock;
             },
-            EBADF => unreachable, // Always a race condition.
+            EBADF => return error.NotOpenForWriting, // can be a race condition.
             EDESTADDRREQ => unreachable, // `connect` was never called.
             EDQUOT => return error.DiskQuota,
             EFBIG => return error.FileTooBig,
@@ -782,7 +789,7 @@ pub fn writev(fd: fd_t, iov: []const iovec_const) WriteError!usize {
             wasi.EINVAL => unreachable,
             wasi.EFAULT => unreachable,
             wasi.EAGAIN => unreachable,
-            wasi.EBADF => unreachable, // Always a race condition.
+            wasi.EBADF => return error.NotOpenForWriting, // can be a race condition.
             wasi.EDESTADDRREQ => unreachable, // `connect` was never called.
             wasi.EDQUOT => return error.DiskQuota,
             wasi.EFBIG => return error.FileTooBig,
@@ -809,7 +816,7 @@ pub fn writev(fd: fd_t, iov: []const iovec_const) WriteError!usize {
             } else {
                 return error.WouldBlock;
             },
-            EBADF => unreachable, // Always a race condition.
+            EBADF => return error.NotOpenForWriting, // Can be a race condition.
             EDESTADDRREQ => unreachable, // `connect` was never called.
             EDQUOT => return error.DiskQuota,
             EFBIG => return error.FileTooBig,
@@ -862,7 +869,7 @@ pub fn pwrite(fd: fd_t, bytes: []const u8, offset: u64) PWriteError!usize {
             wasi.EINVAL => unreachable,
             wasi.EFAULT => unreachable,
             wasi.EAGAIN => unreachable,
-            wasi.EBADF => unreachable, // Always a race condition.
+            wasi.EBADF => return error.NotOpenForWriting, // can be a race condition.
             wasi.EDESTADDRREQ => unreachable, // `connect` was never called.
             wasi.EDQUOT => return error.DiskQuota,
             wasi.EFBIG => return error.FileTooBig,
@@ -898,7 +905,7 @@ pub fn pwrite(fd: fd_t, bytes: []const u8, offset: u64) PWriteError!usize {
             } else {
                 return error.WouldBlock;
             },
-            EBADF => unreachable, // Always a race condition.
+            EBADF => return error.NotOpenForWriting, // Can be a race condition.
             EDESTADDRREQ => unreachable, // `connect` was never called.
             EDQUOT => return error.DiskQuota,
             EFBIG => return error.FileTooBig,
@@ -956,7 +963,7 @@ pub fn pwritev(fd: fd_t, iov: []const iovec_const, offset: u64) PWriteError!usiz
             wasi.EINVAL => unreachable,
             wasi.EFAULT => unreachable,
             wasi.EAGAIN => unreachable,
-            wasi.EBADF => unreachable, // Always a race condition.
+            wasi.EBADF => return error.NotOpenForWriting, // Can be a race condition.
             wasi.EDESTADDRREQ => unreachable, // `connect` was never called.
             wasi.EDQUOT => return error.DiskQuota,
             wasi.EFBIG => return error.FileTooBig,
@@ -986,7 +993,7 @@ pub fn pwritev(fd: fd_t, iov: []const iovec_const, offset: u64) PWriteError!usiz
             } else {
                 return error.WouldBlock;
             },
-            EBADF => unreachable, // Always a race condition.
+            EBADF => return error.NotOpenForWriting, // Can be a race condition.
             EDESTADDRREQ => unreachable, // `connect` was never called.
             EDQUOT => return error.DiskQuota,
             EFBIG => return error.FileTooBig,
@@ -1251,7 +1258,7 @@ pub fn dup2(old_fd: fd_t, new_fd: fd_t) !void {
             EBUSY, EINTR => continue,
             EMFILE => return error.ProcessFdQuotaExceeded,
             EINVAL => unreachable, // invalid parameters passed to dup2
-            EBADF => unreachable, // always a race condition
+            EBADF => unreachable, // invalid file descriptor
             else => |err| return unexpectedErrno(err),
         }
     }
@@ -2505,13 +2512,14 @@ pub fn readlinkatZ(dirfd: fd_t, file_path: [*:0]const u8, out_buffer: []u8) Read
     }
 }
 
-pub const SetIdError = error{
-    ResourceLimitReached,
+pub const SetEidError = error{
     InvalidUserId,
     PermissionDenied,
-} || UnexpectedError;
+};
 
-pub fn setuid(uid: u32) SetIdError!void {
+pub const SetIdError = error{ResourceLimitReached} || SetEidError || UnexpectedError;
+
+pub fn setuid(uid: uid_t) SetIdError!void {
     switch (errno(system.setuid(uid))) {
         0 => return,
         EAGAIN => return error.ResourceLimitReached,
@@ -2521,7 +2529,16 @@ pub fn setuid(uid: u32) SetIdError!void {
     }
 }
 
-pub fn setreuid(ruid: u32, euid: u32) SetIdError!void {
+pub fn seteuid(uid: uid_t) SetEidError!void {
+    switch (errno(system.seteuid(uid))) {
+        0 => return,
+        EINVAL => return error.InvalidUserId,
+        EPERM => return error.PermissionDenied,
+        else => |err| return unexpectedErrno(err),
+    }
+}
+
+pub fn setreuid(ruid: uid_t, euid: uid_t) SetIdError!void {
     switch (errno(system.setreuid(ruid, euid))) {
         0 => return,
         EAGAIN => return error.ResourceLimitReached,
@@ -2531,7 +2548,7 @@ pub fn setreuid(ruid: u32, euid: u32) SetIdError!void {
     }
 }
 
-pub fn setgid(gid: u32) SetIdError!void {
+pub fn setgid(gid: gid_t) SetIdError!void {
     switch (errno(system.setgid(gid))) {
         0 => return,
         EAGAIN => return error.ResourceLimitReached,
@@ -2541,7 +2558,16 @@ pub fn setgid(gid: u32) SetIdError!void {
     }
 }
 
-pub fn setregid(rgid: u32, egid: u32) SetIdError!void {
+pub fn setegid(uid: uid_t) SetEidError!void {
+    switch (errno(system.setegid(uid))) {
+        0 => return,
+        EINVAL => return error.InvalidUserId,
+        EPERM => return error.PermissionDenied,
+        else => |err| return unexpectedErrno(err),
+    }
+}
+
+pub fn setregid(rgid: gid_t, egid: gid_t) SetIdError!void {
     switch (errno(system.setregid(rgid, egid))) {
         0 => return,
         EAGAIN => return error.ResourceLimitReached,
@@ -2795,6 +2821,9 @@ pub const AcceptError = error{
     /// by the socket buffer limits, not by the system memory.
     SystemResources,
 
+    /// Socket is not listening for new connections.
+    SocketNotListening,
+
     ProtocolFailure,
 
     /// Firewall rules forbid connection.
@@ -2863,7 +2892,7 @@ pub fn accept(
             EBADF => unreachable, // always a race condition
             ECONNABORTED => return error.ConnectionAborted,
             EFAULT => unreachable,
-            EINVAL => unreachable,
+            EINVAL => return error.SocketNotListening,
             ENOTSOCK => unreachable,
             EMFILE => return error.ProcessFdQuotaExceeded,
             ENFILE => return error.SystemFdQuotaExceeded,
@@ -4497,7 +4526,7 @@ pub fn res_mkquery(
     // Make a reasonably unpredictable id
     var ts: timespec = undefined;
     clock_gettime(CLOCK_REALTIME, &ts) catch {};
-    const UInt = std.meta.Int(false, @TypeOf(ts.tv_nsec).bit_count);
+    const UInt = std.meta.Int(false, std.meta.bitCount(@TypeOf(ts.tv_nsec)));
     const unsec = @bitCast(UInt, ts.tv_nsec);
     const id = @truncate(u32, unsec + unsec / 65536);
     q[0] = @truncate(u8, id / 256);
@@ -5308,8 +5337,8 @@ pub fn ioctl_SIOCGIFINDEX(fd: fd_t, ifr: *ifreq) IoCtl_SIOCGIFINDEX_Error!void {
     }
 }
 
-pub fn signalfd(fd: fd_t, mask: *const sigset_t, flags: i32) !fd_t {
-    const rc = system.signalfd4(fd, mask, flags);
+pub fn signalfd(fd: fd_t, mask: *const sigset_t, flags: u32) !fd_t {
+    const rc = system.signalfd(fd, mask, flags);
     switch (errno(rc)) {
         0 => return @intCast(fd_t, rc),
         EBADF, EINVAL => unreachable,
@@ -5318,6 +5347,74 @@ pub fn signalfd(fd: fd_t, mask: *const sigset_t, flags: i32) !fd_t {
         EMFILE => return error.ProcessResources,
         ENODEV => return error.InodeMountFail,
         ENOSYS => return error.SystemOutdated,
+        else => |err| return std.os.unexpectedErrno(err),
+    }
+}
+
+pub const SyncError = error{
+    InputOutput,
+    NoSpaceLeft,
+    DiskQuota,
+    AccessDenied,
+} || UnexpectedError;
+
+/// Write all pending file contents and metadata modifications to all filesystems.
+pub fn sync() void {
+    system.sync();
+}
+
+/// Write all pending file contents and metadata modifications to the filesystem which contains the specified file.
+pub fn syncfs(fd: fd_t) SyncError!void {
+    const rc = system.syncfs(fd);
+    switch (errno(rc)) {
+        0 => return,
+        EBADF, EINVAL, EROFS => unreachable,
+        EIO => return error.InputOutput,
+        ENOSPC => return error.NoSpaceLeft,
+        EDQUOT => return error.DiskQuota,
+        else => |err| return std.os.unexpectedErrno(err),
+    }
+}
+
+/// Write all pending file contents and metadata modifications for the specified file descriptor to the underlying filesystem.
+pub fn fsync(fd: fd_t) SyncError!void {
+    if (std.Target.current.os.tag == .windows) {
+        if (windows.kernel32.FlushFileBuffers(fd) != 0)
+            return;
+        switch (windows.kernel32.GetLastError()) {
+            .SUCCESS => return,
+            .INVALID_HANDLE => unreachable,
+            .ACCESS_DENIED => return error.AccessDenied, // a sync was performed but the system couldn't update the access time
+            .UNEXP_NET_ERR => return error.InputOutput,
+            else => return error.InputOutput,
+        }
+    }
+    const rc = system.fsync(fd);
+    switch (errno(rc)) {
+        0 => return,
+        EBADF, EINVAL, EROFS => unreachable,
+        EIO => return error.InputOutput,
+        ENOSPC => return error.NoSpaceLeft,
+        EDQUOT => return error.DiskQuota,
+        else => |err| return std.os.unexpectedErrno(err),
+    }
+}
+
+/// Write all pending file contents for the specified file descriptor to the underlying filesystem, but not necessarily the metadata.
+pub fn fdatasync(fd: fd_t) SyncError!void {
+    if (std.Target.current.os.tag == .windows) {
+        return fsync(fd) catch |err| switch (err) {
+            SyncError.AccessDenied => return, // fdatasync doesn't promise that the access time was synced
+            else => return err,
+        };
+    }
+    const rc = system.fdatasync(fd);
+    switch (errno(rc)) {
+        0 => return,
+        EBADF, EINVAL, EROFS => unreachable,
+        EIO => return error.InputOutput,
+        ENOSPC => return error.NoSpaceLeft,
+        EDQUOT => return error.DiskQuota,
         else => |err| return std.os.unexpectedErrno(err),
     }
 }

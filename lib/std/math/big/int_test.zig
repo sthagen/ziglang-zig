@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("../../std.zig");
 const mem = std.mem;
 const testing = std.testing;
@@ -18,13 +23,13 @@ test "big.int comptime_int set" {
     var a = try Managed.initSet(testing.allocator, s);
     defer a.deinit();
 
-    const s_limb_count = 128 / Limb.bit_count;
+    const s_limb_count = 128 / @typeInfo(Limb).Int.bits;
 
     comptime var i: usize = 0;
     inline while (i < s_limb_count) : (i += 1) {
         const result = @as(Limb, s & maxInt(Limb));
-        s >>= Limb.bit_count / 2;
-        s >>= Limb.bit_count / 2;
+        s >>= @typeInfo(Limb).Int.bits / 2;
+        s >>= @typeInfo(Limb).Int.bits / 2;
         testing.expect(a.limbs[i] == result);
     }
 }

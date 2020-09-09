@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("std.zig");
 const debug = std.debug;
 const assert = debug.assert;
@@ -41,7 +46,11 @@ pub fn ArrayListAligned(comptime T: type, comptime alignment: ?u29) type {
         /// Deinitialize with `deinit` or use `toOwnedSlice`.
         pub fn initCapacity(allocator: *Allocator, num: usize) !Self {
             var self = Self.init(allocator);
-            try self.ensureCapacity(num);
+
+            const new_memory = try self.allocator.allocAdvanced(T, alignment, num, .at_least);
+            self.items.ptr = new_memory.ptr;
+            self.capacity = new_memory.len;
+
             return self;
         }
 
@@ -361,7 +370,11 @@ pub fn ArrayListAlignedUnmanaged(comptime T: type, comptime alignment: ?u29) typ
         /// Deinitialize with `deinit` or use `toOwnedSlice`.
         pub fn initCapacity(allocator: *Allocator, num: usize) !Self {
             var self = Self{};
-            try self.ensureCapacity(allocator, num);
+
+            const new_memory = try self.allocator.allocAdvanced(T, alignment, num, .at_least);
+            self.items.ptr = new_memory.ptr;
+            self.capacity = new_memory.len;
+
             return self;
         }
 

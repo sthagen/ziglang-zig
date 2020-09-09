@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("../std.zig");
 const os = std.os;
 const testing = std.testing;
@@ -120,7 +125,20 @@ test "symlink with relative paths" {
     try cwd.writeFile("file.txt", "nonsense");
 
     if (builtin.os.tag == .windows) {
-        try os.windows.CreateSymbolicLink(cwd.fd, &[_]u16{ 's', 'y', 'm', 'l', 'i', 'n', 'k', 'e', 'd' }, &[_]u16{ 'f', 'i', 'l', 'e', '.', 't', 'x', 't' }, false);
+        os.windows.CreateSymbolicLink(
+            cwd.fd,
+            &[_]u16{ 's', 'y', 'm', 'l', 'i', 'n', 'k', 'e', 'd' },
+            &[_]u16{ 'f', 'i', 'l', 'e', '.', 't', 'x', 't' },
+            false,
+        ) catch |err| switch (err) {
+            // Symlink requires admin privileges on windows, so this test can legitimately fail.
+            error.AccessDenied => {
+                try cwd.deleteFile("file.txt");
+                try cwd.deleteFile("symlinked");
+                return error.SkipZigTest;
+            },
+            else => return err,
+        };
     } else {
         try os.symlink("file.txt", "symlinked");
     }
@@ -178,7 +196,16 @@ test "readlinkat" {
 
     // create a symbolic link
     if (builtin.os.tag == .windows) {
-        try os.windows.CreateSymbolicLink(tmp.dir.fd, &[_]u16{ 'l', 'i', 'n', 'k' }, &[_]u16{ 'f', 'i', 'l', 'e', '.', 't', 'x', 't' }, false);
+        os.windows.CreateSymbolicLink(
+            tmp.dir.fd,
+            &[_]u16{ 'l', 'i', 'n', 'k' },
+            &[_]u16{ 'f', 'i', 'l', 'e', '.', 't', 'x', 't' },
+            false,
+        ) catch |err| switch (err) {
+            // Symlink requires admin privileges on windows, so this test can legitimately fail.
+            error.AccessDenied => return error.SkipZigTest,
+            else => return err,
+        };
     } else {
         try os.symlinkat("file.txt", tmp.dir.fd, "link");
     }
@@ -521,4 +548,46 @@ test "fcntl" {
         const flags = try os.fcntl(file.handle, os.F_GETFD, 0);
         expect((flags & os.FD_CLOEXEC) != 0);
     }
+}
+
+test "signalfd" {
+    if (builtin.os.tag != .linux)
+        return error.SkipZigTest;
+    _ = std.os.signalfd;
+}
+
+test "sync" {
+    if (builtin.os.tag != .linux)
+        return error.SkipZigTest;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    const test_out_file = "os_tmp_test";
+    const file = try tmp.dir.createFile(test_out_file, .{});
+    defer {
+        file.close();
+        tmp.dir.deleteFile(test_out_file) catch {};
+    }
+
+    os.sync();
+    try os.syncfs(file.handle);
+}
+
+test "fsync" {
+    if (builtin.os.tag != .linux and builtin.os.tag != .windows)
+        return error.SkipZigTest;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    const test_out_file = "os_tmp_test";
+    const file = try tmp.dir.createFile(test_out_file, .{});
+    defer {
+        file.close();
+        tmp.dir.deleteFile(test_out_file) catch {};
+    }
+
+    try os.fsync(file.handle);
+    try os.fdatasync(file.handle);
 }

@@ -42,6 +42,11 @@ pub const Inst = struct {
         return @truncate(u1, self.deaths >> index) != 0;
     }
 
+    pub fn clearOperandDeath(self: *Inst, index: DeathsBitIndex) void {
+        assert(index < deaths_bits);
+        self.deaths &= ~(@as(DeathsInt, 1) << index);
+    }
+
     pub fn specialOperandDeaths(self: Inst) bool {
         return (self.deaths & (1 << deaths_bits)) != 0;
     }
@@ -68,6 +73,7 @@ pub const Inst = struct {
         dbg_stmt,
         isnonnull,
         isnull,
+        iserr,
         /// Read a value from a pointer.
         load,
         loop,
@@ -75,6 +81,7 @@ pub const Inst = struct {
         ref,
         ret,
         retvoid,
+        varptr,
         /// Write a value to a pointer. LHS is pointer, RHS is value.
         store,
         sub,
@@ -83,6 +90,7 @@ pub const Inst = struct {
         floatcast,
         intcast,
         unwrap_optional,
+        wrap_optional,
 
         pub fn Type(tag: Tag) type {
             return switch (tag) {
@@ -99,11 +107,13 @@ pub const Inst = struct {
                 .not,
                 .isnonnull,
                 .isnull,
+                .iserr,
                 .ptrtoint,
                 .floatcast,
                 .intcast,
                 .load,
                 .unwrap_optional,
+                .wrap_optional,
                 => UnOp,
 
                 .add,
@@ -126,6 +136,7 @@ pub const Inst = struct {
                 .condbr => CondBr,
                 .constant => Constant,
                 .loop => Loop,
+                .varptr => VarPtr,
             };
         }
 
@@ -178,7 +189,7 @@ pub const Inst = struct {
     }
 
     pub fn cmpOperator(base: *Inst) ?std.math.CompareOperator {
-        return switch (self.base.tag) {
+        return switch (base.tag) {
             .cmp_lt => .lt,
             .cmp_lte => .lte,
             .cmp_eq => .eq,
@@ -207,6 +218,14 @@ pub const Inst = struct {
             }
         }
         unreachable;
+    }
+
+    pub fn breakBlock(base: *Inst) ?*Block {
+        return switch (base.tag) {
+            .br => base.castTag(.br).?.block,
+            .brvoid => base.castTag(.brvoid).?.block,
+            else => null,
+        };
     }
 
     pub const NoOp = struct {
@@ -422,6 +441,20 @@ pub const Inst = struct {
             return 0;
         }
         pub fn getOperand(self: *const Loop, index: usize) ?*Inst {
+            return null;
+        }
+    };
+
+    pub const VarPtr = struct {
+        pub const base_tag = Tag.varptr;
+
+        base: Inst,
+        variable: *Module.Var,
+
+        pub fn operandCount(self: *const VarPtr) usize {
+            return 0;
+        }
+        pub fn getOperand(self: *const VarPtr, index: usize) ?*Inst {
             return null;
         }
     };

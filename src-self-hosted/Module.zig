@@ -6,7 +6,7 @@ const Value = @import("value.zig").Value;
 const Type = @import("type.zig").Type;
 const TypedValue = @import("TypedValue.zig");
 const assert = std.debug.assert;
-const log = std.log;
+const log = std.log.scoped(.module);
 const BigIntConst = std.math.big.int.Const;
 const BigIntMutable = std.math.big.int.Mutable;
 const Target = std.Target;
@@ -36,17 +36,17 @@ bin_file_path: []const u8,
 /// It's rare for a decl to be exported, so we save memory by having a sparse map of
 /// Decl pointers to details about them being exported.
 /// The Export memory is owned by the `export_owners` table; the slice itself is owned by this table.
-decl_exports: std.AutoHashMapUnmanaged(*Decl, []*Export) = .{},
+decl_exports: std.AutoArrayHashMapUnmanaged(*Decl, []*Export) = .{},
 /// We track which export is associated with the given symbol name for quick
 /// detection of symbol collisions.
-symbol_exports: std.StringHashMapUnmanaged(*Export) = .{},
+symbol_exports: std.StringArrayHashMapUnmanaged(*Export) = .{},
 /// This models the Decls that perform exports, so that `decl_exports` can be updated when a Decl
 /// is modified. Note that the key of this table is not the Decl being exported, but the Decl that
 /// is performing the export of another Decl.
 /// This table owns the Export memory.
-export_owners: std.AutoHashMapUnmanaged(*Decl, []*Export) = .{},
+export_owners: std.AutoArrayHashMapUnmanaged(*Decl, []*Export) = .{},
 /// Maps fully qualified namespaced names to the Decl struct for them.
-decl_table: std.HashMapUnmanaged(Scope.NameHash, *Decl, Scope.name_hash_hash, Scope.name_hash_eql, false) = .{},
+decl_table: std.ArrayHashMapUnmanaged(Scope.NameHash, *Decl, Scope.name_hash_hash, Scope.name_hash_eql, false) = .{},
 
 link_error_flags: link.File.ErrorFlags = .{},
 
@@ -57,13 +57,13 @@ work_queue: std.fifo.LinearFifo(WorkItem, .Dynamic),
 /// The ErrorMsg memory is owned by the decl, using Module's allocator.
 /// Note that a Decl can succeed but the Fn it represents can fail. In this case,
 /// a Decl can have a failed_decls entry but have analysis status of success.
-failed_decls: std.AutoHashMapUnmanaged(*Decl, *ErrorMsg) = .{},
+failed_decls: std.AutoArrayHashMapUnmanaged(*Decl, *ErrorMsg) = .{},
 /// Using a map here for consistency with the other fields here.
 /// The ErrorMsg memory is owned by the `Scope`, using Module's allocator.
-failed_files: std.AutoHashMapUnmanaged(*Scope, *ErrorMsg) = .{},
+failed_files: std.AutoArrayHashMapUnmanaged(*Scope, *ErrorMsg) = .{},
 /// Using a map here for consistency with the other fields here.
 /// The ErrorMsg memory is owned by the `Export`, using Module's allocator.
-failed_exports: std.AutoHashMapUnmanaged(*Export, *ErrorMsg) = .{},
+failed_exports: std.AutoArrayHashMapUnmanaged(*Export, *ErrorMsg) = .{},
 
 /// Incrementing integer used to compare against the corresponding Decl
 /// field to determine whether a Decl's status applies to an ongoing update, or a
@@ -79,6 +79,9 @@ deletion_set: std.ArrayListUnmanaged(*Decl) = .{},
 /// Owned by Module.
 root_name: []u8,
 keep_source_files_loaded: bool,
+
+/// Error tags and their values, tag names are duped with mod.gpa.
+global_error_set: std.StringHashMapUnmanaged(u16) = .{},
 
 pub const InnerError = error{ OutOfMemory, AnalysisFail };
 
@@ -122,7 +125,7 @@ pub const Decl = struct {
     /// mapping them to an address in the output file.
     /// Memory owned by this decl, using Module's allocator.
     name: [*:0]const u8,
-    /// The direct parent container of the Decl. This is either a `Scope.File` or `Scope.ZIRModule`.
+    /// The direct parent container of the Decl. This is either a `Scope.Container` or `Scope.ZIRModule`.
     /// Reference to externally owned memory.
     scope: *Scope,
     /// The AST Node decl index or ZIR Inst index that contains this declaration.
@@ -170,6 +173,9 @@ pub const Decl = struct {
     /// This flag is set when this Decl is added to a check_for_deletion set, and cleared
     /// when removed.
     deletion_flag: bool,
+    /// Whether the corresponding AST decl has a `pub` keyword.
+    is_pub: bool,
+
     /// An integer that can be checked against the corresponding incrementing
     /// generation field of Module. This is used to determine whether `complete` status
     /// represents pre- or post- re-analysis.
@@ -195,9 +201,9 @@ pub const Decl = struct {
     /// typed_value may need to be regenerated.
     dependencies: DepsTable = .{},
 
-    /// The reason this is not `std.AutoHashMapUnmanaged` is a workaround for
+    /// The reason this is not `std.AutoArrayHashMapUnmanaged` is a workaround for
     /// stage1 compiler giving me: `error: struct 'Module.Decl' depends on itself`
-    pub const DepsTable = std.HashMapUnmanaged(*Decl, void, std.hash_map.getAutoHashFn(*Decl), std.hash_map.getAutoEqlFn(*Decl), false);
+    pub const DepsTable = std.ArrayHashMapUnmanaged(*Decl, void, std.array_hash_map.getAutoHashFn(*Decl), std.array_hash_map.getAutoEqlFn(*Decl), false);
 
     pub fn destroy(self: *Decl, gpa: *Allocator) void {
         gpa.free(mem.spanZ(self.name));
@@ -211,9 +217,10 @@ pub const Decl = struct {
 
     pub fn src(self: Decl) usize {
         switch (self.scope.tag) {
-            .file => {
-                const file = @fieldParentPtr(Scope.File, "base", self.scope);
-                const tree = file.contents.tree;
+            .container => {
+                const container = @fieldParentPtr(Scope.Container, "base", self.scope);
+                const tree = container.file_scope.contents.tree;
+                // TODO Container should have it's own decls()
                 const decl_node = tree.root_node.decls()[self.src_index];
                 return tree.token_locs[decl_node.firstToken()].start;
             },
@@ -223,7 +230,7 @@ pub const Decl = struct {
                 const src_decl = module.decls[self.src_index];
                 return src_decl.inst.src;
             },
-            .block => unreachable,
+            .file, .block => unreachable,
             .gen_zir => unreachable,
             .local_val => unreachable,
             .local_ptr => unreachable,
@@ -320,6 +327,16 @@ pub const Fn = struct {
     }
 };
 
+pub const Var = struct {
+    /// if is_extern == true this is undefined
+    init: Value,
+    owner_decl: *Decl,
+
+    is_extern: bool,
+    is_mutable: bool,
+    is_threadlocal: bool,
+};
+
 pub const Scope = struct {
     tag: Tag,
 
@@ -343,6 +360,7 @@ pub const Scope = struct {
             .local_ptr => return self.cast(LocalPtr).?.gen_zir.arena,
             .zir_module => return &self.cast(ZIRModule).?.contents.module.arena.allocator,
             .file => unreachable,
+            .container => unreachable,
         }
     }
 
@@ -352,15 +370,16 @@ pub const Scope = struct {
         return switch (self.tag) {
             .block => self.cast(Block).?.decl,
             .gen_zir => self.cast(GenZIR).?.decl,
-            .local_val => return self.cast(LocalVal).?.gen_zir.decl,
-            .local_ptr => return self.cast(LocalPtr).?.gen_zir.decl,
+            .local_val => self.cast(LocalVal).?.gen_zir.decl,
+            .local_ptr => self.cast(LocalPtr).?.gen_zir.decl,
             .decl => self.cast(DeclAnalysis).?.decl,
             .zir_module => null,
             .file => null,
+            .container => null,
         };
     }
 
-    /// Asserts the scope has a parent which is a ZIRModule or File and
+    /// Asserts the scope has a parent which is a ZIRModule or Container and
     /// returns it.
     pub fn namespace(self: *Scope) *Scope {
         switch (self.tag) {
@@ -369,7 +388,8 @@ pub const Scope = struct {
             .local_val => return self.cast(LocalVal).?.gen_zir.decl.scope,
             .local_ptr => return self.cast(LocalPtr).?.gen_zir.decl.scope,
             .decl => return self.cast(DeclAnalysis).?.decl.scope,
-            .zir_module, .file => return self,
+            .file => return &self.cast(File).?.root_container.base,
+            .zir_module, .container => return self,
         }
     }
 
@@ -383,8 +403,9 @@ pub const Scope = struct {
             .local_val => unreachable,
             .local_ptr => unreachable,
             .decl => unreachable,
+            .file => unreachable,
             .zir_module => return self.cast(ZIRModule).?.fullyQualifiedNameHash(name),
-            .file => return self.cast(File).?.fullyQualifiedNameHash(name),
+            .container => return self.cast(Container).?.fullyQualifiedNameHash(name),
         }
     }
 
@@ -393,11 +414,12 @@ pub const Scope = struct {
         switch (self.tag) {
             .file => return self.cast(File).?.contents.tree,
             .zir_module => unreachable,
-            .decl => return self.cast(DeclAnalysis).?.decl.scope.cast(File).?.contents.tree,
-            .block => return self.cast(Block).?.decl.scope.cast(File).?.contents.tree,
-            .gen_zir => return self.cast(GenZIR).?.decl.scope.cast(File).?.contents.tree,
-            .local_val => return self.cast(LocalVal).?.gen_zir.decl.scope.cast(File).?.contents.tree,
-            .local_ptr => return self.cast(LocalPtr).?.gen_zir.decl.scope.cast(File).?.contents.tree,
+            .decl => return self.cast(DeclAnalysis).?.decl.scope.cast(Container).?.file_scope.contents.tree,
+            .block => return self.cast(Block).?.decl.scope.cast(Container).?.file_scope.contents.tree,
+            .gen_zir => return self.cast(GenZIR).?.decl.scope.cast(Container).?.file_scope.contents.tree,
+            .local_val => return self.cast(LocalVal).?.gen_zir.decl.scope.cast(Container).?.file_scope.contents.tree,
+            .local_ptr => return self.cast(LocalPtr).?.gen_zir.decl.scope.cast(Container).?.file_scope.contents.tree,
+            .container => return self.cast(Container).?.file_scope.contents.tree,
         }
     }
 
@@ -411,13 +433,15 @@ pub const Scope = struct {
             .decl => unreachable,
             .zir_module => unreachable,
             .file => unreachable,
+            .container => unreachable,
         };
     }
 
-    /// Asserts the scope has a parent which is a ZIRModule or File and
+    /// Asserts the scope has a parent which is a ZIRModule, Contaienr or File and
     /// returns the sub_file_path field.
     pub fn subFilePath(base: *Scope) []const u8 {
         switch (base.tag) {
+            .container => return @fieldParentPtr(Container, "base", base).file_scope.sub_file_path,
             .file => return @fieldParentPtr(File, "base", base).sub_file_path,
             .zir_module => return @fieldParentPtr(ZIRModule, "base", base).sub_file_path,
             .block => unreachable,
@@ -437,11 +461,13 @@ pub const Scope = struct {
             .local_val => unreachable,
             .local_ptr => unreachable,
             .decl => unreachable,
+            .container => unreachable,
         }
     }
 
     pub fn getSource(base: *Scope, module: *Module) ![:0]const u8 {
         switch (base.tag) {
+            .container => return @fieldParentPtr(Container, "base", base).file_scope.getSource(module),
             .file => return @fieldParentPtr(File, "base", base).getSource(module),
             .zir_module => return @fieldParentPtr(ZIRModule, "base", base).getSource(module),
             .gen_zir => unreachable,
@@ -455,8 +481,9 @@ pub const Scope = struct {
     /// Asserts the scope is a namespace Scope and removes the Decl from the namespace.
     pub fn removeDecl(base: *Scope, child: *Decl) void {
         switch (base.tag) {
-            .file => return @fieldParentPtr(File, "base", base).removeDecl(child),
+            .container => return @fieldParentPtr(Container, "base", base).removeDecl(child),
             .zir_module => return @fieldParentPtr(ZIRModule, "base", base).removeDecl(child),
+            .file => unreachable,
             .block => unreachable,
             .gen_zir => unreachable,
             .local_val => unreachable,
@@ -483,6 +510,7 @@ pub const Scope = struct {
             .local_val => unreachable,
             .local_ptr => unreachable,
             .decl => unreachable,
+            .container => unreachable,
         }
     }
 
@@ -499,11 +527,40 @@ pub const Scope = struct {
         zir_module,
         /// .zig source code.
         file,
+        /// struct, enum or union, every .file contains one of these.
+        container,
         block,
         decl,
         gen_zir,
         local_val,
         local_ptr,
+    };
+
+    pub const Container = struct {
+        pub const base_tag: Tag = .container;
+        base: Scope = Scope{ .tag = base_tag },
+
+        file_scope: *Scope.File,
+
+        /// Direct children of the file.
+        decls: std.AutoArrayHashMapUnmanaged(*Decl, void),
+
+        // TODO implement container types and put this in a status union
+        // ty: Type
+
+        pub fn deinit(self: *Container, gpa: *Allocator) void {
+            self.decls.deinit(gpa);
+            self.* = undefined;
+        }
+
+        pub fn removeDecl(self: *Container, child: *Decl) void {
+            _ = self.decls.remove(child);
+        }
+
+        pub fn fullyQualifiedNameHash(self: *Container, name: []const u8) NameHash {
+            // TODO container scope qualified names.
+            return std.zig.hashSrc(name);
+        }
     };
 
     pub const File = struct {
@@ -528,8 +585,7 @@ pub const Scope = struct {
             loaded_success,
         },
 
-        /// Direct children of the file.
-        decls: ArrayListUnmanaged(*Decl),
+        root_container: Container,
 
         pub fn unload(self: *File, gpa: *Allocator) void {
             switch (self.status) {
@@ -553,18 +609,9 @@ pub const Scope = struct {
         }
 
         pub fn deinit(self: *File, gpa: *Allocator) void {
-            self.decls.deinit(gpa);
+            self.root_container.deinit(gpa);
             self.unload(gpa);
             self.* = undefined;
-        }
-
-        pub fn removeDecl(self: *File, child: *Decl) void {
-            for (self.decls.items) |item, i| {
-                if (item == child) {
-                    _ = self.decls.swapRemove(i);
-                    return;
-                }
-            }
         }
 
         pub fn dumpSrc(self: *File, src: usize) void {
@@ -579,6 +626,7 @@ pub const Scope = struct {
                         module.gpa,
                         self.sub_file_path,
                         std.math.maxInt(u32),
+                        null,
                         1,
                         0,
                     );
@@ -587,11 +635,6 @@ pub const Scope = struct {
                 },
                 .bytes => |bytes| return bytes,
             }
-        }
-
-        pub fn fullyQualifiedNameHash(self: *File, name: []const u8) NameHash {
-            // We don't have struct scopes yet so this is currently just a simple name hash.
-            return std.zig.hashSrc(name);
         }
     };
 
@@ -681,6 +724,7 @@ pub const Scope = struct {
                         module.gpa,
                         self.sub_file_path,
                         std.math.maxInt(u32),
+                        null,
                         1,
                         0,
                     );
@@ -709,6 +753,7 @@ pub const Scope = struct {
         /// Points to the arena allocator of DeclAnalysis
         arena: *Allocator,
         label: ?Label = null,
+        is_comptime: bool,
 
         pub const Label = struct {
             zir_block: *zir.Inst.Block,
@@ -844,7 +889,10 @@ pub fn init(gpa: *Allocator, options: InitOptions) !Module {
                 .source = .{ .unloaded = {} },
                 .contents = .{ .not_available = {} },
                 .status = .never_loaded,
-                .decls = .{},
+                .root_container = .{
+                    .file_scope = root_scope,
+                    .decls = .{},
+                },
             };
             break :blk &root_scope.base;
         } else if (mem.endsWith(u8, options.root_pkg.root_src_path, ".zir")) {
@@ -915,6 +963,12 @@ pub fn deinit(self: *Module) void {
 
     self.symbol_exports.deinit(gpa);
     self.root_scope.destroy(gpa);
+
+    var it = self.global_error_set.iterator();
+    while (it.next()) |entry| {
+        gpa.free(entry.key);
+    }
+    self.global_error_set.deinit(gpa);
     self.* = undefined;
 }
 
@@ -946,7 +1000,7 @@ pub fn update(self: *Module) !void {
     // to force a refresh we unload now.
     if (self.root_scope.cast(Scope.File)) |zig_file| {
         zig_file.unload(self.gpa);
-        self.analyzeRootSrcFile(zig_file) catch |err| switch (err) {
+        self.analyzeContainer(&zig_file.root_container) catch |err| switch (err) {
             error.AnalysisFail => {
                 assert(self.totalErrorCount() != 0);
             },
@@ -974,7 +1028,7 @@ pub fn update(self: *Module) !void {
     }
 
     // This is needed before reading the error flags.
-    try self.bin_file.flush();
+    try self.bin_file.flush(self);
 
     self.link_error_flags = self.bin_file.errorFlags();
 
@@ -1079,7 +1133,7 @@ pub fn performAllTheWork(self: *Module) error{OutOfMemory}!void {
                     // lifetime annotations in the ZIR.
                     var decl_arena = decl.typed_value.most_recent.arena.?.promote(self.gpa);
                     defer decl.typed_value.most_recent.arena.?.* = decl_arena.state;
-                    std.log.debug(.module, "analyze liveness of {}\n", .{decl.name});
+                    log.debug("analyze liveness of {}\n", .{decl.name});
                     try liveness.analyze(self.gpa, &decl_arena.allocator, payload.func.analysis.success);
                 }
 
@@ -1141,7 +1195,7 @@ pub fn ensureDeclAnalyzed(self: *Module, decl: *Decl) InnerError!void {
         .complete => return,
 
         .outdated => blk: {
-            log.debug(.module, "re-analyzing {}\n", .{decl.name});
+            log.debug("re-analyzing {}\n", .{decl.name});
 
             // The exports this Decl performs will be re-discovered, so we remove them here
             // prior to re-analysis.
@@ -1214,8 +1268,8 @@ fn astGenAndAnalyzeDecl(self: *Module, decl: *Decl) !bool {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const file_scope = decl.scope.cast(Scope.File).?;
-    const tree = try self.getAstTree(file_scope);
+    const container_scope = decl.scope.cast(Scope.Container).?;
+    const tree = try self.getAstTree(container_scope);
     const ast_node = tree.root_node.decls()[decl.src_index];
     switch (ast_node.tag) {
         .FnProto => {
@@ -1235,7 +1289,8 @@ fn astGenAndAnalyzeDecl(self: *Module, decl: *Decl) !bool {
             };
             defer fn_type_scope.instructions.deinit(self.gpa);
 
-            const body_node = fn_proto.getTrailer("body_node") orelse
+            decl.is_pub = fn_proto.getVisibToken() != null;
+            const body_node = fn_proto.getBodyNode() orelse
                 return self.failTok(&fn_type_scope.base, fn_proto.fn_token, "TODO implement extern functions", .{});
 
             const param_decls = fn_proto.params();
@@ -1254,19 +1309,19 @@ fn astGenAndAnalyzeDecl(self: *Module, decl: *Decl) !bool {
                 };
                 param_types[i] = try astgen.expr(self, &fn_type_scope.base, type_type_rl, param_type_node);
             }
-            if (fn_proto.getTrailer("var_args_token")) |var_args_token| {
+            if (fn_proto.getVarArgsToken()) |var_args_token| {
                 return self.failTok(&fn_type_scope.base, var_args_token, "TODO implement var args", .{});
             }
-            if (fn_proto.getTrailer("lib_name")) |lib_name| {
+            if (fn_proto.getLibName()) |lib_name| {
                 return self.failNode(&fn_type_scope.base, lib_name, "TODO implement function library name", .{});
             }
-            if (fn_proto.getTrailer("align_expr")) |align_expr| {
+            if (fn_proto.getAlignExpr()) |align_expr| {
                 return self.failNode(&fn_type_scope.base, align_expr, "TODO implement function align expression", .{});
             }
-            if (fn_proto.getTrailer("section_expr")) |sect_expr| {
+            if (fn_proto.getSectionExpr()) |sect_expr| {
                 return self.failNode(&fn_type_scope.base, sect_expr, "TODO implement function section expression", .{});
             }
-            if (fn_proto.getTrailer("callconv_expr")) |callconv_expr| {
+            if (fn_proto.getCallconvExpr()) |callconv_expr| {
                 return self.failNode(
                     &fn_type_scope.base,
                     callconv_expr,
@@ -1285,7 +1340,6 @@ fn astGenAndAnalyzeDecl(self: *Module, decl: *Decl) !bool {
                 .return_type = return_type_inst,
                 .param_types = param_types,
             }, .{});
-            _ = try astgen.addZIRUnOp(self, &fn_type_scope.base, fn_src, .@"return", fn_type_inst);
 
             // We need the memory for the Type to go into the arena for the Decl
             var decl_arena = std.heap.ArenaAllocator.init(self.gpa);
@@ -1298,10 +1352,11 @@ fn astGenAndAnalyzeDecl(self: *Module, decl: *Decl) !bool {
                 .decl = decl,
                 .instructions = .{},
                 .arena = &decl_arena.allocator,
+                .is_comptime = false,
             };
             defer block_scope.instructions.deinit(self.gpa);
 
-            const fn_type = try zir_sema.analyzeBodyValueAsType(self, &block_scope, .{
+            const fn_type = try zir_sema.analyzeBodyValueAsType(self, &block_scope, fn_type_inst, .{
                 .instructions = fn_type_scope.instructions.items,
             });
             const new_func = try decl_arena.allocator.create(Fn);
@@ -1408,10 +1463,10 @@ fn astGenAndAnalyzeDecl(self: *Module, decl: *Decl) !bool {
                 self.bin_file.freeDecl(decl);
             }
 
-            if (fn_proto.getTrailer("extern_export_inline_token")) |maybe_export_token| {
+            if (fn_proto.getExternExportInlineToken()) |maybe_export_token| {
                 if (tree.token_ids[maybe_export_token] == .Keyword_export) {
                     const export_src = tree.token_locs[maybe_export_token].start;
-                    const name_loc = tree.token_locs[fn_proto.getTrailer("name_token").?];
+                    const name_loc = tree.token_locs[fn_proto.getNameToken().?];
                     const name = tree.tokenSliceLoc(name_loc);
                     // The scope needs to have the decl in it.
                     try self.analyzeExport(&block_scope.base, export_src, name, decl);
@@ -1419,8 +1474,210 @@ fn astGenAndAnalyzeDecl(self: *Module, decl: *Decl) !bool {
             }
             return type_changed;
         },
-        .VarDecl => @panic("TODO var decl"),
-        .Comptime => @panic("TODO comptime decl"),
+        .VarDecl => {
+            const var_decl = @fieldParentPtr(ast.Node.VarDecl, "base", ast_node);
+
+            decl.analysis = .in_progress;
+
+            // We need the memory for the Type to go into the arena for the Decl
+            var decl_arena = std.heap.ArenaAllocator.init(self.gpa);
+            errdefer decl_arena.deinit();
+            const decl_arena_state = try decl_arena.allocator.create(std.heap.ArenaAllocator.State);
+
+            var block_scope: Scope.Block = .{
+                .parent = null,
+                .func = null,
+                .decl = decl,
+                .instructions = .{},
+                .arena = &decl_arena.allocator,
+                .is_comptime = true,
+            };
+            defer block_scope.instructions.deinit(self.gpa);
+
+            decl.is_pub = var_decl.getVisibToken() != null;
+            const is_extern = blk: {
+                const maybe_extern_token = var_decl.getExternExportToken() orelse
+                    break :blk false;
+                if (tree.token_ids[maybe_extern_token] != .Keyword_extern) break :blk false;
+                if (var_decl.getInitNode()) |some| {
+                    return self.failNode(&block_scope.base, some, "extern variables have no initializers", .{});
+                }
+                break :blk true;
+            };
+            if (var_decl.getLibName()) |lib_name| {
+                assert(is_extern);
+                return self.failNode(&block_scope.base, lib_name, "TODO implement function library name", .{});
+            }
+            const is_mutable = tree.token_ids[var_decl.mut_token] == .Keyword_var;
+            const is_threadlocal = if (var_decl.getThreadLocalToken()) |some| blk: {
+                if (!is_mutable) {
+                    return self.failTok(&block_scope.base, some, "threadlocal variable cannot be constant", .{});
+                }
+                break :blk true;
+            } else false;
+            assert(var_decl.getComptimeToken() == null);
+            if (var_decl.getAlignNode()) |align_expr| {
+                return self.failNode(&block_scope.base, align_expr, "TODO implement function align expression", .{});
+            }
+            if (var_decl.getSectionNode()) |sect_expr| {
+                return self.failNode(&block_scope.base, sect_expr, "TODO implement function section expression", .{});
+            }
+
+            const var_info: struct { ty: Type, val: ?Value } = if (var_decl.getInitNode()) |init_node| vi: {
+                var gen_scope_arena = std.heap.ArenaAllocator.init(self.gpa);
+                defer gen_scope_arena.deinit();
+                var gen_scope: Scope.GenZIR = .{
+                    .decl = decl,
+                    .arena = &gen_scope_arena.allocator,
+                    .parent = decl.scope,
+                };
+                defer gen_scope.instructions.deinit(self.gpa);
+
+                const init_result_loc: astgen.ResultLoc = if (var_decl.getTypeNode()) |type_node| rl: {
+                    const src = tree.token_locs[type_node.firstToken()].start;
+                    const type_type = try astgen.addZIRInstConst(self, &gen_scope.base, src, .{
+                        .ty = Type.initTag(.type),
+                        .val = Value.initTag(.type_type),
+                    });
+                    const var_type = try astgen.expr(self, &gen_scope.base, .{ .ty = type_type }, type_node);
+                    break :rl .{ .ty = var_type };
+                } else .none;
+
+                const src = tree.token_locs[init_node.firstToken()].start;
+                const init_inst = try astgen.expr(self, &gen_scope.base, init_result_loc, init_node);
+
+                var inner_block: Scope.Block = .{
+                    .parent = null,
+                    .func = null,
+                    .decl = decl,
+                    .instructions = .{},
+                    .arena = &gen_scope_arena.allocator,
+                    .is_comptime = true,
+                };
+                defer inner_block.instructions.deinit(self.gpa);
+                try zir_sema.analyzeBody(self, &inner_block.base, .{ .instructions = gen_scope.instructions.items });
+
+                // The result location guarantees the type coercion.
+                const analyzed_init_inst = init_inst.analyzed_inst.?;
+                // The is_comptime in the Scope.Block guarantees the result is comptime-known.
+                const val = analyzed_init_inst.value().?;
+
+                const ty = try analyzed_init_inst.ty.copy(block_scope.arena);
+                break :vi .{
+                    .ty = ty,
+                    .val = try val.copy(block_scope.arena),
+                };
+            } else if (!is_extern) {
+                return self.failTok(&block_scope.base, var_decl.firstToken(), "variables must be initialized", .{});
+            } else if (var_decl.getTypeNode()) |type_node| vi: {
+                // Temporary arena for the zir instructions.
+                var type_scope_arena = std.heap.ArenaAllocator.init(self.gpa);
+                defer type_scope_arena.deinit();
+                var type_scope: Scope.GenZIR = .{
+                    .decl = decl,
+                    .arena = &type_scope_arena.allocator,
+                    .parent = decl.scope,
+                };
+                defer type_scope.instructions.deinit(self.gpa);
+
+                const src = tree.token_locs[type_node.firstToken()].start;
+                const type_type = try astgen.addZIRInstConst(self, &type_scope.base, src, .{
+                    .ty = Type.initTag(.type),
+                    .val = Value.initTag(.type_type),
+                });
+                const var_type = try astgen.expr(self, &type_scope.base, .{ .ty = type_type }, type_node);
+                const ty = try zir_sema.analyzeBodyValueAsType(self, &block_scope, var_type, .{
+                    .instructions = type_scope.instructions.items,
+                });
+                break :vi .{
+                    .ty = ty,
+                    .val = null,
+                };
+            } else {
+                return self.failTok(&block_scope.base, var_decl.firstToken(), "unable to infer variable type", .{});
+            };
+
+            if (is_mutable and !var_info.ty.isValidVarType(is_extern)) {
+                return self.failTok(&block_scope.base, var_decl.firstToken(), "variable of type '{}' must be const", .{var_info.ty});
+            }
+
+            var type_changed = true;
+            if (decl.typedValueManaged()) |tvm| {
+                type_changed = !tvm.typed_value.ty.eql(var_info.ty);
+
+                tvm.deinit(self.gpa);
+            }
+
+            const new_variable = try decl_arena.allocator.create(Var);
+            const var_payload = try decl_arena.allocator.create(Value.Payload.Variable);
+            new_variable.* = .{
+                .owner_decl = decl,
+                .init = var_info.val orelse undefined,
+                .is_extern = is_extern,
+                .is_mutable = is_mutable,
+                .is_threadlocal = is_threadlocal,
+            };
+            var_payload.* = .{ .variable = new_variable };
+
+            decl_arena_state.* = decl_arena.state;
+            decl.typed_value = .{
+                .most_recent = .{
+                    .typed_value = .{
+                        .ty = var_info.ty,
+                        .val = Value.initPayload(&var_payload.base),
+                    },
+                    .arena = decl_arena_state,
+                },
+            };
+            decl.analysis = .complete;
+            decl.generation = self.generation;
+
+            if (var_decl.getExternExportToken()) |maybe_export_token| {
+                if (tree.token_ids[maybe_export_token] == .Keyword_export) {
+                    const export_src = tree.token_locs[maybe_export_token].start;
+                    const name_loc = tree.token_locs[var_decl.name_token];
+                    const name = tree.tokenSliceLoc(name_loc);
+                    // The scope needs to have the decl in it.
+                    try self.analyzeExport(&block_scope.base, export_src, name, decl);
+                }
+            }
+            return type_changed;
+        },
+        .Comptime => {
+            const comptime_decl = @fieldParentPtr(ast.Node.Comptime, "base", ast_node);
+
+            decl.analysis = .in_progress;
+
+            // A comptime decl does not store any value so we can just deinit this arena after analysis is done.
+            var analysis_arena = std.heap.ArenaAllocator.init(self.gpa);
+            defer analysis_arena.deinit();
+            var gen_scope: Scope.GenZIR = .{
+                .decl = decl,
+                .arena = &analysis_arena.allocator,
+                .parent = decl.scope,
+            };
+            defer gen_scope.instructions.deinit(self.gpa);
+
+            _ = try astgen.comptimeExpr(self, &gen_scope.base, .none, comptime_decl.expr);
+
+            var block_scope: Scope.Block = .{
+                .parent = null,
+                .func = null,
+                .decl = decl,
+                .instructions = .{},
+                .arena = &analysis_arena.allocator,
+                .is_comptime = true,
+            };
+            defer block_scope.instructions.deinit(self.gpa);
+
+            _ = try zir_sema.analyzeBody(self, &block_scope.base, .{
+                .instructions = gen_scope.instructions.items,
+            });
+
+            decl.analysis = .complete;
+            decl.generation = self.generation;
+            return true;
+        },
         .Use => @panic("TODO usingnamespace decl"),
         else => unreachable,
     }
@@ -1472,9 +1729,11 @@ fn getSrcModule(self: *Module, root_scope: *Scope.ZIRModule) !*zir.Module {
     }
 }
 
-fn getAstTree(self: *Module, root_scope: *Scope.File) !*ast.Tree {
+fn getAstTree(self: *Module, container_scope: *Scope.Container) !*ast.Tree {
     const tracy = trace(@src());
     defer tracy.end();
+
+    const root_scope = container_scope.file_scope;
 
     switch (root_scope.status) {
         .never_loaded, .unloaded_success => {
@@ -1517,37 +1776,37 @@ fn getAstTree(self: *Module, root_scope: *Scope.File) !*ast.Tree {
     }
 }
 
-fn analyzeRootSrcFile(self: *Module, root_scope: *Scope.File) !void {
+fn analyzeContainer(self: *Module, container_scope: *Scope.Container) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     // We may be analyzing it for the first time, or this may be
     // an incremental update. This code handles both cases.
-    const tree = try self.getAstTree(root_scope);
+    const tree = try self.getAstTree(container_scope);
     const decls = tree.root_node.decls();
 
     try self.work_queue.ensureUnusedCapacity(decls.len);
-    try root_scope.decls.ensureCapacity(self.gpa, decls.len);
+    try container_scope.decls.ensureCapacity(self.gpa, decls.len);
 
     // Keep track of the decls that we expect to see in this file so that
     // we know which ones have been deleted.
-    var deleted_decls = std.AutoHashMap(*Decl, void).init(self.gpa);
+    var deleted_decls = std.AutoArrayHashMap(*Decl, void).init(self.gpa);
     defer deleted_decls.deinit();
-    try deleted_decls.ensureCapacity(root_scope.decls.items.len);
-    for (root_scope.decls.items) |file_decl| {
-        deleted_decls.putAssumeCapacityNoClobber(file_decl, {});
+    try deleted_decls.ensureCapacity(container_scope.decls.items().len);
+    for (container_scope.decls.items()) |entry| {
+        deleted_decls.putAssumeCapacityNoClobber(entry.key, {});
     }
 
     for (decls) |src_decl, decl_i| {
         if (src_decl.cast(ast.Node.FnProto)) |fn_proto| {
             // We will create a Decl for it regardless of analysis status.
-            const name_tok = fn_proto.getTrailer("name_token") orelse {
+            const name_tok = fn_proto.getNameToken() orelse {
                 @panic("TODO missing function name");
             };
 
             const name_loc = tree.token_locs[name_tok];
             const name = tree.tokenSliceLoc(name_loc);
-            const name_hash = root_scope.fullyQualifiedNameHash(name);
+            const name_hash = container_scope.fullyQualifiedNameHash(name);
             const contents_hash = std.zig.hashSrc(tree.getNodeSource(src_decl));
             if (self.decl_table.get(name_hash)) |decl| {
                 // Update the AST Node index of the decl, even if its contents are unchanged, it may
@@ -1563,31 +1822,81 @@ fn analyzeRootSrcFile(self: *Module, root_scope: *Scope.File) !void {
                         try self.markOutdatedDecl(decl);
                         decl.contents_hash = contents_hash;
                     } else switch (self.bin_file.tag) {
+                        .coff => {
+                            // TODO Implement for COFF
+                        },
                         .elf => if (decl.fn_link.elf.len != 0) {
                             // TODO Look into detecting when this would be unnecessary by storing enough state
                             // in `Decl` to notice that the line number did not change.
                             self.work_queue.writeItemAssumeCapacity(.{ .update_line_number = decl });
                         },
-                        .c => {},
+                        .macho => {
+                            // TODO Implement for MachO
+                        },
+                        .c, .wasm => {},
                     }
                 }
             } else {
-                const new_decl = try self.createNewDecl(&root_scope.base, name, decl_i, name_hash, contents_hash);
-                root_scope.decls.appendAssumeCapacity(new_decl);
-                if (fn_proto.getTrailer("extern_export_inline_token")) |maybe_export_token| {
+                const new_decl = try self.createNewDecl(&container_scope.base, name, decl_i, name_hash, contents_hash);
+                container_scope.decls.putAssumeCapacity(new_decl, {});
+                if (fn_proto.getExternExportInlineToken()) |maybe_export_token| {
                     if (tree.token_ids[maybe_export_token] == .Keyword_export) {
                         self.work_queue.writeItemAssumeCapacity(.{ .analyze_decl = new_decl });
                     }
                 }
             }
+        } else if (src_decl.castTag(.VarDecl)) |var_decl| {
+            const name_loc = tree.token_locs[var_decl.name_token];
+            const name = tree.tokenSliceLoc(name_loc);
+            const name_hash = container_scope.fullyQualifiedNameHash(name);
+            const contents_hash = std.zig.hashSrc(tree.getNodeSource(src_decl));
+            if (self.decl_table.get(name_hash)) |decl| {
+                // Update the AST Node index of the decl, even if its contents are unchanged, it may
+                // have been re-ordered.
+                decl.src_index = decl_i;
+                if (deleted_decls.remove(decl) == null) {
+                    decl.analysis = .sema_failure;
+                    const err_msg = try ErrorMsg.create(self.gpa, name_loc.start, "redefinition of '{}'", .{decl.name});
+                    errdefer err_msg.destroy(self.gpa);
+                    try self.failed_decls.putNoClobber(self.gpa, decl, err_msg);
+                } else if (!srcHashEql(decl.contents_hash, contents_hash)) {
+                    try self.markOutdatedDecl(decl);
+                    decl.contents_hash = contents_hash;
+                }
+            } else {
+                const new_decl = try self.createNewDecl(&container_scope.base, name, decl_i, name_hash, contents_hash);
+                container_scope.decls.putAssumeCapacity(new_decl, {});
+                if (var_decl.getExternExportToken()) |maybe_export_token| {
+                    if (tree.token_ids[maybe_export_token] == .Keyword_export) {
+                        self.work_queue.writeItemAssumeCapacity(.{ .analyze_decl = new_decl });
+                    }
+                }
+            }
+        } else if (src_decl.castTag(.Comptime)) |comptime_node| {
+            const name_index = self.getNextAnonNameIndex();
+            const name = try std.fmt.allocPrint(self.gpa, "__comptime_{}", .{name_index});
+            defer self.gpa.free(name);
+
+            const name_hash = container_scope.fullyQualifiedNameHash(name);
+            const contents_hash = std.zig.hashSrc(tree.getNodeSource(src_decl));
+
+            const new_decl = try self.createNewDecl(&container_scope.base, name, decl_i, name_hash, contents_hash);
+            container_scope.decls.putAssumeCapacity(new_decl, {});
+            self.work_queue.writeItemAssumeCapacity(.{ .analyze_decl = new_decl });
+        } else if (src_decl.castTag(.ContainerField)) |container_field| {
+            log.err("TODO: analyze container field", .{});
+        } else if (src_decl.castTag(.TestDecl)) |test_decl| {
+            log.err("TODO: analyze test decl", .{});
+        } else if (src_decl.castTag(.Use)) |use_decl| {
+            log.err("TODO: analyze usingnamespace decl", .{});
+        } else {
+            unreachable;
         }
-        // TODO also look for global variable declarations
-        // TODO also look for comptime blocks and exported globals
     }
     // Handle explicitly deleted decls from the source code. Not to be confused
     // with when we delete decls because they are no longer referenced.
     for (deleted_decls.items()) |entry| {
-        log.debug(.module, "noticed '{}' deleted from source\n", .{entry.key.name});
+        log.debug("noticed '{}' deleted from source\n", .{entry.key.name});
         try self.deleteDecl(entry.key);
     }
 }
@@ -1605,7 +1914,7 @@ fn analyzeRootZIRModule(self: *Module, root_scope: *Scope.ZIRModule) !void {
 
     // Keep track of the decls that we expect to see in this file so that
     // we know which ones have been deleted.
-    var deleted_decls = std.AutoHashMap(*Decl, void).init(self.gpa);
+    var deleted_decls = std.AutoArrayHashMap(*Decl, void).init(self.gpa);
     defer deleted_decls.deinit();
     try deleted_decls.ensureCapacity(self.decl_table.items().len);
     for (self.decl_table.items()) |entry| {
@@ -1640,7 +1949,7 @@ fn analyzeRootZIRModule(self: *Module, root_scope: *Scope.ZIRModule) !void {
     // Handle explicitly deleted decls from the source code. Not to be confused
     // with when we delete decls because they are no longer referenced.
     for (deleted_decls.items()) |entry| {
-        log.debug(.module, "noticed '{}' deleted from source\n", .{entry.key.name});
+        log.debug("noticed '{}' deleted from source\n", .{entry.key.name});
         try self.deleteDecl(entry.key);
     }
 }
@@ -1652,7 +1961,7 @@ fn deleteDecl(self: *Module, decl: *Decl) !void {
     // not be present in the set, and this does nothing.
     decl.scope.removeDecl(decl);
 
-    log.debug(.module, "deleting decl '{}'\n", .{decl.name});
+    log.debug("deleting decl '{}'\n", .{decl.name});
     const name_hash = decl.fullyQualifiedNameHash();
     self.decl_table.removeAssertDiscard(name_hash);
     // Remove itself from its dependencies, because we are about to destroy the decl pointer.
@@ -1733,23 +2042,24 @@ fn analyzeFnBody(self: *Module, decl: *Decl, func: *Fn) !void {
         .decl = decl,
         .instructions = .{},
         .arena = &arena.allocator,
+        .is_comptime = false,
     };
     defer inner_block.instructions.deinit(self.gpa);
 
     const fn_zir = func.analysis.queued;
     defer fn_zir.arena.promote(self.gpa).deinit();
     func.analysis = .{ .in_progress = {} };
-    log.debug(.module, "set {} to in_progress\n", .{decl.name});
+    log.debug("set {} to in_progress\n", .{decl.name});
 
     try zir_sema.analyzeBody(self, &inner_block.base, fn_zir.body);
 
     const instructions = try arena.allocator.dupe(*Inst, inner_block.instructions.items);
     func.analysis = .{ .success = .{ .instructions = instructions } };
-    log.debug(.module, "set {} to success\n", .{decl.name});
+    log.debug("set {} to success\n", .{decl.name});
 }
 
 fn markOutdatedDecl(self: *Module, decl: *Decl) !void {
-    log.debug(.module, "mark {} outdated\n", .{decl.name});
+    log.debug("mark {} outdated\n", .{decl.name});
     try self.work_queue.writeItem(.{ .analyze_decl = decl });
     if (self.failed_decls.remove(decl)) |entry| {
         entry.value.destroy(self.gpa);
@@ -1773,14 +2083,21 @@ fn allocateNewDecl(
         .deletion_flag = false,
         .contents_hash = contents_hash,
         .link = switch (self.bin_file.tag) {
+            .coff => .{ .coff = link.File.Coff.TextBlock.empty },
             .elf => .{ .elf = link.File.Elf.TextBlock.empty },
+            .macho => .{ .macho = link.File.MachO.TextBlock.empty },
             .c => .{ .c = {} },
+            .wasm => .{ .wasm = {} },
         },
         .fn_link = switch (self.bin_file.tag) {
+            .coff => .{ .coff = {} },
             .elf => .{ .elf = link.File.Elf.SrcFn.empty },
+            .macho => .{ .macho = link.File.MachO.SrcFn.empty },
             .c => .{ .c = {} },
+            .wasm => .{ .wasm = null },
         },
         .generation = 0,
+        .is_pub = false,
     };
     return new_decl;
 }
@@ -1801,10 +2118,29 @@ fn createNewDecl(
     return new_decl;
 }
 
-/// TODO split this into `requireRuntimeBlock` and `requireFunctionBlock` and audit callsites.
-pub fn requireRuntimeBlock(self: *Module, scope: *Scope, src: usize) !*Scope.Block {
+/// Get error value for error tag `name`.
+pub fn getErrorValue(self: *Module, name: []const u8) !std.StringHashMapUnmanaged(u16).Entry {
+    const gop = try self.global_error_set.getOrPut(self.gpa, name);
+    if (gop.found_existing)
+        return gop.entry.*;
+    errdefer self.global_error_set.removeAssertDiscard(name);
+
+    gop.entry.key = try self.gpa.dupe(u8, name);
+    gop.entry.value = @intCast(u16, self.global_error_set.count() - 1);
+    return gop.entry.*;
+}
+
+pub fn requireFunctionBlock(self: *Module, scope: *Scope, src: usize) !*Scope.Block {
     return scope.cast(Scope.Block) orelse
         return self.fail(scope, src, "instruction illegal outside function body", .{});
+}
+
+pub fn requireRuntimeBlock(self: *Module, scope: *Scope, src: usize) !*Scope.Block {
+    const block = try self.requireFunctionBlock(scope, src);
+    if (block.is_comptime) {
+        return self.fail(scope, src, "unable to resolve comptime value", .{});
+    }
+    return block;
 }
 
 pub fn resolveConstValue(self: *Module, scope: *Scope, base: *Inst) !Value {
@@ -2200,15 +2536,44 @@ pub fn analyzeDeclRef(self: *Module, scope: *Scope, src: usize, decl: *Decl) Inn
     };
 
     const decl_tv = try decl.typedValue();
-    const ty_payload = try scope.arena().create(Type.Payload.SingleConstPointer);
-    ty_payload.* = .{ .pointee_type = decl_tv.ty };
+    if (decl_tv.val.tag() == .variable) {
+        return self.analyzeVarRef(scope, src, decl_tv);
+    }
+    const ty = try self.simplePtrType(scope, src, decl_tv.ty, false, .One);
     const val_payload = try scope.arena().create(Value.Payload.DeclRef);
     val_payload.* = .{ .decl = decl };
 
     return self.constInst(scope, src, .{
-        .ty = Type.initPayload(&ty_payload.base),
+        .ty = ty,
         .val = Value.initPayload(&val_payload.base),
     });
+}
+
+fn analyzeVarRef(self: *Module, scope: *Scope, src: usize, tv: TypedValue) InnerError!*Inst {
+    const variable = tv.val.cast(Value.Payload.Variable).?.variable;
+
+    const ty = try self.simplePtrType(scope, src, tv.ty, variable.is_mutable, .One);
+    if (!variable.is_mutable and !variable.is_extern) {
+        const val_payload = try scope.arena().create(Value.Payload.RefVal);
+        val_payload.* = .{ .val = variable.init };
+        return self.constInst(scope, src, .{
+            .ty = ty,
+            .val = Value.initPayload(&val_payload.base),
+        });
+    }
+
+    const b = try self.requireRuntimeBlock(scope, src);
+    const inst = try b.arena.create(Inst.VarPtr);
+    inst.* = .{
+        .base = .{
+            .tag = .varptr,
+            .ty = ty,
+            .src = src,
+        },
+        .variable = variable,
+    };
+    try b.instructions.append(self.gpa, &inst.base);
+    return &inst.base;
 }
 
 pub fn analyzeDeref(self: *Module, scope: *Scope, src: usize, ptr: *Inst, ptr_src: usize) InnerError!*Inst {
@@ -2250,7 +2615,84 @@ pub fn analyzeIsNull(
     operand: *Inst,
     invert_logic: bool,
 ) InnerError!*Inst {
-    return self.fail(scope, src, "TODO implement analysis of isnull and isnotnull", .{});
+    if (operand.value()) |opt_val| {
+        const is_null = opt_val.isNull();
+        const bool_value = if (invert_logic) !is_null else is_null;
+        return self.constBool(scope, src, bool_value);
+    }
+    const b = try self.requireRuntimeBlock(scope, src);
+    const inst_tag: Inst.Tag = if (invert_logic) .isnonnull else .isnull;
+    return self.addUnOp(b, src, Type.initTag(.bool), inst_tag, operand);
+}
+
+pub fn analyzeIsErr(self: *Module, scope: *Scope, src: usize, operand: *Inst) InnerError!*Inst {
+    return self.fail(scope, src, "TODO implement analysis of iserr", .{});
+}
+
+pub fn analyzeSlice(self: *Module, scope: *Scope, src: usize, array_ptr: *Inst, start: *Inst, end_opt: ?*Inst, sentinel_opt: ?*Inst) InnerError!*Inst {
+    const ptr_child = switch (array_ptr.ty.zigTypeTag()) {
+        .Pointer => array_ptr.ty.elemType(),
+        else => return self.fail(scope, src, "expected pointer, found '{}'", .{array_ptr.ty}),
+    };
+
+    var array_type = ptr_child;
+    const elem_type = switch (ptr_child.zigTypeTag()) {
+        .Array => ptr_child.elemType(),
+        .Pointer => blk: {
+            if (ptr_child.isSinglePointer()) {
+                if (ptr_child.elemType().zigTypeTag() == .Array) {
+                    array_type = ptr_child.elemType();
+                    break :blk ptr_child.elemType().elemType();
+                }
+
+                return self.fail(scope, src, "slice of single-item pointer", .{});
+            }
+            break :blk ptr_child.elemType();
+        },
+        else => return self.fail(scope, src, "slice of non-array type '{}'", .{ptr_child}),
+    };
+
+    const slice_sentinel = if (sentinel_opt) |sentinel| blk: {
+        const casted = try self.coerce(scope, elem_type, sentinel);
+        break :blk try self.resolveConstValue(scope, casted);
+    } else null;
+
+    var return_ptr_size: std.builtin.TypeInfo.Pointer.Size = .Slice;
+    var return_elem_type = elem_type;
+    if (end_opt) |end| {
+        if (end.value()) |end_val| {
+            if (start.value()) |start_val| {
+                const start_u64 = start_val.toUnsignedInt();
+                const end_u64 = end_val.toUnsignedInt();
+                if (start_u64 > end_u64) {
+                    return self.fail(scope, src, "out of bounds slice", .{});
+                }
+
+                const len = end_u64 - start_u64;
+                const array_sentinel = if (array_type.zigTypeTag() == .Array and end_u64 == array_type.arrayLen())
+                    array_type.sentinel()
+                else
+                    slice_sentinel;
+                return_elem_type = try self.arrayType(scope, len, array_sentinel, elem_type);
+                return_ptr_size = .One;
+            }
+        }
+    }
+    const return_type = try self.ptrType(
+        scope,
+        src,
+        return_elem_type,
+        if (end_opt == null) slice_sentinel else null,
+        0, // TODO alignment
+        0,
+        0,
+        !ptr_child.isConstPtr(),
+        ptr_child.isAllowzeroPtr(),
+        ptr_child.isVolatilePtr(),
+        return_ptr_size,
+    );
+
+    return self.fail(scope, src, "TODO implement analysis of slice", .{});
 }
 
 /// Asserts that lhs and rhs types are both numeric.
@@ -2425,6 +2867,15 @@ pub fn cmpNumeric(
     return self.addBinOp(b, src, Type.initTag(.bool), Inst.Tag.fromCmpOp(op), casted_lhs, casted_rhs);
 }
 
+fn wrapOptional(self: *Module, scope: *Scope, dest_type: Type, inst: *Inst) !*Inst {
+    if (inst.value()) |val| {
+        return self.constInst(scope, inst.src, .{ .ty = dest_type, .val = val });
+    }
+
+    const b = try self.requireRuntimeBlock(scope, inst.src);
+    return self.addUnOp(b, inst.src, dest_type, .wrap_optional, inst);
+}
+
 fn makeIntType(self: *Module, scope: *Scope, signed: bool, bits: u16) !Type {
     if (signed) {
         const int_payload = try scope.arena().create(Type.Payload.IntSigned);
@@ -2451,6 +2902,12 @@ pub fn resolvePeerTypes(self: *Module, scope: *Scope, instructions: []*Inst) !Ty
         if (next_inst.ty.zigTypeTag() == .NoReturn)
             continue;
         if (prev_inst.ty.zigTypeTag() == .NoReturn) {
+            prev_inst = next_inst;
+            continue;
+        }
+        if (next_inst.ty.zigTypeTag() == .Undefined)
+            continue;
+        if (prev_inst.ty.zigTypeTag() == .Undefined) {
             prev_inst = next_inst;
             continue;
         }
@@ -2502,14 +2959,12 @@ pub fn coerce(self: *Module, scope: *Scope, dest_type: Type, inst: *Inst) !*Inst
 
     // T to ?T
     if (dest_type.zigTypeTag() == .Optional) {
-        const child_type = dest_type.elemType();
-        if (inst.value()) |val| {
-            if (child_type.eql(inst.ty)) {
-                return self.constInst(scope, inst.src, .{ .ty = dest_type, .val = val });
-            }
-            return self.fail(scope, inst.src, "TODO optional wrap {} to {}", .{ val, dest_type });
-        } else if (child_type.eql(inst.ty)) {
-            return self.fail(scope, inst.src, "TODO optional wrap {}", .{dest_type});
+        var buf: Type.Payload.PointerSimple = undefined;
+        const child_type = dest_type.optionalChild(&buf);
+        if (child_type.eql(inst.ty)) {
+            return self.wrapOptional(scope, dest_type, inst);
+        } else if (try self.coerceNum(scope, child_type, inst)) |some| {
+            return self.wrapOptional(scope, dest_type, some);
         }
     }
 
@@ -2527,39 +2982,8 @@ pub fn coerce(self: *Module, scope: *Scope, dest_type: Type, inst: *Inst) !*Inst
     }
 
     // comptime known number to other number
-    if (inst.value()) |val| {
-        const src_zig_tag = inst.ty.zigTypeTag();
-        const dst_zig_tag = dest_type.zigTypeTag();
-
-        if (dst_zig_tag == .ComptimeInt or dst_zig_tag == .Int) {
-            if (src_zig_tag == .Float or src_zig_tag == .ComptimeFloat) {
-                if (val.floatHasFraction()) {
-                    return self.fail(scope, inst.src, "fractional component prevents float value {} from being casted to type '{}'", .{ val, inst.ty });
-                }
-                return self.fail(scope, inst.src, "TODO float to int", .{});
-            } else if (src_zig_tag == .Int or src_zig_tag == .ComptimeInt) {
-                if (!val.intFitsInType(dest_type, self.target())) {
-                    return self.fail(scope, inst.src, "type {} cannot represent integer value {}", .{ inst.ty, val });
-                }
-                return self.constInst(scope, inst.src, .{ .ty = dest_type, .val = val });
-            }
-        } else if (dst_zig_tag == .ComptimeFloat or dst_zig_tag == .Float) {
-            if (src_zig_tag == .Float or src_zig_tag == .ComptimeFloat) {
-                const res = val.floatCast(scope.arena(), dest_type, self.target()) catch |err| switch (err) {
-                    error.Overflow => return self.fail(
-                        scope,
-                        inst.src,
-                        "cast of value {} to type '{}' loses information",
-                        .{ val, dest_type },
-                    ),
-                    error.OutOfMemory => return error.OutOfMemory,
-                };
-                return self.constInst(scope, inst.src, .{ .ty = dest_type, .val = res });
-            } else if (src_zig_tag == .Int or src_zig_tag == .ComptimeInt) {
-                return self.fail(scope, inst.src, "TODO int to float", .{});
-            }
-        }
-    }
+    if (try self.coerceNum(scope, dest_type, inst)) |some|
+        return some;
 
     // integer widening
     if (inst.ty.zigTypeTag() == .Int and dest_type.zigTypeTag() == .Int) {
@@ -2589,6 +3013,42 @@ pub fn coerce(self: *Module, scope: *Scope, dest_type: Type, inst: *Inst) !*Inst
     }
 
     return self.fail(scope, inst.src, "expected {}, found {}", .{ dest_type, inst.ty });
+}
+
+pub fn coerceNum(self: *Module, scope: *Scope, dest_type: Type, inst: *Inst) !?*Inst {
+    const val = inst.value() orelse return null;
+    const src_zig_tag = inst.ty.zigTypeTag();
+    const dst_zig_tag = dest_type.zigTypeTag();
+
+    if (dst_zig_tag == .ComptimeInt or dst_zig_tag == .Int) {
+        if (src_zig_tag == .Float or src_zig_tag == .ComptimeFloat) {
+            if (val.floatHasFraction()) {
+                return self.fail(scope, inst.src, "fractional component prevents float value {} from being casted to type '{}'", .{ val, inst.ty });
+            }
+            return self.fail(scope, inst.src, "TODO float to int", .{});
+        } else if (src_zig_tag == .Int or src_zig_tag == .ComptimeInt) {
+            if (!val.intFitsInType(dest_type, self.target())) {
+                return self.fail(scope, inst.src, "type {} cannot represent integer value {}", .{ inst.ty, val });
+            }
+            return self.constInst(scope, inst.src, .{ .ty = dest_type, .val = val });
+        }
+    } else if (dst_zig_tag == .ComptimeFloat or dst_zig_tag == .Float) {
+        if (src_zig_tag == .Float or src_zig_tag == .ComptimeFloat) {
+            const res = val.floatCast(scope.arena(), dest_type, self.target()) catch |err| switch (err) {
+                error.Overflow => return self.fail(
+                    scope,
+                    inst.src,
+                    "cast of value {} to type '{}' loses information",
+                    .{ val, dest_type },
+                ),
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+            return self.constInst(scope, inst.src, .{ .ty = dest_type, .val = res });
+        } else if (src_zig_tag == .Int or src_zig_tag == .ComptimeInt) {
+            return self.fail(scope, inst.src, "TODO int to float", .{});
+        }
+    }
+    return null;
 }
 
 pub fn storePtr(self: *Module, scope: *Scope, src: usize, ptr: *Inst, uncasted_value: *Inst) !*Inst {
@@ -2702,6 +3162,7 @@ fn failWithOwnedErrorMsg(self: *Module, scope: *Scope, src: usize, err_msg: *Err
             self.failed_files.putAssumeCapacityNoClobber(scope, err_msg);
         },
         .file => unreachable,
+        .container => unreachable,
     }
     return error.AnalysisFail;
 }
@@ -2878,16 +3339,145 @@ pub fn floatSub(self: *Module, scope: *Scope, float_type: Type, src: usize, lhs:
     return Value.initPayload(val_payload);
 }
 
-pub fn singleMutPtrType(self: *Module, scope: *Scope, src: usize, elem_ty: Type) error{OutOfMemory}!Type {
-    const type_payload = try scope.arena().create(Type.Payload.SingleMutPointer);
-    type_payload.* = .{ .pointee_type = elem_ty };
+pub fn simplePtrType(self: *Module, scope: *Scope, src: usize, elem_ty: Type, mutable: bool, size: std.builtin.TypeInfo.Pointer.Size) Allocator.Error!Type {
+    if (!mutable and size == .Slice and elem_ty.eql(Type.initTag(.u8))) {
+        return Type.initTag(.const_slice_u8);
+    }
+    // TODO stage1 type inference bug
+    const T = Type.Tag;
+
+    const type_payload = try scope.arena().create(Type.Payload.PointerSimple);
+    type_payload.* = .{
+        .base = .{
+            .tag = switch (size) {
+                .One => if (mutable) T.single_mut_pointer else T.single_const_pointer,
+                .Many => if (mutable) T.many_mut_pointer else T.many_const_pointer,
+                .C => if (mutable) T.c_mut_pointer else T.c_const_pointer,
+                .Slice => if (mutable) T.mut_slice else T.const_slice,
+            },
+        },
+        .pointee_type = elem_ty,
+    };
     return Type.initPayload(&type_payload.base);
 }
 
-pub fn singleConstPtrType(self: *Module, scope: *Scope, src: usize, elem_ty: Type) error{OutOfMemory}!Type {
-    const type_payload = try scope.arena().create(Type.Payload.SingleConstPointer);
-    type_payload.* = .{ .pointee_type = elem_ty };
+pub fn ptrType(
+    self: *Module,
+    scope: *Scope,
+    src: usize,
+    elem_ty: Type,
+    sentinel: ?Value,
+    @"align": u32,
+    bit_offset: u16,
+    host_size: u16,
+    mutable: bool,
+    @"allowzero": bool,
+    @"volatile": bool,
+    size: std.builtin.TypeInfo.Pointer.Size,
+) Allocator.Error!Type {
+    assert(host_size == 0 or bit_offset < host_size * 8);
+
+    // TODO check if type can be represented by simplePtrType
+    const type_payload = try scope.arena().create(Type.Payload.Pointer);
+    type_payload.* = .{
+        .pointee_type = elem_ty,
+        .sentinel = sentinel,
+        .@"align" = @"align",
+        .bit_offset = bit_offset,
+        .host_size = host_size,
+        .@"allowzero" = @"allowzero",
+        .mutable = mutable,
+        .@"volatile" = @"volatile",
+        .size = size,
+    };
     return Type.initPayload(&type_payload.base);
+}
+
+pub fn optionalType(self: *Module, scope: *Scope, child_type: Type) Allocator.Error!Type {
+    return Type.initPayload(switch (child_type.tag()) {
+        .single_const_pointer => blk: {
+            const payload = try scope.arena().create(Type.Payload.PointerSimple);
+            payload.* = .{
+                .base = .{ .tag = .optional_single_const_pointer },
+                .pointee_type = child_type.elemType(),
+            };
+            break :blk &payload.base;
+        },
+        .single_mut_pointer => blk: {
+            const payload = try scope.arena().create(Type.Payload.PointerSimple);
+            payload.* = .{
+                .base = .{ .tag = .optional_single_mut_pointer },
+                .pointee_type = child_type.elemType(),
+            };
+            break :blk &payload.base;
+        },
+        else => blk: {
+            const payload = try scope.arena().create(Type.Payload.Optional);
+            payload.* = .{
+                .child_type = child_type,
+            };
+            break :blk &payload.base;
+        },
+    });
+}
+
+pub fn arrayType(self: *Module, scope: *Scope, len: u64, sentinel: ?Value, elem_type: Type) Allocator.Error!Type {
+    if (elem_type.eql(Type.initTag(.u8))) {
+        if (sentinel) |some| {
+            if (some.eql(Value.initTag(.zero))) {
+                const payload = try scope.arena().create(Type.Payload.Array_u8_Sentinel0);
+                payload.* = .{
+                    .len = len,
+                };
+                return Type.initPayload(&payload.base);
+            }
+        } else {
+            const payload = try scope.arena().create(Type.Payload.Array_u8);
+            payload.* = .{
+                .len = len,
+            };
+            return Type.initPayload(&payload.base);
+        }
+    }
+
+    if (sentinel) |some| {
+        const payload = try scope.arena().create(Type.Payload.ArraySentinel);
+        payload.* = .{
+            .len = len,
+            .sentinel = some,
+            .elem_type = elem_type,
+        };
+        return Type.initPayload(&payload.base);
+    }
+
+    const payload = try scope.arena().create(Type.Payload.Array);
+    payload.* = .{
+        .len = len,
+        .elem_type = elem_type,
+    };
+    return Type.initPayload(&payload.base);
+}
+
+pub fn errorUnionType(self: *Module, scope: *Scope, error_set: Type, payload: Type) Allocator.Error!Type {
+    assert(error_set.zigTypeTag() == .ErrorSet);
+    if (error_set.eql(Type.initTag(.anyerror)) and payload.eql(Type.initTag(.void))) {
+        return Type.initTag(.anyerror_void_error_union);
+    }
+
+    const result = try scope.arena().create(Type.Payload.ErrorUnion);
+    result.* = .{
+        .error_set = error_set,
+        .payload = payload,
+    };
+    return Type.initPayload(&result.base);
+}
+
+pub fn anyframeType(self: *Module, scope: *Scope, return_type: Type) Allocator.Error!Type {
+    const result = try scope.arena().create(Type.Payload.AnyFrame);
+    result.* = .{
+        .return_type = return_type,
+    };
+    return Type.initPayload(&result.base);
 }
 
 pub fn dumpInst(self: *Module, scope: *Scope, inst: *Inst) void {
@@ -2960,6 +3550,7 @@ pub fn addSafetyCheck(mod: *Module, parent_block: *Scope.Block, ok: *Inst, panic
         .decl = parent_block.decl,
         .instructions = .{},
         .arena = parent_block.arena,
+        .is_comptime = parent_block.is_comptime,
     };
     defer fail_block.instructions.deinit(mod.gpa);
 

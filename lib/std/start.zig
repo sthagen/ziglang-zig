@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 // This file is included in the compilation unit when exporting an executable.
 
 const root = @import("root");
@@ -62,7 +67,7 @@ fn EfiMain(handle: uefi.Handle, system_table: *uefi.tables.SystemTable) callconv
     uefi.handle = handle;
     uefi.system_table = system_table;
 
-    switch (@TypeOf(root.main).ReturnType) {
+    switch (@typeInfo(@TypeOf(root.main)).Fn.return_type.?) {
         noreturn => {
             root.main();
         },
@@ -234,7 +239,7 @@ fn callMainAsync(loop: *std.event.Loop) callconv(.Async) u8 {
 // This is not marked inline because it is called with @asyncCall when
 // there is an event loop.
 pub fn callMain() u8 {
-    switch (@typeInfo(@TypeOf(root.main).ReturnType)) {
+    switch (@typeInfo(@typeInfo(@TypeOf(root.main)).Fn.return_type.?)) {
         .NoReturn => {
             root.main();
         },
@@ -243,7 +248,7 @@ pub fn callMain() u8 {
             return 0;
         },
         .Int => |info| {
-            if (info.bits != 8) {
+            if (info.bits != 8 or info.is_signed) {
                 @compileError(bad_main_ret);
             }
             return root.main();
@@ -259,7 +264,7 @@ pub fn callMain() u8 {
             switch (@typeInfo(@TypeOf(result))) {
                 .Void => return 0,
                 .Int => |info| {
-                    if (info.bits != 8) {
+                    if (info.bits != 8 or info.is_signed) {
                         @compileError(bad_main_ret);
                     }
                     return result;

@@ -43,10 +43,16 @@ pub const Inst = struct {
         alloc,
         /// Same as `alloc` except the type is inferred.
         alloc_inferred,
+        /// Create an `anyframe->T`.
+        anyframe_type,
         /// Array concatenation. `a ++ b`
         array_cat,
         /// Array multiplication `a ** b`
         array_mul,
+        /// Create an array type
+        array_type,
+        /// Create an array type with sentinel
+        array_type_sentinel,
         /// Function parameter value. These must be first in a function's main block,
         /// in respective order with the parameters.
         arg,
@@ -58,18 +64,27 @@ pub const Inst = struct {
         bitand,
         /// TODO delete this instruction, it has no purpose.
         bitcast,
-        /// An arbitrary typed pointer, which is to be used as an L-Value, is pointer-casted
-        /// to a new L-Value. The destination type is given by LHS. The cast is to be evaluated
+        /// An arbitrary typed pointer is pointer-casted to a new Pointer.
+        /// The destination type is given by LHS. The cast is to be evaluated
         /// as if it were a bit-cast operation from the operand pointer element type to the
         /// provided destination type.
-        bitcast_lvalue,
+        bitcast_ref,
         /// A typed result location pointer is bitcasted to a new result location pointer.
         /// The new result location pointer has an inferred type.
         bitcast_result_ptr,
+        /// Bitwise NOT. `~`
+        bitnot,
         /// Bitwise OR. `|`
         bitor,
         /// A labeled block of code, which can return a value.
         block,
+        /// A block of code, which can return a value. There are no instructions that break out of
+        /// this block; it is implied that the final instruction is the result.
+        block_flat,
+        /// Same as `block` but additionally makes the inner instructions execute at comptime.
+        block_comptime,
+        /// Same as `block_flat` but additionally makes the inner instructions execute at comptime.
+        block_comptime_flat,
         /// Boolean NOT. See also `bitnot`.
         boolnot,
         /// Return a value from a `Block`.
@@ -129,6 +144,12 @@ pub const Inst = struct {
         ensure_result_used,
         /// Emits a compile error if an error is ignored.
         ensure_result_non_error,
+        /// Emits a compile error if operand cannot be indexed.
+        ensure_indexable,
+        /// Create a `E!T` type.
+        error_union_type,
+        /// Create an error set.
+        error_set,
         /// Export the provided Decl as the provided name in the compilation's output object file.
         @"export",
         /// Given a pointer to a struct or object that contains virtual fields, returns a pointer
@@ -151,9 +172,13 @@ pub const Inst = struct {
         isnonnull,
         /// Return a boolean true if an optional is null. `x == null`
         isnull,
+        /// Return a boolean true if value is an error
+        iserr,
         /// A labeled block of code that loops forever. At the end of the body it is implied
         /// to repeat; no explicit "repeat" instruction terminates loop bodies.
         loop,
+        /// Merge two error sets into one, `E1 || E2`.
+        merge_error_sets,
         /// Ambiguously remainder division or modulus. If the computation would possibly have
         /// a different value depending on whether the operation is remainder division or modulus,
         /// a compile error is emitted. Otherwise the computation is performed.
@@ -188,10 +213,28 @@ pub const Inst = struct {
         shl,
         /// Integer shift-right. Arithmetic or logical depending on the signedness of the integer type.
         shr,
-        /// Create a const pointer type based on the element type. `*const T`
+        /// Create a const pointer type with element type T. `*const T`
         single_const_ptr_type,
-        /// Create a mutable pointer type based on the element type. `*T`
+        /// Create a mutable pointer type with element type T. `*T`
         single_mut_ptr_type,
+        /// Create a const pointer type with element type T. `[*]const T`
+        many_const_ptr_type,
+        /// Create a mutable pointer type with element type T. `[*]T`
+        many_mut_ptr_type,
+        /// Create a const pointer type with element type T. `[*c]const T`
+        c_const_ptr_type,
+        /// Create a mutable pointer type with element type T. `[*c]T`
+        c_mut_ptr_type,
+        /// Create a mutable slice type with element type T. `[]T`
+        mut_slice_type,
+        /// Create a const slice type with element type T. `[]T`
+        const_slice_type,
+        /// Create a pointer type with attributes
+        ptr_type,
+        /// Slice operation `array_ptr[start..end:sentinel]`
+        slice,
+        /// Slice operation with just start `lhs[rhs..]`
+        slice_start,
         /// Write a value to a pointer. For loading, see `deref`.
         store,
         /// String Literal. Makes an anonymous Decl and then takes a pointer to it.
@@ -217,6 +260,16 @@ pub const Inst = struct {
         unwrap_optional_safe,
         /// Same as previous, but without safety checks. Used for orelse, if and while
         unwrap_optional_unsafe,
+        /// Gets the payload of an error union
+        unwrap_err_safe,
+        /// Same as previous, but without safety checks. Used for orelse, if and while
+        unwrap_err_unsafe,
+        /// Gets the error code value of an error union
+        unwrap_err_code,
+        /// Takes a *E!T and raises a compiler error if T != void
+        ensure_err_payload_void,
+        /// Enum literal
+        enum_literal,
 
         pub fn Type(tag: Tag) type {
             return switch (tag) {
@@ -235,25 +288,40 @@ pub const Inst = struct {
                 .@"return",
                 .isnull,
                 .isnonnull,
+                .iserr,
                 .ptrtoint,
                 .alloc,
                 .ensure_result_used,
                 .ensure_result_non_error,
+                .ensure_indexable,
                 .bitcast_result_ptr,
                 .ref,
-                .bitcast_lvalue,
+                .bitcast_ref,
                 .typeof,
                 .single_const_ptr_type,
                 .single_mut_ptr_type,
+                .many_const_ptr_type,
+                .many_mut_ptr_type,
+                .c_const_ptr_type,
+                .c_mut_ptr_type,
+                .mut_slice_type,
+                .const_slice_type,
                 .optional_type,
                 .unwrap_optional_safe,
                 .unwrap_optional_unsafe,
+                .unwrap_err_safe,
+                .unwrap_err_unsafe,
+                .unwrap_err_code,
+                .ensure_err_payload_void,
+                .anyframe_type,
+                .bitnot,
                 => UnOp,
 
                 .add,
                 .addwrap,
                 .array_cat,
                 .array_mul,
+                .array_type,
                 .bitand,
                 .bitor,
                 .div,
@@ -277,10 +345,19 @@ pub const Inst = struct {
                 .bitcast,
                 .coerce_result_ptr,
                 .xor,
+                .error_union_type,
+                .merge_error_sets,
+                .slice_start,
                 => BinOp,
 
+                .block,
+                .block_flat,
+                .block_comptime,
+                .block_comptime_flat,
+                => Block,
+
                 .arg => Arg,
-                .block => Block,
+                .array_type_sentinel => ArrayTypeSentinel,
                 .@"break" => Break,
                 .breakvoid => BreakVoid,
                 .call => Call,
@@ -305,6 +382,10 @@ pub const Inst = struct {
                 .fntype => FnType,
                 .elemptr => ElemPtr,
                 .condbr => CondBr,
+                .ptr_type => PtrType,
+                .enum_literal => EnumLiteral,
+                .error_set => ErrorSet,
+                .slice => Slice,
             };
         }
 
@@ -318,15 +399,20 @@ pub const Inst = struct {
                 .alloc_inferred,
                 .array_cat,
                 .array_mul,
+                .array_type,
+                .array_type_sentinel,
                 .arg,
                 .as,
                 .@"asm",
                 .bitand,
                 .bitcast,
-                .bitcast_lvalue,
+                .bitcast_ref,
                 .bitcast_result_ptr,
                 .bitor,
                 .block,
+                .block_flat,
+                .block_comptime,
+                .block_comptime_flat,
                 .boolnot,
                 .breakpoint,
                 .call,
@@ -350,6 +436,7 @@ pub const Inst = struct {
                 .elemptr,
                 .ensure_result_used,
                 .ensure_result_non_error,
+                .ensure_indexable,
                 .@"export",
                 .floatcast,
                 .fieldptr,
@@ -360,6 +447,7 @@ pub const Inst = struct {
                 .inttype,
                 .isnonnull,
                 .isnull,
+                .iserr,
                 .mod_rem,
                 .mul,
                 .mulwrap,
@@ -373,6 +461,12 @@ pub const Inst = struct {
                 .shr,
                 .single_const_ptr_type,
                 .single_mut_ptr_type,
+                .many_const_ptr_type,
+                .many_mut_ptr_type,
+                .c_const_ptr_type,
+                .c_mut_ptr_type,
+                .mut_slice_type,
+                .const_slice_type,
                 .store,
                 .str,
                 .sub,
@@ -382,6 +476,19 @@ pub const Inst = struct {
                 .optional_type,
                 .unwrap_optional_safe,
                 .unwrap_optional_unsafe,
+                .unwrap_err_safe,
+                .unwrap_err_unsafe,
+                .unwrap_err_code,
+                .ptr_type,
+                .ensure_err_payload_void,
+                .enum_literal,
+                .merge_error_sets,
+                .anyframe_type,
+                .error_union_type,
+                .bitnot,
+                .error_set,
+                .slice,
+                .slice_start,
                 => false,
 
                 .@"break",
@@ -811,6 +918,71 @@ pub const Inst = struct {
         },
         kw_args: struct {},
     };
+
+    pub const PtrType = struct {
+        pub const base_tag = Tag.ptr_type;
+        base: Inst,
+
+        positionals: struct {
+            child_type: *Inst,
+        },
+        kw_args: struct {
+            @"allowzero": bool = false,
+            @"align": ?*Inst = null,
+            align_bit_start: ?*Inst = null,
+            align_bit_end: ?*Inst = null,
+            mutable: bool = true,
+            @"volatile": bool = false,
+            sentinel: ?*Inst = null,
+            size: std.builtin.TypeInfo.Pointer.Size = .One,
+        },
+    };
+
+    pub const ArrayTypeSentinel = struct {
+        pub const base_tag = Tag.array_type_sentinel;
+        base: Inst,
+
+        positionals: struct {
+            len: *Inst,
+            sentinel: *Inst,
+            elem_type: *Inst,
+        },
+        kw_args: struct {},
+    };
+
+    pub const EnumLiteral = struct {
+        pub const base_tag = Tag.enum_literal;
+        base: Inst,
+
+        positionals: struct {
+            name: []const u8,
+        },
+        kw_args: struct {},
+    };
+
+    pub const ErrorSet = struct {
+        pub const base_tag = Tag.error_set;
+        base: Inst,
+
+        positionals: struct {
+            fields: [][]const u8,
+        },
+        kw_args: struct {},
+    };
+
+    pub const Slice = struct {
+        pub const base_tag = Tag.slice;
+        base: Inst,
+
+        positionals: struct {
+            array_ptr: *Inst,
+            start: *Inst,
+        },
+        kw_args: struct {
+            end: ?*Inst = null,
+            sentinel: ?*Inst = null,
+        },
+    };
 };
 
 pub const ErrorMsg = struct {
@@ -827,6 +999,7 @@ pub const Module = struct {
 
     pub const MetaData = struct {
         deaths: ir.Inst.DeathsInt,
+        addr: usize,
     };
 
     pub const BodyMetaData = struct {
@@ -838,6 +1011,8 @@ pub const Module = struct {
     };
 
     pub fn deinit(self: *Module, allocator: *Allocator) void {
+        self.metadata.deinit();
+        self.body_metadata.deinit();
         allocator.free(self.decls);
         self.arena.deinit();
         self.* = undefined;
@@ -896,7 +1071,7 @@ pub const Module = struct {
         defer write.loop_table.deinit();
 
         // First, build a map of *Inst to @ or % indexes
-        try write.inst_table.ensureCapacity(self.decls.len);
+        try write.inst_table.ensureCapacity(@intCast(u32, self.decls.len));
 
         for (self.decls) |decl, decl_i| {
             try write.inst_table.putNoClobber(decl.inst, .{ .inst = decl.inst, .index = null, .name = decl.name });
@@ -1023,6 +1198,12 @@ const Writer = struct {
                     try self.writeInstToStream(stream, inst);
                     if (self.module.metadata.get(inst)) |metadata| {
                         try stream.print(" ; deaths=0b{b}", .{metadata.deaths});
+                        // This is conditionally compiled in because addresses mess up the tests due
+                        // to Address Space Layout Randomization. It's super useful when debugging
+                        // codegen.zig though.
+                        if (!std.builtin.is_test) {
+                            try stream.print(" 0x{x}", .{metadata.addr});
+                        }
                     }
                     self.indent -= 2;
                     try stream.writeByte('\n');
@@ -1042,6 +1223,16 @@ const Writer = struct {
             *Inst.Loop => {
                 const name = self.loop_table.get(param).?;
                 return std.zig.renderStringLiteral(name, stream);
+            },
+            [][]const u8 => {
+                try stream.writeByte('[');
+                for (param) |str, i| {
+                    if (i != 0) {
+                        try stream.writeAll(", ");
+                    }
+                    try std.zig.renderStringLiteral(str, stream);
+                }
+                try stream.writeByte(']');
             },
             else => |T| @compileError("unimplemented: rendering parameter of type " ++ @typeName(T)),
         }
@@ -1440,6 +1631,21 @@ const Parser = struct {
                 const name = try self.parseStringLiteral();
                 return self.loop_table.get(name).?;
             },
+            [][]const u8 => {
+                try requireEatBytes(self, "[");
+                skipSpace(self);
+                if (eatByte(self, ']')) return &[0][]const u8{};
+
+                var strings = std.ArrayList([]const u8).init(&self.arena.allocator);
+                while (true) {
+                    skipSpace(self);
+                    try strings.append(try self.parseStringLiteral());
+                    skipSpace(self);
+                    if (!eatByte(self, ',')) break;
+                }
+                try requireEatBytes(self, "]");
+                return strings.toOwnedSlice();
+            },
             else => @compileError("Unimplemented: ir parseParameterGeneric for type " ++ @typeName(T)),
         }
         return self.fail("TODO parse parameter {}", .{@typeName(T)});
@@ -1501,7 +1707,7 @@ pub fn emit(allocator: *Allocator, old_module: IrModule) !Module {
         .arena = std.heap.ArenaAllocator.init(allocator),
         .old_module = &old_module,
         .next_auto_name = 0,
-        .names = std.StringHashMap(void).init(allocator),
+        .names = std.StringArrayHashMap(void).init(allocator),
         .primitive_table = std.AutoHashMap(Inst.Primitive.Builtin, *Decl).init(allocator),
         .indent = 0,
         .block_table = std.AutoHashMap(*ir.Inst.Block, *Inst.Block).init(allocator),
@@ -1509,8 +1715,8 @@ pub fn emit(allocator: *Allocator, old_module: IrModule) !Module {
         .metadata = std.AutoHashMap(*Inst, Module.MetaData).init(allocator),
         .body_metadata = std.AutoHashMap(*Module.Body, Module.BodyMetaData).init(allocator),
     };
-    defer ctx.metadata.deinit();
-    defer ctx.body_metadata.deinit();
+    errdefer ctx.metadata.deinit();
+    errdefer ctx.body_metadata.deinit();
     defer ctx.block_table.deinit();
     defer ctx.loop_table.deinit();
     defer ctx.decls.deinit(allocator);
@@ -1574,7 +1780,7 @@ const EmitZIR = struct {
     arena: std.heap.ArenaAllocator,
     old_module: *const IrModule,
     decls: std.ArrayListUnmanaged(*Decl),
-    names: std.StringHashMap(void),
+    names: std.StringArrayHashMap(void),
     next_auto_name: usize,
     primitive_table: std.AutoHashMap(Inst.Primitive.Builtin, *Decl),
     indent: usize,
@@ -1678,6 +1884,9 @@ const EmitZIR = struct {
                 const decl_ref = try self.emitDeclRef(inst.src, declref.decl);
                 try new_body.instructions.append(decl_ref);
                 break :blk decl_ref;
+            } else if (const_inst.val.cast(Value.Payload.Variable)) |var_pl| blk: {
+                const owner_decl = var_pl.variable.owner_decl;
+                break :blk try self.emitDeclVal(inst.src, mem.spanZ(owner_decl.name));
             } else blk: {
                 break :blk (try self.emitTypedValue(inst.src, .{ .ty = inst.ty, .val = const_inst.val })).inst;
             };
@@ -1801,6 +2010,11 @@ const EmitZIR = struct {
         if (typed_value.val.cast(Value.Payload.DeclRef)) |decl_ref| {
             const decl = decl_ref.decl;
             return try self.emitUnnamedDecl(try self.emitDeclRef(src, decl));
+        } else if (typed_value.val.cast(Value.Payload.Variable)) |variable| {
+            return self.emitTypedValue(src, .{
+                .ty = typed_value.ty,
+                .val = variable.variable.init,
+            });
         }
         if (typed_value.val.isUndef()) {
             const as_inst = try self.arena.allocator.create(Inst.BinOp);
@@ -1854,7 +2068,7 @@ const EmitZIR = struct {
                 return self.emitUnnamedDecl(&as_inst.base);
             },
             .Type => {
-                const ty = typed_value.val.toType();
+                const ty = try typed_value.val.toType(&self.arena.allocator);
                 return self.emitType(src, ty);
             },
             .Fn => {
@@ -1886,6 +2100,25 @@ const EmitZIR = struct {
                 return self.emitUnnamedDecl(&str_inst.base);
             },
             .Void => return self.emitPrimitive(src, .void_value),
+            .Bool => if (typed_value.val.toBool())
+                return self.emitPrimitive(src, .@"true")
+            else
+                return self.emitPrimitive(src, .@"false"),
+            .EnumLiteral => {
+                const enum_literal = @fieldParentPtr(Value.Payload.Bytes, "base", typed_value.val.ptr_otherwise);
+                const inst = try self.arena.allocator.create(Inst.Str);
+                inst.* = .{
+                    .base = .{
+                        .src = src,
+                        .tag = .enum_literal,
+                    },
+                    .positionals = .{
+                        .bytes = enum_literal.data,
+                    },
+                    .kw_args = .{},
+                };
+                return self.emitUnnamedDecl(&inst.base);
+            },
             else => |t| std.debug.panic("TODO implement emitTypedValue for {}", .{@tagName(t)}),
         }
     }
@@ -1992,9 +2225,11 @@ const EmitZIR = struct {
                 .ptrtoint => try self.emitUnOp(inst.src, new_body, inst.castTag(.ptrtoint).?, .ptrtoint),
                 .isnull => try self.emitUnOp(inst.src, new_body, inst.castTag(.isnull).?, .isnull),
                 .isnonnull => try self.emitUnOp(inst.src, new_body, inst.castTag(.isnonnull).?, .isnonnull),
+                .iserr => try self.emitUnOp(inst.src, new_body, inst.castTag(.iserr).?, .iserr),
                 .load => try self.emitUnOp(inst.src, new_body, inst.castTag(.load).?, .deref),
                 .ref => try self.emitUnOp(inst.src, new_body, inst.castTag(.ref).?, .ref),
                 .unwrap_optional => try self.emitUnOp(inst.src, new_body, inst.castTag(.unwrap_optional).?, .unwrap_optional_unsafe),
+                .wrap_optional => try self.emitCast(inst.src, new_body, inst.castTag(.wrap_optional).?, .as),
 
                 .add => try self.emitBinOp(inst.src, new_body, inst.castTag(.add).?, .add),
                 .sub => try self.emitBinOp(inst.src, new_body, inst.castTag(.sub).?, .sub),
@@ -2231,8 +2466,13 @@ const EmitZIR = struct {
                     };
                     break :blk &new_inst.base;
                 },
+
+                .varptr => @panic("TODO"),
             };
-            try self.metadata.put(new_inst, .{ .deaths = inst.deaths });
+            try self.metadata.put(new_inst, .{
+                .deaths = inst.deaths,
+                .addr = @ptrToInt(inst),
+            });
             try instructions.append(new_inst);
             try inst_table.put(inst, new_inst);
         }
@@ -2338,6 +2578,7 @@ const EmitZIR = struct {
                     }
                 },
                 .Optional => {
+                    var buf: Type.Payload.PointerSimple = undefined;
                     const inst = try self.arena.allocator.create(Inst.UnOp);
                     inst.* = .{
                         .base = .{
@@ -2345,11 +2586,56 @@ const EmitZIR = struct {
                             .tag = .optional_type,
                         },
                         .positionals = .{
-                            .operand = (try self.emitType(src, ty.elemType())).inst,
+                            .operand = (try self.emitType(src, ty.optionalChild(&buf))).inst,
                         },
                         .kw_args = .{},
                     };
                     return self.emitUnnamedDecl(&inst.base);
+                },
+                .Array => {
+                    var len_pl = Value.Payload.Int_u64{ .int = ty.arrayLen() };
+                    const len = Value.initPayload(&len_pl.base);
+
+                    const inst = if (ty.sentinel()) |sentinel| blk: {
+                        const inst = try self.arena.allocator.create(Inst.ArrayTypeSentinel);
+                        inst.* = .{
+                            .base = .{
+                                .src = src,
+                                .tag = .array_type,
+                            },
+                            .positionals = .{
+                                .len = (try self.emitTypedValue(src, .{
+                                    .ty = Type.initTag(.usize),
+                                    .val = len,
+                                })).inst,
+                                .sentinel = (try self.emitTypedValue(src, .{
+                                    .ty = ty.elemType(),
+                                    .val = sentinel,
+                                })).inst,
+                                .elem_type = (try self.emitType(src, ty.elemType())).inst,
+                            },
+                            .kw_args = .{},
+                        };
+                        break :blk &inst.base;
+                    } else blk: {
+                        const inst = try self.arena.allocator.create(Inst.BinOp);
+                        inst.* = .{
+                            .base = .{
+                                .src = src,
+                                .tag = .array_type,
+                            },
+                            .positionals = .{
+                                .lhs = (try self.emitTypedValue(src, .{
+                                    .ty = Type.initTag(.usize),
+                                    .val = len,
+                                })).inst,
+                                .rhs = (try self.emitType(src, ty.elemType())).inst,
+                            },
+                            .kw_args = .{},
+                        };
+                        break :blk &inst.base;
+                    };
+                    return self.emitUnnamedDecl(inst);
                 },
                 else => std.debug.panic("TODO implement emitType for {}", .{ty}),
             },

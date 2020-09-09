@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 pub usingnamespace @import("builtin");
 
 /// Deprecated: use `std.Target`.
@@ -254,9 +259,9 @@ pub const TypeInfo = union(enum) {
     /// therefore must be kept in sync with the compiler implementation.
     pub const StructField = struct {
         name: []const u8,
-        offset: ?comptime_int,
         field_type: type,
         default_value: anytype,
+        is_comptime: bool,
     };
 
     /// This data structure is used by the Zig language code generation and
@@ -285,8 +290,6 @@ pub const TypeInfo = union(enum) {
     /// therefore must be kept in sync with the compiler implementation.
     pub const Error = struct {
         name: []const u8,
-        /// This field is ignored when using @Type().
-        value: comptime_int,
     };
 
     /// This data structure is used by the Zig language code generation and

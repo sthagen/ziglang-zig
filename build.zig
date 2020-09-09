@@ -38,7 +38,7 @@ pub fn build(b: *Builder) !void {
     const test_step = b.step("test", "Run all the tests");
 
     var test_stage2 = b.addTest("src-self-hosted/test.zig");
-    test_stage2.setBuildMode(.Debug); // note this is only the mode of the test harness
+    test_stage2.setBuildMode(mode);
     test_stage2.addPackagePath("stage2_tests", "test/stage2/test.zig");
 
     const fmt_build_zig = b.addFmt(&[_][]const u8{"build.zig"});
@@ -49,6 +49,7 @@ pub fn build(b: *Builder) !void {
     const skip_release_safe = b.option(bool, "skip-release-safe", "Main test suite skips release-safe builds") orelse skip_release;
     const skip_non_native = b.option(bool, "skip-non-native", "Main test suite skips non-native builds") orelse false;
     const skip_libc = b.option(bool, "skip-libc", "Main test suite skips tests that link libc") orelse false;
+    const skip_compile_errors = b.option(bool, "skip-compile-errors", "Main test suite skips compile error tests") orelse false;
 
     const only_install_lib_files = b.option(bool, "lib-files-only", "Only install library files") orelse false;
     const enable_llvm = b.option(bool, "enable-llvm", "Build self-hosted compiler with LLVM backend enabled") orelse false;
@@ -77,9 +78,13 @@ pub fn build(b: *Builder) !void {
         }
         const tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
         const link_libc = b.option(bool, "force-link-libc", "Force self-hosted compiler to link libc") orelse false;
-        if (link_libc) exe.linkLibC();
+        if (link_libc) {
+            exe.linkLibC();
+            test_stage2.linkLibC();
+        }
 
         const log_scopes = b.option([]const []const u8, "log", "Which log scopes to enable") orelse &[0][]const u8{};
+        const zir_dumps = b.option([]const []const u8, "dump-zir", "Which functions to dump ZIR for before codegen") orelse &[0][]const u8{};
 
         const opt_version_string = b.option([]const u8, "version-string", "Override Zig version string. Default is to find out with git.");
         const version = if (opt_version_string) |version| version else v: {
@@ -100,6 +105,7 @@ pub fn build(b: *Builder) !void {
         exe.addBuildOption([]const u8, "version", version);
 
         exe.addBuildOption([]const []const u8, "log_scopes", log_scopes);
+        exe.addBuildOption([]const []const u8, "zir_dumps", zir_dumps);
         exe.addBuildOption(bool, "enable_tracy", tracy != null);
         if (tracy) |tracy_path| {
             const client_cpp = fs.path.join(
@@ -117,7 +123,13 @@ pub fn build(b: *Builder) !void {
         .source_dir = "lib",
         .install_dir = .Lib,
         .install_subdir = "zig",
-        .exclude_extensions = &[_][]const u8{ "test.zig", "README.md" },
+        .exclude_extensions = &[_][]const u8{
+            "test.zig",
+            "README.md",
+            ".z.0",
+            ".z.9",
+            "rfc1951.txt",
+        },
     });
 
     const test_filter = b.option([]const u8, "test-filter", "Skip tests that do not match filter");
@@ -179,7 +191,9 @@ pub fn build(b: *Builder) !void {
     test_step.dependOn(tests.addRunTranslatedCTests(b, test_filter));
     // tests for this feature are disabled until we have the self-hosted compiler available
     // test_step.dependOn(tests.addGenHTests(b, test_filter));
-    test_step.dependOn(tests.addCompileErrorTests(b, test_filter, modes));
+    if (!skip_compile_errors) {
+        test_step.dependOn(tests.addCompileErrorTests(b, test_filter, modes));
+    }
     test_step.dependOn(docs_step);
 }
 

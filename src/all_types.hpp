@@ -1420,6 +1420,7 @@ struct ZigTypeStruct {
     bool requires_comptime;
     bool resolve_loop_flag_zero_bits;
     bool resolve_loop_flag_other;
+    bool created_by_at_type;
 };
 
 struct ZigTypeOptional {
@@ -1808,7 +1809,6 @@ enum BuiltinFnId {
     BuiltinFnIdShrExact,
     BuiltinFnIdSetEvalBranchQuota,
     BuiltinFnIdAlignCast,
-    BuiltinFnIdOpaqueType,
     BuiltinFnIdThis,
     BuiltinFnIdSetAlignStack,
     BuiltinFnIdExport,
@@ -2733,7 +2733,6 @@ enum IrInstSrcId {
     IrInstSrcIdImplicitCast,
     IrInstSrcIdResolveResult,
     IrInstSrcIdResetResult,
-    IrInstSrcIdOpaqueType,
     IrInstSrcIdSetAlignStack,
     IrInstSrcIdArgType,
     IrInstSrcIdExport,
@@ -4231,10 +4230,6 @@ struct IrInstGenAlignCast {
     IrInstGen base;
 
     IrInstGen *target;
-};
-
-struct IrInstSrcOpaqueType {
-    IrInstSrc base;
 };
 
 struct IrInstSrcSetAlignStack {

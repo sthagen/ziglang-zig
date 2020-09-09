@@ -19,23 +19,9 @@ pub const Error = error{OutOfMemory};
 const TypeError = Error || error{UnsupportedType};
 const TransError = TypeError || error{UnsupportedTranslation};
 
-const DeclTable = std.HashMap(usize, []const u8, addrHash, addrEql, false);
+const DeclTable = std.AutoArrayHashMap(usize, []const u8);
 
-fn addrHash(x: usize) u32 {
-    switch (@typeInfo(usize).Int.bits) {
-        32 => return x,
-        // pointers are usually aligned so we ignore the bits that are probably all 0 anyway
-        // usually the larger bits of addr space are unused so we just chop em off
-        64 => return @truncate(u32, x >> 4),
-        else => @compileError("unreachable"),
-    }
-}
-
-fn addrEql(a: usize, b: usize) bool {
-    return a == b;
-}
-
-const SymbolTable = std.StringHashMap(*ast.Node);
+const SymbolTable = std.StringArrayHashMap(*ast.Node);
 const AliasList = std.ArrayList(struct {
     alias: []const u8,
     name: []const u8,
@@ -168,7 +154,7 @@ const Scope = struct {
 
         fn localContains(scope: *Block, name: []const u8) bool {
             for (scope.variables.items) |p| {
-                if (mem.eql(u8, p.name, name))
+                if (mem.eql(u8, p.alias, name))
                     return true;
             }
             return false;
@@ -285,7 +271,7 @@ pub const Context = struct {
     /// a list of names that we found by visiting all the top level decls without
     /// translating them. The other maps are updated as we translate; this one is updated
     /// up front in a pre-processing step.
-    global_names: std.StringHashMap(void),
+    global_names: std.StringArrayHashMap(void),
 
     fn getMangle(c: *Context) u32 {
         c.mangle_count += 1;
@@ -380,7 +366,7 @@ pub fn translate(
         .alias_list = AliasList.init(gpa),
         .global_scope = try arena.allocator.create(Scope.Root),
         .clang_context = ZigClangASTUnit_getASTContext(ast_unit).?,
-        .global_names = std.StringHashMap(void).init(gpa),
+        .global_names = std.StringArrayHashMap(void).init(gpa),
         .token_ids = .{},
         .token_locs = .{},
         .errors = .{},
@@ -498,7 +484,7 @@ fn declVisitor(c: *Context, decl: *const ZigClangDecl) Error!void {
             _ = try transRecordDecl(c, @ptrCast(*const ZigClangRecordDecl, decl));
         },
         .Var => {
-            return visitVarDecl(c, @ptrCast(*const ZigClangVarDecl, decl));
+            return visitVarDecl(c, @ptrCast(*const ZigClangVarDecl, decl), null);
         },
         .Empty => {
             // Do nothing
@@ -675,16 +661,17 @@ fn visitFnDecl(c: *Context, fn_decl: *const ZigClangFunctionDecl) Error!void {
     }
 
     const body_node = try block_scope.complete(rp.c);
-    proto_node.setTrailer("body_node", body_node);
+    proto_node.setBodyNode(body_node);
     return addTopLevelDecl(c, fn_name, &proto_node.base);
 }
 
-fn visitVarDecl(c: *Context, var_decl: *const ZigClangVarDecl) Error!void {
-    const var_name = try c.str(ZigClangNamedDecl_getName_bytes_begin(@ptrCast(*const ZigClangNamedDecl, var_decl)));
+/// if mangled_name is not null, this var decl was declared in a block scope.
+fn visitVarDecl(c: *Context, var_decl: *const ZigClangVarDecl, mangled_name: ?[]const u8) Error!void {
+    const var_name = mangled_name orelse try c.str(ZigClangNamedDecl_getName_bytes_begin(@ptrCast(*const ZigClangNamedDecl, var_decl)));
     if (c.global_scope.sym_table.contains(var_name))
         return; // Avoid processing this decl twice
     const rp = makeRestorePoint(c);
-    const visib_tok = try appendToken(c, .Keyword_pub, "pub");
+    const visib_tok = if (mangled_name) |_| null else try appendToken(c, .Keyword_pub, "pub");
 
     const thread_local_token = if (ZigClangVarDecl_getTLSKind(var_decl) == .None)
         null
@@ -701,8 +688,14 @@ fn visitVarDecl(c: *Context, var_decl: *const ZigClangVarDecl) Error!void {
     const qual_type = ZigClangVarDecl_getTypeSourceInfo_getType(var_decl);
     const storage_class = ZigClangVarDecl_getStorageClass(var_decl);
     const is_const = ZigClangQualType_isConstQualified(qual_type);
+    const has_init = ZigClangVarDecl_hasInit(var_decl);
 
-    const extern_tok = if (storage_class == .Extern)
+    // In C extern variables with initializers behave like Zig exports.
+    // extern int foo = 2;
+    // does the same as:
+    // extern int foo;
+    // int foo = 2;
+    const extern_tok = if (storage_class == .Extern and !has_init)
         try appendToken(c, .Keyword_extern, "extern")
     else if (storage_class != .Static)
         try appendToken(c, .Keyword_export, "export")
@@ -730,7 +723,7 @@ fn visitVarDecl(c: *Context, var_decl: *const ZigClangVarDecl) Error!void {
     // If the initialization expression is not present, initialize with undefined.
     // If it is an integer literal, we can skip the @as since it will be redundant
     // with the variable type.
-    if (ZigClangVarDecl_hasInit(var_decl)) {
+    if (has_init) {
         eq_tok = try appendToken(c, .Equal, "=");
         init_node = if (ZigClangVarDecl_getInit(var_decl)) |expr|
             transExprCoercing(rp, &c.global_scope.base, expr, .used, .r_value) catch |err| switch (err) {
@@ -745,7 +738,22 @@ fn visitVarDecl(c: *Context, var_decl: *const ZigClangVarDecl) Error!void {
             try transCreateNodeUndefinedLiteral(c);
     } else if (storage_class != .Extern) {
         eq_tok = try appendToken(c, .Equal, "=");
-        init_node = try transCreateNodeIdentifierUnchecked(c, "undefined");
+        // The C language specification states that variables with static or threadlocal
+        // storage without an initializer are initialized to a zero value.
+
+        // @import("std").mem.zeroes(T)
+        const import_fn_call = try c.createBuiltinCall("@import", 1);
+        const std_node = try transCreateNodeStringLiteral(c, "\"std\"");
+        import_fn_call.params()[0] = std_node;
+        import_fn_call.rparen_token = try appendToken(c, .RParen, ")");
+        const inner_field_access = try transCreateNodeFieldAccess(c, &import_fn_call.base, "mem");
+        const outer_field_access = try transCreateNodeFieldAccess(c, inner_field_access, "zeroes");
+
+        const zero_init_call = try c.createCall(outer_field_access, 1);
+        zero_init_call.params()[0] = type_node;
+        zero_init_call.rtoken = try appendToken(c, .RParen, ")");
+
+        init_node = &zero_init_call.base;
     }
 
     const linksection_expr = blk: {
@@ -1561,15 +1569,22 @@ fn transDeclStmtOne(
         .Var => {
             const var_decl = @ptrCast(*const ZigClangVarDecl, decl);
 
-            const thread_local_token = if (ZigClangVarDecl_getTLSKind(var_decl) == .None)
-                null
-            else
-                try appendToken(c, .Keyword_threadlocal, "threadlocal");
             const qual_type = ZigClangVarDecl_getTypeSourceInfo_getType(var_decl);
             const name = try c.str(ZigClangNamedDecl_getName_bytes_begin(
                 @ptrCast(*const ZigClangNamedDecl, var_decl),
             ));
             const mangled_name = try block_scope.makeMangledName(c, name);
+
+            switch (ZigClangVarDecl_getStorageClass(var_decl)) {
+                .Extern, .Static => {
+                    // This is actually a global variable, put it in the global scope and reference it.
+                    // `_ = mangled_name;`
+                    try visitVarDecl(rp.c, var_decl, mangled_name);
+                    return try maybeSuppressResult(rp, scope, .unused, try transCreateNodeIdentifier(rp.c, mangled_name));
+                },
+                else => {},
+            }
+
             const mut_tok = if (ZigClangQualType_isConstQualified(qual_type))
                 try appendToken(c, .Keyword_const, "const")
             else
@@ -1597,7 +1612,6 @@ fn transDeclStmtOne(
                 .mut_token = mut_tok,
                 .semicolon_token = semicolon_token,
             }, .{
-                .thread_local_token = thread_local_token,
                 .eq_token = eq_token,
                 .type_node = type_node,
                 .init_node = init_node,
@@ -4465,7 +4479,7 @@ fn transCreateNodeMacroFn(c: *Context, name: []const u8, ref: *ast.Node, proto_a
     const block_lbrace = try appendToken(c, .LBrace, "{");
 
     const return_kw = try appendToken(c, .Keyword_return, "return");
-    const unwrap_expr = try transCreateNodeUnwrapNull(c, ref.cast(ast.Node.VarDecl).?.getTrailer("init_node").?);
+    const unwrap_expr = try transCreateNodeUnwrapNull(c, ref.cast(ast.Node.VarDecl).?.getInitNode().?);
 
     const call_expr = try c.createCall(unwrap_expr, fn_params.items.len);
     const call_params = call_expr.params();
@@ -6333,7 +6347,7 @@ fn getContainer(c: *Context, node: *ast.Node) ?*ast.Node {
             const ident = node.castTag(.Identifier).?;
             if (c.global_scope.sym_table.get(tokenSlice(c, ident.token))) |value| {
                 if (value.cast(ast.Node.VarDecl)) |var_decl|
-                    return getContainer(c, var_decl.getTrailer("init_node").?);
+                    return getContainer(c, var_decl.getInitNode().?);
             }
         },
 
@@ -6362,7 +6376,7 @@ fn getContainerTypeOf(c: *Context, ref: *ast.Node) ?*ast.Node {
     if (ref.castTag(.Identifier)) |ident| {
         if (c.global_scope.sym_table.get(tokenSlice(c, ident.token))) |value| {
             if (value.cast(ast.Node.VarDecl)) |var_decl| {
-                if (var_decl.getTrailer("type_node")) |ty|
+                if (var_decl.getTypeNode()) |ty|
                     return getContainer(c, ty);
             }
         }
@@ -6384,7 +6398,7 @@ fn getContainerTypeOf(c: *Context, ref: *ast.Node) ?*ast.Node {
 }
 
 fn getFnProto(c: *Context, ref: *ast.Node) ?*ast.Node.FnProto {
-    const init = if (ref.cast(ast.Node.VarDecl)) |v| v.getTrailer("init_node").? else return null;
+    const init = if (ref.cast(ast.Node.VarDecl)) |v| v.getInitNode().? else return null;
     if (getContainerTypeOf(c, init)) |ty_node| {
         if (ty_node.castTag(.OptionalType)) |prefix| {
             if (prefix.rhs.cast(ast.Node.FnProto)) |fn_proto| {
@@ -6396,7 +6410,8 @@ fn getFnProto(c: *Context, ref: *ast.Node) ?*ast.Node.FnProto {
 }
 
 fn addMacros(c: *Context) !void {
-    for (c.global_scope.macro_table.items()) |kv| {
+    var it = c.global_scope.macro_table.iterator();
+    while (it.next()) |kv| {
         if (getFnProto(c, kv.value)) |proto_node| {
             // If a macro aliases a global variable which is a function pointer, we conclude that
             // the macro is intended to represent a function that assumes the function pointer

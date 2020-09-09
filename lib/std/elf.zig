@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("std.zig");
 const builtin = std.builtin;
 const io = std.io;
@@ -558,6 +563,7 @@ fn preadNoEof(file: std.fs.File, buf: []u8, offset: u64) !void {
             error.InputOutput => return error.FileSystem,
             error.Unexpected => return error.Unexpected,
             error.WouldBlock => return error.Unexpected,
+            error.NotOpenForReading => return error.Unexpected,
             error.AccessDenied => return error.Unexpected,
         };
         if (len == 0) return error.UnexpectedEndOfFile;
@@ -969,6 +975,9 @@ pub const EM = extern enum(u16) {
 
     /// MIPS RS3000 Little-endian
     _MIPS_RS3_LE = 10,
+
+    /// SPU Mark II
+    _SPU_2 = 13,
 
     /// Hewlett-Packard PA-RISC
     _PARISC = 15,

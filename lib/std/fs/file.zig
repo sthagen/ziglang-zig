@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("../std.zig");
 const builtin = @import("builtin");
 const os = std.os;
@@ -96,6 +101,10 @@ pub const File = struct {
         /// if `std.io.is_async`. It allows the use of `nosuspend` when calling functions
         /// related to opening the file, reading, writing, and locking.
         intended_io_mode: io.ModeOverride = io.default_mode,
+
+        /// Set this to allow the opened file to automatically become the
+        /// controlling TTY for the current process.
+        allow_ctty: bool = false,
     };
 
     /// TODO https://github.com/ziglang/zig/issues/3802
@@ -354,31 +363,49 @@ pub const File = struct {
         try os.futimens(self.handle, &times);
     }
 
+    /// Reads all the bytes from the current position to the end of the file.
     /// On success, caller owns returned buffer.
     /// If the file is larger than `max_bytes`, returns `error.FileTooBig`.
-    pub fn readAllAlloc(self: File, allocator: *mem.Allocator, stat_size: u64, max_bytes: usize) ![]u8 {
-        return self.readAllAllocOptions(allocator, stat_size, max_bytes, @alignOf(u8), null);
+    pub fn readToEndAlloc(self: File, allocator: *mem.Allocator, max_bytes: usize) ![]u8 {
+        return self.readToEndAllocOptions(allocator, max_bytes, null, @alignOf(u8), null);
     }
 
+    /// Reads all the bytes from the current position to the end of the file.
     /// On success, caller owns returned buffer.
     /// If the file is larger than `max_bytes`, returns `error.FileTooBig`.
+    /// If `size_hint` is specified the initial buffer size is calculated using
+    /// that value, otherwise an arbitrary value is used instead.
     /// Allows specifying alignment and a sentinel value.
-    pub fn readAllAllocOptions(
+    pub fn readToEndAllocOptions(
         self: File,
         allocator: *mem.Allocator,
-        stat_size: u64,
         max_bytes: usize,
+        size_hint: ?usize,
         comptime alignment: u29,
         comptime optional_sentinel: ?u8,
     ) !(if (optional_sentinel) |s| [:s]align(alignment) u8 else []align(alignment) u8) {
-        const size = math.cast(usize, stat_size) catch math.maxInt(usize);
-        if (size > max_bytes) return error.FileTooBig;
+        // If no size hint is provided fall back to the size=0 code path
+        const size = size_hint orelse 0;
 
-        const buf = try allocator.allocWithOptions(u8, size, alignment, optional_sentinel);
-        errdefer allocator.free(buf);
+        // The file size returned by stat is used as hint to set the buffer
+        // size. If the reported size is zero, as it happens on Linux for files
+        // in /proc, a small buffer is allocated instead.
+        const initial_cap = (if (size > 0) size else 1024) + @boolToInt(optional_sentinel != null);
+        var array_list = try std.ArrayListAligned(u8, alignment).initCapacity(allocator, initial_cap);
+        defer array_list.deinit();
 
-        try self.reader().readNoEof(buf);
-        return buf;
+        self.reader().readAllArrayList(&array_list, max_bytes) catch |err| switch (err) {
+            error.StreamTooLong => return error.FileTooBig,
+            else => |e| return e,
+        };
+
+        if (optional_sentinel) |sentinel| {
+            try array_list.append(sentinel);
+            const buf = array_list.toOwnedSlice();
+            return buf[0 .. buf.len - 1 :sentinel];
+        } else {
+            return array_list.toOwnedSlice();
+        }
     }
 
     pub const ReadError = os.ReadError;

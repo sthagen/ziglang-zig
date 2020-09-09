@@ -11,8 +11,8 @@ const C = link.File.C;
 const Decl = Module.Decl;
 const mem = std.mem;
 
-/// Maps a name from Zig source to C. This will always give the same output for
-/// any given input.
+/// Maps a name from Zig source to C. Currently, this will always give the same
+/// output for any given input, sometimes resulting in broken identifiers.
 fn map(allocator: *std.mem.Allocator, name: []const u8) ![]const u8 {
     return allocator.dupe(u8, name);
 }
@@ -85,7 +85,7 @@ fn genArray(file: *C, decl: *Decl) !void {
     const name = try map(file.base.allocator, mem.span(decl.name));
     defer file.base.allocator.free(name);
     if (tv.val.cast(Value.Payload.Bytes)) |payload|
-        if (tv.ty.arraySentinel()) |sentinel|
+        if (tv.ty.sentinel()) |sentinel|
             if (sentinel.toUnsignedInt() == 0)
                 try file.constants.writer().print("const char *const {} = \"{}\";\n", .{ name, payload.data })
             else
@@ -110,7 +110,8 @@ const Context = struct {
     }
 
     fn deinit(self: *Context) void {
-        for (self.inst_map.items()) |kv| {
+        var it = self.inst_map.iterator();
+        while (it.next()) |kv| {
             self.file.base.allocator.free(kv.value);
         }
         self.inst_map.deinit();
