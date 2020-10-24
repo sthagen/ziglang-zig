@@ -203,7 +203,7 @@ pub const NativeTargetInfo = struct {
     /// deinitialization method.
     /// TODO Remove the Allocator requirement from this function.
     pub fn detect(allocator: *Allocator, cross_target: CrossTarget) DetectError!NativeTargetInfo {
-        var os = Target.Os.defaultVersionRange(cross_target.getOsTag());
+        var os = cross_target.getOsTag().defaultVersionRange();
         if (cross_target.os_tag == null) {
             switch (Target.current.os.tag) {
                 .linux => {
@@ -212,6 +212,8 @@ pub const NativeTargetInfo = struct {
                     // The release field may have several other fields after the
                     // kernel version
                     const kernel_version = if (mem.indexOfScalar(u8, release, '-')) |pos|
+                        release[0..pos]
+                    else if (mem.indexOfScalar(u8, release, '_')) |pos|
                         release[0..pos]
                     else
                         release;
@@ -265,7 +267,7 @@ pub const NativeTargetInfo = struct {
                     os.version_range.windows.max = @intToEnum(Target.Os.WindowsVersion, version);
                     os.version_range.windows.min = @intToEnum(Target.Os.WindowsVersion, version);
                 },
-                .macosx => {
+                .macos => {
                     var scbuf: [32]u8 = undefined;
                     var size: usize = undefined;
 
@@ -392,6 +394,12 @@ pub const NativeTargetInfo = struct {
         const os_is_non_native = cross_target.os_tag != null;
         if (!native_target_has_ld or have_all_info or os_is_non_native) {
             return defaultAbiAndDynamicLinker(cpu, os, cross_target);
+        }
+        if (cross_target.abi) |abi| {
+            if (abi.isMusl()) {
+                // musl implies static linking.
+                return defaultAbiAndDynamicLinker(cpu, os, cross_target);
+            }
         }
         // The current target's ABI cannot be relied on for this. For example, we may build the zig
         // compiler for target riscv64-linux-musl and provide a tarball for users to download.

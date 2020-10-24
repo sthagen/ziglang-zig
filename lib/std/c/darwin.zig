@@ -12,11 +12,19 @@ usingnamespace @import("../os/bits.zig");
 
 extern "c" fn __error() *c_int;
 pub extern "c" fn NSVersionOfRunTimeLibrary(library_name: [*:0]const u8) u32;
-pub extern "c" fn _NSGetExecutablePath(buf: [*]u8, bufsize: *u32) c_int;
+pub extern "c" fn _NSGetExecutablePath(buf: [*:0]u8, bufsize: *u32) c_int;
 pub extern "c" fn _dyld_image_count() u32;
 pub extern "c" fn _dyld_get_image_header(image_index: u32) ?*mach_header;
 pub extern "c" fn _dyld_get_image_vmaddr_slide(image_index: u32) usize;
 pub extern "c" fn _dyld_get_image_name(image_index: u32) [*:0]const u8;
+
+pub const COPYFILE_ACL = 1 << 0;
+pub const COPYFILE_STAT = 1 << 1;
+pub const COPYFILE_XATTR = 1 << 2;
+pub const COPYFILE_DATA = 1 << 3;
+
+pub const copyfile_state_t = *opaque {};
+pub extern "c" fn fcopyfile(from: fd_t, to: fd_t, state: ?copyfile_state_t, flags: u32) c_int;
 
 pub extern "c" fn @"realpath$DARWIN_EXTSN"(noalias file_name: [*:0]const u8, noalias resolved_name: [*]u8) ?[*:0]u8;
 
@@ -163,3 +171,5 @@ pub const pthread_attr_t = extern struct {
     __sig: c_long,
     __opaque: [56]u8,
 };
+
+pub extern "c" fn arc4random_buf(buf: [*]u8, len: usize) void;

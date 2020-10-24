@@ -12,11 +12,12 @@ const std = @import("std");
 const root = @import("root");
 
 pub usingnamespace switch (std.Target.current.os.tag) {
-    .macosx, .ios, .tvos, .watchos => @import("bits/darwin.zig"),
+    .macos, .ios, .tvos, .watchos => @import("bits/darwin.zig"),
     .dragonfly => @import("bits/dragonfly.zig"),
     .freebsd => @import("bits/freebsd.zig"),
     .linux => @import("bits/linux.zig"),
     .netbsd => @import("bits/netbsd.zig"),
+    .openbsd => @import("bits/openbsd.zig"),
     .wasi => @import("bits/wasi.zig"),
     .windows => @import("bits/windows.zig"),
     else => struct {},

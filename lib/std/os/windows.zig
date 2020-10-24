@@ -217,6 +217,7 @@ pub fn DeviceIoControl(
     switch (rc) {
         .SUCCESS => {},
         .PRIVILEGE_NOT_HELD => return error.AccessDenied,
+        .ACCESS_DENIED => return error.AccessDenied,
         .INVALID_PARAMETER => unreachable,
         else => return unexpectedStatus(rc),
     }
@@ -760,6 +761,7 @@ pub const DeleteFileError = error{
     FileNotFound,
     AccessDenied,
     NameTooLong,
+    /// Also known as sharing violation.
     FileBusy,
     Unexpected,
     NotDir,
@@ -824,11 +826,12 @@ pub fn DeleteFile(sub_path_w: []const u16, options: DeleteFileOptions) DeleteFil
         .INVALID_PARAMETER => unreachable,
         .FILE_IS_A_DIRECTORY => return error.IsDir,
         .NOT_A_DIRECTORY => return error.NotDir,
+        .SHARING_VIOLATION => return error.FileBusy,
         else => return unexpectedStatus(rc),
     }
 }
 
-pub const MoveFileError = error{Unexpected};
+pub const MoveFileError = error{ FileNotFound, Unexpected };
 
 pub fn MoveFileEx(old_path: []const u8, new_path: []const u8, flags: DWORD) MoveFileError!void {
     const old_path_w = try sliceToPrefixedFileW(old_path);
@@ -839,6 +842,7 @@ pub fn MoveFileEx(old_path: []const u8, new_path: []const u8, flags: DWORD) Move
 pub fn MoveFileExW(old_path: [*:0]const u16, new_path: [*:0]const u16, flags: DWORD) MoveFileError!void {
     if (kernel32.MoveFileExW(old_path, new_path, flags) == 0) {
         switch (kernel32.GetLastError()) {
+            .FILE_NOT_FOUND => return error.FileNotFound,
             else => |err| return unexpectedError(err),
         }
     }
@@ -1153,6 +1157,14 @@ pub fn WSASocketW(
     return rc;
 }
 
+pub fn bind(s: ws2_32.SOCKET, name: *const ws2_32.sockaddr, namelen: ws2_32.socklen_t) i32 {
+    return ws2_32.bind(s, name, @intCast(i32, namelen));
+}
+
+pub fn listen(s: ws2_32.SOCKET, backlog: u31) i32 {
+    return ws2_32.listen(s, backlog);
+}
+
 pub fn closesocket(s: ws2_32.SOCKET) !void {
     switch (ws2_32.closesocket(s)) {
         0 => {},
@@ -1161,6 +1173,40 @@ pub fn closesocket(s: ws2_32.SOCKET) !void {
         },
         else => unreachable,
     }
+}
+
+pub fn accept(s: ws2_32.SOCKET, name: ?*ws2_32.sockaddr, namelen: ?*ws2_32.socklen_t) ws2_32.SOCKET {
+    assert((name == null) == (namelen == null));
+    return ws2_32.accept(s, name, @ptrCast(?*i32, namelen));
+}
+
+pub fn getsockname(s: ws2_32.SOCKET, name: *ws2_32.sockaddr, namelen: *ws2_32.socklen_t) i32 {
+    return ws2_32.getsockname(s, name, @ptrCast(*i32, namelen));
+}
+
+pub fn sendto(s: ws2_32.SOCKET, buf: [*]const u8, len: usize, flags: u32, to: ?*const ws2_32.sockaddr, to_len: ws2_32.socklen_t) i32 {
+    var buffer = ws2_32.WSABUF{ .len = @truncate(u31, len), .buf = @intToPtr([*]u8, @ptrToInt(buf)) };
+    var bytes_send: DWORD = undefined;
+    if (ws2_32.WSASendTo(s, @ptrCast([*]ws2_32.WSABUF, &buffer), 1, &bytes_send, flags, to, @intCast(i32, to_len), null, null) == ws2_32.SOCKET_ERROR) {
+        return ws2_32.SOCKET_ERROR;
+    } else {
+        return @as(i32, @intCast(u31, bytes_send));
+    }
+}
+
+pub fn recvfrom(s: ws2_32.SOCKET, buf: [*]u8, len: usize, flags: u32, from: ?*ws2_32.sockaddr, from_len: ?*ws2_32.socklen_t) i32 {
+    var buffer = ws2_32.WSABUF{ .len = @truncate(u31, len), .buf = buf };
+    var bytes_received: DWORD = undefined;
+    var flags_inout = flags;
+    if (ws2_32.WSARecvFrom(s, @ptrCast([*]ws2_32.WSABUF, &buffer), 1, &bytes_received, &flags_inout, from, from_len, null, null) == ws2_32.SOCKET_ERROR) {
+        return ws2_32.SOCKET_ERROR;
+    } else {
+        return @as(i32, @intCast(u31, bytes_received));
+    }
+}
+
+pub fn poll(fds: [*]ws2_32.pollfd, n: usize, timeout: i32) i32 {
+    return ws2_32.WSAPoll(fds, @intCast(u32, n), timeout);
 }
 
 pub fn WSAIoctl(

@@ -414,10 +414,12 @@ pub const File = struct {
     pub fn read(self: File, buffer: []u8) ReadError!usize {
         if (is_windows) {
             return windows.ReadFile(self.handle, buffer, null, self.intended_io_mode);
-        } else if (self.capable_io_mode != self.intended_io_mode) {
-            return std.event.Loop.instance.?.read(self.handle, buffer);
-        } else {
+        }
+
+        if (self.intended_io_mode == .blocking) {
             return os.read(self.handle, buffer);
+        } else {
+            return std.event.Loop.instance.?.read(self.handle, buffer, self.capable_io_mode != self.intended_io_mode);
         }
     }
 
@@ -436,10 +438,12 @@ pub const File = struct {
     pub fn pread(self: File, buffer: []u8, offset: u64) PReadError!usize {
         if (is_windows) {
             return windows.ReadFile(self.handle, buffer, offset, self.intended_io_mode);
-        } else if (self.capable_io_mode != self.intended_io_mode) {
-            return std.event.Loop.instance.?.pread(self.handle, buffer, offset);
-        } else {
+        }
+
+        if (self.intended_io_mode == .blocking) {
             return os.pread(self.handle, buffer, offset);
+        } else {
+            return std.event.Loop.instance.?.pread(self.handle, buffer, offset, self.capable_io_mode != self.intended_io_mode);
         }
     }
 
@@ -461,10 +465,12 @@ pub const File = struct {
             if (iovecs.len == 0) return @as(usize, 0);
             const first = iovecs[0];
             return windows.ReadFile(self.handle, first.iov_base[0..first.iov_len], null, self.intended_io_mode);
-        } else if (self.capable_io_mode != self.intended_io_mode) {
-            return std.event.Loop.instance.?.readv(self.handle, iovecs);
-        } else {
+        }
+
+        if (self.intended_io_mode == .blocking) {
             return os.readv(self.handle, iovecs);
+        } else {
+            return std.event.Loop.instance.?.readv(self.handle, iovecs, self.capable_io_mode != self.intended_io_mode);
         }
     }
 
@@ -500,10 +506,12 @@ pub const File = struct {
             if (iovecs.len == 0) return @as(usize, 0);
             const first = iovecs[0];
             return windows.ReadFile(self.handle, first.iov_base[0..first.iov_len], offset, self.intended_io_mode);
-        } else if (self.capable_io_mode != self.intended_io_mode) {
-            return std.event.Loop.instance.?.preadv(self.handle, iovecs, offset);
-        } else {
+        }
+
+        if (self.intended_io_mode == .blocking) {
             return os.preadv(self.handle, iovecs, offset);
+        } else {
+            return std.event.Loop.instance.?.preadv(self.handle, iovecs, offset, self.capable_io_mode != self.intended_io_mode);
         }
     }
 
@@ -539,10 +547,12 @@ pub const File = struct {
     pub fn write(self: File, bytes: []const u8) WriteError!usize {
         if (is_windows) {
             return windows.WriteFile(self.handle, bytes, null, self.intended_io_mode);
-        } else if (self.capable_io_mode != self.intended_io_mode) {
-            return std.event.Loop.instance.?.write(self.handle, bytes);
-        } else {
+        }
+
+        if (self.intended_io_mode == .blocking) {
             return os.write(self.handle, bytes);
+        } else {
+            return std.event.Loop.instance.?.write(self.handle, bytes, self.capable_io_mode != self.intended_io_mode);
         }
     }
 
@@ -556,10 +566,12 @@ pub const File = struct {
     pub fn pwrite(self: File, bytes: []const u8, offset: u64) PWriteError!usize {
         if (is_windows) {
             return windows.WriteFile(self.handle, bytes, offset, self.intended_io_mode);
-        } else if (self.capable_io_mode != self.intended_io_mode) {
-            return std.event.Loop.instance.?.pwrite(self.handle, bytes, offset);
-        } else {
+        }
+
+        if (self.intended_io_mode == .blocking) {
             return os.pwrite(self.handle, bytes, offset);
+        } else {
+            return std.event.Loop.instance.?.pwrite(self.handle, bytes, offset, self.capable_io_mode != self.intended_io_mode);
         }
     }
 
@@ -576,10 +588,12 @@ pub const File = struct {
             if (iovecs.len == 0) return @as(usize, 0);
             const first = iovecs[0];
             return windows.WriteFile(self.handle, first.iov_base[0..first.iov_len], null, self.intended_io_mode);
-        } else if (self.capable_io_mode != self.intended_io_mode) {
-            return std.event.Loop.instance.?.writev(self.handle, iovecs);
-        } else {
+        }
+
+        if (self.intended_io_mode == .blocking) {
             return os.writev(self.handle, iovecs);
+        } else {
+            return std.event.Loop.instance.?.writev(self.handle, iovecs, self.capable_io_mode != self.intended_io_mode);
         }
     }
 
@@ -601,26 +615,28 @@ pub const File = struct {
         }
     }
 
-    pub fn pwritev(self: File, iovecs: []os.iovec_const, offset: usize) PWriteError!usize {
+    pub fn pwritev(self: File, iovecs: []os.iovec_const, offset: u64) PWriteError!usize {
         if (is_windows) {
             // TODO improve this to use WriteFileScatter
             if (iovecs.len == 0) return @as(usize, 0);
             const first = iovecs[0];
             return windows.WriteFile(self.handle, first.iov_base[0..first.iov_len], offset, self.intended_io_mode);
-        } else if (self.capable_io_mode != self.intended_io_mode) {
-            return std.event.Loop.instance.?.pwritev(self.handle, iovecs, offset);
-        } else {
+        }
+
+        if (self.intended_io_mode == .blocking) {
             return os.pwritev(self.handle, iovecs, offset);
+        } else {
+            return std.event.Loop.instance.?.pwritev(self.handle, iovecs, offset, self.capable_io_mode != self.intended_io_mode);
         }
     }
 
     /// The `iovecs` parameter is mutable because this function needs to mutate the fields in
     /// order to handle partial writes from the underlying OS layer.
-    pub fn pwritevAll(self: File, iovecs: []os.iovec_const, offset: usize) PWriteError!void {
+    pub fn pwritevAll(self: File, iovecs: []os.iovec_const, offset: u64) PWriteError!void {
         if (iovecs.len == 0) return;
 
         var i: usize = 0;
-        var off: usize = 0;
+        var off: u64 = 0;
         while (true) {
             var amt = try self.pwritev(iovecs[i..], offset + off);
             off += amt;
@@ -636,14 +652,16 @@ pub const File = struct {
 
     pub const CopyRangeError = os.CopyFileRangeError;
 
-    pub fn copyRange(in: File, in_offset: u64, out: File, out_offset: u64, len: usize) CopyRangeError!usize {
-        return os.copy_file_range(in.handle, in_offset, out.handle, out_offset, len, 0);
+    pub fn copyRange(in: File, in_offset: u64, out: File, out_offset: u64, len: u64) CopyRangeError!u64 {
+        const adjusted_len = math.cast(usize, len) catch math.maxInt(usize);
+        const result = try os.copy_file_range(in.handle, in_offset, out.handle, out_offset, adjusted_len, 0);
+        return result;
     }
 
     /// Returns the number of bytes copied. If the number read is smaller than `buffer.len`, it
     /// means the in file reached the end. Reaching the end of a file is not an error condition.
-    pub fn copyRangeAll(in: File, in_offset: u64, out: File, out_offset: u64, len: usize) CopyRangeError!usize {
-        var total_bytes_copied: usize = 0;
+    pub fn copyRangeAll(in: File, in_offset: u64, out: File, out_offset: u64, len: u64) CopyRangeError!u64 {
+        var total_bytes_copied: u64 = 0;
         var in_off = in_offset;
         var out_off = out_offset;
         while (total_bytes_copied < len) {
@@ -728,7 +746,7 @@ pub const File = struct {
         }
         var i: usize = 0;
         while (i < trailers.len) {
-            while (amt >= headers[i].iov_len) {
+            while (amt >= trailers[i].iov_len) {
                 amt -= trailers[i].iov_len;
                 i += 1;
                 if (i >= trailers.len) return;
@@ -740,14 +758,16 @@ pub const File = struct {
     }
 
     pub const Reader = io.Reader(File, ReadError, read);
+
     /// Deprecated: use `Reader`
     pub const InStream = Reader;
 
-    pub fn reader(file: File) io.Reader(File, ReadError, read) {
+    pub fn reader(file: File) Reader {
         return .{ .context = file };
     }
+
     /// Deprecated: use `reader`
-    pub fn inStream(file: File) io.InStream(File, ReadError, read) {
+    pub fn inStream(file: File) Reader {
         return .{ .context = file };
     }
 

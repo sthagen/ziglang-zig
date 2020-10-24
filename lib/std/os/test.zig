@@ -360,7 +360,7 @@ fn iter_fn(info: *dl_phdr_info, size: usize, counter: *usize) IterFnError!void {
 }
 
 test "dl_iterate_phdr" {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi or builtin.os.tag == .macosx)
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi or builtin.os.tag == .macos)
         return error.SkipZigTest;
 
     var counter: usize = 0;
@@ -590,4 +590,14 @@ test "fsync" {
 
     try os.fsync(file.handle);
     try os.fdatasync(file.handle);
+}
+
+test "getrlimit and setrlimit" {
+    // TODO enable for other systems when implemented
+    if(builtin.os.tag != .linux){
+        return error.SkipZigTest;
+    }
+
+    const cpuLimit = try os.getrlimit(.CPU);
+    try os.setrlimit(.CPU, cpuLimit);
 }

@@ -105,8 +105,8 @@ pub const ChildProcess = struct {
             .term = null,
             .env_map = null,
             .cwd = null,
-            .uid = if (builtin.os.tag == .windows) {} else null,
-            .gid = if (builtin.os.tag == .windows) {} else null,
+            .uid = if (builtin.os.tag == .windows or builtin.os.tag == .wasi) {} else null,
+            .gid = if (builtin.os.tag == .windows or builtin.os.tag == .wasi) {} else null,
             .stdin = null,
             .stdout = null,
             .stderr = null,
@@ -210,10 +210,10 @@ pub const ChildProcess = struct {
 
         try child.spawn();
 
-        const stdout_in = child.stdout.?.inStream();
-        const stderr_in = child.stderr.?.inStream();
+        const stdout_in = child.stdout.?.reader();
+        const stderr_in = child.stderr.?.reader();
 
-        // TODO need to poll to read these streams to prevent a deadlock (or rely on evented I/O).
+        // TODO https://github.com/ziglang/zig/issues/6343
         const stdout = try stdout_in.readAllAlloc(args.allocator, args.max_output_bytes);
         errdefer args.allocator.free(stdout);
         const stderr = try stderr_in.readAllAlloc(args.allocator, args.max_output_bytes);
@@ -269,7 +269,7 @@ pub const ChildProcess = struct {
     }
 
     fn waitUnwrapped(self: *ChildProcess) void {
-        const status = os.waitpid(self.pid, 0);
+        const status = os.waitpid(self.pid, 0).status;
         self.cleanupStreams();
         self.handleWaitResult(status);
     }
@@ -816,10 +816,17 @@ fn destroyPipe(pipe: [2]os.fd_t) void {
 // Then the child exits.
 fn forkChildErrReport(fd: i32, err: ChildProcess.SpawnError) noreturn {
     writeIntFd(fd, @as(ErrInt, @errorToInt(err))) catch {};
+    // If we're linking libc, some naughty applications may have registered atexit handlers
+    // which we really do not want to run in the fork child. I caught LLVM doing this and
+    // it caused a deadlock instead of doing an exit syscall. In the words of Avril Lavigne,
+    // "Why'd you have to go and make things so complicated?"
+    if (std.Target.current.os.tag == .linux) {
+        std.os.linux.exit(1); // By-pass libc regardless of whether it is linked.
+    }
     os.exit(1);
 }
 
-const ErrInt = std.meta.Int(false, @sizeOf(anyerror) * 8);
+const ErrInt = std.meta.Int(.unsigned, @sizeOf(anyerror) * 8);
 
 fn writeIntFd(fd: i32, value: ErrInt) !void {
     const file = File{
@@ -836,7 +843,7 @@ fn readIntFd(fd: i32) !ErrInt {
         .capable_io_mode = .blocking,
         .intended_io_mode = .blocking,
     };
-    return @intCast(ErrInt, file.inStream().readIntNative(u64) catch return error.SystemResources);
+    return @intCast(ErrInt, file.reader().readIntNative(u64) catch return error.SystemResources);
 }
 
 /// Caller must free result.

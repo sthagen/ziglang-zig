@@ -4,6 +4,50 @@
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
 
+/// Authenticated Encryption with Associated Data
+pub const aead = struct {
+    const chacha20 = @import("crypto/chacha20.zig");
+
+    pub const Gimli = @import("crypto/gimli.zig").Aead;
+    pub const ChaCha20Poly1305 = chacha20.Chacha20Poly1305;
+    pub const XChaCha20Poly1305 = chacha20.XChacha20Poly1305;
+    pub const Aegis128L = @import("crypto/aegis.zig").Aegis128L;
+    pub const Aegis256 = @import("crypto/aegis.zig").Aegis256;
+    pub const Aes128Gcm = @import("crypto/aes_gcm.zig").Aes128Gcm;
+    pub const Aes256Gcm = @import("crypto/aes_gcm.zig").Aes256Gcm;
+};
+
+/// Authentication (MAC) functions.
+pub const auth = struct {
+    pub const hmac = @import("crypto/hmac.zig");
+    pub const siphash = @import("crypto/siphash.zig");
+};
+
+/// Core functions, that should rarely be used directly by applications.
+pub const core = struct {
+    pub const aes = @import("crypto/aes.zig");
+    pub const Gimli = @import("crypto/gimli.zig").State;
+
+    /// Modes are generic compositions to construct encryption/decryption functions from block ciphers and permutations.
+    ///
+    /// These modes are designed to be building blocks for higher-level constructions, and should generally not be used directly by applications, as they may not provide the expected properties and security guarantees.
+    ///
+    /// Most applications may want to use AEADs instead.
+    pub const modes = @import("crypto/modes.zig");
+};
+
+/// Diffie-Hellman key exchange functions.
+pub const dh = struct {
+    pub const X25519 = @import("crypto/25519/x25519.zig").X25519;
+};
+
+/// Elliptic-curve arithmetic.
+pub const ecc = struct {
+    pub const Curve25519 = @import("crypto/25519/curve25519.zig").Curve25519;
+    pub const Edwards25519 = @import("crypto/25519/edwards25519.zig").Edwards25519;
+    pub const Ristretto255 = @import("crypto/25519/ristretto255.zig").Ristretto255;
+};
+
 /// Hash functions.
 pub const hash = struct {
     pub const Md5 = @import("crypto/md5.zig").Md5;
@@ -15,42 +59,35 @@ pub const hash = struct {
     pub const Gimli = @import("crypto/gimli.zig").Hash;
 };
 
-/// Authentication (MAC) functions.
-pub const auth = struct {
-    pub const hmac = @import("crypto/hmac.zig");
-    pub const siphash = @import("crypto/siphash.zig");
-};
-
-/// Authenticated Encryption with Associated Data
-pub const aead = struct {
-    const chacha20 = @import("crypto/chacha20.zig");
-
-    pub const Gimli = @import("crypto/gimli.zig").Aead;
-    pub const ChaCha20Poly1305 = chacha20.Chacha20Poly1305;
-    pub const XChaCha20Poly1305 = chacha20.XChacha20Poly1305;
+/// Key derivation functions.
+pub const kdf = struct {
+    pub const hkdf = @import("crypto/hkdf.zig");
 };
 
 /// MAC functions requiring single-use secret keys.
 pub const onetimeauth = struct {
     pub const Poly1305 = @import("crypto/poly1305.zig").Poly1305;
+    pub const Ghash = @import("crypto/ghash.zig").Ghash;
 };
 
-/// Core functions, that should rarely be used directly by applications.
-pub const core = struct {
-    pub const aes = @import("crypto/aes.zig");
-    pub const Gimli = @import("crypto/gimli.zig").State;
-};
-
-/// Elliptic-curve arithmetic.
-pub const ecc = struct {
-    pub const Curve25519 = @import("crypto/25519/curve25519.zig").Curve25519;
-    pub const Edwards25519 = @import("crypto/25519/edwards25519.zig").Edwards25519;
-    pub const Ristretto255 = @import("crypto/25519/ristretto255.zig").Ristretto255;
-};
-
-/// Diffie-Hellman key exchange functions.
-pub const dh = struct {
-    pub const X25519 = @import("crypto/25519/x25519.zig").X25519;
+/// A password hashing function derives a uniform key from low-entropy input material such as passwords.
+/// It is intentionally slow or expensive.
+///
+/// With the standard definition of a key derivation function, if a key space is small, an exhaustive search may be practical.
+/// Password hashing functions make exhaustive searches way slower or way more expensive, even when implemented on GPUs and ASICs, by using different, optionally combined strategies:
+///
+/// - Requiring a lot of computation cycles to complete
+/// - Requiring a lot of memory to complete
+/// - Requiring multiple CPU cores to complete
+/// - Requiring cache-local data to complete in reasonable time
+/// - Requiring large static tables
+/// - Avoiding precomputations and time/memory tradeoffs
+/// - Requiring multi-party computations
+/// - Combining the input material with random per-entry data (salts), application-specific contexts and keys
+///
+/// Password hashing functions must be used whenever sensitive data has to be directly derived from a password.
+pub const pwhash = struct {
+    pub const pbkdf2 = @import("crypto/pbkdf2.zig").pbkdf2;
 };
 
 /// Digital signature functions.
@@ -70,6 +107,20 @@ const std = @import("std.zig");
 pub const randomBytes = std.os.getrandom;
 
 test "crypto" {
+    inline for (std.meta.declarations(@This())) |decl| {
+        switch (decl.data) {
+            .Type => |t| {
+                std.testing.refAllDecls(t);
+            },
+            .Var => |v| {
+                _ = v;
+            },
+            .Fn => |f| {
+                _ = f;
+            },
+        }
+    }
+
     _ = @import("crypto/aes.zig");
     _ = @import("crypto/blake2.zig");
     _ = @import("crypto/blake3.zig");
@@ -77,6 +128,8 @@ test "crypto" {
     _ = @import("crypto/gimli.zig");
     _ = @import("crypto/hmac.zig");
     _ = @import("crypto/md5.zig");
+    _ = @import("crypto/modes.zig");
+    _ = @import("crypto/pbkdf2.zig");
     _ = @import("crypto/poly1305.zig");
     _ = @import("crypto/sha1.zig");
     _ = @import("crypto/sha2.zig");
@@ -103,8 +156,11 @@ test "issue #4532: no index out of bounds" {
         hash.sha3.Sha3_256,
         hash.sha3.Sha3_384,
         hash.sha3.Sha3_512,
+        hash.blake2.Blake2s128,
         hash.blake2.Blake2s224,
         hash.blake2.Blake2s256,
+        hash.blake2.Blake2b128,
+        hash.blake2.Blake2b256,
         hash.blake2.Blake2b384,
         hash.blake2.Blake2b512,
         hash.Gimli,
@@ -117,11 +173,11 @@ test "issue #4532: no index out of bounds" {
         const h0 = Hasher.init(.{});
         var h = h0;
         h.update(block[0..]);
-        h.final(out1[0..]);
+        h.final(&out1);
         h = h0;
         h.update(block[0..1]);
         h.update(block[1..]);
-        h.final(out2[0..]);
+        h.final(&out2);
 
         std.testing.expectEqual(out1, out2);
     }

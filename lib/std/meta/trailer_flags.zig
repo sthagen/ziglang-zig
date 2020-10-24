@@ -18,7 +18,7 @@ pub fn TrailerFlags(comptime Fields: type) type {
     return struct {
         bits: Int,
 
-        pub const Int = meta.Int(false, bit_count);
+        pub const Int = meta.Int(.unsigned, bit_count);
         pub const bit_count = @typeInfo(Fields).Struct.fields.len;
 
         pub const FieldEnum = blk: {
@@ -47,6 +47,7 @@ pub fn TrailerFlags(comptime Fields: type) type {
                         @as(?struct_field.field_type, null),
                     ),
                     .is_comptime = false,
+                    .alignment = @alignOf(?struct_field.field_type),
                 };
             }
             break :blk @Type(.{

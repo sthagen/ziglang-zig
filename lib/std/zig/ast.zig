@@ -288,7 +288,7 @@ pub const Error = union(enum) {
     pub const ExpectedVarDecl = SingleTokenError("Expected variable declaration, found '{}'");
     pub const ExpectedFn = SingleTokenError("Expected function, found '{}'");
     pub const ExpectedReturnType = SingleTokenError("Expected 'var' or return type expression, found '{}'");
-    pub const ExpectedAggregateKw = SingleTokenError("Expected '" ++ Token.Id.Keyword_struct.symbol() ++ "', '" ++ Token.Id.Keyword_union.symbol() ++ "', or '" ++ Token.Id.Keyword_enum.symbol() ++ "', found '{}'");
+    pub const ExpectedAggregateKw = SingleTokenError("Expected '" ++ Token.Id.Keyword_struct.symbol() ++ "', '" ++ Token.Id.Keyword_union.symbol() ++ "', '" ++ Token.Id.Keyword_enum.symbol() ++ "', or '" ++ Token.Id.Keyword_opaque.symbol() ++ "', found '{}'");
     pub const ExpectedEqOrSemi = SingleTokenError("Expected '=' or ';', found '{}'");
     pub const ExpectedSemiOrLBrace = SingleTokenError("Expected ';' or '{{', found '{}'");
     pub const ExpectedSemiOrElse = SingleTokenError("Expected ';' or 'else', found '{}'");
@@ -821,6 +821,15 @@ pub const Node = struct {
         } else {
             unreachable;
         }
+    }
+
+    pub fn findFirstWithId(self: *Node, id: Id) ?*Node {
+        if (self.id == id) return self;
+        var child_i: usize = 0;
+        while (self.iterate(child_i)) |child| : (child_i += 1) {
+            if (child.findFirstWithId(id)) |result| return result;
+        }
+        return null;
     }
 
     pub fn dump(self: *Node, indent: usize) void {

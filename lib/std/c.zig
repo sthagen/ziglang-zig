@@ -22,7 +22,7 @@ pub usingnamespace @import("os/bits.zig");
 pub usingnamespace switch (std.Target.current.os.tag) {
     .linux => @import("c/linux.zig"),
     .windows => @import("c/windows.zig"),
-    .macosx, .ios, .tvos, .watchos => @import("c/darwin.zig"),
+    .macos, .ios, .tvos, .watchos => @import("c/darwin.zig"),
     .freebsd, .kfreebsd => @import("c/freebsd.zig"),
     .netbsd => @import("c/netbsd.zig"),
     .dragonfly => @import("c/dragonfly.zig"),
@@ -122,7 +122,7 @@ pub extern "c" fn readlink(noalias path: [*:0]const u8, noalias buf: [*]u8, bufs
 pub extern "c" fn readlinkat(dirfd: fd_t, noalias path: [*:0]const u8, noalias buf: [*]u8, bufsize: usize) isize;
 
 pub usingnamespace switch (builtin.os.tag) {
-    .macosx, .ios, .watchos, .tvos => struct {
+    .macos, .ios, .watchos, .tvos => struct {
         pub const realpath = @"realpath$DARWIN_EXTSN";
         pub const fstatat = @"fstatat$INODE64";
     },
@@ -132,8 +132,6 @@ pub usingnamespace switch (builtin.os.tag) {
     },
 };
 
-pub extern "c" fn setreuid(ruid: c_uint, euid: c_uint) c_int;
-pub extern "c" fn setregid(rgid: c_uint, egid: c_uint) c_int;
 pub extern "c" fn rmdir(path: [*:0]const u8) c_int;
 pub extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 pub extern "c" fn sysctl(name: [*]const c_int, namelen: c_uint, oldp: ?*c_void, oldlenp: ?*usize, newp: ?*c_void, newlen: usize) c_int;
@@ -191,7 +189,7 @@ pub usingnamespace switch (builtin.os.tag) {
         pub const sigprocmask = __sigprocmask14;
         pub const stat = __stat50;
     },
-    .macosx, .ios, .watchos, .tvos => struct {
+    .macos, .ios, .watchos, .tvos => struct {
         // XXX: close -> close$NOCANCEL
         // XXX: getdirentries -> _getdirentries64
         pub extern "c" fn clock_getres(clk_id: c_int, tp: *timespec) c_int;
@@ -237,17 +235,24 @@ pub usingnamespace switch (builtin.os.tag) {
 
 pub extern "c" fn kill(pid: pid_t, sig: c_int) c_int;
 pub extern "c" fn getdirentries(fd: fd_t, buf_ptr: [*]u8, nbytes: usize, basep: *i64) isize;
-pub extern "c" fn setgid(ruid: c_uint, euid: c_uint) c_int;
-pub extern "c" fn setuid(uid: c_uint) c_int;
+
+pub extern "c" fn setuid(uid: uid_t) c_int;
+pub extern "c" fn setgid(gid: gid_t) c_int;
+pub extern "c" fn seteuid(euid: uid_t) c_int;
+pub extern "c" fn setegid(egid: gid_t) c_int;
+pub extern "c" fn setreuid(ruid: uid_t, euid: uid_t) c_int;
+pub extern "c" fn setregid(rgid: gid_t, egid: gid_t) c_int;
+pub extern "c" fn setresuid(ruid: uid_t, euid: uid_t, suid: uid_t) c_int;
+pub extern "c" fn setresgid(rgid: gid_t, egid: gid_t, sgid: gid_t) c_int;
 
 pub extern "c" fn aligned_alloc(alignment: usize, size: usize) ?*c_void;
 pub extern "c" fn malloc(usize) ?*c_void;
 
 pub usingnamespace switch (builtin.os.tag) {
-    .linux, .freebsd, .kfreebsd, .netbsd, .openbsd => struct {
+    .linux, .freebsd, .kfreebsd, .netbsd => struct {
         pub extern "c" fn malloc_usable_size(?*const c_void) usize;
     },
-    .macosx, .ios, .watchos, .tvos => struct {
+    .macos, .ios, .watchos, .tvos => struct {
         pub extern "c" fn malloc_size(?*const c_void) usize;
     },
     else => struct {},
@@ -324,8 +329,8 @@ pub extern "c" fn pthread_cond_signal(cond: *pthread_cond_t) c_int;
 pub extern "c" fn pthread_cond_broadcast(cond: *pthread_cond_t) c_int;
 pub extern "c" fn pthread_cond_destroy(cond: *pthread_cond_t) c_int;
 
-pub const pthread_t = *@Type(.Opaque);
-pub const FILE = @Type(.Opaque);
+pub const pthread_t = *opaque {};
+pub const FILE = opaque {};
 
 pub extern "c" fn dlopen(path: [*:0]const u8, mode: c_int) ?*c_void;
 pub extern "c" fn dlclose(handle: *c_void) c_int;
@@ -335,3 +340,8 @@ pub extern "c" fn sync() void;
 pub extern "c" fn syncfs(fd: c_int) c_int;
 pub extern "c" fn fsync(fd: c_int) c_int;
 pub extern "c" fn fdatasync(fd: c_int) c_int;
+
+pub extern "c" fn prctl(option: c_int, ...) c_int;
+
+pub extern "c" fn getrlimit(resource: rlimit_resource, rlim: *rlimit) c_int;
+pub extern "c" fn setrlimit(resource: rlimit_resource, rlim: *const rlimit) c_int;

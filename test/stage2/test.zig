@@ -1,8 +1,11 @@
 const std = @import("std");
-const TestContext = @import("../../src-self-hosted/test.zig").TestContext;
+const TestContext = @import("../../src/test.zig").TestContext;
 
-// self-hosted does not yet support PE executable files / COFF object files
-// or mach-o files. So we do these test cases cross compiling for x86_64-linux.
+// Self-hosted has differing levels of support for various architectures. For now we pass explicit
+// target parameters to each test case. At some point we will take this to the next level and have
+// a set of targets that all test cases run on unless specifically overridden. For now, each test
+// case applies to only the specified target.
+
 const linux_x64 = std.zig.CrossTarget{
     .cpu_arch = .x86_64,
     .os_tag = .linux,
@@ -10,16 +13,11 @@ const linux_x64 = std.zig.CrossTarget{
 
 const macosx_x64 = std.zig.CrossTarget{
     .cpu_arch = .x86_64,
-    .os_tag = .macosx,
+    .os_tag = .macos,
 };
 
 const linux_riscv64 = std.zig.CrossTarget{
     .cpu_arch = .riscv64,
-    .os_tag = .linux,
-};
-
-const linux_arm = std.zig.CrossTarget{
-    .cpu_arch = .arm,
     .os_tag = .linux,
 };
 
@@ -32,6 +30,7 @@ pub fn addCases(ctx: *TestContext) !void {
     try @import("zir.zig").addCases(ctx);
     try @import("cbe.zig").addCases(ctx);
     try @import("spu-ii.zig").addCases(ctx);
+    try @import("arm.zig").addCases(ctx);
 
     {
         var case = ctx.exe("hello world with updates", linux_x64);
@@ -146,8 +145,114 @@ pub fn addCases(ctx: *TestContext) !void {
     }
 
     {
-        var case = ctx.exe("hello world", macosx_x64);
+        var case = ctx.exe("hello world with updates", macosx_x64);
         case.addError("", &[_][]const u8{":1:1: error: no entry point found"});
+
+        // Incorrect return type
+        case.addError(
+            \\export fn _start() noreturn {
+            \\}
+        , &[_][]const u8{":2:1: error: expected noreturn, found void"});
+
+        // Regular old hello world
+        case.addCompareOutput(
+            \\export fn _start() noreturn {
+            \\    print();
+            \\
+            \\    exit();
+            \\}
+            \\
+            \\fn print() void {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (0x2000004),
+            \\          [arg1] "{rdi}" (1),
+            \\          [arg2] "{rsi}" (@ptrToInt("Hello, World!\n")),
+            \\          [arg3] "{rdx}" (14)
+            \\        : "memory"
+            \\    );
+            \\    return;
+            \\}
+            \\
+            \\fn exit() noreturn {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (0x2000001),
+            \\          [arg1] "{rdi}" (0)
+            \\        : "memory"
+            \\    );
+            \\    unreachable;
+            \\}
+        ,
+            "Hello, World!\n",
+        );
+        // Now change the message only
+        case.addCompareOutput(
+            \\export fn _start() noreturn {
+            \\    print();
+            \\
+            \\    exit();
+            \\}
+            \\
+            \\fn print() void {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (0x2000004),
+            \\          [arg1] "{rdi}" (1),
+            \\          [arg2] "{rsi}" (@ptrToInt("What is up? This is a longer message that will force the data to be relocated in virtual address space.\n")),
+            \\          [arg3] "{rdx}" (104)
+            \\        : "memory"
+            \\    );
+            \\    return;
+            \\}
+            \\
+            \\fn exit() noreturn {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (0x2000001),
+            \\          [arg1] "{rdi}" (0)
+            \\        : "memory"
+            \\    );
+            \\    unreachable;
+            \\}
+        ,
+            "What is up? This is a longer message that will force the data to be relocated in virtual address space.\n",
+        );
+        // Now we print it twice.
+        case.addCompareOutput(
+            \\export fn _start() noreturn {
+            \\    print();
+            \\    print();
+            \\
+            \\    exit();
+            \\}
+            \\
+            \\fn print() void {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (0x2000004),
+            \\          [arg1] "{rdi}" (1),
+            \\          [arg2] "{rsi}" (@ptrToInt("What is up? This is a longer message that will force the data to be relocated in virtual address space.\n")),
+            \\          [arg3] "{rdx}" (104)
+            \\        : "memory"
+            \\    );
+            \\    return;
+            \\}
+            \\
+            \\fn exit() noreturn {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (0x2000001),
+            \\          [arg1] "{rdi}" (0)
+            \\        : "memory"
+            \\    );
+            \\    unreachable;
+            \\}
+        ,
+            \\What is up? This is a longer message that will force the data to be relocated in virtual address space.
+            \\What is up? This is a longer message that will force the data to be relocated in virtual address space.
+            \\
+        );
     }
 
     {
@@ -178,41 +283,6 @@ pub fn addCases(ctx: *TestContext) !void {
             \\        : [number] "{a7}" (94),
             \\          [arg1] "{a0}" (0)
             \\        : "rcx", "r11", "memory"
-            \\    );
-            \\    unreachable;
-            \\}
-        ,
-            "Hello, World!\n",
-        );
-    }
-
-    {
-        var case = ctx.exe("hello world", linux_arm);
-        // Regular old hello world
-        case.addCompareOutput(
-            \\export fn _start() noreturn {
-            \\    print();
-            \\    exit();
-            \\}
-            \\
-            \\fn print() void {
-            \\    asm volatile ("svc #0"
-            \\        :
-            \\        : [number] "{r7}" (4),
-            \\          [arg1] "{r0}" (1),
-            \\          [arg2] "{r1}" (@ptrToInt("Hello, World!\n")),
-            \\          [arg3] "{r2}" (14)
-            \\        : "memory"
-            \\    );
-            \\    return;
-            \\}
-            \\
-            \\fn exit() noreturn {
-            \\    asm volatile ("svc #0"
-            \\        :
-            \\        : [number] "{r7}" (1),
-            \\          [arg1] "{r0}" (0)
-            \\        : "memory"
             \\    );
             \\    unreachable;
             \\}
@@ -907,6 +977,44 @@ pub fn addCases(ctx: *TestContext) !void {
     }
 
     {
+        var case = ctx.exe("basic import", linux_x64);
+        case.addCompareOutput(
+            \\export fn _start() noreturn {
+            \\    @import("print.zig").print();
+            \\    exit();
+            \\}
+            \\
+            \\fn exit() noreturn {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (231),
+            \\          [arg1] "{rdi}" (@as(usize, 0))
+            \\        : "rcx", "r11", "memory"
+            \\    );
+            \\    unreachable;
+            \\}
+        ,
+            "Hello, World!\n",
+        );
+        try case.files.append(.{
+            .src =
+            \\pub fn print() void {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (@as(usize, 1)),
+            \\          [arg1] "{rdi}" (@as(usize, 1)),
+            \\          [arg2] "{rsi}" (@ptrToInt("Hello, World!\n")),
+            \\          [arg3] "{rdx}" (@as(usize, 14))
+            \\        : "rcx", "r11", "memory"
+            \\    );
+            \\    return;
+            \\}
+            ,
+            .path = "print.zig",
+        });
+    }
+
+    {
         var case = ctx.exe("wasm function calls", wasi);
 
         case.addCompareOutput(
@@ -955,9 +1063,9 @@ pub fn addCases(ctx: *TestContext) !void {
             \\}
             \\fn bar() void {}
         ,
-            // This is what you get when you take the bits of the IEE-754
-            // representation of 42.0 and reinterpret them as an unsigned
-            // integer. Guess that's a bug in wasmtime.
+        // This is what you get when you take the bits of the IEE-754
+        // representation of 42.0 and reinterpret them as an unsigned
+        // integer. Guess that's a bug in wasmtime.
             "1109917696\n",
         );
     }

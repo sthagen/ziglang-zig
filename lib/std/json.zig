@@ -1293,7 +1293,7 @@ pub const Value = union(enum) {
         var held = std.debug.getStderrMutex().acquire();
         defer held.release();
 
-        const stderr = io.getStdErr().writer();
+        const stderr = std.io.getStdErr().writer();
         std.json.stringify(self, std.json.StringifyOptions{ .whitespace = null }, stderr) catch return;
     }
 };
@@ -1613,7 +1613,7 @@ pub fn parseFree(comptime T: type, value: T, options: ParseOptions) void {
         .Union => |unionInfo| {
             if (unionInfo.tag_type) |UnionTagType| {
                 inline for (unionInfo.fields) |u_field| {
-                    if (@enumToInt(@as(UnionTagType, value)) == u_field.enum_field.?.value) {
+                    if (value == @field(UnionTagType, u_field.name)) {
                         parseFree(u_field.field_type, @field(value, u_field.name), options);
                         break;
                     }
@@ -2458,7 +2458,7 @@ pub fn stringify(
             const info = @typeInfo(T).Union;
             if (info.tag_type) |UnionTagType| {
                 inline for (info.fields) |u_field| {
-                    if (@enumToInt(@as(UnionTagType, value)) == u_field.enum_field.?.value) {
+                    if (value == @field(UnionTagType, u_field.name)) {
                         return try stringify(@field(value, u_field.name), options, out_stream);
                     }
                 }

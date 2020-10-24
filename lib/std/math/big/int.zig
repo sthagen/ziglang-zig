@@ -24,7 +24,7 @@ pub fn calcLimbLen(scalar: anytype) usize {
     const T = @TypeOf(scalar);
     switch (@typeInfo(T)) {
         .Int => |info| {
-            const UT = if (info.is_signed) std.meta.Int(false, info.bits - 1) else T;
+            const UT = if (info.is_signed) std.meta.Int(.unsigned, info.bits - 1) else T;
             return @sizeOf(UT) / @sizeOf(Limb);
         },
         .ComptimeInt => {
@@ -56,6 +56,11 @@ pub fn calcSetStringLimbsBufferLen(base: u8, string_len: usize) usize {
 
 pub fn calcSetStringLimbCount(base: u8, string_len: usize) usize {
     return (string_len + (limb_bits / base - 1)) / (limb_bits / base);
+}
+
+pub fn calcPowLimbsBufferLen(a_bit_count: usize, y: usize) usize {
+    // The 2 accounts for the minimum space requirement for llmulacc
+    return 2 + (a_bit_count * y + (limb_bits - 1)) / limb_bits;
 }
 
 /// a + b * c + *carry, sets carry to the overflow bits
@@ -182,7 +187,7 @@ pub const Mutable = struct {
 
         switch (@typeInfo(T)) {
             .Int => |info| {
-                const UT = if (info.is_signed) std.meta.Int(false, info.bits - 1) else T;
+                const UT = if (info.is_signed) std.meta.Int(.unsigned, info.bits - 1) else T;
 
                 const needed_limbs = @sizeOf(UT) / @sizeOf(Limb);
                 assert(needed_limbs <= self.limbs.len); // value too big
@@ -441,6 +446,26 @@ pub const Mutable = struct {
         rma.positive = (a.positive == b.positive);
     }
 
+    /// rma = a * a
+    ///
+    /// `rma` may not alias with `a`.
+    ///
+    /// Asserts the result fits in `rma`. An upper bound on the number of limbs needed by
+    /// rma is given by `2 * a.limbs.len + 1`.
+    ///
+    /// If `allocator` is provided, it will be used for temporary storage to improve
+    /// multiplication performance. `error.OutOfMemory` is handled with a fallback algorithm.
+    pub fn sqrNoAlias(rma: *Mutable, a: Const, opt_allocator: ?*Allocator) void {
+        assert(rma.limbs.ptr != a.limbs.ptr); // illegal aliasing
+
+        mem.set(Limb, rma.limbs, 0);
+
+        llsquare_basecase(rma.limbs, a.limbs);
+
+        rma.normalize(2 * a.limbs.len + 1);
+        rma.positive = true;
+    }
+
     /// q = a / b (rem r)
     ///
     /// a / b are floored (rounded towards 0).
@@ -595,6 +620,52 @@ pub const Mutable = struct {
         } else y;
 
         return gcdLehmer(rma, x_copy, y_copy, limbs_buffer);
+    }
+
+    /// q = a ^ b
+    ///
+    /// r may not alias a.
+    ///
+    /// Asserts that `r` has enough limbs to store the result. Upper bound is
+    /// `calcPowLimbsBufferLen(a.bitCountAbs(), b)`.
+    ///
+    /// `limbs_buffer` is used for temporary storage.
+    /// The amount required is given by `calcPowLimbsBufferLen`.
+    pub fn pow(r: *Mutable, a: Const, b: u32, limbs_buffer: []Limb) !void {
+        assert(r.limbs.ptr != a.limbs.ptr); // illegal aliasing
+
+        // Handle all the trivial cases first
+        switch (b) {
+            0 => {
+                // a^0 = 1
+                return r.set(1);
+            },
+            1 => {
+                // a^1 = a
+                return r.copy(a);
+            },
+            else => {},
+        }
+
+        if (a.eqZero()) {
+            // 0^b = 0
+            return r.set(0);
+        } else if (a.limbs.len == 1 and a.limbs[0] == 1) {
+            // 1^b = 1 and -1^b = ±1
+            r.set(1);
+            r.positive = a.positive or (b & 1) == 0;
+            return;
+        }
+
+        // Here a>1 and b>1
+        const needed_limbs = calcPowLimbsBufferLen(a.bitCountAbs(), b);
+        assert(r.limbs.len >= needed_limbs);
+        assert(limbs_buffer.len >= needed_limbs);
+
+        llpow(r.limbs, a.limbs, b, limbs_buffer);
+
+        r.normalize(needed_limbs);
+        r.positive = a.positive or (b & 1) == 0;
     }
 
     /// rma may not alias x or y.
@@ -1021,7 +1092,7 @@ pub const Const = struct {
     pub fn to(self: Const, comptime T: type) ConvertError!T {
         switch (@typeInfo(T)) {
             .Int => |info| {
-                const UT = std.meta.Int(false, info.bits);
+                const UT = std.meta.Int(.unsigned, info.bits);
 
                 if (self.bitCountTwosComp() > info.bits) {
                     return error.TargetTooSmall;
@@ -1775,6 +1846,50 @@ pub const Managed = struct {
         try m.gcd(x.toConst(), y.toConst(), &limbs_buffer);
         rma.setMetadata(m.positive, m.len);
     }
+
+    /// r = a * a
+    pub fn sqr(rma: *Managed, a: Const) !void {
+        const needed_limbs = 2 * a.limbs.len + 1;
+
+        if (rma.limbs.ptr == a.limbs.ptr) {
+            var m = try Managed.initCapacity(rma.allocator, needed_limbs);
+            errdefer m.deinit();
+            var m_mut = m.toMutable();
+            m_mut.sqrNoAlias(a, rma.allocator);
+            m.setMetadata(m_mut.positive, m_mut.len);
+
+            rma.deinit();
+            rma.swap(&m);
+        } else {
+            try rma.ensureCapacity(needed_limbs);
+            var rma_mut = rma.toMutable();
+            rma_mut.sqrNoAlias(a, rma.allocator);
+            rma.setMetadata(rma_mut.positive, rma_mut.len);
+        }
+    }
+
+    pub fn pow(rma: *Managed, a: Const, b: u32) !void {
+        const needed_limbs = calcPowLimbsBufferLen(a.bitCountAbs(), b);
+
+        const limbs_buffer = try rma.allocator.alloc(Limb, needed_limbs);
+        defer rma.allocator.free(limbs_buffer);
+
+        if (rma.limbs.ptr == a.limbs.ptr) {
+            var m = try Managed.initCapacity(rma.allocator, needed_limbs);
+            errdefer m.deinit();
+            var m_mut = m.toMutable();
+            try m_mut.pow(a, b, limbs_buffer);
+            m.setMetadata(m_mut.positive, m_mut.len);
+
+            rma.deinit();
+            rma.swap(&m);
+        } else {
+            try rma.ensureCapacity(needed_limbs);
+            var rma_mut = rma.toMutable();
+            try rma_mut.pow(a, b, limbs_buffer);
+            rma.setMetadata(rma_mut.positive, rma_mut.len);
+        }
+    }
 };
 
 /// Knuth 4.3.1, Algorithm M.
@@ -1795,11 +1910,14 @@ fn llmulacc(opt_allocator: ?*Allocator, r: []Limb, a: []const Limb, b: []const L
     assert(r.len >= x.len + y.len + 1);
 
     // 48 is a pretty abitrary size chosen based on performance of a factorial program.
-    if (x.len > 48) {
-        if (opt_allocator) |allocator| {
-            llmulacc_karatsuba(allocator, r, x, y) catch |err| switch (err) {
-                error.OutOfMemory => {}, // handled below
-            };
+    k_mul: {
+        if (x.len > 48) {
+            if (opt_allocator) |allocator| {
+                llmulacc_karatsuba(allocator, r, x, y) catch |err| switch (err) {
+                    error.OutOfMemory => break :k_mul, // handled below
+                };
+                return;
+            }
         }
     }
 
@@ -2126,6 +2244,88 @@ fn llxor(r: []Limb, a: []const Limb, b: []const Limb) void {
     }
     while (i < a.len) : (i += 1) {
         r[i] = a[i];
+    }
+}
+
+/// r MUST NOT alias x.
+fn llsquare_basecase(r: []Limb, x: []const Limb) void {
+    @setRuntimeSafety(debug_safety);
+
+    const x_norm = x;
+    assert(r.len >= 2 * x_norm.len + 1);
+
+    // Compute the square of a N-limb bigint with only (N^2 + N)/2
+    // multiplications by exploting the symmetry of the coefficients around the
+    // diagonal:
+    //
+    //           a   b   c *
+    //           a   b   c =
+    // -------------------
+    //          ca  cb  cc +
+    //      ba  bb  bc     +
+    //  aa  ab  ac
+    //
+    // Note that:
+    //  - Each mixed-product term appears twice for each column,
+    //  - Squares are always in the 2k (0 <= k < N) column
+
+    for (x_norm) |v, i| {
+        // Accumulate all the x[i]*x[j] (with x!=j) products
+        llmulDigit(r[2 * i + 1 ..], x_norm[i + 1 ..], v);
+    }
+
+    // Each product appears twice, multiply by 2
+    llshl(r, r[0 .. 2 * x_norm.len], 1);
+
+    for (x_norm) |v, i| {
+        // Compute and add the squares
+        llmulDigit(r[2 * i ..], x[i .. i + 1], v);
+    }
+}
+
+/// Knuth 4.6.3
+fn llpow(r: []Limb, a: []const Limb, b: u32, tmp_limbs: []Limb) void {
+    var tmp1: []Limb = undefined;
+    var tmp2: []Limb = undefined;
+
+    // Multiplication requires no aliasing between the operand and the result
+    // variable, use the output limbs and another temporary set to overcome this
+    // limitation.
+    // The initial assignment makes the result end in `r` so an extra memory
+    // copy is saved, each 1 flips the index twice so it's only the zeros that
+    // matter.
+    const b_leading_zeros = @clz(u32, b);
+    const exp_zeros = @popCount(u32, ~b) - b_leading_zeros;
+    if (exp_zeros & 1 != 0) {
+        tmp1 = tmp_limbs;
+        tmp2 = r;
+    } else {
+        tmp1 = r;
+        tmp2 = tmp_limbs;
+    }
+
+    mem.copy(Limb, tmp1, a);
+    mem.set(Limb, tmp1[a.len..], 0);
+
+    // Scan the exponent as a binary number, from left to right, dropping the
+    // most significant bit set.
+    // Square the result if the current bit is zero, square and multiply by a if
+    // it is one.
+    var exp_bits = 32 - 1 - b_leading_zeros;
+    var exp = b << @intCast(u5, 1 + b_leading_zeros);
+
+    var i: usize = 0;
+    while (i < exp_bits) : (i += 1) {
+        // Square
+        mem.set(Limb, tmp2, 0);
+        llsquare_basecase(tmp2, tmp1[0..llnormalize(tmp1)]);
+        mem.swap([]Limb, &tmp1, &tmp2);
+        // Multiply by a
+        if (@shlWithOverflow(u32, exp, 1, &exp)) {
+            mem.set(Limb, tmp2, 0);
+            llmulacc(null, tmp2, tmp1[0..llnormalize(tmp1)], a);
+            mem.swap([]Limb, &tmp1, &tmp2);
+        }
     }
 }
 

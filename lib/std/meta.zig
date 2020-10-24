@@ -465,10 +465,13 @@ pub fn TagPayloadType(comptime U: type, tag: @TagType(U)) type {
     testing.expect(trait.is(.Union)(U));
 
     const info = @typeInfo(U).Union;
+    const tag_info = @typeInfo(@TagType(U)).Enum;
 
     inline for (info.fields) |field_info| {
-        if (field_info.enum_field.?.value == @enumToInt(tag)) return field_info.field_type;
+        if (comptime mem.eql(u8, field_info.name, @tagName(tag)))
+            return field_info.field_type;
     }
+
     unreachable;
 }
 
@@ -504,15 +507,14 @@ pub fn eql(a: anytype, b: @TypeOf(a)) bool {
             }
         },
         .Union => |info| {
-            if (info.tag_type) |_| {
+            if (info.tag_type) |Tag| {
                 const tag_a = activeTag(a);
                 const tag_b = activeTag(b);
                 if (tag_a != tag_b) return false;
 
                 inline for (info.fields) |field_info| {
-                    const enum_field = field_info.enum_field.?;
-                    if (enum_field.value == @enumToInt(tag_a)) {
-                        return eql(@field(a, enum_field.name), @field(b, enum_field.name));
+                    if (@field(Tag, field_info.name) == tag_a) {
+                        return eql(@field(a, field_info.name), @field(b, field_info.name));
                     }
                 }
                 return false;
@@ -653,13 +655,7 @@ pub fn fieldIndex(comptime T: type, comptime name: []const u8) ?comptime_int {
     return null;
 }
 
-/// Given a type, reference all the declarations inside, so that the semantic analyzer sees them.
-pub fn refAllDecls(comptime T: type) void {
-    if (!builtin.is_test) return;
-    inline for (declarations(T)) |decl| {
-        _ = decl;
-    }
-}
+pub const refAllDecls = @compileError("refAllDecls has been moved from std.meta to std.testing");
 
 /// Returns a slice of pointers to public declarations of a namespace.
 pub fn declList(comptime Namespace: type, comptime Decl: type) []const *const Decl {
@@ -682,10 +678,15 @@ pub fn declList(comptime Namespace: type, comptime Decl: type) []const *const De
 /// Deprecated: use Int
 pub const IntType = Int;
 
-pub fn Int(comptime is_signed: bool, comptime bit_count: u16) type {
+pub const Signedness = enum {
+    unsigned,
+    signed,
+};
+
+pub fn Int(comptime signedness: Signedness, comptime bit_count: u16) type {
     return @Type(TypeInfo{
         .Int = .{
-            .is_signed = is_signed,
+            .is_signed = signedness == .signed,
             .bits = bit_count,
         },
     });
@@ -715,7 +716,7 @@ pub fn cast(comptime DestType: type, target: anytype) DestType {
                 },
                 .Optional => |opt| {
                     if (@typeInfo(opt.child) == .Pointer) {
-                        return @ptrCast(DestType, @alignCast(dest_ptr, target));
+                        return @ptrCast(DestType, @alignCast(dest_ptr.alignment, target));
                     }
                 },
                 else => {},
@@ -723,23 +724,24 @@ pub fn cast(comptime DestType: type, target: anytype) DestType {
         },
         .Optional => |dest_opt| {
             if (@typeInfo(dest_opt.child) == .Pointer) {
+                const dest_ptr = @typeInfo(dest_opt.child).Pointer;
                 switch (@typeInfo(TargetType)) {
                     .Int, .ComptimeInt => {
                         return @intToPtr(DestType, target);
                     },
                     .Pointer => {
-                        return @ptrCast(DestType, @alignCast(@alignOf(dest_opt.child.Child), target));
+                        return @ptrCast(DestType, @alignCast(dest_ptr.alignment, target));
                     },
                     .Optional => |target_opt| {
                         if (@typeInfo(target_opt.child) == .Pointer) {
-                            return @ptrCast(DestType, @alignCast(@alignOf(dest_opt.child.Child), target));
+                            return @ptrCast(DestType, @alignCast(dest_ptr.alignment, target));
                         }
                     },
                     else => {},
                 }
             }
         },
-        .Enum, .EnumLiteral => {
+        .Enum => {
             if (@typeInfo(TargetType) == .Int or @typeInfo(TargetType) == .ComptimeInt) {
                 return @intToEnum(DestType, target);
             }
@@ -747,15 +749,18 @@ pub fn cast(comptime DestType: type, target: anytype) DestType {
         .Int, .ComptimeInt => {
             switch (@typeInfo(TargetType)) {
                 .Pointer => {
-                    return @as(DestType, @ptrToInt(target));
+                    return @intCast(DestType, @ptrToInt(target));
                 },
                 .Optional => |opt| {
                     if (@typeInfo(opt.child) == .Pointer) {
-                        return @as(DestType, @ptrToInt(target));
+                        return @intCast(DestType, @ptrToInt(target));
                     }
                 },
-                .Enum, .EnumLiteral => {
-                    return @as(DestType, @enumToInt(target));
+                .Enum => {
+                    return @intCast(DestType, @enumToInt(target));
+                },
+                .Int, .ComptimeInt => {
+                    return @intCast(DestType, target);
                 },
                 else => {},
             }
@@ -774,10 +779,161 @@ test "std.meta.cast" {
 
     var i = @as(i64, 10);
 
-    testing.expect(cast(?*c_void, 0) == @intToPtr(?*c_void, 0));
     testing.expect(cast(*u8, 16) == @intToPtr(*u8, 16));
-    testing.expect(cast(u64, @as(u32, 10)) == @as(u64, 10));
-    testing.expect(cast(E, 1) == .One);
-    testing.expect(cast(u8, E.Two) == 2);
     testing.expect(cast(*u64, &i).* == @as(u64, 10));
+    testing.expect(cast(*i64, @as(?*align(1) i64, &i)) == &i);
+
+    testing.expect(cast(?*u8, 2) == @intToPtr(*u8, 2));
+    testing.expect(cast(?*i64, @as(*align(1) i64, &i)) == &i);
+    testing.expect(cast(?*i64, @as(?*align(1) i64, &i)) == &i);
+
+    testing.expect(cast(E, 1) == .One);
+
+    testing.expectEqual(@as(u32, 4), cast(u32, @intToPtr(*u32, 4)));
+    testing.expectEqual(@as(u32, 4), cast(u32, @intToPtr(?*u32, 4)));
+    testing.expectEqual(@as(u32, 10), cast(u32, @as(u64, 10)));
+    testing.expectEqual(@as(u8, 2), cast(u8, E.Two));
+}
+
+/// Given a value returns its size as C's sizeof operator would.
+/// This is for translate-c and is not intended for general use.
+pub fn sizeof(target: anytype) usize {
+    switch (@typeInfo(@TypeOf(target))) {
+        .Type => return @sizeOf(target),
+        .Float, .Int, .Struct, .Union, .Enum => return @sizeOf(@TypeOf(target)),
+        .ComptimeFloat => return @sizeOf(f64), // TODO c_double #3999
+        .ComptimeInt => {
+            // TODO to get the correct result we have to translate
+            // `1073741824 * 4` as `int(1073741824) *% int(4)` since
+            // sizeof(1073741824 * 4) != sizeof(4294967296).
+
+            // TODO test if target fits in int, long or long long
+            return @sizeOf(c_int);
+        },
+        else => @compileError("TODO implement std.meta.sizeof for type " ++ @typeName(@TypeOf(target))),
+    }
+}
+
+test "sizeof" {
+    const E = extern enum(c_int) { One, _ };
+    const S = extern struct { a: u32 };
+
+    testing.expect(sizeof(u32) == 4);
+    testing.expect(sizeof(@as(u32, 2)) == 4);
+    testing.expect(sizeof(2) == @sizeOf(c_int));
+    testing.expect(sizeof(E) == @sizeOf(c_int));
+    testing.expect(sizeof(E.One) == @sizeOf(c_int));
+    testing.expect(sizeof(S) == 4);
+}
+
+/// For a given function type, returns a tuple type which fields will
+/// correspond to the argument types.
+///
+/// Examples:
+/// - `ArgsTuple(fn() void)` ⇒ `tuple { }`
+/// - `ArgsTuple(fn(a: u32) u32)` ⇒ `tuple { u32 }`
+/// - `ArgsTuple(fn(a: u32, b: f16) noreturn)` ⇒ `tuple { u32, f16 }`
+pub fn ArgsTuple(comptime Function: type) type {
+    const info = @typeInfo(Function);
+    if (info != .Fn)
+        @compileError("ArgsTuple expects a function type");
+
+    const function_info = info.Fn;
+    if (function_info.is_generic)
+        @compileError("Cannot create ArgsTuple for generic function");
+    if (function_info.is_var_args)
+        @compileError("Cannot create ArgsTuple for variadic function");
+
+    var argument_field_list: [function_info.args.len]std.builtin.TypeInfo.StructField = undefined;
+    inline for (function_info.args) |arg, i| {
+        const T = arg.arg_type.?;
+        @setEvalBranchQuota(10_000);
+        var num_buf: [128]u8 = undefined;
+        argument_field_list[i] = std.builtin.TypeInfo.StructField{
+            .name = std.fmt.bufPrint(&num_buf, "{d}", .{i}) catch unreachable,
+            .field_type = T,
+            .default_value = @as(?T, null),
+            .is_comptime = false,
+            .alignment = if (@sizeOf(T) > 0) @alignOf(T) else 0,
+        };
+    }
+
+    return @Type(std.builtin.TypeInfo{
+        .Struct = std.builtin.TypeInfo.Struct{
+            .is_tuple = true,
+            .layout = .Auto,
+            .decls = &[_]std.builtin.TypeInfo.Declaration{},
+            .fields = &argument_field_list,
+        },
+    });
+}
+
+/// For a given anonymous list of types, returns a new tuple type
+/// with those types as fields.
+///
+/// Examples:
+/// - `Tuple(&[_]type {})` ⇒ `tuple { }`
+/// - `Tuple(&[_]type {f32})` ⇒ `tuple { f32 }`
+/// - `Tuple(&[_]type {f32,u32})` ⇒ `tuple { f32, u32 }`
+pub fn Tuple(comptime types: []const type) type {
+    var tuple_fields: [types.len]std.builtin.TypeInfo.StructField = undefined;
+    inline for (types) |T, i| {
+        @setEvalBranchQuota(10_000);
+        var num_buf: [128]u8 = undefined;
+        tuple_fields[i] = std.builtin.TypeInfo.StructField{
+            .name = std.fmt.bufPrint(&num_buf, "{d}", .{i}) catch unreachable,
+            .field_type = T,
+            .default_value = @as(?T, null),
+            .is_comptime = false,
+            .alignment = if (@sizeOf(T) > 0) @alignOf(T) else 0,
+        };
+    }
+
+    return @Type(std.builtin.TypeInfo{
+        .Struct = std.builtin.TypeInfo.Struct{
+            .is_tuple = true,
+            .layout = .Auto,
+            .decls = &[_]std.builtin.TypeInfo.Declaration{},
+            .fields = &tuple_fields,
+        },
+    });
+}
+
+const TupleTester = struct {
+    fn assertTypeEqual(comptime Expected: type, comptime Actual: type) void {
+        if (Expected != Actual)
+            @compileError("Expected type " ++ @typeName(Expected) ++ ", but got type " ++ @typeName(Actual));
+    }
+
+    fn assertTuple(comptime expected: anytype, comptime Actual: type) void {
+        const info = @typeInfo(Actual);
+        if (info != .Struct)
+            @compileError("Expected struct type");
+        if (!info.Struct.is_tuple)
+            @compileError("Struct type must be a tuple type");
+
+        const fields_list = std.meta.fields(Actual);
+        if (expected.len != fields_list.len)
+            @compileError("Argument count mismatch");
+
+        inline for (fields_list) |fld, i| {
+            if (expected[i] != fld.field_type) {
+                @compileError("Field " ++ fld.name ++ " expected to be type " ++ @typeName(expected[i]) ++ ", but was type " ++ @typeName(fld.field_type));
+            }
+        }
+    }
+};
+
+test "ArgsTuple" {
+    TupleTester.assertTuple(.{}, ArgsTuple(fn () void));
+    TupleTester.assertTuple(.{u32}, ArgsTuple(fn (a: u32) []const u8));
+    TupleTester.assertTuple(.{ u32, f16 }, ArgsTuple(fn (a: u32, b: f16) noreturn));
+    TupleTester.assertTuple(.{ u32, f16, []const u8, void }, ArgsTuple(fn (a: u32, b: f16, c: []const u8, void) noreturn));
+}
+
+test "Tuple" {
+    TupleTester.assertTuple(.{}, Tuple(&[_]type{}));
+    TupleTester.assertTuple(.{u32}, Tuple(&[_]type{u32}));
+    TupleTester.assertTuple(.{ u32, f16 }, Tuple(&[_]type{ u32, f16 }));
+    TupleTester.assertTuple(.{ u32, f16, []const u8, void }, Tuple(&[_]type{ u32, f16, []const u8, void }));
 }
