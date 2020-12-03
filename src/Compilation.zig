@@ -93,6 +93,9 @@ libc_static_lib: ?CRTFile = null,
 /// Populated when we build the libcompiler_rt static library. A Job to build this is placed in the queue
 /// and resolved before calling linker.flush().
 compiler_rt_static_lib: ?CRTFile = null,
+/// Populated when we build the compiler_rt_obj object. A Job to build this is placed in the queue
+/// and resolved before calling linker.flush().
+compiler_rt_obj: ?CRTFile = null,
 
 glibc_so_files: ?glibc.BuiltSharedObjects = null,
 
@@ -164,8 +167,8 @@ const Job = union(enum) {
     libcxx: void,
     libcxxabi: void,
     libssp: void,
-    /// needed when producing a dynamic library or executable
-    libcompiler_rt: void,
+    compiler_rt_lib: void,
+    compiler_rt_obj: void,
     /// needed when not linking libc and using LLVM for code generation because it generates
     /// calls to, for example, memcpy and memset.
     zig_libc: void,
@@ -343,9 +346,14 @@ pub const InitOptions = struct {
     link_libc: bool = false,
     link_libcpp: bool = false,
     want_pic: ?bool = null,
+    /// This means that if the output mode is an executable it will be a
+    /// Position Independent Executable. If the output mode is not an
+    /// executable this field is ignored.
+    want_pie: ?bool = null,
     want_sanitize_c: ?bool = null,
     want_stack_check: ?bool = null,
     want_valgrind: ?bool = null,
+    want_compiler_rt: ?bool = null,
     use_llvm: ?bool = null,
     use_lld: ?bool = null,
     use_clang: ?bool = null,
@@ -360,7 +368,7 @@ pub const InitOptions = struct {
     link_emit_relocs: bool = false,
     linker_script: ?[]const u8 = null,
     version_script: ?[]const u8 = null,
-    override_soname: ?[]const u8 = null,
+    soname: ?[]const u8 = null,
     linker_gc_sections: ?bool = null,
     linker_allow_shlib_undefined: ?bool = null,
     linker_bind_global_refs_locally: ?bool = null,
@@ -395,6 +403,50 @@ pub const InitOptions = struct {
     subsystem: ?std.Target.SubSystem = null,
 };
 
+fn addPackageTableToCacheHash(
+    hash: *Cache.HashHelper,
+    arena: *std.heap.ArenaAllocator,
+    pkg_table: Package.Table,
+    hash_type: union(enum) { path_bytes, files: *Cache.Manifest },
+) (error{OutOfMemory} || std.os.GetCwdError)!void {
+    const allocator = &arena.allocator;
+
+    const packages = try allocator.alloc(Package.Table.Entry, pkg_table.count());
+    {
+        // Copy over the hashmap entries to our slice
+        var table_it = pkg_table.iterator();
+        var idx: usize = 0;
+        while (table_it.next()) |entry| : (idx += 1) {
+            packages[idx] = entry.*;
+        }
+    }
+    // Sort the slice by package name
+    std.sort.sort(Package.Table.Entry, packages, {}, struct {
+        fn lessThan(_: void, lhs: Package.Table.Entry, rhs: Package.Table.Entry) bool {
+            return std.mem.lessThan(u8, lhs.key, rhs.key);
+        }
+    }.lessThan);
+
+    for (packages) |pkg| {
+        // Finally insert the package name and path to the cache hash.
+        hash.addBytes(pkg.key);
+        switch (hash_type) {
+            .path_bytes => {
+                hash.addBytes(pkg.value.root_src_path);
+                hash.addOptionalBytes(pkg.value.root_src_directory.path);
+            },
+            .files => |man| {
+                const pkg_zig_file = try pkg.value.root_src_directory.join(allocator, &[_][]const u8{
+                    pkg.value.root_src_path,
+                });
+                _ = try man.addFile(pkg_zig_file, null);
+            },
+        }
+        // Recurse to handle the package's dependencies
+        try addPackageTableToCacheHash(hash, arena, pkg.value.table, hash_type);
+    }
+}
+
 pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
     const is_dyn_lib = switch (options.output_mode) {
         .Obj, .Exe => false,
@@ -405,6 +457,9 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
         .Lib => is_dyn_lib,
         .Exe => true,
     };
+    const needs_c_symbols = !options.is_compiler_rt_or_libc and
+        (is_exe_or_dyn_lib or (options.target.isWasm() and options.output_mode != .Obj));
+
     const comp: *Compilation = comp: {
         // For allocations that have the same lifetime as Compilation. This arena is used only during this
         // initialization and then is freed in deinit().
@@ -472,6 +527,23 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             break :blk false;
         };
 
+        const DarwinOptions = struct {
+            syslibroot: ?[]const u8 = null,
+            system_linker_hack: bool = false,
+        };
+
+        const darwin_options: DarwinOptions = if (build_options.have_llvm and comptime std.Target.current.isDarwin()) outer: {
+            const opts: DarwinOptions = if (use_lld and options.is_native_os and options.target.isDarwin()) inner: {
+                const syslibroot = try std.zig.system.getSDKPath(arena);
+                const system_linker_hack = std.os.getenv("ZIG_SYSTEM_LINKER_HACK") != null;
+                break :inner .{
+                    .syslibroot = syslibroot,
+                    .system_linker_hack = system_linker_hack,
+                };
+            } else .{};
+            break :outer opts;
+        } else .{};
+
         const link_libc = options.link_libc or target_util.osRequiresLibC(options.target);
 
         const must_dynamic_link = dl: {
@@ -482,8 +554,19 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             {
                 break :dl true;
             }
-            if (options.system_libs.len != 0) {
-                // when creating a executable that links to system libraries,
+            const any_dyn_libs: bool = x: {
+                if (options.system_libs.len != 0)
+                    break :x true;
+                for (options.link_objects) |obj| {
+                    switch (classifyFileExt(obj)) {
+                        .shared_library => break :x true,
+                        else => continue,
+                    }
+                }
+                break :x false;
+            };
+            if (any_dyn_libs) {
+                // When creating a executable that links to system libraries,
                 // we require dynamic linking, but we must not link static libraries
                 // or object files dynamically!
                 break :dl (options.output_mode == .Exe);
@@ -510,17 +593,30 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             options.libc_installation,
         );
 
+        const must_pie = target_util.requiresPIE(options.target);
+        const pie = if (options.want_pie) |explicit| pie: {
+            if (!explicit and must_pie) {
+                return error.TargetRequiresPIE;
+            }
+            break :pie explicit;
+        } else must_pie;
+
         const must_pic: bool = b: {
             if (target_util.requiresPIC(options.target, link_libc))
                 break :b true;
             break :b link_mode == .Dynamic;
         };
         const pic = if (options.want_pic) |explicit| pic: {
-            if (!explicit and must_pic) {
-                return error.TargetRequiresPIC;
+            if (!explicit) {
+                if (must_pic) {
+                    return error.TargetRequiresPIC;
+                }
+                if (pie) {
+                    return error.PIERequiresPIC;
+                }
             }
             break :pic explicit;
-        } else must_pic;
+        } else pie or must_pic;
 
         // Make a decision on whether to use Clang for translate-c and compiling C files.
         const use_clang = if (options.use_clang) |explicit| explicit else blk: {
@@ -550,6 +646,8 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
                 break :b false;
             break :b options.want_valgrind orelse (options.optimize_mode == .Debug);
         };
+
+        const include_compiler_rt = options.want_compiler_rt orelse needs_c_symbols;
 
         const single_threaded = options.single_threaded or target_util.isSingleThreaded(options.target);
 
@@ -596,10 +694,12 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
         cache.hash.addBytes(options.target.cpu.model.name);
         cache.hash.add(options.target.cpu.features.ints);
         cache.hash.add(options.target.os.tag);
+        cache.hash.add(options.target.os.getVersionRange());
         cache.hash.add(options.is_native_os);
         cache.hash.add(options.target.abi);
         cache.hash.add(ofmt);
         cache.hash.add(pic);
+        cache.hash.add(pie);
         cache.hash.add(stack_check);
         cache.hash.add(link_mode);
         cache.hash.add(options.function_sections);
@@ -608,7 +708,8 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
         cache.hash.add(options.link_libcpp);
         cache.hash.add(options.output_mode);
         cache.hash.add(options.machine_code_model);
-        cache.hash.add(options.emit_bin != null);
+        cache.hash.addOptionalEmitLoc(options.emit_bin);
+        cache.hash.addBytes(options.root_name);
         // TODO audit this and make sure everything is in it
 
         const module: ?*Module = if (options.root_pkg) |root_pkg| blk: {
@@ -623,9 +724,13 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             // would be likely to cause cache hits.
             hash.addBytes(root_pkg.root_src_path);
             hash.addOptionalBytes(root_pkg.root_src_directory.path);
+            {
+                var local_arena = std.heap.ArenaAllocator.init(gpa);
+                defer local_arena.deinit();
+                try addPackageTableToCacheHash(&hash, &local_arena, root_pkg.table, .path_bytes);
+            }
             hash.add(valgrind);
             hash.add(single_threaded);
-            hash.add(options.target.os.getVersionRange());
             hash.add(dll_export_fns);
             hash.add(options.is_test);
             hash.add(options.is_compiler_rt_or_libc);
@@ -660,6 +765,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
                         .source = .{ .unloaded = {} },
                         .contents = .{ .not_available = {} },
                         .status = .never_loaded,
+                        .pkg = root_pkg,
                         .root_container = .{
                             .file_scope = root_scope,
                             .decls = .{},
@@ -766,12 +872,14 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .optimize_mode = options.optimize_mode,
             .use_lld = use_lld,
             .use_llvm = use_llvm,
+            .system_linker_hack = darwin_options.system_linker_hack,
             .link_libc = link_libc,
             .link_libcpp = options.link_libcpp,
             .objects = options.link_objects,
             .frameworks = options.frameworks,
             .framework_dirs = options.framework_dirs,
             .system_libs = system_libs,
+            .syslibroot = darwin_options.syslibroot,
             .lib_dirs = options.lib_dirs,
             .rpath_list = options.rpath_list,
             .strip = strip,
@@ -783,6 +891,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .z_defs = options.linker_z_defs,
             .stack_size_override = options.stack_size_override,
             .image_base_override = options.image_base_override,
+            .include_compiler_rt = include_compiler_rt,
             .linker_script = options.linker_script,
             .version_script = options.version_script,
             .gc_sections = options.linker_gc_sections,
@@ -790,10 +899,11 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .emit_relocs = options.link_emit_relocs,
             .rdynamic = options.rdynamic,
             .extra_lld_args = options.lld_argv,
-            .override_soname = options.override_soname,
+            .soname = options.soname,
             .version = options.version,
             .libc_installation = libc_dirs.libc_installation,
             .pic = pic,
+            .pie = pie,
             .valgrind = valgrind,
             .stack_check = stack_check,
             .single_threaded = single_threaded,
@@ -878,7 +988,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             try comp.addBuildingGLibCJobs();
         }
         if (comp.wantBuildMuslFromSource()) {
-            try comp.work_queue.ensureUnusedCapacity(5);
+            try comp.work_queue.ensureUnusedCapacity(6);
             if (target_util.libc_needs_crti_crtn(comp.getTarget())) {
                 comp.work_queue.writeAssumeCapacity(&[_]Job{
                     .{ .musl_crt_file = .crti_o },
@@ -888,6 +998,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             comp.work_queue.writeAssumeCapacity(&[_]Job{
                 .{ .musl_crt_file = .crt1_o },
                 .{ .musl_crt_file = .scrt1_o },
+                .{ .musl_crt_file = .rcrt1_o },
                 .{ .musl_crt_file = .libc_a },
             });
         }
@@ -927,16 +1038,35 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             try comp.work_queue.writeItem(.libcxxabi);
         }
 
-        const needs_compiler_rt_and_c = is_exe_or_dyn_lib or
-            (comp.getTarget().isWasm() and comp.bin_file.options.output_mode != .Obj);
-        if (needs_compiler_rt_and_c and build_options.is_stage1) {
-            try comp.work_queue.writeItem(.{ .libcompiler_rt = {} });
-            // MinGW provides no libssp, use our own implementation.
-            if (comp.getTarget().isMinGW()) {
-                try comp.work_queue.writeItem(.{ .libssp = {} });
+        // The `is_stage1` condition is here only because stage2 cannot yet build compiler-rt.
+        // Once it is capable this condition should be removed.
+        if (build_options.is_stage1) {
+            if (comp.bin_file.options.include_compiler_rt) {
+                if (is_exe_or_dyn_lib or comp.getTarget().isWasm()) {
+                    try comp.work_queue.writeItem(.{ .compiler_rt_lib = {} });
+                } else {
+                    try comp.work_queue.writeItem(.{ .compiler_rt_obj = {} });
+                    if (comp.bin_file.options.object_format != .elf and
+                        comp.bin_file.options.output_mode == .Obj)
+                    {
+                        // For ELF we can rely on using -r to link multiple objects together into one,
+                        // but to truly support `build-obj -fcompiler-rt` will require virtually
+                        // injecting `_ = @import("compiler_rt.zig")` into the root source file of
+                        // the compilation.
+                        fatal("Embedding compiler-rt into {s} objects is not yet implemented.", .{
+                            @tagName(comp.bin_file.options.object_format),
+                        });
+                    }
+                }
             }
-            if (!comp.bin_file.options.link_libc) {
-                try comp.work_queue.writeItem(.{ .zig_libc = {} });
+            if (needs_c_symbols) {
+                // MinGW provides no libssp, use our own implementation.
+                if (comp.getTarget().isMinGW()) {
+                    try comp.work_queue.writeItem(.{ .libssp = {} });
+                }
+                if (!comp.bin_file.options.link_libc) {
+                    try comp.work_queue.writeItem(.{ .zig_libc = {} });
+                }
             }
         }
     }
@@ -1278,7 +1408,7 @@ pub fn performAllTheWork(self: *Compilation) error{ TimerUnsupported, OutOfMemor
                     self.failed_c_objects.putAssumeCapacityNoClobber(c_object, try ErrorMsg.create(
                         self.gpa,
                         0,
-                        "unable to build C object: {}",
+                        "unable to build C object: {s}",
                         .{@errorName(err)},
                     ));
                     c_object.status = .{ .failure = {} };
@@ -1334,20 +1464,26 @@ pub fn performAllTheWork(self: *Compilation) error{ TimerUnsupported, OutOfMemor
                 fatal("unable to build libcxxabi: {}", .{@errorName(err)});
             };
         },
-        .libcompiler_rt => {
-            self.buildStaticLibFromZig("compiler_rt.zig", &self.compiler_rt_static_lib) catch |err| {
+        .compiler_rt_lib => {
+            self.buildOutputFromZig("compiler_rt.zig", .Lib, &self.compiler_rt_static_lib) catch |err| {
                 // TODO Expose this as a normal compile error rather than crashing here.
-                fatal("unable to build compiler_rt: {}", .{@errorName(err)});
+                fatal("unable to build compiler_rt: {s}", .{@errorName(err)});
+            };
+        },
+        .compiler_rt_obj => {
+            self.buildOutputFromZig("compiler_rt.zig", .Obj, &self.compiler_rt_obj) catch |err| {
+                // TODO Expose this as a normal compile error rather than crashing here.
+                fatal("unable to build compiler_rt: {s}", .{@errorName(err)});
             };
         },
         .libssp => {
-            self.buildStaticLibFromZig("ssp.zig", &self.libssp_static_lib) catch |err| {
+            self.buildOutputFromZig("ssp.zig", .Lib, &self.libssp_static_lib) catch |err| {
                 // TODO Expose this as a normal compile error rather than crashing here.
                 fatal("unable to build libssp: {}", .{@errorName(err)});
             };
         },
         .zig_libc => {
-            self.buildStaticLibFromZig("c.zig", &self.libc_static_lib) catch |err| {
+            self.buildOutputFromZig("c.zig", .Lib, &self.libc_static_lib) catch |err| {
                 // TODO Expose this as a normal compile error rather than crashing here.
                 fatal("unable to build zig's multitarget libc: {}", .{@errorName(err)});
             };
@@ -1599,7 +1735,7 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_comp_progress_node: *
         const out_dep_path: ?[]const u8 = if (comp.disable_c_depfile or !ext.clangSupportsDepFile())
             null
         else
-            try std.fmt.allocPrint(arena, "{}.d", .{out_obj_path});
+            try std.fmt.allocPrint(arena, "{s}.d", .{out_obj_path});
         try comp.addCCArgs(arena, &argv, ext, out_dep_path);
 
         try argv.ensureCapacity(argv.items.len + 3);
@@ -1640,16 +1776,16 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_comp_progress_node: *
             }
         } else {
             child.stdin_behavior = .Ignore;
-            child.stdout_behavior = .Pipe;
+            child.stdout_behavior = .Ignore;
             child.stderr_behavior = .Pipe;
 
             try child.spawn();
 
-            const stdout_reader = child.stdout.?.reader();
             const stderr_reader = child.stderr.?.reader();
 
             // TODO https://github.com/ziglang/zig/issues/6343
-            const stdout = try stdout_reader.readAllAlloc(arena, std.math.maxInt(u32));
+            // Please uncomment and use stdout once this issue is fixed
+            // const stdout = try stdout_reader.readAllAlloc(arena, std.math.maxInt(u32));
             const stderr = try stderr_reader.readAllAlloc(arena, 10 * 1024 * 1024);
 
             const term = child.wait() catch |err| {
@@ -1681,6 +1817,9 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_comp_progress_node: *
                 log.warn("failed to delete '{}': {}", .{ dep_file_path, @errorName(err) });
             };
         }
+
+        // We don't actually care whether it's a cache hit or miss; we just need the digest and the lock.
+        if (comp.disable_c_depfile) _ = try man.hit();
 
         // Rename into place.
         const digest = man.final();
@@ -1829,10 +1968,39 @@ pub fn addCCArgs(
                 try argv.append(try std.fmt.allocPrint(arena, "-mcmodel={}", .{@tagName(mcmodel)}));
             }
 
-            // windows.h has files such as pshpack1.h which do #pragma packing, triggering a clang warning.
-            // So for this target, we disable this warning.
-            if (target.os.tag == .windows and target.abi.isGnu()) {
-                try argv.append("-Wno-pragma-pack");
+            switch (target.os.tag) {
+                .windows => {
+                    // windows.h has files such as pshpack1.h which do #pragma packing,
+                    // triggering a clang warning. So for this target, we disable this warning.
+                    if (target.abi.isGnu()) {
+                        try argv.append("-Wno-pragma-pack");
+                    }
+                },
+                .macos => {
+                    // Pass the proper -m<os>-version-min argument for darwin.
+                    const ver = target.os.version_range.semver.min;
+                    try argv.append(try std.fmt.allocPrint(arena, "-mmacos-version-min={d}.{d}.{d}", .{
+                        ver.major, ver.minor, ver.patch,
+                    }));
+                },
+                .ios, .tvos, .watchos => switch (target.cpu.arch) {
+                    // Pass the proper -m<os>-version-min argument for darwin.
+                    .i386, .x86_64 => {
+                        const ver = target.os.version_range.semver.min;
+                        try argv.append(try std.fmt.allocPrint(
+                            arena,
+                            "-m{s}-simulator-version-min={d}.{d}.{d}",
+                            .{ @tagName(target.os.tag), ver.major, ver.minor, ver.patch },
+                        ));
+                    },
+                    else => {
+                        const ver = target.os.version_range.semver.min;
+                        try argv.append(try std.fmt.allocPrint(arena, "-m{s}-version-min={d}.{d}.{d}", .{
+                            @tagName(target.os.tag), ver.major, ver.minor, ver.patch,
+                        }));
+                    },
+                },
+                else => {},
             }
 
             if (!comp.bin_file.options.strip) {
@@ -2241,7 +2409,8 @@ fn wantBuildGLibCFromSource(comp: Compilation) bool {
 }
 
 fn wantBuildMuslFromSource(comp: Compilation) bool {
-    return comp.wantBuildLibCFromSource() and comp.getTarget().isMusl();
+    return comp.wantBuildLibCFromSource() and comp.getTarget().isMusl() and
+        !comp.getTarget().isWasm();
 }
 
 fn wantBuildMinGWFromSource(comp: Compilation) bool {
@@ -2424,6 +2593,7 @@ pub fn generateBuiltinZigSource(comp: *Compilation, allocator: *Allocator) ![]u8
         \\pub const have_error_return_tracing = {};
         \\pub const valgrind_support = {};
         \\pub const position_independent_code = {};
+        \\pub const position_independent_executable = {};
         \\pub const strip_debug_info = {};
         \\pub const code_model = CodeModel.{};
         \\
@@ -2435,6 +2605,7 @@ pub fn generateBuiltinZigSource(comp: *Compilation, allocator: *Allocator) ![]u8
         comp.bin_file.options.error_return_tracing,
         comp.bin_file.options.valgrind,
         comp.bin_file.options.pic,
+        comp.bin_file.options.pie,
         comp.bin_file.options.strip,
         @tagName(comp.bin_file.options.machine_code_model),
     });
@@ -2480,10 +2651,16 @@ pub fn updateSubCompilation(sub_compilation: *Compilation) !void {
     }
 }
 
-fn buildStaticLibFromZig(comp: *Compilation, src_basename: []const u8, out: *?CRTFile) !void {
+fn buildOutputFromZig(
+    comp: *Compilation,
+    src_basename: []const u8,
+    output_mode: std.builtin.OutputMode,
+    out: *?CRTFile,
+) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    std.debug.assert(output_mode != .Exe);
     const special_sub = "std" ++ std.fs.path.sep_str ++ "special";
     const special_path = try comp.zig_lib_directory.join(comp.gpa, &[_][]const u8{special_sub});
     defer comp.gpa.free(special_path);
@@ -2500,11 +2677,11 @@ fn buildStaticLibFromZig(comp: *Compilation, src_basename: []const u8, out: *?CR
     };
     const root_name = mem.split(src_basename, ".").next().?;
     const target = comp.getTarget();
-    const output_mode: std.builtin.OutputMode = if (target.cpu.arch.isWasm()) .Obj else .Lib;
+    const fixed_output_mode = if (target.cpu.arch.isWasm()) .Obj else output_mode;
     const bin_basename = try std.zig.binNameAlloc(comp.gpa, .{
         .root_name = root_name,
         .target = target,
-        .output_mode = output_mode,
+        .output_mode = fixed_output_mode,
     });
     defer comp.gpa.free(bin_basename);
 
@@ -2527,7 +2704,7 @@ fn buildStaticLibFromZig(comp: *Compilation, src_basename: []const u8, out: *?CR
         .target = target,
         .root_name = root_name,
         .root_pkg = &root_pkg,
-        .output_mode = output_mode,
+        .output_mode = fixed_output_mode,
         .rand = comp.rand,
         .libc_installation = comp.bin_file.options.libc_installation,
         .emit_bin = emit_bin,
@@ -2538,6 +2715,7 @@ fn buildStaticLibFromZig(comp: *Compilation, src_basename: []const u8, out: *?CR
         .want_stack_check = false,
         .want_valgrind = false,
         .want_pic = comp.bin_file.options.pic,
+        .want_pie = comp.bin_file.options.pie,
         .emit_h = null,
         .strip = comp.bin_file.options.strip,
         .is_native_os = comp.bin_file.options.is_native_os,
@@ -2599,6 +2777,11 @@ fn updateStage1Module(comp: *Compilation, main_progress_node: *std.Progress.Node
     defer man.deinit();
 
     _ = try man.addFile(main_zig_file, null);
+    {
+        var local_arena = std.heap.ArenaAllocator.init(comp.gpa);
+        defer local_arena.deinit();
+        try addPackageTableToCacheHash(&man.hash, &local_arena, mod.root_pkg.table, .{ .files = &man });
+    }
     man.hash.add(comp.bin_file.options.valgrind);
     man.hash.add(comp.bin_file.options.single_threaded);
     man.hash.add(target.os.getVersionRange());
@@ -2606,11 +2789,11 @@ fn updateStage1Module(comp: *Compilation, main_progress_node: *std.Progress.Node
     man.hash.add(comp.bin_file.options.function_sections);
     man.hash.add(comp.bin_file.options.is_test);
     man.hash.add(comp.bin_file.options.emit != null);
-    man.hash.add(comp.emit_h != null);
-    man.hash.add(comp.emit_asm != null);
-    man.hash.add(comp.emit_llvm_ir != null);
-    man.hash.add(comp.emit_analysis != null);
-    man.hash.add(comp.emit_docs != null);
+    man.hash.addOptionalEmitLoc(comp.emit_h);
+    man.hash.addOptionalEmitLoc(comp.emit_asm);
+    man.hash.addOptionalEmitLoc(comp.emit_llvm_ir);
+    man.hash.addOptionalEmitLoc(comp.emit_analysis);
+    man.hash.addOptionalEmitLoc(comp.emit_docs);
     man.hash.addOptionalBytes(comp.test_filter);
     man.hash.addOptionalBytes(comp.test_name_prefix);
 
@@ -2746,6 +2929,7 @@ fn updateStage1Module(comp: *Compilation, main_progress_node: *std.Progress.Node
         .subsystem = subsystem,
         .err_color = @enumToInt(comp.color),
         .pic = comp.bin_file.options.pic,
+        .pie = comp.bin_file.options.pie,
         .link_libc = comp.bin_file.options.link_libc,
         .link_libcpp = comp.bin_file.options.link_libcpp,
         .strip = comp.bin_file.options.strip,
@@ -2901,6 +3085,7 @@ pub fn build_crt_file(
         .want_stack_check = false,
         .want_valgrind = false,
         .want_pic = comp.bin_file.options.pic,
+        .want_pie = comp.bin_file.options.pie,
         .emit_h = null,
         .strip = comp.bin_file.options.strip,
         .is_native_os = comp.bin_file.options.is_native_os,

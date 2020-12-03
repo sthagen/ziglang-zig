@@ -19,6 +19,7 @@ pub usingnamespace switch (builtin.arch) {
     .aarch64 => @import("linux/arm64.zig"),
     .arm => @import("linux/arm-eabi.zig"),
     .riscv64 => @import("linux/riscv64.zig"),
+    .sparcv9 => @import("linux/sparc64.zig"),
     .mips, .mipsel => @import("linux/mips.zig"),
     .powerpc64, .powerpc64le => @import("linux/powerpc64.zig"),
     else => struct {},
@@ -30,6 +31,7 @@ pub usingnamespace @import("linux/securebits.zig");
 
 const is_mips = builtin.arch.isMIPS();
 const is_ppc64 = builtin.arch.isPPC64();
+const is_sparc = builtin.arch.isSPARC();
 
 pub const pid_t = i32;
 pub const fd_t = i32;
@@ -81,6 +83,27 @@ pub const AT_STATX_DONT_SYNC = 0x4000;
 
 /// Apply to the entire subtree
 pub const AT_RECURSIVE = 0x8000;
+
+/// Default is extend size
+pub const FALLOC_FL_KEEP_SIZE = 0x01;
+
+/// De-allocates range
+pub const FALLOC_FL_PUNCH_HOLE = 0x02;
+
+/// Reserved codepoint
+pub const FALLOC_FL_NO_HIDE_STALE = 0x04;
+
+/// Removes a range of a file without leaving a hole in the file
+pub const FALLOC_FL_COLLAPSE_RANGE = 0x08;
+
+/// Converts a range of file to zeros preferably without issuing data IO
+pub const FALLOC_FL_ZERO_RANGE = 0x10;
+
+/// Inserts space within the file size without overwriting any existing data
+pub const FALLOC_FL_INSERT_RANGE = 0x20;
+
+/// Unshares shared blocks within the file size without overwriting any existing data
+pub const FALLOC_FL_UNSHARE_RANGE = 0x40;
 
 pub const FUTEX_WAIT = 0;
 pub const FUTEX_WAKE = 1;
@@ -182,27 +205,46 @@ pub usingnamespace if (is_mips)
         pub const SA_NOCLDSTOP = 1;
         pub const SA_NOCLDWAIT = 0x10000;
         pub const SA_SIGINFO = 8;
+        pub const SA_RESTART = 0x10000000;
+        pub const SA_RESETHAND = 0x80000000;
+        pub const SA_ONSTACK = 0x08000000;
+        pub const SA_NODEFER = 0x40000000;
+        pub const SA_RESTORER = 0x04000000;
 
         pub const SIG_BLOCK = 1;
         pub const SIG_UNBLOCK = 2;
         pub const SIG_SETMASK = 3;
+    }
+else if (is_sparc)
+    struct {
+        pub const SA_NOCLDSTOP = 0x8;
+        pub const SA_NOCLDWAIT = 0x100;
+        pub const SA_SIGINFO = 0x200;
+        pub const SA_RESTART = 0x2;
+        pub const SA_RESETHAND = 0x4;
+        pub const SA_ONSTACK = 0x1;
+        pub const SA_NODEFER = 0x20;
+        pub const SA_RESTORER = 0x04000000;
+
+        pub const SIG_BLOCK = 1;
+        pub const SIG_UNBLOCK = 2;
+        pub const SIG_SETMASK = 4;
     }
 else
     struct {
         pub const SA_NOCLDSTOP = 1;
         pub const SA_NOCLDWAIT = 2;
         pub const SA_SIGINFO = 4;
+        pub const SA_RESTART = 0x10000000;
+        pub const SA_RESETHAND = 0x80000000;
+        pub const SA_ONSTACK = 0x08000000;
+        pub const SA_NODEFER = 0x40000000;
+        pub const SA_RESTORER = 0x04000000;
 
         pub const SIG_BLOCK = 0;
         pub const SIG_UNBLOCK = 1;
         pub const SIG_SETMASK = 2;
     };
-
-pub const SA_ONSTACK = 0x08000000;
-pub const SA_RESTART = 0x10000000;
-pub const SA_NODEFER = 0x40000000;
-pub const SA_RESETHAND = 0x80000000;
-pub const SA_RESTORER = 0x04000000;
 
 pub const SIGHUP = 1;
 pub const SIGINT = 2;
@@ -1110,11 +1152,19 @@ pub const SS_ONSTACK = 1;
 pub const SS_DISABLE = 2;
 pub const SS_AUTODISARM = 1 << 31;
 
-pub const stack_t = extern struct {
-    ss_sp: [*]u8,
-    ss_flags: i32,
-    ss_size: isize,
-};
+pub const stack_t = if (is_mips)
+    // IRIX compatible stack_t
+    extern struct {
+        ss_sp: [*]u8,
+        ss_size: usize,
+        ss_flags: i32,
+    }
+else
+    extern struct {
+        ss_sp: [*]u8,
+        ss_flags: i32,
+        ss_size: usize,
+    };
 
 pub const sigval = extern union {
     int: i32,
@@ -1200,6 +1250,8 @@ pub const IORING_FEAT_NODROP = 1 << 1;
 pub const IORING_FEAT_SUBMIT_STABLE = 1 << 2;
 pub const IORING_FEAT_RW_CUR_POS = 1 << 3;
 pub const IORING_FEAT_CUR_PERSONALITY = 1 << 4;
+pub const IORING_FEAT_FAST_POLL = 1 << 5;
+pub const IORING_FEAT_POLL_32BITS = 1 << 6;
 
 // io_uring_params.flags
 
@@ -1252,6 +1304,9 @@ pub const io_sqring_offsets = extern struct {
 /// needs io_uring_enter wakeup
 pub const IORING_SQ_NEED_WAKEUP = 1 << 0;
 
+/// kernel has cqes waiting beyond the cq ring
+pub const IORING_SQ_CQ_OVERFLOW = 1 << 1;
+
 pub const io_cqring_offsets = extern struct {
     head: u32,
     tail: u32,
@@ -1263,48 +1318,19 @@ pub const io_cqring_offsets = extern struct {
 };
 
 pub const io_uring_sqe = extern struct {
-    pub const union1 = extern union {
-        off: u64,
-        addr2: u64,
-    };
-
-    pub const union2 = extern union {
-        rw_flags: kernel_rwf,
-        fsync_flags: u32,
-        poll_events: u16,
-        sync_range_flags: u32,
-        msg_flags: u32,
-        timeout_flags: u32,
-        accept_flags: u32,
-        cancel_flags: u32,
-        open_flags: u32,
-        statx_flags: u32,
-        fadvise_flags: u32,
-    };
-
-    pub const union3 = extern union {
-        struct1: extern struct {
-            /// index into fixed buffers, if used
-            buf_index: u16,
-
-            /// personality to use, if used
-            personality: u16,
-        },
-        __pad2: [3]u64,
-    };
     opcode: IORING_OP,
     flags: u8,
     ioprio: u16,
     fd: i32,
-
-    union1: union1,
+    off: u64,
     addr: u64,
     len: u32,
-
-    union2: union2,
+    rw_flags: u32,
     user_data: u64,
-
-    union3: union3,
+    buf_index: u16,
+    personality: u16,
+    splice_fd_in: i32,
+    __pad2: [2]u64,
 };
 
 pub const IOSQE_BIT = extern enum(u8) {
@@ -1313,6 +1339,7 @@ pub const IOSQE_BIT = extern enum(u8) {
     IO_LINK,
     IO_HARDLINK,
     ASYNC,
+    BUFFER_SELECT,
 
     _,
 };
@@ -1332,7 +1359,10 @@ pub const IOSQE_IO_LINK = 1 << @enumToInt(IOSQE_BIT.IO_LINK);
 pub const IOSQE_IO_HARDLINK = 1 << @enumToInt(IOSQE_BIT.IO_HARDLINK);
 
 /// always go async
-pub const IOSQE_ASYNC = 1 << IOSQE_BIT.ASYNC;
+pub const IOSQE_ASYNC = 1 << @enumToInt(IOSQE_BIT.ASYNC);
+
+/// select buffer from buf_group
+pub const IOSQE_BUFFER_SELECT = 1 << @enumToInt(IOSQE_BIT.BUFFER_SELECT);
 
 pub const IORING_OP = extern enum(u8) {
     NOP,
@@ -1365,6 +1395,10 @@ pub const IORING_OP = extern enum(u8) {
     RECV,
     OPENAT2,
     EPOLL_CTL,
+    SPLICE,
+    PROVIDE_BUFFERS,
+    REMOVE_BUFFERS,
+    TEE,
 
     _,
 };

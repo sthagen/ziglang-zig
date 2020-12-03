@@ -430,6 +430,9 @@ pub const TestContext = struct {
         var default_prng = std.rand.DefaultPrng.init(random_seed);
 
         for (self.cases.items) |case| {
+            if (build_options.skip_non_native and case.target.getCpuArch() != std.Target.current.cpu.arch)
+                continue;
+
             var prg_node = root_node.start(case.name, case.updates.items.len);
             prg_node.activate();
             defer prg_node.end();
@@ -463,10 +466,10 @@ pub const TestContext = struct {
 
         var cache_dir = try tmp.dir.makeOpenPath("zig-cache", .{});
         defer cache_dir.close();
-        const bogus_path = "bogus"; // TODO this will need to be fixed before we can test LLVM extensions
+        const tmp_path = try std.fs.path.join(arena, &[_][]const u8{ ".", "zig-cache", "tmp", &tmp.sub_path });
         const zig_cache_directory: Compilation.Directory = .{
             .handle = cache_dir,
-            .path = try std.fs.path.join(arena, &[_][]const u8{ bogus_path, "zig-cache" }),
+            .path = try std.fs.path.join(arena, &[_][]const u8{ tmp_path, "zig-cache" }),
         };
 
         const tmp_src_path = switch (case.extension) {
@@ -475,7 +478,7 @@ pub const TestContext = struct {
         };
 
         var root_pkg: Package = .{
-            .root_src_directory = .{ .path = bogus_path, .handle = tmp.dir },
+            .root_src_directory = .{ .path = tmp_path, .handle = tmp.dir },
             .root_src_path = tmp_src_path,
         };
 
@@ -488,7 +491,7 @@ pub const TestContext = struct {
         });
 
         const emit_directory: Compilation.Directory = .{
-            .path = bogus_path,
+            .path = tmp_path,
             .handle = tmp.dir,
         };
         const emit_bin: Compilation.EmitLoc = .{

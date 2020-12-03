@@ -907,8 +907,11 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
         // Create an LLD command line and invoke it.
         var argv = std.ArrayList([]const u8).init(self.base.allocator);
         defer argv.deinit();
-        // Even though we're calling LLD as a library it thinks the first argument is its own exe name.
-        try argv.append("lld");
+        // The first argument is ignored as LLD is called as a library, set it
+        // anyway to the correct LLD driver name for this target so that it's
+        // correctly printed when `verbose_link` is true. This is needed for some
+        // tools such as CMake when Zig is used as C compiler.
+        try argv.append("lld-link");
 
         try argv.append("-ERRORLIMIT:0");
         try argv.append("-NOLOGO");
@@ -1054,6 +1057,11 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
 
                         if (is_dyn_lib) {
                             try argv.append(try comp.get_libc_crt_file(arena, "dllcrt2.o"));
+                            if (target.cpu.arch == .i386) {
+                                try argv.append("-ALTERNATENAME:__DllMainCRTStartup@12=_DllMainCRTStartup@12");
+                            } else {
+                                try argv.append("-ALTERNATENAME:_DllMainCRTStartup=DllMainCRTStartup");
+                            }
                         } else {
                             try argv.append(try comp.get_libc_crt_file(arena, "crt2.o"));
                         }
