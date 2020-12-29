@@ -16,6 +16,7 @@ const link = @import("../link.zig");
 const build_options = @import("build_options");
 const Cache = @import("../Cache.zig");
 const mingw = @import("../mingw.zig");
+const llvm_backend = @import("../llvm_backend.zig");
 
 const allocation_padding = 4 / 3;
 const minimum_text_block_size = 64 * allocation_padding;
@@ -31,6 +32,9 @@ comptime {
 pub const base_tag: link.File.Tag = .coff;
 
 const msdos_stub = @embedFile("msdos-stub.bin");
+
+/// If this is not null, an object file is created by LLVM and linked with LLD afterwards.
+llvm_ir_module: ?*llvm_backend.LLVMIRModule = null,
 
 base: link.File,
 ptr_width: PtrWidth,
@@ -121,8 +125,13 @@ pub const SrcFn = void;
 pub fn openPath(allocator: *Allocator, sub_path: []const u8, options: link.Options) !*Coff {
     assert(options.object_format == .coff);
 
-    if (options.use_llvm) return error.LLVM_BackendIsTODO_ForCoff; // TODO
-    if (options.use_lld) return error.LLD_LinkingIsTODO_ForCoff; // TODO
+    if (build_options.have_llvm and options.use_llvm) {
+        const self = try createEmpty(allocator, options);
+        errdefer self.base.destroy();
+
+        self.llvm_ir_module = try llvm_backend.LLVMIRModule.create(allocator, sub_path, options);
+        return self;
+    }
 
     const file = try options.emit.?.directory.handle.createFile(sub_path, .{
         .truncate = false,
@@ -404,6 +413,8 @@ pub fn createEmpty(gpa: *Allocator, options: link.Options) !*Coff {
 }
 
 pub fn allocateDeclIndexes(self: *Coff, decl: *Module.Decl) !void {
+    if (self.llvm_ir_module) |_| return;
+
     try self.offset_table.ensureCapacity(self.base.allocator, self.offset_table.items.len + 1);
 
     if (self.offset_table_free_list.popOrNull()) |i| {
@@ -648,6 +659,9 @@ pub fn updateDecl(self: *Coff, module: *Module, decl: *Module.Decl) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    if (build_options.have_llvm)
+        if (self.llvm_ir_module) |llvm_ir_module| return try llvm_ir_module.updateDecl(module, decl);
+
     var code_buffer = std.ArrayList(u8).init(self.base.allocator);
     defer code_buffer.deinit();
 
@@ -698,12 +712,16 @@ pub fn updateDecl(self: *Coff, module: *Module, decl: *Module.Decl) !void {
 }
 
 pub fn freeDecl(self: *Coff, decl: *Module.Decl) void {
+    if (self.llvm_ir_module) |_| return;
+
     // Appending to free lists is allowed to fail because the free lists are heuristics based anyway.
     self.freeTextBlock(&decl.link.coff);
     self.offset_table_free_list.append(self.base.allocator, decl.link.coff.offset_table_index) catch {};
 }
 
 pub fn updateDeclExports(self: *Coff, module: *Module, decl: *const Module.Decl, exports: []const *Module.Export) !void {
+    if (self.llvm_ir_module) |_| return;
+
     for (exports) |exp| {
         if (exp.options.section) |section_name| {
             if (!mem.eql(u8, section_name, ".text")) {
@@ -743,6 +761,9 @@ pub fn flush(self: *Coff, comp: *Compilation) !void {
 pub fn flushModule(self: *Coff, comp: *Compilation) !void {
     const tracy = trace(@src());
     defer tracy.end();
+
+    if (build_options.have_llvm)
+        if (self.llvm_ir_module) |llvm_ir_module| return try llvm_ir_module.flushModule(comp);
 
     if (self.text_section_size_dirty) {
         // Write the new raw size in the .text header
@@ -835,7 +856,7 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
         man.hash.addOptional(self.base.options.image_base_override);
         man.hash.addListOfBytes(self.base.options.extra_lld_args);
         man.hash.addListOfBytes(self.base.options.lib_dirs);
-        man.hash.add(self.base.options.is_compiler_rt_or_libc);
+        man.hash.add(self.base.options.skip_linker_dependencies);
         if (self.base.options.link_libc) {
             man.hash.add(self.base.options.libc_installation != null);
             if (self.base.options.libc_installation) |libc_installation| {
@@ -907,11 +928,10 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
         // Create an LLD command line and invoke it.
         var argv = std.ArrayList([]const u8).init(self.base.allocator);
         defer argv.deinit();
-        // The first argument is ignored as LLD is called as a library, set it
-        // anyway to the correct LLD driver name for this target so that it's
-        // correctly printed when `verbose_link` is true. This is needed for some
-        // tools such as CMake when Zig is used as C compiler.
-        try argv.append("lld-link");
+        // We will invoke ourselves as a child process to gain access to LLD.
+        // This is necessary because LLD does not behave properly as a library -
+        // it calls exit() and does not reset all global data between invocations.
+        try argv.appendSlice(&[_][]const u8{ comp.self_exe_path.?, "lld-link" });
 
         try argv.append("-ERRORLIMIT:0");
         try argv.append("-NOLOGO");
@@ -1125,8 +1145,9 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
             try argv.append(comp.libunwind_static_lib.?.full_object_path);
         }
 
+        // TODO: remove when stage2 can build compiler_rt.zig, c.zig and ssp.zig
         // compiler-rt, libc and libssp
-        if (is_exe_or_dyn_lib and !self.base.options.is_compiler_rt_or_libc) {
+        if (is_exe_or_dyn_lib and !self.base.options.skip_linker_dependencies and build_options.is_stage1) {
             if (!self.base.options.link_libc) {
                 try argv.append(comp.libc_static_lib.?.full_object_path);
             }
@@ -1149,45 +1170,65 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
         }
 
         if (self.base.options.verbose_link) {
-            Compilation.dump_argv(argv.items);
+            // Skip over our own name so that the LLD linker name is the first argv item.
+            Compilation.dump_argv(argv.items[1..]);
         }
 
-        const new_argv = try arena.allocSentinel(?[*:0]const u8, argv.items.len, null);
-        for (argv.items) |arg, i| {
-            new_argv[i] = try arena.dupeZ(u8, arg);
-        }
+        // Sadly, we must run LLD as a child process because it does not behave
+        // properly as a library.
+        const child = try std.ChildProcess.init(argv.items, arena);
+        defer child.deinit();
 
-        var stderr_context: LLDContext = .{
-            .coff = self,
-            .data = std.ArrayList(u8).init(self.base.allocator),
-        };
-        defer stderr_context.data.deinit();
-        var stdout_context: LLDContext = .{
-            .coff = self,
-            .data = std.ArrayList(u8).init(self.base.allocator),
-        };
-        defer stdout_context.data.deinit();
-        const llvm = @import("../llvm.zig");
-        const ok = llvm.Link(
-            .COFF,
-            new_argv.ptr,
-            new_argv.len,
-            append_diagnostic,
-            @ptrToInt(&stdout_context),
-            @ptrToInt(&stderr_context),
-        );
-        if (stderr_context.oom or stdout_context.oom) return error.OutOfMemory;
-        if (stdout_context.data.items.len != 0) {
-            std.log.warn("unexpected LLD stdout: {}", .{stdout_context.data.items});
-        }
-        if (!ok) {
-            // TODO parse this output and surface with the Compilation API rather than
-            // directly outputting to stderr here.
-            std.debug.print("{}", .{stderr_context.data.items});
-            return error.LLDReportedFailure;
-        }
-        if (stderr_context.data.items.len != 0) {
-            std.log.warn("unexpected LLD stderr: {}", .{stderr_context.data.items});
+        if (comp.clang_passthrough_mode) {
+            child.stdin_behavior = .Inherit;
+            child.stdout_behavior = .Inherit;
+            child.stderr_behavior = .Inherit;
+
+            const term = child.spawnAndWait() catch |err| {
+                log.err("unable to spawn {s}: {s}", .{ argv.items[0], @errorName(err) });
+                return error.UnableToSpawnSelf;
+            };
+            switch (term) {
+                .Exited => |code| {
+                    if (code != 0) {
+                        // TODO https://github.com/ziglang/zig/issues/6342
+                        std.process.exit(1);
+                    }
+                },
+                else => std.process.abort(),
+            }
+        } else {
+            child.stdin_behavior = .Ignore;
+            child.stdout_behavior = .Ignore;
+            child.stderr_behavior = .Pipe;
+
+            try child.spawn();
+
+            const stderr = try child.stderr.?.reader().readAllAlloc(arena, 10 * 1024 * 1024);
+
+            const term = child.wait() catch |err| {
+                log.err("unable to spawn {s}: {s}", .{ argv.items[0], @errorName(err) });
+                return error.UnableToSpawnSelf;
+            };
+
+            switch (term) {
+                .Exited => |code| {
+                    if (code != 0) {
+                        // TODO parse this output and surface with the Compilation API rather than
+                        // directly outputting to stderr here.
+                        std.debug.print("{s}", .{stderr});
+                        return error.LLDReportedFailure;
+                    }
+                },
+                else => {
+                    log.err("{s} terminated with stderr:\n{s}", .{ argv.items[0], stderr });
+                    return error.LLDCrashed;
+                },
+            }
+
+            if (stderr.len != 0) {
+                log.warn("unexpected LLD stderr:\n{s}", .{stderr});
+            }
         }
     }
 
@@ -1195,11 +1236,11 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
         // Update the file with the digest. If it fails we can continue; it only
         // means that the next invocation will have an unnecessary cache miss.
         Cache.writeSmallFile(directory.handle, id_symlink_basename, &digest) catch |err| {
-            std.log.warn("failed to save linking hash digest file: {}", .{@errorName(err)});
+            log.warn("failed to save linking hash digest file: {}", .{@errorName(err)});
         };
         // Again failure here only means an unnecessary cache miss.
         man.writeManifest() catch |err| {
-            std.log.warn("failed to write cache manifest when linking: {}", .{@errorName(err)});
+            log.warn("failed to write cache manifest when linking: {}", .{@errorName(err)});
         };
         // We hang on to this lock so that the output file path can be used without
         // other processes clobbering it.
@@ -1207,21 +1248,8 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
     }
 }
 
-const LLDContext = struct {
-    data: std.ArrayList(u8),
-    coff: *Coff,
-    oom: bool = false,
-};
-
-fn append_diagnostic(context: usize, ptr: [*]const u8, len: usize) callconv(.C) void {
-    const lld_context = @intToPtr(*LLDContext, context);
-    const msg = ptr[0..len];
-    lld_context.data.appendSlice(msg) catch |err| switch (err) {
-        error.OutOfMemory => lld_context.oom = true,
-    };
-}
-
 pub fn getDeclVAddr(self: *Coff, decl: *const Module.Decl) u64 {
+    assert(self.llvm_ir_module == null);
     return self.text_section_virtual_address + decl.link.coff.text_offset;
 }
 
@@ -1230,6 +1258,9 @@ pub fn updateDeclLineNumber(self: *Coff, module: *Module, decl: *Module.Decl) !v
 }
 
 pub fn deinit(self: *Coff) void {
+    if (build_options.have_llvm)
+        if (self.llvm_ir_module) |ir_module| ir_module.deinit(self.base.allocator);
+
     self.text_block_free_list.deinit(self.base.allocator);
     self.offset_table.deinit(self.base.allocator);
     self.offset_table_free_list.deinit(self.base.allocator);

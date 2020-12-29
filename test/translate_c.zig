@@ -3,6 +3,15 @@ const std = @import("std");
 const CrossTarget = std.zig.CrossTarget;
 
 pub fn addCases(cases: *tests.TranslateCContext) void {
+    cases.add("variadic function demoted to prototype",
+        \\int foo(int bar, ...) {
+        \\    return 1;
+        \\}
+    , &[_][]const u8{
+        \\warning: TODO unable to translate variadic function, demoted to declaration
+        \\pub extern fn foo(bar: c_int, ...) c_int;
+    });
+
     cases.add("pointer to opaque demoted struct",
         \\typedef struct {
         \\    _Atomic int foo;
@@ -2000,9 +2009,9 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\    int h = (a || b);
         \\    int i = (b || c);
         \\    int j = (a || c);
-        \\    int k = (a || d);
-        \\    int l = (d && b);
-        \\    int m = (c || d);
+        \\    int k = (a || (int)d);
+        \\    int l = ((int)d && b);
+        \\    int m = (c || (unsigned int)d);
         \\    SomeTypedef td = 44;
         \\    int o = (td || b);
         \\    int p = (c && td);
@@ -2027,9 +2036,9 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\    var h: c_int = @boolToInt(((a != 0) or (b != 0)));
         \\    var i: c_int = @boolToInt(((b != 0) or (c != null)));
         \\    var j: c_int = @boolToInt(((a != 0) or (c != null)));
-        \\    var k: c_int = @boolToInt(((a != 0) or (@enumToInt(d) != 0)));
-        \\    var l: c_int = @boolToInt(((@enumToInt(d) != 0) and (b != 0)));
-        \\    var m: c_int = @boolToInt(((c != null) or (@enumToInt(d) != 0)));
+        \\    var k: c_int = @boolToInt(((a != 0) or (@bitCast(c_int, @enumToInt(d)) != 0)));
+        \\    var l: c_int = @boolToInt(((@bitCast(c_int, @enumToInt(d)) != 0) and (b != 0)));
+        \\    var m: c_int = @boolToInt(((c != null) or (@bitCast(c_uint, @enumToInt(d)) != 0)));
         \\    var td: SomeTypedef = 44;
         \\    var o: c_int = @boolToInt(((td != 0) or (b != 0)));
         \\    var p: c_int = @boolToInt(((c != null) and (td != 0)));
@@ -2964,10 +2973,10 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
     , &[_][]const u8{
         \\pub export fn foo(arg_x: bool) bool {
         \\    var x = arg_x;
-        \\    var a: bool = (@intCast(c_int, @bitCast(i1, @intCast(u1, @boolToInt(x)))) != @as(c_int, 1));
-        \\    var b: bool = (@intCast(c_int, @bitCast(i1, @intCast(u1, @boolToInt(a)))) != @as(c_int, 0));
+        \\    var a: bool = (@as(c_int, @boolToInt(x)) != @as(c_int, 1));
+        \\    var b: bool = (@as(c_int, @boolToInt(a)) != @as(c_int, 0));
         \\    var c: bool = @ptrToInt(foo) != 0;
-        \\    return foo((@intCast(c_int, @bitCast(i1, @intCast(u1, @boolToInt(c)))) != @intCast(c_int, @bitCast(i1, @intCast(u1, @boolToInt(b))))));
+        \\    return foo((@as(c_int, @boolToInt(c)) != @as(c_int, @boolToInt(b))));
         \\}
     });
 

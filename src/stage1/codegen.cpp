@@ -8,7 +8,6 @@
 #include "analyze.hpp"
 #include "ast_render.hpp"
 #include "codegen.hpp"
-#include "config.h"
 #include "errmsg.hpp"
 #include "error.hpp"
 #include "hash_map.hpp"
@@ -471,6 +470,10 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
         addLLVMFnAttr(llvm_fn, "naked");
     } else {
         ZigLLVMFunctionSetCallingConv(llvm_fn, get_llvm_cc(g, cc));
+    }
+
+    if (g->tsan_enabled) {
+        addLLVMFnAttr(llvm_fn, "sanitize_thread");
     }
 
     bool want_cold = fn->is_cold;
@@ -5178,11 +5181,7 @@ static LLVMValueRef ir_render_ref(CodeGen *g, IrExecutableGen *executable, IrIns
 
 static LLVMValueRef ir_render_err_name(CodeGen *g, IrExecutableGen *executable, IrInstGenErrName *instruction) {
     assert(g->generate_error_name_table);
-
-    if (g->errors_by_index.length == 1) {
-        LLVMBuildUnreachable(g->builder);
-        return nullptr;
-    }
+    assert(g->errors_by_index.length > 0);
 
     LLVMValueRef err_val = ir_llvm_value(g, instruction->value);
     if (ir_want_runtime_safety(g, &instruction->base)) {
@@ -7856,9 +7855,9 @@ static LLVMValueRef gen_const_val(CodeGen *g, ZigValue *const_val, const char *n
         case ZigTypeIdOpaque:
             zig_unreachable();
         case ZigTypeIdFnFrame:
-            zig_panic("TODO");
+            zig_panic("TODO: gen_const_val ZigTypeIdFnFrame");
         case ZigTypeIdAnyFrame:
-            zig_panic("TODO");
+            zig_panic("TODO: gen_const_val ZigTypeIdAnyFrame");
     }
     zig_unreachable();
 }
@@ -7890,7 +7889,7 @@ static void render_const_val_global(CodeGen *g, ZigValue *const_val, const char 
 }
 
 static void generate_error_name_table(CodeGen *g) {
-    if (g->err_name_table != nullptr || !g->generate_error_name_table || g->errors_by_index.length == 1) {
+    if (g->err_name_table != nullptr || !g->generate_error_name_table) {
         return;
     }
 
@@ -8396,7 +8395,7 @@ static void do_code_gen(CodeGen *g) {
     assert(!g->errors.length);
 
     if (buf_len(&g->global_asm) != 0) {
-        LLVMSetModuleInlineAsm(g->module, buf_ptr(&g->global_asm));
+        LLVMSetModuleInlineAsm2(g->module, buf_ptr(&g->global_asm), buf_len(&g->global_asm));
     }
 
     while (g->type_resolve_stack.length != 0) {
@@ -8437,7 +8436,7 @@ static void zig_llvm_emit_output(CodeGen *g) {
     // pipeline multiple times if this is requested.
     if (asm_filename != nullptr && bin_filename != nullptr) {
         if (ZigLLVMTargetMachineEmitToFile(g->target_machine, g->module, &err_msg, g->build_mode == BuildModeDebug,
-            is_small, g->enable_time_report, nullptr, bin_filename, llvm_ir_filename))
+            is_small, g->enable_time_report, g->tsan_enabled, nullptr, bin_filename, llvm_ir_filename))
         {
             fprintf(stderr, "LLVM failed to emit file: %s\n", err_msg);
             exit(1);
@@ -8447,7 +8446,7 @@ static void zig_llvm_emit_output(CodeGen *g) {
     }
 
     if (ZigLLVMTargetMachineEmitToFile(g->target_machine, g->module, &err_msg, g->build_mode == BuildModeDebug,
-        is_small, g->enable_time_report, asm_filename, bin_filename, llvm_ir_filename))
+        is_small, g->enable_time_report, g->tsan_enabled, asm_filename, bin_filename, llvm_ir_filename))
     {
         fprintf(stderr, "LLVM failed to emit file: %s\n", err_msg);
         exit(1);
@@ -8660,6 +8659,13 @@ static void define_builtin_types(CodeGen *g) {
             break;
         case ZigLLVM_avr:
             // It's either a float or a double, depending on a toolchain switch
+            add_fp_entry(g, "c_longdouble", 64, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
+            break;
+        case ZigLLVM_msp430:
+            add_fp_entry(g, "c_longdouble", 64, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
+            break;
+        case ZigLLVM_bpfel:
+        case ZigLLVM_bpfeb:
             add_fp_entry(g, "c_longdouble", 64, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
             break;
         default:
@@ -9055,7 +9061,7 @@ Buf *codegen_generate_builtin_source(CodeGen *g) {
     buf_append_str(contents, "/// Deprecated: use `std.Target.current.cpu.arch.endian()`\n");
     buf_append_str(contents, "pub const endian = Target.current.cpu.arch.endian();\n");
     buf_appendf(contents, "pub const output_mode = OutputMode.Obj;\n");
-    buf_appendf(contents, "pub const link_mode = LinkMode.%s;\n", ZIG_LINK_MODE);
+    buf_appendf(contents, "pub const link_mode = LinkMode.%s;\n", ZIG_QUOTE(ZIG_LINK_MODE));
     buf_appendf(contents, "pub const is_test = false;\n");
     buf_appendf(contents, "pub const single_threaded = %s;\n", bool_to_str(g->is_single_threaded));
     buf_appendf(contents, "pub const abi = Abi.%s;\n", cur_abi);
@@ -9255,9 +9261,9 @@ static void init(CodeGen *g) {
     g->builder = LLVMCreateBuilder();
     g->dbuilder = ZigLLVMCreateDIBuilder(g->module, true);
 
-    // Don't use ZIG_VERSION_STRING here, llvm misparses it when it includes
-    // the git revision.
-    Buf *producer = buf_sprintf("zig %d.%d.%d", ZIG_VERSION_MAJOR, ZIG_VERSION_MINOR, ZIG_VERSION_PATCH);
+    // Don't use the version string here, llvm misparses it when it includes the git revision.
+    Stage2SemVer semver = stage2_version();
+    Buf *producer = buf_sprintf("zig %d.%d.%d", semver.major, semver.minor, semver.patch);
     const char *flags = "";
     unsigned runtime_version = 0;
 
@@ -9555,9 +9561,9 @@ void codegen_build_object(CodeGen *g) {
     }
 
     do_code_gen(g);
-    codegen_add_time_event(g, "LLVM Emit Output");
+    codegen_add_time_event(g, "LLVM Emit Object");
     {
-        const char *progress_name = "LLVM Emit Output";
+        const char *progress_name = "LLVM Emit Object";
         codegen_switch_sub_prog_node(g, stage2_progress_start(g->main_progress_node,
                 progress_name, strlen(progress_name), 0));
     }

@@ -41,8 +41,12 @@ pub const Inst = struct {
         /// Allocates stack local memory. Its lifetime ends when the block ends that contains
         /// this instruction. The operand is the type of the allocated object.
         alloc,
+        /// Same as `alloc` except mutable.
+        alloc_mut,
         /// Same as `alloc` except the type is inferred.
         alloc_inferred,
+        /// Same as `alloc_inferred` except mutable.
+        alloc_inferred_mut,
         /// Create an `anyframe->T`.
         anyframe_type,
         /// Array concatenation. `a ++ b`
@@ -251,6 +255,8 @@ pub const Inst = struct {
         subwrap,
         /// Returns the type of a value.
         typeof,
+        /// Is the builtin @TypeOf which returns the type after peertype resolution of one or more params
+        typeof_peer,
         /// Asserts control-flow will not reach this instruction. Not safety checked - the compiler
         /// will assume the correctness of this instruction.
         unreach_nocheck,
@@ -285,24 +291,27 @@ pub const Inst = struct {
 
         pub fn Type(tag: Tag) type {
             return switch (tag) {
+                .alloc_inferred,
+                .alloc_inferred_mut,
                 .breakpoint,
                 .dbg_stmt,
                 .returnvoid,
-                .alloc_inferred,
                 .ret_ptr,
                 .ret_type,
                 .unreach_nocheck,
                 .@"unreachable",
                 => NoOp,
 
+                .alloc,
+                .alloc_mut,
                 .boolnot,
+                .compileerror,
                 .deref,
                 .@"return",
                 .isnull,
                 .isnonnull,
                 .iserr,
                 .ptrtoint,
-                .alloc,
                 .ensure_result_used,
                 .ensure_result_non_error,
                 .ensure_indexable,
@@ -383,7 +392,6 @@ pub const Inst = struct {
                 .declval => DeclVal,
                 .declval_in_module => DeclValInModule,
                 .coerce_result_block_ptr => CoerceResultBlockPtr,
-                .compileerror => CompileError,
                 .loop => Loop,
                 .@"const" => Const,
                 .str => Str,
@@ -403,6 +411,7 @@ pub const Inst = struct {
                 .error_set => ErrorSet,
                 .slice => Slice,
                 .switchbr => SwitchBr,
+                .typeof_peer => TypeOfPeer,
             };
         }
 
@@ -413,7 +422,9 @@ pub const Inst = struct {
                 .add,
                 .addwrap,
                 .alloc,
+                .alloc_mut,
                 .alloc_inferred,
+                .alloc_inferred_mut,
                 .array_cat,
                 .array_mul,
                 .array_type,
@@ -510,6 +521,7 @@ pub const Inst = struct {
                 .slice_start,
                 .import,
                 .switch_range,
+                .typeof_peer,
                 => false,
 
                 .@"break",
@@ -689,16 +701,6 @@ pub const Inst = struct {
         positionals: struct {
             dest_type: *Inst,
             block: *Block,
-        },
-        kw_args: struct {},
-    };
-
-    pub const CompileError = struct {
-        pub const base_tag = Tag.compileerror;
-        base: Inst,
-
-        positionals: struct {
-            msg: []const u8,
         },
         kw_args: struct {},
     };
@@ -1031,6 +1033,14 @@ pub const Inst = struct {
             item: *Inst,
             body: Module.Body,
         };
+    };
+    pub const TypeOfPeer = struct {
+        pub const base_tag = .typeof_peer;
+        base: Inst,
+        positionals: struct {
+            items: []*Inst,
+        },
+        kw_args: struct {},
     };
 };
 
@@ -1914,14 +1924,29 @@ const EmitZIR = struct {
                 .sema_failure_retryable,
                 .dependency_failure,
                 => if (self.old_module.failed_decls.get(ir_decl)) |err_msg| {
-                    const fail_inst = try self.arena.allocator.create(Inst.CompileError);
+                    const fail_inst = try self.arena.allocator.create(Inst.UnOp);
                     fail_inst.* = .{
                         .base = .{
                             .src = ir_decl.src(),
-                            .tag = Inst.CompileError.base_tag,
+                            .tag = .compileerror,
                         },
                         .positionals = .{
-                            .msg = try self.arena.allocator.dupe(u8, err_msg.msg),
+                            .operand = blk: {
+                                const msg_str = try self.arena.allocator.dupe(u8, err_msg.msg);
+
+                                const str_inst = try self.arena.allocator.create(Inst.Str);
+                                str_inst.* = .{
+                                    .base = .{
+                                        .src = ir_decl.src(),
+                                        .tag = Inst.Str.base_tag,
+                                    },
+                                    .positionals = .{
+                                        .bytes = err_msg.msg,
+                                    },
+                                    .kw_args = .{},
+                                };
+                                break :blk &str_inst.base;
+                            },
                         },
                         .kw_args = .{},
                     };
@@ -2044,28 +2069,58 @@ const EmitZIR = struct {
             },
             .sema_failure => {
                 const err_msg = self.old_module.failed_decls.get(module_fn.owner_decl).?;
-                const fail_inst = try self.arena.allocator.create(Inst.CompileError);
+                const fail_inst = try self.arena.allocator.create(Inst.UnOp);
                 fail_inst.* = .{
                     .base = .{
                         .src = src,
-                        .tag = Inst.CompileError.base_tag,
+                        .tag = .compileerror,
                     },
                     .positionals = .{
-                        .msg = try self.arena.allocator.dupe(u8, err_msg.msg),
+                        .operand = blk: {
+                            const msg_str = try self.arena.allocator.dupe(u8, err_msg.msg);
+
+                            const str_inst = try self.arena.allocator.create(Inst.Str);
+                            str_inst.* = .{
+                                .base = .{
+                                    .src = src,
+                                    .tag = Inst.Str.base_tag,
+                                },
+                                .positionals = .{
+                                    .bytes = msg_str,
+                                },
+                                .kw_args = .{},
+                            };
+                            break :blk &str_inst.base;
+                        },
                     },
                     .kw_args = .{},
                 };
                 try instructions.append(&fail_inst.base);
             },
             .dependency_failure => {
-                const fail_inst = try self.arena.allocator.create(Inst.CompileError);
+                const fail_inst = try self.arena.allocator.create(Inst.UnOp);
                 fail_inst.* = .{
                     .base = .{
                         .src = src,
-                        .tag = Inst.CompileError.base_tag,
+                        .tag = .compileerror,
                     },
                     .positionals = .{
-                        .msg = try self.arena.allocator.dupe(u8, "depends on another failed Decl"),
+                        .operand = blk: {
+                            const msg_str = try self.arena.allocator.dupe(u8, "depends on another failed Decl");
+
+                            const str_inst = try self.arena.allocator.create(Inst.Str);
+                            str_inst.* = .{
+                                .base = .{
+                                    .src = src,
+                                    .tag = Inst.Str.base_tag,
+                                },
+                                .positionals = .{
+                                    .bytes = msg_str,
+                                },
+                                .kw_args = .{},
+                            };
+                            break :blk &str_inst.base;
+                        },
                     },
                     .kw_args = .{},
                 };
@@ -2330,6 +2385,9 @@ const EmitZIR = struct {
                 .cmp_neq => try self.emitBinOp(inst.src, new_body, inst.castTag(.cmp_neq).?, .cmp_neq),
                 .booland => try self.emitBinOp(inst.src, new_body, inst.castTag(.booland).?, .booland),
                 .boolor => try self.emitBinOp(inst.src, new_body, inst.castTag(.boolor).?, .boolor),
+                .bitand => try self.emitBinOp(inst.src, new_body, inst.castTag(.bitand).?, .bitand),
+                .bitor => try self.emitBinOp(inst.src, new_body, inst.castTag(.bitor).?, .bitor),
+                .xor => try self.emitBinOp(inst.src, new_body, inst.castTag(.xor).?, .xor),
 
                 .bitcast => try self.emitCast(inst.src, new_body, inst.castTag(.bitcast).?, .bitcast),
                 .intcast => try self.emitCast(inst.src, new_body, inst.castTag(.intcast).?, .intcast),

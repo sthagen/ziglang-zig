@@ -61,6 +61,7 @@ pub const Builder = struct {
     installed_files: ArrayList(InstalledFile),
     build_root: []const u8,
     cache_root: []const u8,
+    global_cache_root: []const u8,
     release_mode: ?builtin.Mode,
     is_release: bool,
     override_lib_dir: ?[]const u8,
@@ -126,6 +127,7 @@ pub const Builder = struct {
         zig_exe: []const u8,
         build_root: []const u8,
         cache_root: []const u8,
+        global_cache_root: []const u8,
     ) !*Builder {
         const env_map = try allocator.create(BufMap);
         env_map.* = try process.getEnvMap(allocator);
@@ -135,6 +137,7 @@ pub const Builder = struct {
             .zig_exe = zig_exe,
             .build_root = build_root,
             .cache_root = try fs.path.relative(allocator, build_root, cache_root),
+            .global_cache_root = global_cache_root,
             .verbose = false,
             .verbose_tokenize = false,
             .verbose_ast = false,
@@ -506,7 +509,26 @@ pub const Builder = struct {
                     return null;
                 },
             },
-            .Float => panic("TODO float options to build script", .{}),
+            .Float => switch (entry.value.value) {
+                .Flag => {
+                    warn("Expected -D{} to be a float, but received a boolean.\n", .{name});
+                    self.markInvalidUserInput();
+                    return null;
+                },
+                .Scalar => |s| {
+                    const n = std.fmt.parseFloat(T, s) catch |err| {
+                        warn("Expected -D{} to be a float of type {}.\n", .{ name, @typeName(T) });
+                        self.markInvalidUserInput();
+                        return null;
+                    };
+                    return n;
+                },
+                .List => {
+                    warn("Expected -D{} to be a float, but received a list.\n", .{name});
+                    self.markInvalidUserInput();
+                    return null;
+                },
+            },
             .Enum => switch (entry.value.value) {
                 .Flag => {
                     warn("Expected -D{} to be a string, but received a boolean.\n", .{name});
@@ -1128,7 +1150,13 @@ test "builder.findProgram compiles" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
-    const builder = try Builder.create(&arena.allocator, "zig", "zig-cache", "zig-cache");
+    const builder = try Builder.create(
+        &arena.allocator,
+        "zig",
+        "zig-cache",
+        "zig-cache",
+        "zig-cache",
+    );
     defer builder.destroy();
     _ = builder.findProgram(&[_][]const u8{}, &[_][]const u8{}) catch null;
 }
@@ -1148,6 +1176,11 @@ pub const Pkg = struct {
 const CSourceFile = struct {
     source: FileSource,
     args: []const []const u8,
+};
+
+const CSourceFiles = struct {
+    files: []const []const u8,
+    flags: []const []const u8,
 };
 
 fn isLibCLibrary(name: []const u8) bool {
@@ -1219,6 +1252,7 @@ pub const LibExeObjStep = struct {
     bundle_compiler_rt: ?bool = null,
     disable_stack_probing: bool,
     disable_sanitize_c: bool,
+    sanitize_thread: bool,
     rdynamic: bool,
     c_std: Builder.CStd,
     override_lib_dir: ?[]const u8,
@@ -1291,12 +1325,16 @@ pub const LibExeObjStep = struct {
 
     subsystem: ?builtin.SubSystem = null,
 
+    /// Overrides the default stack size
+    stack_size: ?u64 = null,
+
     const LinkObject = union(enum) {
         StaticPath: []const u8,
         OtherStep: *LibExeObjStep,
         SystemLib: []const u8,
         AssemblyFile: FileSource,
         CSourceFile: *CSourceFile,
+        CSourceFiles: *CSourceFiles,
     };
 
     const IncludeDir = union(enum) {
@@ -1397,6 +1435,7 @@ pub const LibExeObjStep = struct {
             .filter = null,
             .disable_stack_probing = false,
             .disable_sanitize_c = false,
+            .sanitize_thread = false,
             .rdynamic = false,
             .output_dir = null,
             .single_threaded = false,
@@ -1670,9 +1709,25 @@ pub const LibExeObjStep = struct {
         self.filter = text;
     }
 
-    pub fn addCSourceFile(self: *LibExeObjStep, file: []const u8, args: []const []const u8) void {
+    /// Handy when you have many C/C++ source files and want them all to have the same flags.
+    pub fn addCSourceFiles(self: *LibExeObjStep, files: []const []const u8, flags: []const []const u8) void {
+        const c_source_files = self.builder.allocator.create(CSourceFiles) catch unreachable;
+
+        const flags_copy = self.builder.allocator.alloc([]u8, flags.len) catch unreachable;
+        for (flags) |flag, i| {
+            flags_copy[i] = self.builder.dupe(flag);
+        }
+
+        c_source_files.* = .{
+            .files = files,
+            .flags = flags_copy,
+        };
+        self.link_objects.append(LinkObject{ .CSourceFiles = c_source_files }) catch unreachable;
+    }
+
+    pub fn addCSourceFile(self: *LibExeObjStep, file: []const u8, flags: []const []const u8) void {
         self.addCSourceFileSource(.{
-            .args = args,
+            .args = flags,
             .source = .{ .path = file },
         });
     }
@@ -1795,6 +1850,10 @@ pub const LibExeObjStep = struct {
                 out.writeAll("};\n") catch unreachable;
                 return;
             },
+            [:0]const u8 => {
+                out.print("pub const {z}: [:0]const u8 = \"{Z}\";\n", .{ name, value }) catch unreachable;
+                return;
+            },
             []const u8 => {
                 out.print("pub const {z}: []const u8 = \"{Z}\";\n", .{ name, value }) catch unreachable;
                 return;
@@ -1807,6 +1866,22 @@ pub const LibExeObjStep = struct {
                     out.writeAll("null;\n") catch unreachable;
                 }
                 return;
+            },
+            std.builtin.Version => {
+                out.print(
+                    \\pub const {z}: @import("builtin").Version = .{{
+                    \\    .major = {d},
+                    \\    .minor = {d},
+                    \\    .patch = {d},
+                    \\}};
+                    \\
+                , .{
+                    name,
+
+                    value.major,
+                    value.minor,
+                    value.patch,
+                }) catch unreachable;
             },
             std.SemanticVersion => {
                 out.print(
@@ -1987,6 +2062,11 @@ pub const LibExeObjStep = struct {
             try zig_args.append(@tagName(builder.color));
         }
 
+        if (self.stack_size) |stack_size| {
+            try zig_args.append("--stack");
+            try zig_args.append(try std.fmt.allocPrint(builder.allocator, "{}", .{stack_size}));
+        }
+
         if (self.root_src) |root_src| try zig_args.append(root_src.getPath(builder));
 
         var prev_has_extra_flags = false;
@@ -2015,8 +2095,7 @@ pub const LibExeObjStep = struct {
                     },
                 },
                 .SystemLib => |name| {
-                    try zig_args.append("--library");
-                    try zig_args.append(name);
+                    try zig_args.append(builder.fmt("-l{s}", .{name}));
                 },
                 .AssemblyFile => |asm_file| {
                     if (prev_has_extra_flags) {
@@ -2026,6 +2105,7 @@ pub const LibExeObjStep = struct {
                     }
                     try zig_args.append(asm_file.getPath(builder));
                 },
+
                 .CSourceFile => |c_source_file| {
                     if (c_source_file.args.len == 0) {
                         if (prev_has_extra_flags) {
@@ -2041,6 +2121,25 @@ pub const LibExeObjStep = struct {
                         try zig_args.append("--");
                     }
                     try zig_args.append(c_source_file.source.getPath(builder));
+                },
+
+                .CSourceFiles => |c_source_files| {
+                    if (c_source_files.flags.len == 0) {
+                        if (prev_has_extra_flags) {
+                            try zig_args.append("-cflags");
+                            try zig_args.append("--");
+                            prev_has_extra_flags = false;
+                        }
+                    } else {
+                        try zig_args.append("-cflags");
+                        for (c_source_files.flags) |flag| {
+                            try zig_args.append(flag);
+                        }
+                        try zig_args.append("--");
+                    }
+                    for (c_source_files.files) |file| {
+                        try zig_args.append(builder.pathFromRoot(file));
+                    }
                 },
             }
         }
@@ -2127,6 +2226,9 @@ pub const LibExeObjStep = struct {
         try zig_args.append("--cache-dir");
         try zig_args.append(builder.pathFromRoot(builder.cache_root));
 
+        try zig_args.append("--global-cache-dir");
+        try zig_args.append(builder.pathFromRoot(builder.global_cache_root));
+
         zig_args.append("--name") catch unreachable;
         zig_args.append(self.name) catch unreachable;
 
@@ -2151,6 +2253,9 @@ pub const LibExeObjStep = struct {
         }
         if (self.disable_sanitize_c) {
             try zig_args.append("-fno-sanitize-c");
+        }
+        if (self.sanitize_thread) {
+            try zig_args.append("-fsanitize-thread");
         }
         if (self.rdynamic) {
             try zig_args.append("-rdynamic");
@@ -2302,6 +2407,17 @@ pub const LibExeObjStep = struct {
                 zig_args.append("-framework") catch unreachable;
                 zig_args.append(entry.key) catch unreachable;
             }
+        }
+
+        for (builder.search_prefixes.items) |search_prefix| {
+            try zig_args.append("-L");
+            try zig_args.append(try fs.path.join(builder.allocator, &[_][]const u8{
+                search_prefix, "lib",
+            }));
+            try zig_args.append("-isystem");
+            try zig_args.append(try fs.path.join(builder.allocator, &[_][]const u8{
+                search_prefix, "include",
+            }));
         }
 
         if (self.valgrind_support) |valgrind_support| {
@@ -2746,6 +2862,7 @@ test "Builder.dupePkg()" {
         "test",
         "test",
         "test",
+        "test",
     );
     defer builder.destroy();
 
@@ -2789,6 +2906,7 @@ test "LibExeObjStep.addBuildOption" {
         "test",
         "test",
         "test",
+        "test",
     );
     defer builder.destroy();
 
@@ -2823,6 +2941,7 @@ test "LibExeObjStep.addPackage" {
 
     var builder = try Builder.create(
         &arena.allocator,
+        "test",
         "test",
         "test",
         "test",

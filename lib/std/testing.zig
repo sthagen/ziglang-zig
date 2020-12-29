@@ -21,6 +21,10 @@ pub var base_allocator_instance = std.heap.FixedBufferAllocator.init("");
 /// TODO https://github.com/ziglang/zig/issues/5738
 pub var log_level = std.log.Level.warn;
 
+/// This is available to any test that wants to execute Zig in a child process.
+/// It will be the same executable that is running `zig test`.
+pub var zig_exe_path: []const u8 = undefined;
+
 /// This function is intended to be used only in tests. It prints diagnostics to stderr
 /// and then aborts when actual_error_union is not expected_error.
 pub fn expectError(expected_error: anyerror, actual_error_union: anytype) void {
@@ -247,6 +251,7 @@ test "expectWithinEpsilon" {
 /// This function is intended to be used only in tests. When the two slices are not
 /// equal, prints diagnostics to stderr to show exactly how they are not equal,
 /// then aborts.
+/// If your inputs are UTF-8 encoded strings, consider calling `expectEqualStrings` instead.
 pub fn expectEqualSlices(comptime T: type, expected: []const T, actual: []const T) void {
     // TODO better printing of the difference
     // If the arrays are small enough we could print the whole thing
@@ -302,10 +307,9 @@ fn getCwdOrWasiPreopen() std.fs.Dir {
 
 pub fn tmpDir(opts: std.fs.Dir.OpenDirOptions) TmpDir {
     var random_bytes: [TmpDir.random_bytes_count]u8 = undefined;
-    std.crypto.randomBytes(&random_bytes) catch
-        @panic("unable to make tmp dir for testing: unable to get random bytes");
+    std.crypto.random.bytes(&random_bytes);
     var sub_path: [TmpDir.sub_path_len]u8 = undefined;
-    std.fs.base64_encoder.encode(&sub_path, &random_bytes);
+    _ = std.fs.base64_encoder.encode(&sub_path, &random_bytes);
 
     var cwd = getCwdOrWasiPreopen();
     var cache_dir = cwd.makeOpenPath("zig-cache", .{}) catch
@@ -366,6 +370,26 @@ pub fn expectEqualStrings(expected: []const u8, actual: []const u8) void {
 
         @panic("test failure");
     }
+}
+
+pub fn expectStringEndsWith(actual: []const u8, expected_ends_with: []const u8) void {
+    if (std.mem.endsWith(u8, actual, expected_ends_with))
+        return;
+
+    const shortened_actual = if (actual.len >= expected_ends_with.len)
+        actual[0..expected_ends_with.len]
+    else
+        actual;
+
+    print("\n====== expected to end with: =========\n", .{});
+    printWithVisibleNewlines(expected_ends_with);
+    print("\n====== instead ended with: ===========\n", .{});
+    printWithVisibleNewlines(shortened_actual);
+    print("\n========= full output: ==============\n", .{});
+    printWithVisibleNewlines(actual);
+    print("\n======================================\n", .{});
+
+    @panic("test failure");
 }
 
 fn printIndicatorLine(source: []const u8, indicator_index: usize) void {

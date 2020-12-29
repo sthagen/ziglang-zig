@@ -116,6 +116,7 @@ pub const Module = extern struct {
     dll_export_fns: bool,
     link_mode_dynamic: bool,
     valgrind_enabled: bool,
+    tsan_enabled: bool,
     function_sections: bool,
     enable_stack_probing: bool,
     enable_time_report: bool,
@@ -252,6 +253,20 @@ const Error = extern enum {
 };
 
 // ABI warning
+export fn stage2_version_string() [*:0]const u8 {
+    return build_options.version;
+}
+
+// ABI warning
+export fn stage2_version() Stage2SemVer {
+    return .{
+        .major = build_options.semver.major,
+        .minor = build_options.semver.minor,
+        .patch = build_options.semver.patch,
+    };
+}
+
+// ABI warning
 export fn stage2_attach_segfault_handler() void {
     if (std.debug.runtime_safety and std.debug.have_segfault_handling_support) {
         std.debug.attachSegfaultHandler();
@@ -279,7 +294,7 @@ export fn stage2_progress_start_root(
 ) *std.Progress.Node {
     return progress.start(
         name_ptr[0..name_len],
-        if (estimated_total_items == 0) null else estimated_total_items,
+        estimated_total_items,
     ) catch @panic("timer unsupported");
 }
 
@@ -298,7 +313,7 @@ export fn stage2_progress_start(
     const child_node = std.heap.c_allocator.create(std.Progress.Node) catch @panic("out of memory");
     child_node.* = node.start(
         name_ptr[0..name_len],
-        if (estimated_total_items == 0) null else estimated_total_items,
+        estimated_total_items,
     );
     child_node.activate();
     return child_node;
@@ -319,8 +334,8 @@ export fn stage2_progress_complete_one(node: *std.Progress.Node) void {
 
 // ABI warning
 export fn stage2_progress_update_node(node: *std.Progress.Node, done_count: usize, total_count: usize) void {
-    node.completed_items = done_count;
-    node.estimated_total_items = total_count;
+    node.setCompletedItems(done_count);
+    node.setEstimatedTotalItems(total_count);
     node.activate();
     node.context.maybeRefresh();
 }

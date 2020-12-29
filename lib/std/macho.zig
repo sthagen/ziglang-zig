@@ -42,7 +42,6 @@ pub const uuid_command = extern struct {
     uuid: [16]u8,
 };
 
-
 /// The version_min_command contains the min OS version on which this
 /// binary was built to run.
 pub const version_min_command = extern struct {
@@ -1258,6 +1257,33 @@ pub const VM_PROT_WRITE: vm_prot_t = 0x2;
 /// VM execute permission
 pub const VM_PROT_EXECUTE: vm_prot_t = 0x4;
 
+pub const BIND_TYPE_POINTER: u8 = 1;
+pub const BIND_TYPE_TEXT_ABSOLUTE32: u8 = 2;
+pub const BIND_TYPE_TEXT_PCREL32: u8 = 3;
+
+pub const BIND_SPECIAL_DYLIB_SELF: i8 = 0;
+pub const BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE: i8 = -1;
+pub const BIND_SPECIAL_DYLIB_FLAT_LOOKUP: i8 = -2;
+
+pub const BIND_SYMBOL_FLAGS_WEAK_IMPORT: u8 = 0x1;
+pub const BIND_SYMBOL_FLAGS_NON_WEAK_DEFINITION: u8 = 0x8;
+
+pub const BIND_OPCODE_MASK: u8 = 0xf0;
+pub const BIND_IMMEDIATE_MASK: u8 = 0x0f;
+pub const BIND_OPCODE_DONE: u8 = 0x00;
+pub const BIND_OPCODE_SET_DYLIB_ORDINAL_IMM: u8 = 0x10;
+pub const BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB: u8 = 0x20;
+pub const BIND_OPCODE_SET_DYLIB_SPECIAL_IMM: u8 = 0x30;
+pub const BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM: u8 = 0x40;
+pub const BIND_OPCODE_SET_TYPE_IMM: u8 = 0x50;
+pub const BIND_OPCODE_SET_ADDEND_SLEB: u8 = 0x60;
+pub const BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB: u8 = 0x70;
+pub const BIND_OPCODE_ADD_ADDR_ULEB: 0x80;
+pub const BIND_OPCODE_DO_BIND: u8 = 0x90;
+pub const BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB: u8 = 0xa0;
+pub const BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED: u8 = 0xb0;
+pub const BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB: u8 = xc0;
+
 pub const reloc_type_x86_64 = packed enum(u4) {
     /// for absolute addresses
     X86_64_RELOC_UNSIGNED = 0,
@@ -1333,6 +1359,15 @@ pub const N_WEAK_DEF: u16 = 0x80;
 /// be called to get the address of the real function to use.
 /// This bit is only available in .o files (MH_OBJECT filetype)
 pub const N_SYMBOL_RESOLVER: u16 = 0x100;
+
+// The following are used on the flags byte of a terminal node // in the export information.
+pub const EXPORT_SYMBOL_FLAGS_KIND_MASK: u8 = 0x03;
+pub const EXPORT_SYMBOL_FLAGS_KIND_REGULAR: u8 = 0x00;
+pub const EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL: u8 = 0x01;
+pub const EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE: u8 = 0x02;
+pub const EXPORT_SYMBOL_FLAGS_KIND_WEAK_DEFINITION: u8 = 0x04;
+pub const EXPORT_SYMBOL_FLAGS_REEXPORT: u8 = 0x08;
+pub const EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER: u8 = 0x10;
 
 // Codesign consts and structs taken from:
 // https://opensource.apple.com/source/xnu/xnu-6153.81.5/osfmk/kern/cs_blobs.h.auto.html

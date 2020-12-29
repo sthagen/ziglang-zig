@@ -764,6 +764,8 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 .arg => return self.genArg(inst.castTag(.arg).?),
                 .assembly => return self.genAsm(inst.castTag(.assembly).?),
                 .bitcast => return self.genBitCast(inst.castTag(.bitcast).?),
+                .bitand => return self.genBitAnd(inst.castTag(.bitand).?),
+                .bitor => return self.genBitOr(inst.castTag(.bitor).?),
                 .block => return self.genBlock(inst.castTag(.block).?),
                 .br => return self.genBr(inst.castTag(.br).?),
                 .breakpoint => return self.genBreakpoint(inst.src),
@@ -799,6 +801,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 .unwrap_optional => return self.genUnwrapOptional(inst.castTag(.unwrap_optional).?),
                 .wrap_optional => return self.genWrapOptional(inst.castTag(.wrap_optional).?),
                 .varptr => return self.genVarPtr(inst.castTag(.varptr).?),
+                .xor => return self.genXor(inst.castTag(.xor).?),
             }
         }
 
@@ -1006,6 +1009,36 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 },
                 .arm, .armeb => return try self.genArmBinOp(&inst.base, inst.lhs, inst.rhs, .add),
                 else => return self.fail(inst.base.src, "TODO implement add for {}", .{self.target.cpu.arch}),
+            }
+        }
+
+        fn genBitAnd(self: *Self, inst: *ir.Inst.BinOp) !MCValue {
+            // No side effects, so if it's unreferenced, do nothing.
+            if (inst.base.isUnused())
+                return MCValue.dead;
+            switch (arch) {
+                .arm, .armeb => return try self.genArmBinOp(&inst.base, inst.lhs, inst.rhs, .bitand),
+                else => return self.fail(inst.base.src, "TODO implement bitwise and for {}", .{self.target.cpu.arch}),
+            }
+        }
+
+        fn genBitOr(self: *Self, inst: *ir.Inst.BinOp) !MCValue {
+            // No side effects, so if it's unreferenced, do nothing.
+            if (inst.base.isUnused())
+                return MCValue.dead;
+            switch (arch) {
+                .arm, .armeb => return try self.genArmBinOp(&inst.base, inst.lhs, inst.rhs, .bitor),
+                else => return self.fail(inst.base.src, "TODO implement bitwise or for {}", .{self.target.cpu.arch}),
+            }
+        }
+
+        fn genXor(self: *Self, inst: *ir.Inst.BinOp) !MCValue {
+            // No side effects, so if it's unreferenced, do nothing.
+            if (inst.base.isUnused())
+                return MCValue.dead;
+            switch (arch) {
+                .arm, .armeb => return try self.genArmBinOp(&inst.base, inst.lhs, inst.rhs, .xor),
+                else => return self.fail(inst.base.src, "TODO implement xor for {}", .{self.target.cpu.arch}),
             }
         }
 
@@ -1251,13 +1284,13 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         writeInt(u32, try self.code.addManyAsArray(4), Instruction.rsb(.al, dst_reg, dst_reg, operand).toU32());
                     }
                 },
-                .booland => {
+                .booland, .bitand => {
                     writeInt(u32, try self.code.addManyAsArray(4), Instruction.@"and"(.al, dst_reg, dst_reg, operand).toU32());
                 },
-                .boolor => {
+                .boolor, .bitor => {
                     writeInt(u32, try self.code.addManyAsArray(4), Instruction.orr(.al, dst_reg, dst_reg, operand).toU32());
                 },
-                .not => {
+                .not, .xor => {
                     writeInt(u32, try self.code.addManyAsArray(4), Instruction.eor(.al, dst_reg, dst_reg, operand).toU32());
                 },
                 else => unreachable, // not a binary instruction
@@ -2730,16 +2763,13 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             // For MachO, the binary, with the exception of object files, has to be a PIE.
                             // Therefore we cannot load an absolute address.
                             // Instead, we need to make use of PC-relative addressing.
-                            // TODO This needs to be optimised in the stack usage (perhaps use a shadow stack
-                            // like described here:
-                            // https://community.arm.com/developer/ip-products/processors/b/processors-ip-blog/posts/using-the-stack-in-aarch64-implementing-push-and-pop)
-                            // TODO As far as branching is concerned, instead of saving the return address
-                            // in a register, I'm thinking here of immitating x86_64, and having the address
-                            // passed on the stack.
                             if (reg.id() == 0) { // x0 is special-cased
+                                // TODO This needs to be optimised in the stack usage (perhaps use a shadow stack
+                                // like described here:
+                                // https://community.arm.com/developer/ip-products/processors/b/processors-ip-blog/posts/using-the-stack-in-aarch64-implementing-push-and-pop)
                                 // str x28, [sp, #-16]
                                 mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.str(.x28, Register.sp, .{
-                                    .offset = Instruction.Offset.imm_pre_index(-16),
+                                    .offset = Instruction.LoadStoreOffset.imm_pre_index(-16),
                                 }).toU32());
                                 // adr x28, #8
                                 mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.adr(.x28, 8).toU32());
@@ -2755,21 +2785,24 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                                 // b [label]
                                 mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.b(0).toU32());
                                 // mov r, x0
-                                mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.orr(reg, .x0, Instruction.RegisterShift.none()).toU32());
+                                mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.orr(
+                                    reg,
+                                    .x0,
+                                    Instruction.RegisterShift.none(),
+                                ).toU32());
                                 // ldr x28, [sp], #16
                                 mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.ldr(.x28, .{
                                     .rn = Register.sp,
-                                    .offset = Instruction.Offset.imm_post_index(16),
+                                    .offset = Instruction.LoadStoreOffset.imm_post_index(16),
                                 }).toU32());
                             } else {
-                                // str x28, [sp, #-16]
-                                mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.str(.x28, Register.sp, .{
-                                    .offset = Instruction.Offset.imm_pre_index(-16),
-                                }).toU32());
-                                // str x0, [sp, #-16]
-                                mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.str(.x0, Register.sp, .{
-                                    .offset = Instruction.Offset.imm_pre_index(-16),
-                                }).toU32());
+                                // stp x0, x28, [sp, #-16]
+                                mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.stp(
+                                    .x0,
+                                    .x28,
+                                    Register.sp,
+                                    Instruction.LoadStorePairOffset.pre_index(-16),
+                                ).toU32());
                                 // adr x28, #8
                                 mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.adr(.x28, 8).toU32());
                                 if (self.bin_file.cast(link.File.MachO)) |macho_file| {
@@ -2784,17 +2817,18 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                                 // b [label]
                                 mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.b(0).toU32());
                                 // mov r, x0
-                                mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.orr(reg, .x0, Instruction.RegisterShift.none()).toU32());
-                                // ldr x0, [sp], #16
-                                mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.ldr(.x0, .{
-                                    .rn = Register.sp,
-                                    .offset = Instruction.Offset.imm_post_index(16),
-                                }).toU32());
-                                // ldr x28, [sp], #16
-                                mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.ldr(.x28, .{
-                                    .rn = Register.sp,
-                                    .offset = Instruction.Offset.imm_post_index(16),
-                                }).toU32());
+                                mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.orr(
+                                    reg,
+                                    .x0,
+                                    Instruction.RegisterShift.none(),
+                                ).toU32());
+                                // ldp x0, x28, [sp, #16]
+                                mem.writeIntLittle(u32, try self.code.addManyAsArray(4), Instruction.ldp(
+                                    .x0,
+                                    .x28,
+                                    Register.sp,
+                                    Instruction.LoadStorePairOffset.post_index(16),
+                                ).toU32());
                             }
                         } else {
                             // The value is in memory at a hard-coded address.

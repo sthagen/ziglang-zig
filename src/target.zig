@@ -1,5 +1,5 @@
 const std = @import("std");
-const llvm = @import("llvm.zig");
+const llvm = @import("llvm_bindings.zig");
 
 pub const ArchOsAbi = struct {
     arch: std.Target.Cpu.Arch,
@@ -14,6 +14,7 @@ pub const available_libcs = [_]ArchOsAbi{
     .{ .arch = .aarch64, .os = .linux, .abi = .gnu },
     .{ .arch = .aarch64, .os = .linux, .abi = .musl },
     .{ .arch = .aarch64, .os = .windows, .abi = .gnu },
+    .{ .arch = .aarch64, .os = .macos, .abi = .gnu },
     .{ .arch = .armeb, .os = .linux, .abi = .gnueabi },
     .{ .arch = .armeb, .os = .linux, .abi = .gnueabihf },
     .{ .arch = .armeb, .os = .linux, .abi = .musleabi },
@@ -324,8 +325,6 @@ pub fn is_libc_lib_name(target: std.Target, name: []const u8) bool {
             return true;
         if (eqlIgnoreCase(ignore_case, name, "dl"))
             return true;
-        if (eqlIgnoreCase(ignore_case, name, "util"))
-            return true;
     }
 
     if (target.os.tag.isDarwin() and eqlIgnoreCase(ignore_case, name, "System"))
@@ -344,4 +343,12 @@ pub fn is_libcpp_lib_name(target: std.Target, name: []const u8) bool {
 
 pub fn hasDebugInfo(target: std.Target) bool {
     return !target.cpu.arch.isWasm();
+}
+
+pub fn defaultCompilerRtOptimizeMode(target: std.Target) std.builtin.Mode {
+    if (target.cpu.arch.isWasm() and target.os.tag == .freestanding) {
+        return .ReleaseSmall;
+    } else {
+        return .ReleaseFast;
+    }
 }
