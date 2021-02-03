@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -247,7 +247,7 @@ fn strHashInternal(password: []const u8, rounds_log: u6, salt: [salt_length]u8) 
     Codec.encode(ct_str[0..], ct[0 .. ct.len - 1]);
 
     var s_buf: [hash_length]u8 = undefined;
-    const s = fmt.bufPrint(s_buf[0..], "$2b${}{}${}{}", .{ rounds_log / 10, rounds_log % 10, salt_str, ct_str }) catch unreachable;
+    const s = fmt.bufPrint(s_buf[0..], "$2b${d}{d}${s}{s}", .{ rounds_log / 10, rounds_log % 10, salt_str, ct_str }) catch unreachable;
     debug.assert(s.len == s_buf.len);
     return s_buf;
 }

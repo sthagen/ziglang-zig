@@ -19,6 +19,7 @@
 #include "stage2.h"
 #include "dump_analysis.hpp"
 #include "softfloat.hpp"
+#include "zigendian.h"
 
 #include <stdio.h>
 #include <errno.h>
@@ -512,6 +513,10 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
         }
     } else {
         maybe_import_dll(g, llvm_fn, linkage);
+    }
+
+    if (!g->red_zone) {
+        addLLVMFnAttr(llvm_fn, "noredzone");
     }
 
     if (fn->alignstack_value != 0) {
@@ -7417,11 +7422,20 @@ static LLVMValueRef gen_const_val(CodeGen *g, ZigValue *const_val, const char *n
                     return LLVMConstReal(get_llvm_type(g, type_entry), const_val->data.x_f64);
                 case 128:
                     {
-                        // TODO make sure this is correct on big endian targets too
-                        uint8_t buf[16];
-                        memcpy(buf, &const_val->data.x_f128, 16);
-                        LLVMValueRef as_int = LLVMConstIntOfArbitraryPrecision(LLVMInt128Type(), 2,
-                                (uint64_t*)buf);
+                        uint64_t buf[2];
+
+                        // LLVM seems to require that the lower half of the f128 be placed first in the buffer.
+                        #if defined(ZIG_BYTE_ORDER) && ZIG_BYTE_ORDER == ZIG_LITTLE_ENDIAN
+                            buf[0] = const_val->data.x_f128.v[0];
+                            buf[1] = const_val->data.x_f128.v[1];
+                        #elif defined(ZIG_BYTE_ORDER) && ZIG_BYTE_ORDER == ZIG_BIG_ENDIAN
+                            buf[0] = const_val->data.x_f128.v[1];
+                            buf[1] = const_val->data.x_f128.v[0];
+                        #else
+                            #error Unsupported endian
+                        #endif
+
+                        LLVMValueRef as_int = LLVMConstIntOfArbitraryPrecision(LLVMInt128Type(), 2, buf);
                         return LLVMConstBitCast(as_int, get_llvm_type(g, type_entry));
                     }
                 default:
@@ -8435,8 +8449,9 @@ static void zig_llvm_emit_output(CodeGen *g) {
     // Unfortunately, LLVM shits the bed when we ask for both binary and assembly. So we call the entire
     // pipeline multiple times if this is requested.
     if (asm_filename != nullptr && bin_filename != nullptr) {
-        if (ZigLLVMTargetMachineEmitToFile(g->target_machine, g->module, &err_msg, g->build_mode == BuildModeDebug,
-            is_small, g->enable_time_report, g->tsan_enabled, nullptr, bin_filename, llvm_ir_filename))
+        if (ZigLLVMTargetMachineEmitToFile(g->target_machine, g->module, &err_msg,
+            g->build_mode == BuildModeDebug, is_small, g->enable_time_report, g->tsan_enabled,
+            g->have_lto, nullptr, bin_filename, llvm_ir_filename))
         {
             fprintf(stderr, "LLVM failed to emit file: %s\n", err_msg);
             exit(1);
@@ -8445,8 +8460,9 @@ static void zig_llvm_emit_output(CodeGen *g) {
         llvm_ir_filename = nullptr;
     }
 
-    if (ZigLLVMTargetMachineEmitToFile(g->target_machine, g->module, &err_msg, g->build_mode == BuildModeDebug,
-        is_small, g->enable_time_report, g->tsan_enabled, asm_filename, bin_filename, llvm_ir_filename))
+    if (ZigLLVMTargetMachineEmitToFile(g->target_machine, g->module, &err_msg,
+        g->build_mode == BuildModeDebug, is_small, g->enable_time_report, g->tsan_enabled,
+        g->have_lto, asm_filename, bin_filename, llvm_ir_filename))
     {
         fprintf(stderr, "LLVM failed to emit file: %s\n", err_msg);
         exit(1);
@@ -8826,7 +8842,6 @@ static void define_builtin_fns(CodeGen *g) {
     create_builtin_fn(g, BuiltinFnIdIntToPtr, "intToPtr", 2);
     create_builtin_fn(g, BuiltinFnIdPtrToInt, "ptrToInt", 1);
     create_builtin_fn(g, BuiltinFnIdTagName, "tagName", 1);
-    create_builtin_fn(g, BuiltinFnIdTagType, "TagType", 1);
     create_builtin_fn(g, BuiltinFnIdFieldParentPtr, "fieldParentPtr", 3);
     create_builtin_fn(g, BuiltinFnIdByteOffsetOf, "byteOffsetOf", 2);
     create_builtin_fn(g, BuiltinFnIdBitOffsetOf, "bitOffsetOf", 2);

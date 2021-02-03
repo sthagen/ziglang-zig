@@ -657,4 +657,165 @@ pub fn addCases(cases: *tests.RunTranslatedCContext) void {
         \\    return 0;
         \\}
     , "");
+
+    cases.add("static K&R-style no prototype function declaration (empty parameter list)",
+        \\#include <stdlib.h>
+        \\static int foo() {
+        \\    return 42;
+        \\}
+        \\int main() {
+        \\    if (foo() != 42) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("K&R-style static function prototype for unused function",
+        \\static int foo();
+        \\int main() {
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("K&R-style static function prototype + separate definition",
+        \\#include <stdlib.h>
+        \\static int foo();
+        \\static int foo(int a, int b) {
+        \\    return a + b;
+        \\}
+        \\int main() {
+        \\    if (foo(40, 2) != 42) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("dollar sign in identifiers",
+        \\#include <stdlib.h>
+        \\#define $FOO 2
+        \\#define $foo bar$
+        \\#define $baz($x) ($x + $FOO)
+        \\int $$$(int $x$) { return $x$ + $FOO; }
+        \\int main() {
+        \\    int bar$ = 42;
+        \\    if ($foo != 42) abort();
+        \\    if (bar$ != 42) abort();
+        \\    if ($baz(bar$) != 44) abort();
+        \\    if ($$$(bar$) != 44) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("Cast boolean expression result to int",
+        \\#include <stdlib.h>
+        \\char foo(char c) { return c; }
+        \\int  bar(int i)  { return i; }
+        \\long baz(long l) { return l; }
+        \\int main() {
+        \\    if (foo(1 == 2)) abort();
+        \\    if (!foo(1 == 1)) abort();
+        \\    if (bar(1 == 2)) abort();
+        \\    if (!bar(1 == 1)) abort();
+        \\    if (baz(1 == 2)) abort();
+        \\    if (!baz(1 == 1)) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("Wide, UTF-16, and UTF-32 character literals",
+        \\#include <wchar.h>
+        \\#include <stdlib.h>
+        \\int main() {
+        \\    wchar_t wc = L'™';
+        \\    int utf16_char = u'™';
+        \\    int utf32_char = U'💯';
+        \\    if (wc != 8482) abort();
+        \\    if (utf16_char != 8482) abort();
+        \\    if (utf32_char != 128175) abort();
+        \\    unsigned char c = wc;
+        \\    if (c != 0x22) abort();
+        \\    c = utf32_char;
+        \\    if (c != 0xaf) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("Variadic function call",
+        \\#define _NO_CRT_STDIO_INLINE 1
+        \\#include <stdio.h>
+        \\int main(void) {
+        \\    printf("%d %d\n", 1, 2);
+        \\    return 0;
+        \\}
+    , "1 2" ++ nl);
+
+    cases.add("multi-character character constant",
+        \\#include <stdlib.h>
+        \\int main(void) {
+        \\    int foo = 'abcd';
+        \\    switch (foo) {
+        \\        case 'abcd': break;
+        \\        default: abort();
+        \\    }
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("Array initializers (string literals, incomplete arrays)",
+        \\#include <stdlib.h>
+        \\#include <string.h>
+        \\extern int foo[];
+        \\int global_arr[] = {1, 2, 3};
+        \\char global_string[] = "hello";
+        \\int main(int argc, char *argv[]) {
+        \\    if (global_arr[2] != 3) abort();
+        \\    if (strlen(global_string) != 5) abort();
+        \\    const char *const_str = "hello";
+        \\    if (strcmp(const_str, "hello") != 0) abort();
+        \\    char empty_str[] = "";
+        \\    if (strlen(empty_str) != 0) abort();
+        \\    char hello[] = "hello";
+        \\    if (strlen(hello) != 5 || sizeof(hello) != 6) abort();
+        \\    int empty[] = {};
+        \\    if (sizeof(empty) != 0) abort();
+        \\    int bar[] = {42};
+        \\    if (bar[0] != 42) abort();
+        \\    bar[0] = 43;
+        \\    if (bar[0] != 43) abort();
+        \\    int baz[] = {1, [42] = 123, 456};
+        \\    if (baz[42] != 123 || baz[43] != 456) abort();
+        \\    if (sizeof(baz) != sizeof(int) * 44) abort();
+        \\    const char *const names[] = {"first", "second", "third"};
+        \\    if (strcmp(names[2], "third") != 0) abort();
+        \\    char catted_str[] = "abc" "def";
+        \\    if (strlen(catted_str) != 6 || sizeof(catted_str) != 7) abort();
+        \\    char catted_trunc_str[2] = "abc" "def";
+        \\    if (sizeof(catted_trunc_str) != 2 || catted_trunc_str[0] != 'a' || catted_trunc_str[1] != 'b') abort();
+        \\    char big_array_utf8lit[10] = "💯";
+        \\    if (strcmp(big_array_utf8lit, "💯") != 0 || big_array_utf8lit[9] != 0) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("Wide, UTF-16, and UTF-32 string literals",
+        \\#include <stdlib.h>
+        \\#include <stdint.h>
+        \\#include <wchar.h>
+        \\int main(void) {
+        \\    const wchar_t *wide_str = L"wide";
+        \\    const wchar_t wide_hello[] = L"hello";
+        \\    if (wcslen(wide_str) != 4) abort();
+        \\    if (wcslen(L"literal") != 7) abort();
+        \\    if (wcscmp(wide_hello, L"hello") != 0) abort();
+        \\
+        \\    const uint16_t *u16_str = u"wide";
+        \\    const uint16_t u16_hello[] = u"hello";
+        \\    if (u16_str[3] != u'e' || u16_str[4] != 0) abort();
+        \\    if (u16_hello[4] != u'o' || u16_hello[5] != 0) abort();
+        \\
+        \\    const uint32_t *u32_str = U"wide";
+        \\    const uint32_t u32_hello[] = U"hello";
+        \\    if (u32_str[3] != U'e' || u32_str[4] != 0) abort();
+        \\    if (u32_hello[4] != U'o' || u32_hello[5] != 0) abort();
+        \\    return 0;
+        \\}
+    , "");
 }

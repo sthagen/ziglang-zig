@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -596,7 +596,7 @@ fn testWindowsCmdLine(input_cmd_line: [*]const u16, expected_args: []const []con
     for (expected_args) |expected_arg| {
         const arg = it.next(std.testing.allocator).? catch unreachable;
         defer std.testing.allocator.free(arg);
-        testing.expectEqualSlices(u8, expected_arg, arg);
+        testing.expectEqualStrings(expected_arg, arg);
     }
     testing.expect(it.next(std.testing.allocator) == null);
 }

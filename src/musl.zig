@@ -155,21 +155,21 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
                 if (!is_arch_specific) {
                     // Look for an arch specific override.
                     override_path.shrinkRetainingCapacity(0);
-                    try override_path.writer().print("{}" ++ s ++ "{}" ++ s ++ "{}.s", .{
+                    try override_path.writer().print("{s}" ++ s ++ "{s}" ++ s ++ "{s}.s", .{
                         dirname, arch_name, noextbasename,
                     });
                     if (source_table.contains(override_path.items))
                         continue;
 
                     override_path.shrinkRetainingCapacity(0);
-                    try override_path.writer().print("{}" ++ s ++ "{}" ++ s ++ "{}.S", .{
+                    try override_path.writer().print("{s}" ++ s ++ "{s}" ++ s ++ "{s}.S", .{
                         dirname, arch_name, noextbasename,
                     });
                     if (source_table.contains(override_path.items))
                         continue;
 
                     override_path.shrinkRetainingCapacity(0);
-                    try override_path.writer().print("{}" ++ s ++ "{}" ++ s ++ "{}.c", .{
+                    try override_path.writer().print("{s}" ++ s ++ "{s}" ++ s ++ "{s}.c", .{
                         dirname, arch_name, noextbasename,
                     });
                     if (source_table.contains(override_path.items))
@@ -206,6 +206,7 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
                 .optimize_mode = comp.compilerRtOptMode(),
                 .want_sanitize_c = false,
                 .want_stack_check = false,
+                .want_red_zone = comp.bin_file.options.red_zone,
                 .want_valgrind = false,
                 .want_tsan = false,
                 .emit_h = null,
@@ -322,7 +323,7 @@ fn add_cc_args(
     const target = comp.getTarget();
     const arch_name = target_util.archMuslName(target.cpu.arch);
     const os_name = @tagName(target.os.tag);
-    const triple = try std.fmt.allocPrint(arena, "{}-{}-musl", .{ arch_name, os_name });
+    const triple = try std.fmt.allocPrint(arena, "{s}-{s}-musl", .{ arch_name, os_name });
     const o_arg = if (want_O3) "-O3" else "-Os";
 
     try args.appendSlice(&[_][]const u8{

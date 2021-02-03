@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -26,6 +26,7 @@ pub const time_t = i64;
 pub const clock_t = isize;
 
 pub const socklen_t = u32;
+pub const suseconds_t = c_long;
 
 /// Renamed from `kevent` to `Kevent` to avoid conflict with function name.
 pub const Kevent = extern struct {
@@ -167,6 +168,13 @@ pub const libc_stat = extern struct {
 pub const timespec = extern struct {
     tv_sec: isize,
     tv_nsec: isize,
+};
+
+pub const timeval = extern struct {
+    /// seconds
+    tv_sec: time_t,
+    /// microseconds
+    tv_usec: suseconds_t,
 };
 
 pub const dirent = extern struct {
@@ -560,6 +568,9 @@ pub const EV_ONESHOT = 0x0010;
 
 /// clear event state after reporting
 pub const EV_CLEAR = 0x0020;
+
+/// error, event data contains errno
+pub const EV_ERROR = 0x4000;
 
 /// force immediate event output
 /// ... with or without EV_ERROR

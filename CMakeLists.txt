@@ -89,6 +89,7 @@ set(ZIG_TARGET_MCPU "baseline" CACHE STRING "-mcpu parameter to output binaries 
 set(ZIG_EXECUTABLE "" CACHE STRING "(when cross compiling) path to already-built zig binary")
 set(ZIG_PREFER_LLVM_CONFIG off CACHE BOOL "(when cross compiling) use llvm-config to find target llvm dependencies if needed")
 set(ZIG_SINGLE_THREADED off CACHE BOOL "limit the zig compiler to use only 1 thread")
+set(ZIG_OMIT_STAGE2 off CACHE BOOL "omit the stage2 backend from stage1")
 
 find_package(llvm)
 find_package(clang)
@@ -333,7 +334,6 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/atomic/int.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/atomic/queue.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/atomic/stack.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/auto_reset_event.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/base64.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/buf_map.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/builtin.zig"
@@ -374,10 +374,11 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/io/buffered_atomic_file.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/io/buffered_writer.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/io/change_detection_stream.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/io/counting_writer.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/io/counting_reader.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/io/find_byte_out_stream.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/io/counting_writer.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/io/find_byte_writer.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/io/fixed_buffer_stream.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/io/limited_reader.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/io/reader.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/io/seekable_stream.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/io/writer.zig"
@@ -407,7 +408,6 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/meta.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/meta/trailer_flags.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/meta/trait.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/mutex.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os/bits.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os/bits/linux.zig"
@@ -424,8 +424,6 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/os/windows/ntstatus.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os/windows/win32error.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/Progress.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/ResetEvent.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/StaticResetEvent.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/pdb.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/process.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/rand.zig"
@@ -492,7 +490,6 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/special/compiler_rt/udivmodti4.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/special/compiler_rt/udivti3.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/special/compiler_rt/umodti3.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/spinlock.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/start.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/std.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/target.zig"
@@ -511,7 +508,11 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/target/systemz.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/target/wasm.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/target/x86.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/thread.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Thread.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Thread/AutoResetEvent.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Thread/Mutex.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Thread/ResetEvent.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Thread/StaticResetEvent.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/time.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/unicode.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig.zig"
@@ -540,6 +541,8 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/codegen/aarch64.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/arm.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/c.zig"
+    "${CMAKE_SOURCE_DIR}/src/codegen/llvm.zig"
+    "${CMAKE_SOURCE_DIR}/src/codegen/llvm/bindings.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/riscv64.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/spu-mk2.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/wasm.zig"
@@ -558,11 +561,9 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/link/MachO.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/Trie.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Wasm.zig"
-    "${CMAKE_SOURCE_DIR}/src/link/cbe.h"
+    "${CMAKE_SOURCE_DIR}/src/link/C/zig.h"
     "${CMAKE_SOURCE_DIR}/src/link/msdos-stub.bin"
     "${CMAKE_SOURCE_DIR}/src/liveness.zig"
-    "${CMAKE_SOURCE_DIR}/src/llvm_backend.zig"
-    "${CMAKE_SOURCE_DIR}/src/llvm_bindings.zig"
     "${CMAKE_SOURCE_DIR}/src/main.zig"
     "${CMAKE_SOURCE_DIR}/src/mingw.zig"
     "${CMAKE_SOURCE_DIR}/src/musl.zig"
@@ -585,6 +586,12 @@ if(MSVC)
         set(ZIG_DIA_GUIDS_LIB "${MSVC_DIA_SDK_DIR}/lib/amd64/diaguids.lib")
         string(REGEX REPLACE "\\\\" "\\\\\\\\" ZIG_DIA_GUIDS_LIB_ESCAPED "${ZIG_DIA_GUIDS_LIB}")
     endif()
+endif()
+
+if(ZIG_OMIT_STAGE2)
+  set(ZIG_OMIT_STAGE2_BOOL "true")
+else()
+  set(ZIG_OMIT_STAGE2_BOOL "false")
 endif()
 
 configure_file (

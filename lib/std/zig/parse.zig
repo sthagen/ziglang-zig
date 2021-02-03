@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -366,9 +366,7 @@ const Parser = struct {
     /// TestDecl <- KEYWORD_test STRINGLITERALSINGLE Block
     fn parseTestDecl(p: *Parser) !?*Node {
         const test_token = p.eatToken(.Keyword_test) orelse return null;
-        const name_node = try p.expectNode(parseStringLiteralSingle, .{
-            .ExpectedStringLiteral = .{ .token = p.tok_i },
-        });
+        const name_node = try p.parseStringLiteralSingle();
         const block_node = (try p.parseBlock(null)) orelse {
             try p.errors.append(p.gpa, .{ .ExpectedLBrace = .{ .token = p.tok_i } });
             return error.ParseError;

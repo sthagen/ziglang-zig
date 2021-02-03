@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -22,6 +22,7 @@ pub const socklen_t = u32;
 pub const time_t = i64;
 pub const uid_t = u32;
 pub const lwpid_t = i32;
+pub const suseconds_t = c_int;
 
 /// Renamed from `kevent` to `Kevent` to avoid conflict with function name.
 pub const Kevent = extern struct {
@@ -188,6 +189,13 @@ pub const libc_stat = extern struct {
 pub const timespec = extern struct {
     tv_sec: i64,
     tv_nsec: isize,
+};
+
+pub const timeval = extern struct {
+    /// seconds
+    tv_sec: time_t,
+    /// microseconds
+    tv_usec: suseconds_t,
 };
 
 pub const MAXNAMLEN = 511;

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -3734,7 +3734,7 @@ const maxInt = std.math.maxInt;
 var fixed_buffer_mem: [100 * 1024]u8 = undefined;
 
 fn testParse(source: []const u8, allocator: *mem.Allocator, anything_changed: *bool) ![]u8 {
-    const stderr = io.getStdErr().outStream();
+    const stderr = io.getStdErr().writer();
 
     const tree = try std.zig.parse(allocator, source);
     defer tree.deinit();
@@ -3742,9 +3742,9 @@ fn testParse(source: []const u8, allocator: *mem.Allocator, anything_changed: *b
     for (tree.errors) |*parse_error| {
         const token = tree.token_locs[parse_error.loc()];
         const loc = tree.tokenLocation(0, parse_error.loc());
-        try stderr.print("(memory buffer):{}:{}: error: ", .{ loc.line + 1, loc.column + 1 });
+        try stderr.print("(memory buffer):{d}:{d}: error: ", .{ loc.line + 1, loc.column + 1 });
         try tree.renderError(parse_error, stderr);
-        try stderr.print("\n{}\n", .{source[loc.line_start..loc.line_end]});
+        try stderr.print("\n{s}\n", .{source[loc.line_start..loc.line_end]});
         {
             var i: usize = 0;
             while (i < loc.column) : (i += 1) {
@@ -3767,8 +3767,8 @@ fn testParse(source: []const u8, allocator: *mem.Allocator, anything_changed: *b
     var buffer = std.ArrayList(u8).init(allocator);
     errdefer buffer.deinit();
 
-    const outStream = buffer.outStream();
-    anything_changed.* = try std.zig.render(allocator, outStream, tree);
+    const writer = buffer.writer();
+    anything_changed.* = try std.zig.render(allocator, writer, tree);
     return buffer.toOwnedSlice();
 }
 fn testTransform(source: []const u8, expected_source: []const u8) !void {
@@ -3800,7 +3800,7 @@ fn testTransform(source: []const u8, expected_source: []const u8) !void {
             error.OutOfMemory => {
                 if (failing_allocator.allocated_bytes != failing_allocator.freed_bytes) {
                     warn(
-                        "\nfail_index: {}/{}\nallocated bytes: {}\nfreed bytes: {}\nallocations: {}\ndeallocations: {}\n",
+                        "\nfail_index: {d}/{d}\nallocated bytes: {d}\nfreed bytes: {d}\nallocations: {d}\ndeallocations: {d}\n",
                         .{
                             fail_index,
                             needed_alloc_count,
@@ -3822,7 +3822,7 @@ fn testCanonical(source: []const u8) !void {
     return testTransform(source, source);
 }
 
-const Error = @TagType(std.zig.ast.Error);
+const Error = std.meta.Tag(std.zig.ast.Error);
 
 fn testError(source: []const u8, expected_errors: []const Error) !void {
     const tree = try std.zig.parse(std.testing.allocator, source);

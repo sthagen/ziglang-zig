@@ -102,6 +102,11 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\} Color;
         \\#define CLITERAL(type)      (type)
         \\#define LIGHTGRAY  CLITERAL(Color){ 200, 200, 200, 255 }   // Light Gray
+        \\typedef struct boom_t
+        \\{
+        \\    int i1;
+        \\} boom_t;
+        \\#define FOO ((boom_t){1})
     , &[_][]const u8{ // TODO properly translate this
         \\pub const struct_Color = extern struct {
         \\    r: u8,
@@ -116,6 +121,13 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\}
         ,
         \\pub const LIGHTGRAY = @import("std").mem.zeroInit(CLITERAL(Color), .{ 200, 200, 200, 255 });
+        ,
+        \\pub const struct_boom_t = extern struct {
+        \\    i1: c_int,
+        \\};
+        \\pub const boom_t = struct_boom_t;
+        ,
+        \\pub const FOO = @import("std").mem.zeroInit(boom_t, .{ 1 });
     });
 
     cases.add("complex switch",
@@ -539,7 +551,14 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\    static const char v2[] = "2.2.2";
         \\}
     , &[_][]const u8{
-        \\const v2: [*c]const u8 = "2.2.2";
+        \\const v2: [6]u8 = [6]u8{
+        \\    '2',
+        \\    '.',
+        \\    '2',
+        \\    '.',
+        \\    '2',
+        \\    0,
+        \\};
         \\pub export fn foo() void {
         \\    _ = v2;
         \\}
@@ -1375,11 +1394,19 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\void b(void) {}
         \\void c();
         \\void d(void);
+        \\static void e() {}
+        \\static void f(void) {}
+        \\static void g();
+        \\static void h(void);
     , &[_][]const u8{
         \\pub export fn a() void {}
         \\pub export fn b() void {}
         \\pub extern fn c(...) void;
         \\pub extern fn d() void;
+        \\pub fn e() callconv(.C) void {}
+        \\pub fn f() callconv(.C) void {}
+        \\pub extern fn g() void;
+        \\pub extern fn h() void;
     });
 
     cases.add("variable declarations",
@@ -1387,9 +1414,30 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\static char arr1[] = "hello";
         \\char arr2[] = "hello";
     , &[_][]const u8{
-        \\pub export var arr0: [*c]u8 = "hello";
-        \\pub var arr1: [*c]u8 = "hello";
-        \\pub export var arr2: [*c]u8 = "hello";
+        \\pub export var arr0: [6]u8 = [6]u8{
+        \\    'h',
+        \\    'e',
+        \\    'l',
+        \\    'l',
+        \\    'o',
+        \\    0,
+        \\};
+        \\pub var arr1: [6]u8 = [6]u8{
+        \\    'h',
+        \\    'e',
+        \\    'l',
+        \\    'l',
+        \\    'o',
+        \\    0,
+        \\};
+        \\pub export var arr2: [6]u8 = [6]u8{
+        \\    'h',
+        \\    'e',
+        \\    'l',
+        \\    'l',
+        \\    'o',
+        \\    0,
+        \\};
     });
 
     cases.add("array initializer expr",
@@ -2938,7 +2986,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub fn a() callconv(.C) void {}
         \\pub fn b() callconv(.C) void {}
         \\pub export fn c() void {}
-        \\pub fn foo(...) callconv(.C) void {}
+        \\pub fn foo() callconv(.C) void {}
     });
 
     cases.add("casting away const and volatile",

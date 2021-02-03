@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -140,6 +140,9 @@ pub const random = &@import("crypto/tlcsprng.zig").interface;
 const std = @import("std.zig");
 
 test "crypto" {
+    const please_windows_dont_oom = std.Target.current.os.tag == .windows;
+    if (please_windows_dont_oom) return error.SkipZigTest;
+
     inline for (std.meta.declarations(@This())) |decl| {
         switch (decl.data) {
             .Type => |t| {
