@@ -255,7 +255,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    exit(y - 6);
             \\}
             \\
-            \\inline fn add(a: usize, b: usize, c: usize) usize {
+            \\fn add(a: usize, b: usize, c: usize) callconv(.Inline) usize {
             \\    return a + b + c;
             \\}
             \\
@@ -1228,7 +1228,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    exit(y - 6);
             \\}
             \\
-            \\inline fn add(a: usize, b: usize, c: usize) usize {
+            \\fn add(a: usize, b: usize, c: usize) callconv(.Inline) usize {
             \\    if (a == 10) @compileError("bad");
             \\    return a + b + c;
             \\}
@@ -1251,7 +1251,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    exit(y - 6);
             \\}
             \\
-            \\inline fn add(a: usize, b: usize, c: usize) usize {
+            \\fn add(a: usize, b: usize, c: usize) callconv(.Inline) usize {
             \\    if (a == 10) @compileError("bad");
             \\    return a + b + c;
             \\}
@@ -1277,7 +1277,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    exit(y - 21);
             \\}
             \\
-            \\inline fn fibonacci(n: usize) usize {
+            \\fn fibonacci(n: usize) callconv(.Inline) usize {
             \\    if (n <= 2) return n;
             \\    return fibonacci(n - 2) + fibonacci(n - 1);
             \\}
@@ -1300,7 +1300,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    exit(y - 21);
             \\}
             \\
-            \\inline fn fibonacci(n: usize) usize {
+            \\fn fibonacci(n: usize) callconv(.Inline) usize {
             \\    if (n <= 2) return n;
             \\    return fibonacci(n - 2) + fibonacci(n - 1);
             \\}
@@ -1384,6 +1384,28 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    asm volatile ("syscall"
             \\        :
             \\        : [number] "{rax}" (231), // exit_group
+            \\          [arg1] "{rdi}" (0)
+            \\        : "rcx", "r11", "memory"
+            \\    );
+            \\    unreachable;
+            \\}
+        ,
+            "",
+        );
+    }
+
+    {
+        var case = ctx.exe("passing u0 to function", linux_x64);
+        case.addCompareOutput(
+            \\export fn _start() noreturn {
+            \\    doNothing(0);
+            \\    exit();
+            \\}
+            \\fn doNothing(arg: u0) void {}
+            \\fn exit() noreturn {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (231),
             \\          [arg1] "{rdi}" (0)
             \\        : "rcx", "r11", "memory"
             \\    );
