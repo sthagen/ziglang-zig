@@ -1421,6 +1421,8 @@ pub const LibExeObjStep = struct {
     /// Overrides the default stack size
     stack_size: ?u64 = null,
 
+    want_lto: ?bool = null,
+
     const LinkObject = union(enum) {
         StaticPath: []const u8,
         OtherStep: *LibExeObjStep,
@@ -2589,6 +2591,14 @@ pub const LibExeObjStep = struct {
             }
         }
 
+        if (self.want_lto) |lto| {
+            if (lto) {
+                try zig_args.append("-flto");
+            } else {
+                try zig_args.append("-fno-lto");
+            }
+        }
+
         if (self.subsystem) |subsystem| {
             try zig_args.append("--subsystem");
             try zig_args.append(switch (subsystem) {
@@ -2763,7 +2773,9 @@ pub const InstallDirectoryOptions = struct {
             .install_dir = self.install_dir.dupe(b),
             .install_subdir = b.dupe(self.install_subdir),
             .exclude_extensions = if (self.exclude_extensions) |extensions|
-                b.dupeStrings(extensions) else null,
+                b.dupeStrings(extensions)
+            else
+                null,
         };
     }
 };

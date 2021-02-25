@@ -288,6 +288,8 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         /// The key must be canonical register.
         registers: std.AutoHashMapUnmanaged(Register, *ir.Inst) = .{},
         free_registers: FreeRegInt = math.maxInt(FreeRegInt),
+        /// Tracks all registers allocated in the course of this function
+        allocated_registers: FreeRegInt = 0,
         /// Maps offset to what is stored there.
         stack: std.AutoHashMapUnmanaged(u32, StackAllocation) = .{},
 
@@ -384,7 +386,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             const index = reg.allocIndex() orelse return;
             const ShiftInt = math.Log2Int(FreeRegInt);
             const shift = @intCast(ShiftInt, index);
-            self.free_registers &= ~(@as(FreeRegInt, 1) << shift);
+            const mask = @as(FreeRegInt, 1) << shift;
+            self.free_registers &= ~mask;
+            self.allocated_registers |= mask;
         }
 
         fn markRegFree(self: *Self, reg: Register) void {
@@ -402,7 +406,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             if (free_index >= callee_preserved_regs.len) {
                 return null;
             }
-            self.free_registers &= ~(@as(FreeRegInt, 1) << free_index);
+            const mask = @as(FreeRegInt, 1) << free_index;
+            self.free_registers &= ~mask;
+            self.allocated_registers |= mask;
             const reg = callee_preserved_regs[free_index];
             self.registers.putAssumeCapacityNoClobber(reg, inst);
             log.debug("alloc {} => {*}", .{ reg, inst });
@@ -451,11 +457,16 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
 
             const src_data: struct { lbrace_src: usize, rbrace_src: usize, source: []const u8 } = blk: {
                 const container_scope = module_fn.owner_decl.container;
-                const tree = container_scope.file_scope.contents.tree;
-                const fn_proto = tree.root_node.decls()[module_fn.owner_decl.src_index].castTag(.FnProto).?;
-                const block = fn_proto.getBodyNode().?.castTag(.Block).?;
-                const lbrace_src = tree.token_locs[block.lbrace].start;
-                const rbrace_src = tree.token_locs[block.rbrace].start;
+                const tree = container_scope.file_scope.tree;
+                const node_tags = tree.nodes.items(.tag);
+                const node_datas = tree.nodes.items(.data);
+                const token_starts = tree.tokens.items(.start);
+
+                const fn_decl = tree.rootDecls()[module_fn.owner_decl.src_index];
+                assert(node_tags[fn_decl] == .fn_decl);
+                const block = node_datas[fn_decl].rhs;
+                const lbrace_src = token_starts[tree.firstToken(block)];
+                const rbrace_src = token_starts[tree.lastToken(block)];
                 break :blk .{
                     .lbrace_src = lbrace_src,
                     .rbrace_src = rbrace_src,
@@ -581,20 +592,34 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         // push {fp, lr}
                         // mov fp, sp
                         // sub sp, sp, #reloc
-                        writeInt(u32, try self.code.addManyAsArray(4), Instruction.push(.al, .{ .fp, .lr }).toU32());
-                        writeInt(u32, try self.code.addManyAsArray(4), Instruction.mov(.al, .fp, Instruction.Operand.reg(.sp, Instruction.Operand.Shift.none)).toU32());
-                        const backpatch_reloc = self.code.items.len;
-                        try self.code.resize(backpatch_reloc + 4);
+                        const prologue_reloc = self.code.items.len;
+                        try self.code.resize(prologue_reloc + 12);
+                        writeInt(u32, self.code.items[prologue_reloc + 4 ..][0..4], Instruction.mov(.al, .fp, Instruction.Operand.reg(.sp, Instruction.Operand.Shift.none)).toU32());
 
                         try self.dbgSetPrologueEnd();
 
                         try self.genBody(self.mod_fn.body);
 
+                        // Backpatch push callee saved regs
+                        var saved_regs = Instruction.RegisterList{
+                            .r11 = true, // fp
+                            .r14 = true, // lr
+                        };
+                        inline for (callee_preserved_regs) |reg, i| {
+                            const ShiftInt = math.Log2Int(FreeRegInt);
+                            const shift = @intCast(ShiftInt, i);
+                            const mask = @as(FreeRegInt, 1) << shift;
+                            if (self.allocated_registers & mask != 0) {
+                                @field(saved_regs, @tagName(reg)) = true;
+                            }
+                        }
+                        writeInt(u32, self.code.items[prologue_reloc..][0..4], Instruction.stmdb(.al, .sp, true, saved_regs).toU32());
+
                         // Backpatch stack offset
                         const stack_end = self.max_end_stack;
                         const aligned_stack_end = mem.alignForward(stack_end, self.stack_align);
                         if (Instruction.Operand.fromU32(@intCast(u32, aligned_stack_end))) |op| {
-                            writeInt(u32, self.code.items[backpatch_reloc..][0..4], Instruction.sub(.al, .sp, .sp, op).toU32());
+                            writeInt(u32, self.code.items[prologue_reloc + 8 ..][0..4], Instruction.sub(.al, .sp, .sp, op).toU32());
                         } else {
                             return self.failSymbol("TODO ARM: allow larger stacks", .{});
                         }
@@ -627,10 +652,14 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             }
                         }
 
+                        // Epilogue: pop callee saved registers (swap lr with pc in saved_regs)
+                        saved_regs.r14 = false; // lr
+                        saved_regs.r15 = true; // pc
+
                         // mov sp, fp
                         // pop {fp, pc}
                         writeInt(u32, try self.code.addManyAsArray(4), Instruction.mov(.al, .sp, Instruction.Operand.reg(.fp, Instruction.Operand.Shift.none)).toU32());
-                        writeInt(u32, try self.code.addManyAsArray(4), Instruction.pop(.al, .{ .fp, .pc }).toU32());
+                        writeInt(u32, try self.code.addManyAsArray(4), Instruction.ldm(.al, .sp, true, saved_regs).toU32());
                     } else {
                         try self.dbgSetPrologueEnd();
                         try self.genBody(self.mod_fn.body);
@@ -2945,8 +2974,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             4, 8 => {
                                 const offset = if (math.cast(i9, adj_off)) |imm|
                                     Instruction.LoadStoreOffset.imm_post_index(-imm)
-                                else |_|
-                                    Instruction.LoadStoreOffset.reg(try self.copyToTmpRegister(src, Type.initTag(.u64), MCValue{ .immediate = adj_off }));
+                                else |_| Instruction.LoadStoreOffset.reg(try self.copyToTmpRegister(src, Type.initTag(.u64), MCValue{ .immediate = adj_off }));
                                 const rn: Register = switch (arch) {
                                     .aarch64, .aarch64_be => .x29,
                                     .aarch64_32 => .w29,
