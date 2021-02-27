@@ -154,6 +154,8 @@ pub const Inst = struct {
         error_union_type,
         /// Create an error set.
         error_set,
+        /// `error.Foo` syntax.
+        error_value,
         /// Export the provided Decl as the provided name in the compilation's output object file.
         @"export",
         /// Given a pointer to a struct or object that contains virtual fields, returns a pointer
@@ -487,6 +489,7 @@ pub const Inst = struct {
                 .ptr_type => PtrType,
                 .enum_literal => EnumLiteral,
                 .error_set => ErrorSet,
+                .error_value => ErrorValue,
                 .slice => Slice,
                 .typeof_peer => TypeOfPeer,
                 .container_field_named => ContainerFieldNamed,
@@ -612,6 +615,7 @@ pub const Inst = struct {
                 .error_union_type,
                 .bit_not,
                 .error_set,
+                .error_value,
                 .slice,
                 .slice_start,
                 .import,
@@ -1095,6 +1099,16 @@ pub const Inst = struct {
 
         positionals: struct {
             fields: [][]const u8,
+        },
+        kw_args: struct {},
+    };
+
+    pub const ErrorValue = struct {
+        pub const base_tag = Tag.error_value;
+        base: Inst,
+
+        positionals: struct {
+            name: []const u8,
         },
         kw_args: struct {},
     };
@@ -1622,6 +1636,12 @@ const DumpTzir = struct {
                 .optional_payload,
                 .optional_payload_ptr,
                 .wrap_optional,
+                .wrap_errunion_payload,
+                .wrap_errunion_err,
+                .unwrap_errunion_payload,
+                .unwrap_errunion_err,
+                .unwrap_errunion_payload_ptr,
+                .unwrap_errunion_err_ptr,
                 => {
                     const un_op = inst.cast(ir.Inst.UnOp).?;
                     try dtz.findConst(un_op.operand);
@@ -1733,6 +1753,12 @@ const DumpTzir = struct {
                 .optional_payload,
                 .optional_payload_ptr,
                 .wrap_optional,
+                .wrap_errunion_err,
+                .wrap_errunion_payload,
+                .unwrap_errunion_err,
+                .unwrap_errunion_payload,
+                .unwrap_errunion_payload_ptr,
+                .unwrap_errunion_err_ptr,
                 => {
                     const un_op = inst.cast(ir.Inst.UnOp).?;
                     const kinky = try dtz.writeInst(writer, un_op.operand);

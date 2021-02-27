@@ -32,6 +32,7 @@ const MAX_PATH_BYTES = std.fs.MAX_PATH_BYTES;
 pub const darwin = @import("os/darwin.zig");
 pub const dragonfly = @import("os/dragonfly.zig");
 pub const freebsd = @import("os/freebsd.zig");
+pub const haiku = @import("os/haiku.zig");
 pub const netbsd = @import("os/netbsd.zig");
 pub const openbsd = @import("os/openbsd.zig");
 pub const linux = @import("os/linux.zig");
@@ -52,6 +53,7 @@ test {
     _ = uefi;
     _ = wasi;
     _ = windows;
+    _ = haiku;
 
     _ = @import("os/test.zig");
 }
@@ -66,6 +68,7 @@ else if (builtin.link_libc)
 else switch (builtin.os.tag) {
     .macos, .ios, .watchos, .tvos => darwin,
     .freebsd => freebsd,
+    .haiku => haiku,
     .linux => linux,
     .netbsd => netbsd,
     .openbsd => openbsd,
@@ -599,7 +602,7 @@ pub fn ftruncate(fd: fd_t, length: u64) TruncateError!void {
 /// On these systems, the read races with concurrent writes to the same file descriptor.
 pub fn preadv(fd: fd_t, iov: []const iovec, offset: u64) PReadError!usize {
     const have_pread_but_not_preadv = switch (std.Target.current.os.tag) {
-        .windows, .macos, .ios, .watchos, .tvos => true,
+        .windows, .macos, .ios, .watchos, .tvos, .haiku => true,
         else => false,
     };
     if (have_pread_but_not_preadv) {
@@ -932,7 +935,7 @@ pub fn pwrite(fd: fd_t, bytes: []const u8, offset: u64) PWriteError!usize {
 /// If `iov.len` is larger than will fit in a `u31`, a partial write will occur.
 pub fn pwritev(fd: fd_t, iov: []const iovec_const, offset: u64) PWriteError!usize {
     const have_pwrite_but_not_pwritev = switch (std.Target.current.os.tag) {
-        .windows, .macos, .ios, .watchos, .tvos => true,
+        .windows, .macos, .ios, .watchos, .tvos, .haiku => true,
         else => false,
     };
 
@@ -3921,7 +3924,10 @@ pub fn sysctl(
     newlen: usize,
 ) SysCtlError!void {
     if (builtin.os.tag == .wasi) {
-        @panic("unsupported");
+        @panic("unsupported"); // TODO should be compile error, not panic
+    }
+    if (builtin.os.tag == .haiku) {
+        @panic("unsupported"); // TODO should be compile error, not panic
     }
 
     const name_len = math.cast(c_uint, name.len) catch return error.NameTooLong;
@@ -3945,7 +3951,10 @@ pub fn sysctlbynameZ(
     newlen: usize,
 ) SysCtlError!void {
     if (builtin.os.tag == .wasi) {
-        @panic("unsupported");
+        @panic("unsupported"); // TODO should be compile error, not panic
+    }
+    if (builtin.os.tag == .haiku) {
+        @panic("unsupported"); // TODO should be compile error, not panic
     }
 
     switch (errno(system.sysctlbyname(name, oldp, oldlenp, newp, newlen))) {
