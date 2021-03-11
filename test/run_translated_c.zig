@@ -27,6 +27,8 @@ pub fn addCases(cases: *tests.RunTranslatedCContext) void {
         \\#define FOO =
         \\#define PtrToPtr64(p) ((void *POINTER_64) p)
         \\#define STRUC_ALIGNED_STACK_COPY(t,s) ((CONST t *)(s))
+        \\#define bar = 0x
+        \\#define baz = 0b
         \\int main(void) {}
     , "");
 
@@ -1070,6 +1072,118 @@ pub fn addCases(cases: *tests.RunTranslatedCContext) void {
         \\    const char *my_string = "bar";
         \\    typeof (typeof (my_string)[4]) string_arr = {"a","b","c","d"};
         \\    if (string_arr[0][0] != 'a' || string_arr[3][0] != 'd') abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("offsetof",
+        \\#include <stddef.h>
+        \\#include <stdlib.h>
+        \\#define container_of(ptr, type, member) ({                      \
+        \\        const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
+        \\        (type *)( (char *)__mptr - offsetof(type,member) );})
+        \\typedef struct {
+        \\    int i;
+        \\    struct { int x; char y; int z; } s;
+        \\    float f;
+        \\} container;
+        \\int main(void) {
+        \\    if (offsetof(container, i) != 0) abort();
+        \\    if (offsetof(container, s) <= offsetof(container, i)) abort();
+        \\    if (offsetof(container, f) <= offsetof(container, s)) abort();
+        \\
+        \\    container my_container;
+        \\    typeof(my_container.s) *inner_member_pointer = &my_container.s;
+        \\    float *float_member_pointer = &my_container.f;
+        \\    int *anon_member_pointer = &my_container.s.z;
+        \\    container *my_container_p;
+        \\
+        \\    my_container_p = container_of(inner_member_pointer, container, s);
+        \\    if (my_container_p != &my_container) abort();
+        \\
+        \\    my_container_p = container_of(float_member_pointer, container, f);
+        \\    if (my_container_p != &my_container) abort();
+        \\
+        \\    if (container_of(anon_member_pointer, typeof(my_container.s), z) != inner_member_pointer) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("handle assert.h",
+        \\#include <assert.h>
+        \\int main() {
+        \\    int x = 1;
+        \\    int *xp = &x;
+        \\    assert(1);
+        \\    assert(x != 0);
+        \\    assert(xp);
+        \\    assert(*xp);
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("NDEBUG disables assert",
+        \\#define NDEBUG
+        \\#include <assert.h>
+        \\int main() {
+        \\    assert(0);
+        \\    assert(NULL);
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("pointer arithmetic with signed operand",
+        \\#include <stdlib.h>
+        \\int main() {
+        \\    int array[10];
+        \\    int *x = &array[5];
+        \\    int *y;
+        \\    int idx = 0;
+        \\    y = x + ++idx;
+        \\    if (y != x + 1 || y != &array[6]) abort();
+        \\    y = idx + x;
+        \\    if (y != x + 1 || y != &array[6]) abort();
+        \\    y = x - idx;
+        \\    if (y != x - 1 || y != &array[4]) abort();
+        \\
+        \\    idx = 0;
+        \\    y = --idx + x;
+        \\    if (y != x - 1 || y != &array[4]) abort();
+        \\    y = idx + x;
+        \\    if (y != x - 1 || y != &array[4]) abort();
+        \\    y = x - idx;
+        \\    if (y != x + 1 || y != &array[6]) abort();
+        \\
+        \\    idx = 1;
+        \\    x += idx;
+        \\    if (x != &array[6]) abort();
+        \\    x -= idx;
+        \\    if (x != &array[5]) abort();
+        \\    y = (x += idx);
+        \\    if (y != x || y != &array[6]) abort();
+        \\    y = (x -= idx);
+        \\    if (y != x || y != &array[5]) abort();
+        \\
+        \\    if (array + idx != &array[1] || array + 1 != &array[1]) abort();
+        \\    idx = -1;
+        \\    if (array - idx != &array[1]) abort();
+        \\
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("Compound literals",
+        \\#include <stdlib.h>
+        \\struct Foo {
+        \\    int a;
+        \\    char b[2];
+        \\    float c;
+        \\};
+        \\int main() {
+        \\    struct Foo foo;
+        \\    int x = 1, y = 2;
+        \\    foo = (struct Foo) {x + y, {'a', 'b'}, 42.0f};
+        \\    if (foo.a != x + y || foo.b[0] != 'a' || foo.b[1] != 'b' || foo.c != 42.0f) abort();
         \\    return 0;
         \\}
     , "");

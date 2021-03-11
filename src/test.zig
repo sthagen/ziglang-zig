@@ -871,6 +871,7 @@ pub const TestContext = struct {
                                 "-std=c89",
                                 "-pedantic",
                                 "-Werror",
+                                "-Wno-incompatible-library-redeclaration", // https://github.com/ziglang/zig/issues/875
                                 "-Wno-declaration-after-statement",
                                 "--",
                                 "-lc",
@@ -1030,8 +1031,8 @@ pub const TestContext = struct {
             var file = try tmp_dir.openFile(bin_name, .{ .read = true });
             defer file.close();
 
-            const header = try std.elf.readHeader(file);
-            var iterator = header.program_header_iterator(file);
+            const header = try std.elf.Header.read(&file);
+            var iterator = header.program_header_iterator(&file);
 
             var none_loaded = true;
 

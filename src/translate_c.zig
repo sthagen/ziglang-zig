@@ -671,15 +671,6 @@ fn visitVarDecl(c: *Context, var_decl: *const clang.VarDecl, mangled_name: ?[]co
         break :blk null;
     };
 
-    const alignment = blk: {
-        const alignment = var_decl.getAlignedAttribute(c.clang_context);
-        if (alignment != 0) {
-            // Clang reports the alignment in bits
-            break :blk alignment / 8;
-        }
-        break :blk null;
-    };
-
     const node = try Tag.var_decl.create(c.arena, .{
         .is_pub = is_pub,
         .is_const = is_const,
@@ -687,7 +678,7 @@ fn visitVarDecl(c: *Context, var_decl: *const clang.VarDecl, mangled_name: ?[]co
         .is_export = is_export,
         .is_threadlocal = is_threadlocal,
         .linksection_string = linksection_string,
-        .alignment = alignment,
+        .alignment = zigAlignment(var_decl.getAlignedAttribute(c.clang_context)),
         .name = checked_name,
         .type = type_node,
         .init = init_node,
@@ -833,14 +824,7 @@ fn transRecordDecl(c: *Context, scope: *Scope, record_decl: *const clang.RecordD
                 else => |e| return e,
             };
 
-            const alignment = blk_2: {
-                const alignment = field_decl.getAlignedAttribute(c.clang_context);
-                if (alignment != 0) {
-                    // Clang reports the alignment in bits
-                    break :blk_2 alignment / 8;
-                }
-                break :blk_2 null;
-            };
+            const alignment = zigAlignment(field_decl.getAlignedAttribute(c.clang_context));
 
             if (is_anon) {
                 try c.decl_table.putNoClobber(c.gpa, @ptrToInt(field_decl.getCanonicalDecl()), field_name);
@@ -1069,10 +1053,112 @@ fn transStmt(
             const expr = try transExpr(c, scope, source_expr, .used);
             return maybeSuppressResult(c, scope, result_used, expr);
         },
+        .OffsetOfExprClass => return transOffsetOfExpr(c, scope, @ptrCast(*const clang.OffsetOfExpr, stmt), result_used),
+        .CompoundLiteralExprClass => {
+            const compound_literal = @ptrCast(*const clang.CompoundLiteralExpr, stmt);
+            return transExpr(c, scope, compound_literal.getInitializer(), result_used);
+        },
         else => {
             return fail(c, error.UnsupportedTranslation, stmt.getBeginLoc(), "TODO implement translation of stmt class {s}", .{@tagName(sc)});
         },
     }
+}
+
+/// Translate a "simple" offsetof expression containing exactly one component,
+/// when that component is of kind .Field - e.g. offsetof(mytype, myfield)
+fn transSimpleOffsetOfExpr(
+    c: *Context,
+    scope: *Scope,
+    expr: *const clang.OffsetOfExpr,
+) TransError!Node {
+    assert(expr.getNumComponents() == 1);
+    const component = expr.getComponent(0);
+    if (component.getKind() == .Field) {
+        const field_decl = component.getField();
+        if (field_decl.getParent()) |record_decl| {
+            if (c.decl_table.get(@ptrToInt(record_decl.getCanonicalDecl()))) |type_name| {
+                const type_node = try Tag.type.create(c.arena, type_name);
+
+                var raw_field_name = try c.str(@ptrCast(*const clang.NamedDecl, field_decl).getName_bytes_begin());
+                const quoted_field_name = try std.fmt.allocPrint(c.arena, "\"{s}\"", .{raw_field_name});
+                const field_name_node = try Tag.string_literal.create(c.arena, quoted_field_name);
+
+                return Tag.byte_offset_of.create(c.arena, .{
+                    .lhs = type_node,
+                    .rhs = field_name_node,
+                });
+            }
+        }
+    }
+    return fail(c, error.UnsupportedTranslation, expr.getBeginLoc(), "Failed to translate simple OffsetOfExpr", .{});
+}
+
+fn transOffsetOfExpr(
+    c: *Context,
+    scope: *Scope,
+    expr: *const clang.OffsetOfExpr,
+    result_used: ResultUsed,
+) TransError!Node {
+    if (expr.getNumComponents() == 1) {
+        const offsetof_expr = try transSimpleOffsetOfExpr(c, scope, expr);
+        return maybeSuppressResult(c, scope, result_used, offsetof_expr);
+    }
+
+    // TODO implement OffsetOfExpr with more than 1 component
+    // OffsetOfExpr API:
+    //     call expr.getComponent(idx) while idx < expr.getNumComponents()
+    //     component.getKind() will be either .Array or .Field (other kinds are C++-only)
+    //     if .Field, use component.getField() to retrieve *clang.FieldDecl
+    //     if .Array, use component.getArrayExprIndex() to get a c_uint which
+    //         can be passed to expr.getIndexExpr(expr_index) to get the *clang.Expr for the array index
+
+    return fail(c, error.UnsupportedTranslation, expr.getBeginLoc(), "TODO: implement complex OffsetOfExpr translation", .{});
+}
+
+/// Cast a signed integer node to a usize, for use in pointer arithmetic. Negative numbers
+/// will become very large positive numbers but that is ok since we only use this in
+/// pointer arithmetic expressions, where wraparound will ensure we get the correct value.
+/// node -> @bitCast(usize, @intCast(isize, node))
+fn usizeCastForWrappingPtrArithmetic(gpa: *mem.Allocator, node: Node) TransError!Node {
+    const intcast_node = try Tag.int_cast.create(gpa, .{
+        .lhs = try Tag.identifier.create(gpa, "isize"),
+        .rhs = node,
+    });
+
+    return Tag.bit_cast.create(gpa, .{
+        .lhs = try Tag.identifier.create(gpa, "usize"),
+        .rhs = intcast_node,
+    });
+}
+
+/// Translate an arithmetic expression with a pointer operand and a signed-integer operand.
+/// Zig requires a usize argument for pointer arithmetic, so we intCast to isize and then
+/// bitcast to usize; pointer wraparound make the math work.
+/// Zig pointer addition is not commutative (unlike C); the pointer operand needs to be on the left.
+/// The + operator in C is not a sequence point so it should be safe to switch the order if necessary.
+fn transCreatePointerArithmeticSignedOp(
+    c: *Context,
+    scope: *Scope,
+    stmt: *const clang.BinaryOperator,
+    result_used: ResultUsed,
+) TransError!Node {
+    const is_add = stmt.getOpcode() == .Add;
+    const lhs = stmt.getLHS();
+    const rhs = stmt.getRHS();
+    const swap_operands = is_add and cIsSignedInteger(getExprQualType(c, lhs));
+
+    const swizzled_lhs = if (swap_operands) rhs else lhs;
+    const swizzled_rhs = if (swap_operands) lhs else rhs;
+
+    const lhs_node = try transExpr(c, scope, swizzled_lhs, .used);
+    const rhs_node = try transExpr(c, scope, swizzled_rhs, .used);
+
+    const bitcast_node = try usizeCastForWrappingPtrArithmetic(c.arena, rhs_node);
+
+    const arith_args = .{ .lhs = lhs_node, .rhs = bitcast_node };
+    const arith_node = try if (is_add) Tag.add.create(c.arena, arith_args) else Tag.sub.create(c.arena, arith_args);
+
+    return maybeSuppressResult(c, scope, result_used, arith_node);
 }
 
 fn transBinaryOperator(
@@ -1131,6 +1217,12 @@ fn transBinaryOperator(
         },
         .LOr => {
             return transCreateNodeBoolInfixOp(c, scope, stmt, .@"or", result_used);
+        },
+        .Add, .Sub => {
+            // `ptr + idx` and `idx + ptr` -> ptr + @bitCast(usize, @intCast(isize, idx))
+            // `ptr - idx` -> ptr - @bitCast(usize, @intCast(isize, idx))
+            if (qualTypeIsPtr(qt) and (cIsSignedInteger(getExprQualType(c, stmt.getLHS())) or
+                cIsSignedInteger(getExprQualType(c, stmt.getRHS())))) return transCreatePointerArithmeticSignedOp(c, scope, stmt, result_used);
         },
         else => {},
     }
@@ -1277,6 +1369,13 @@ fn transCStyleCastExprClass(
     return maybeSuppressResult(c, scope, result_used, cast_node);
 }
 
+/// Clang reports the alignment in bits, we use bytes
+/// Clang uses 0 for "no alignment specified", we use null
+fn zigAlignment(bit_alignment: c_uint) ?c_uint {
+    if (bit_alignment == 0) return null;
+    return bit_alignment / 8;
+}
+
 fn transDeclStmtOne(
     c: *Context,
     scope: *Scope,
@@ -1316,6 +1415,7 @@ fn transDeclStmtOne(
             if (!qualTypeIsBoolean(qual_type) and isBoolRes(init_node)) {
                 init_node = try Tag.bool_to_int.create(c.arena, init_node);
             }
+
             const node = try Tag.var_decl.create(c.arena, .{
                 .is_pub = false,
                 .is_const = is_const,
@@ -1323,7 +1423,7 @@ fn transDeclStmtOne(
                 .is_export = false,
                 .is_threadlocal = false,
                 .linksection_string = null,
-                .alignment = null,
+                .alignment = zigAlignment(var_decl.getAlignedAttribute(c.clang_context)),
                 .name = mangled_name,
                 .type = type_node,
                 .init = init_node,
@@ -1397,7 +1497,8 @@ fn transImplicitCastExpr(
             }
 
             const addr = try Tag.address_of.create(c.arena, try transExpr(c, scope, sub_expr, .used));
-            return maybeSuppressResult(c, scope, result_used, addr);
+            const casted = try transCPtrCast(c, scope, expr.getBeginLoc(), dest_type, src_type, addr);
+            return maybeSuppressResult(c, scope, result_used, casted);
         },
         .NullToPointer => {
             return Tag.null_literal.init();
@@ -2463,8 +2564,8 @@ fn transConstantExpr(c: *Context, scope: *Scope, expr: *const clang.Expr, used: 
             });
             return maybeSuppressResult(c, scope, used, as_node);
         },
-        else => {
-            return fail(c, error.UnsupportedTranslation, expr.getBeginLoc(), "unsupported constant expression kind", .{});
+        else => |kind| {
+            return fail(c, error.UnsupportedTranslation, expr.getBeginLoc(), "unsupported constant expression kind '{s}'", .{kind});
         },
     }
 }
@@ -2947,6 +3048,7 @@ fn transCreateCompoundAssign(
     const lhs_qt = getExprQualType(c, lhs);
     const rhs_qt = getExprQualType(c, rhs);
     const is_signed = cIsSignedInteger(lhs_qt);
+    const is_ptr_op_signed = qualTypeIsPtr(lhs_qt) and cIsSignedInteger(rhs_qt);
     const requires_int_cast = blk: {
         const are_integers = cIsInteger(lhs_qt) and cIsInteger(rhs_qt);
         const are_same_sign = cIsSignedInteger(lhs_qt) == cIsSignedInteger(rhs_qt);
@@ -2972,6 +3074,10 @@ fn transCreateCompoundAssign(
             try transExprCoercing(c, scope, rhs, .used)
         else
             try transExpr(c, scope, rhs, .used);
+
+        if (is_ptr_op_signed) {
+            rhs_node = try usizeCastForWrappingPtrArithmetic(c.arena, rhs_node);
+        }
 
         if (is_shift or requires_int_cast) {
             // @intCast(rhs)
@@ -3025,6 +3131,9 @@ fn transCreateCompoundAssign(
 
             rhs_node = try Tag.int_cast.create(c.arena, .{ .lhs = cast_to_type, .rhs = rhs_node });
         }
+        if (is_ptr_op_signed) {
+            rhs_node = try usizeCastForWrappingPtrArithmetic(c.arena, rhs_node);
+        }
 
         const assign = try transCreateNodeInfixOp(c, &block_scope.base, op, ref_node, rhs_node, .used);
         try block_scope.statements.append(assign);
@@ -3052,10 +3161,10 @@ fn transCPtrCast(
     const src_child_type = src_ty.getPointeeType();
     const dst_type_node = try transType(c, scope, ty, loc);
 
-    if ((src_child_type.isConstQualified() and
+    if (!src_ty.isArrayType() and ((src_child_type.isConstQualified() and
         !child_type.isConstQualified()) or
         (src_child_type.isVolatileQualified() and
-        !child_type.isVolatileQualified()))
+        !child_type.isVolatileQualified())))
     {
         // Casting away const or volatile requires us to use @intToPtr
         const ptr_to_int = try Tag.ptr_to_int.create(c.arena, expr);
@@ -4015,16 +4124,7 @@ fn finishTransFnProto(
         break :blk null;
     };
 
-    const alignment = blk: {
-        if (fn_decl) |decl| {
-            const alignment = decl.getAlignedAttribute(c.clang_context);
-            if (alignment != 0) {
-                // Clang reports the alignment in bits
-                break :blk alignment / 8;
-            }
-        }
-        break :blk null;
-    };
+    const alignment = if (fn_decl) |decl| zigAlignment(decl.getAlignedAttribute(c.clang_context)) else null;
 
     const explicit_callconv = if ((is_export or is_extern) and cc == .C) null else cc;
 
@@ -4556,7 +4656,7 @@ fn parseCPrimaryExprInner(c: *Context, m: *MacroCtx, scope: *Scope) ParseError!N
             if (slice[0] != '\'' or slice[1] == '\\' or slice.len == 3) {
                 return Tag.char_literal.create(c.arena, try zigifyEscapeSequences(c, m));
             } else {
-                const str = try std.fmt.allocPrint(c.arena, "0x{x}", .{slice[1 .. slice.len - 1]});
+                const str = try std.fmt.allocPrint(c.arena, "0x{s}", .{std.fmt.fmtSliceHexLower(slice[1 .. slice.len - 1])});
                 return Tag.integer_literal.create(c.arena, str);
             }
         },
