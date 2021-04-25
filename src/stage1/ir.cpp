@@ -9534,7 +9534,7 @@ static IrInstSrc *ir_gen_nosuspend(IrBuilderSrc *irb, Scope *parent_scope, AstNo
 
     Scope *child_scope = create_nosuspend_scope(irb->codegen, node, parent_scope);
     // purposefully pass null for result_loc and let EndExpr handle it
-    return ir_gen_node_extra(irb, node->data.comptime_expr.expr, child_scope, lval, nullptr);
+    return ir_gen_node_extra(irb, node->data.nosuspend_expr.expr, child_scope, lval, nullptr);
 }
 
 static IrInstSrc *ir_gen_return_from_block(IrBuilderSrc *irb, Scope *break_scope, AstNode *node, ScopeBlock *block_scope) {
@@ -10199,14 +10199,12 @@ static IrInstSrc *ir_gen_suspend(IrBuilderSrc *irb, Scope *parent_scope, AstNode
     }
 
     IrInstSrcSuspendBegin *begin = ir_build_suspend_begin_src(irb, parent_scope, node);
-    if (node->data.suspend.block != nullptr) {
-        ScopeSuspend *suspend_scope = create_suspend_scope(irb->codegen, node, parent_scope);
-        Scope *child_scope = &suspend_scope->base;
-        IrInstSrc *susp_res = ir_gen_node(irb, node->data.suspend.block, child_scope);
-        if (susp_res == irb->codegen->invalid_inst_src)
-            return irb->codegen->invalid_inst_src;
-        ir_mark_gen(ir_build_check_statement_is_void(irb, child_scope, node->data.suspend.block, susp_res));
-    }
+    ScopeSuspend *suspend_scope = create_suspend_scope(irb->codegen, node, parent_scope);
+    Scope *child_scope = &suspend_scope->base;
+    IrInstSrc *susp_res = ir_gen_node(irb, node->data.suspend.block, child_scope);
+    if (susp_res == irb->codegen->invalid_inst_src)
+        return irb->codegen->invalid_inst_src;
+    ir_mark_gen(ir_build_check_statement_is_void(irb, child_scope, node->data.suspend.block, susp_res));
 
     return ir_mark_gen(ir_build_suspend_finish_src(irb, parent_scope, node, begin));
 }
@@ -21660,8 +21658,8 @@ static ErrorMsg *ir_eval_negation_scalar(IrAnalyze *ira, IrInst* source_instr, Z
 {
     bool is_float = (scalar_type->id == ZigTypeIdFloat || scalar_type->id == ZigTypeIdComptimeFloat);
 
-    bool ok_type = ((scalar_type->id == ZigTypeIdInt && scalar_type->data.integral.is_signed) ||
-        scalar_type->id == ZigTypeIdComptimeInt || (is_float && !is_wrap_op));
+    bool ok_type = scalar_type->id == ZigTypeIdInt || scalar_type->id == ZigTypeIdComptimeInt ||
+            (is_float && !is_wrap_op);
 
     if (!ok_type) {
         const char *fmt = is_wrap_op ? "invalid wrapping negation type: '%s'" : "invalid negation type: '%s'";
@@ -21672,7 +21670,7 @@ static ErrorMsg *ir_eval_negation_scalar(IrAnalyze *ira, IrInst* source_instr, Z
         float_negate(scalar_out_val, operand_val);
     } else if (is_wrap_op) {
         bigint_negate_wrap(&scalar_out_val->data.x_bigint, &operand_val->data.x_bigint,
-                scalar_type->data.integral.bit_count);
+                scalar_type->data.integral.bit_count, scalar_type->data.integral.is_signed);
     } else {
         bigint_negate(&scalar_out_val->data.x_bigint, &operand_val->data.x_bigint);
     }
