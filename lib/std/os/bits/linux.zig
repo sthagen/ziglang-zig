@@ -18,7 +18,7 @@ pub usingnamespace switch (builtin.arch) {
     .i386 => @import("linux/i386.zig"),
     .x86_64 => @import("linux/x86_64.zig"),
     .aarch64 => @import("linux/arm64.zig"),
-    .arm => @import("linux/arm-eabi.zig"),
+    .arm, .thumb => @import("linux/arm-eabi.zig"),
     .riscv64 => @import("linux/riscv64.zig"),
     .sparcv9 => @import("linux/sparc64.zig"),
     .mips, .mipsel => @import("linux/mips.zig"),
@@ -1147,6 +1147,13 @@ pub const socklen_t = u32;
 pub const sockaddr = extern struct {
     family: sa_family_t,
     data: [14]u8,
+};
+
+pub const sockaddr_storage = extern struct {
+    family: sa_family_t,
+    __pad1: [6]u8,
+    __align: i64,
+    __pad2: [112]u8,
 };
 
 /// IPv4 socket address

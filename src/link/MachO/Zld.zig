@@ -29,6 +29,10 @@ page_size: ?u16 = null,
 file: ?fs.File = null,
 out_path: ?[]const u8 = null,
 
+// TODO these args will become obselete once Zld is coalesced with incremental
+// linker.
+stack_size: u64 = 0,
+
 objects: std.ArrayListUnmanaged(*Object) = .{},
 archives: std.ArrayListUnmanaged(*Archive) = .{},
 
@@ -82,7 +86,7 @@ unresolved: std.StringArrayHashMapUnmanaged(*Symbol) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 strtab_dir: std.StringHashMapUnmanaged(u32) = .{},
 
-threadlocal_offsets: std.ArrayListUnmanaged(u64) = .{},
+threadlocal_offsets: std.ArrayListUnmanaged(TlvOffset) = .{}, // TODO merge with Symbol abstraction
 local_rebases: std.ArrayListUnmanaged(Pointer) = .{},
 stubs: std.ArrayListUnmanaged(*Symbol) = .{},
 got_entries: std.ArrayListUnmanaged(*Symbol) = .{},
@@ -91,6 +95,15 @@ stub_helper_stubs_start_off: ?u64 = null,
 
 mappings: std.AutoHashMapUnmanaged(MappingKey, SectionMapping) = .{},
 unhandled_sections: std.AutoHashMapUnmanaged(MappingKey, u0) = .{},
+
+const TlvOffset = struct {
+    source_addr: u64,
+    offset: u64,
+
+    fn cmp(context: void, a: TlvOffset, b: TlvOffset) bool {
+        return a.source_addr < b.source_addr;
+    }
+};
 
 const MappingKey = struct {
     object_id: u16,
@@ -163,7 +176,11 @@ pub fn closeFiles(self: Zld) void {
     if (self.file) |f| f.close();
 }
 
-pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
+const LinkArgs = struct {
+    stack_size: ?u64 = null,
+};
+
+pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8, args: LinkArgs) !void {
     if (files.len == 0) return error.NoInputFiles;
     if (out_path.len == 0) return error.EmptyOutputPath;
 
@@ -197,6 +214,7 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
         .read = true,
         .mode = if (std.Target.current.os.tag == .windows) 0 else 0o777,
     });
+    self.stack_size = args.stack_size orelse 0;
 
     try self.populateMetadata();
     try self.parseInputFiles(files);
@@ -277,7 +295,7 @@ fn parseInputFiles(self: *Zld, files: []const []const u8) !void {
 
                 object.* = Object.init(self.allocator);
                 object.arch = self.arch.?;
-                object.name = try self.allocator.dupe(u8, input.name);
+                object.name = input.name;
                 object.file = input.file;
                 try object.parse();
                 try self.objects.append(self.allocator, object);
@@ -288,7 +306,7 @@ fn parseInputFiles(self: *Zld, files: []const []const u8) !void {
 
                 archive.* = Archive.init(self.allocator);
                 archive.arch = self.arch.?;
-                archive.name = try self.allocator.dupe(u8, input.name);
+                archive.name = input.name;
                 archive.file = input.file;
                 try archive.parse();
                 try self.archives.append(self.allocator, archive);
@@ -1362,10 +1380,7 @@ fn resolveSymbols(self: *Zld) !void {
             };
             assert(offsets.items.len > 0);
 
-            const object = try self.allocator.create(Object);
-            errdefer self.allocator.destroy(object);
-
-            object.* = try archive.parseObject(offsets.items[0]);
+            const object = try archive.parseObject(offsets.items[0]);
             try self.objects.append(self.allocator, object);
             try self.resolveSymbolsInObject(object);
 
@@ -1527,7 +1542,8 @@ fn resolveRelocsAndWriteSections(self: *Zld) !void {
                             }
                             if (rel.target == .section) {
                                 const source_sect = object.sections.items[rel.target.section];
-                                args.source_sect_addr = source_sect.inner.addr;
+                                args.source_source_sect_addr = sect.inner.addr;
+                                args.source_target_sect_addr = source_sect.inner.addr;
                             }
 
                             rebases: {
@@ -1567,7 +1583,10 @@ fn resolveRelocsAndWriteSections(self: *Zld) !void {
                                 };
                                 // Since we require TLV data to always preceed TLV bss section, we calculate
                                 // offsets wrt to the former if it is defined; otherwise, wrt to the latter.
-                                try self.threadlocal_offsets.append(self.allocator, args.target_addr - base_addr);
+                                try self.threadlocal_offsets.append(self.allocator, .{
+                                    .source_addr = args.source_addr,
+                                    .offset = args.target_addr - base_addr,
+                                });
                             }
                         },
                         .got_page, .got_page_off, .got_load, .got => {
@@ -1579,7 +1598,8 @@ fn resolveRelocsAndWriteSections(self: *Zld) !void {
                         else => |tt| {
                             if (tt == .signed and rel.target == .section) {
                                 const source_sect = object.sections.items[rel.target.section];
-                                args.source_sect_addr = source_sect.inner.addr;
+                                args.source_source_sect_addr = sect.inner.addr;
+                                args.source_target_sect_addr = source_sect.inner.addr;
                             }
                             args.target_addr = try self.relocTargetAddr(@intCast(u16, object_id), rel.target);
                         },
@@ -2093,10 +2113,12 @@ fn flush(self: *Zld) !void {
         var stream = std.io.fixedBufferStream(buffer);
         var writer = stream.writer();
 
+        std.sort.sort(TlvOffset, self.threadlocal_offsets.items, {}, TlvOffset.cmp);
+
         const seek_amt = 2 * @sizeOf(u64);
-        while (self.threadlocal_offsets.popOrNull()) |offset| {
+        for (self.threadlocal_offsets.items) |tlv| {
             try writer.context.seekBy(seek_amt);
-            try writer.writeIntLittle(u64, offset);
+            try writer.writeIntLittle(u64, tlv.offset);
         }
 
         try self.file.?.pwriteAll(buffer, sect.offset);
@@ -2191,6 +2213,7 @@ fn setEntryPoint(self: *Zld) !void {
     const entry_sym = sym.cast(Symbol.Regular) orelse unreachable;
     const ec = &self.load_commands.items[self.main_cmd_index.?].Main;
     ec.entryoff = @intCast(u32, entry_sym.address - seg.inner.vmaddr);
+    ec.stacksize = self.stack_size;
 }
 
 fn writeRebaseInfoTable(self: *Zld) !void {

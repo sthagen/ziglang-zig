@@ -20,6 +20,14 @@ pub fn resolveScopeID(name: []const u8) !u32 {
     if (comptime @hasDecl(os, "IFNAMESIZE")) {
         if (name.len >= os.IFNAMESIZE - 1) return error.NameTooLong;
 
+        if (comptime builtin.os.tag == .windows) {
+            var interface_name: [os.IFNAMESIZE]u8 = undefined;
+            mem.copy(u8, &interface_name, name);
+            interface_name[name.len] = 0;
+
+            return os.windows.ws2_32.if_nametoindex(@ptrCast([*:0]const u8, &interface_name));
+        }
+
         const fd = try os.socket(os.AF_UNIX, os.SOCK_DGRAM, 0);
         defer os.closeSocket(fd);
 
@@ -31,6 +39,7 @@ pub fn resolveScopeID(name: []const u8) !u32 {
 
         return @bitCast(u32, f.ifru.ivalue);
     }
+
     return error.Unsupported;
 }
 
@@ -499,12 +508,12 @@ test {
 
 test "ip: convert to and from ipv6" {
     try testing.expectFmt("::7f00:1", "{}", .{IPv4.localhost.toIPv6()});
-    testing.expect(!IPv4.localhost.toIPv6().mapsToIPv4());
+    try testing.expect(!IPv4.localhost.toIPv6().mapsToIPv4());
 
     try testing.expectFmt("::ffff:127.0.0.1", "{}", .{IPv4.localhost.mapToIPv6()});
-    testing.expect(IPv4.localhost.mapToIPv6().mapsToIPv4());
+    try testing.expect(IPv4.localhost.mapToIPv6().mapsToIPv4());
 
-    testing.expect(IPv4.localhost.toIPv6().toIPv4() == null);
+    try testing.expect(IPv4.localhost.toIPv6().toIPv4() == null);
     try testing.expectFmt("127.0.0.1", "{}", .{IPv4.localhost.mapToIPv6().toIPv4()});
 }
 

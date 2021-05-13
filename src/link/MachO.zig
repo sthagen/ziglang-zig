@@ -442,6 +442,7 @@ pub fn flushModule(self: *MachO, comp: *Compilation) !void {
                 const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
                 const main_cmd = &self.load_commands.items[self.main_cmd_index.?].Main;
                 main_cmd.entryoff = addr - text_segment.inner.vmaddr;
+                main_cmd.stacksize = self.base.options.stack_size_override orelse 0;
                 self.load_commands_dirty = true;
             }
             try self.writeRebaseInfoTable();
@@ -687,10 +688,7 @@ fn linkWithLLD(self: *MachO, comp: *Compilation) !void {
                 try argv.append("zig");
                 try argv.append("ld");
 
-                try argv.ensureCapacity(input_files.items.len);
-                for (input_files.items) |f| {
-                    argv.appendAssumeCapacity(f);
-                }
+                try argv.appendSlice(input_files.items);
 
                 try argv.append("-o");
                 try argv.append(full_out_path);
@@ -698,7 +696,9 @@ fn linkWithLLD(self: *MachO, comp: *Compilation) !void {
                 Compilation.dump_argv(argv.items);
             }
 
-            try zld.link(input_files.items, full_out_path);
+            try zld.link(input_files.items, full_out_path, .{
+                .stack_size = self.base.options.stack_size_override,
+            });
 
             break :outer;
         }

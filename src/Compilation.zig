@@ -232,7 +232,6 @@ pub const CObject = struct {
         pub fn destroy(em: *ErrorMsg, gpa: *Allocator) void {
             gpa.free(em.msg);
             gpa.destroy(em);
-            em.* = undefined;
         }
     };
 
@@ -849,7 +848,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             arena,
             options.zig_lib_directory.path.?,
             options.target,
-            options.is_native_os,
+            options.is_native_abi,
             link_libc,
             options.libc_installation,
         );
@@ -2261,23 +2260,7 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_comp_progress_node: *
 
     man.hash.add(comp.clang_preprocessor_mode);
 
-    _ = try man.addFile(c_object.src.src_path, null);
-    {
-        // Hash the extra flags, with special care to call addFile for file parameters.
-        // TODO this logic can likely be improved by utilizing clang_options_data.zig.
-        const file_args = [_][]const u8{"-include"};
-        var arg_i: usize = 0;
-        while (arg_i < c_object.src.extra_flags.len) : (arg_i += 1) {
-            const arg = c_object.src.extra_flags[arg_i];
-            man.hash.addBytes(arg);
-            for (file_args) |file_arg| {
-                if (mem.eql(u8, file_arg, arg) and arg_i + 1 < c_object.src.extra_flags.len) {
-                    arg_i += 1;
-                    _ = try man.addFile(c_object.src.extra_flags[arg_i], null);
-                }
-            }
-        }
-    }
+    try man.hashCSource(c_object.src);
 
     {
         const is_collision = blk: {
@@ -2609,6 +2592,10 @@ pub fn addCCArgs(
                 }
             }
 
+            if (target.cpu.arch.isThumb()) {
+                try argv.append("-mthumb");
+            }
+
             if (comp.haveFramePointer()) {
                 try argv.append("-fno-omit-frame-pointer");
             } else {
@@ -2853,14 +2840,14 @@ pub fn classifyFileExt(filename: []const u8) FileExt {
 }
 
 test "classifyFileExt" {
-    std.testing.expectEqual(FileExt.cpp, classifyFileExt("foo.cc"));
-    std.testing.expectEqual(FileExt.unknown, classifyFileExt("foo.nim"));
-    std.testing.expectEqual(FileExt.shared_library, classifyFileExt("foo.so"));
-    std.testing.expectEqual(FileExt.shared_library, classifyFileExt("foo.so.1"));
-    std.testing.expectEqual(FileExt.shared_library, classifyFileExt("foo.so.1.2"));
-    std.testing.expectEqual(FileExt.shared_library, classifyFileExt("foo.so.1.2.3"));
-    std.testing.expectEqual(FileExt.unknown, classifyFileExt("foo.so.1.2.3~"));
-    std.testing.expectEqual(FileExt.zig, classifyFileExt("foo.zig"));
+    try std.testing.expectEqual(FileExt.cpp, classifyFileExt("foo.cc"));
+    try std.testing.expectEqual(FileExt.unknown, classifyFileExt("foo.nim"));
+    try std.testing.expectEqual(FileExt.shared_library, classifyFileExt("foo.so"));
+    try std.testing.expectEqual(FileExt.shared_library, classifyFileExt("foo.so.1"));
+    try std.testing.expectEqual(FileExt.shared_library, classifyFileExt("foo.so.1.2"));
+    try std.testing.expectEqual(FileExt.shared_library, classifyFileExt("foo.so.1.2.3"));
+    try std.testing.expectEqual(FileExt.unknown, classifyFileExt("foo.so.1.2.3~"));
+    try std.testing.expectEqual(FileExt.zig, classifyFileExt("foo.zig"));
 }
 
 fn haveFramePointer(comp: *const Compilation) bool {
@@ -2882,7 +2869,7 @@ fn detectLibCIncludeDirs(
     arena: *Allocator,
     zig_lib_dir: []const u8,
     target: Target,
-    is_native_os: bool,
+    is_native_abi: bool,
     link_libc: bool,
     libc_installation: ?*const LibCInstallation,
 ) !LibCDirs {
@@ -2897,10 +2884,26 @@ fn detectLibCIncludeDirs(
         return detectLibCFromLibCInstallation(arena, target, lci);
     }
 
+    if (is_native_abi) {
+        const libc = try arena.create(LibCInstallation);
+        libc.* = try LibCInstallation.findNative(.{ .allocator = arena });
+        return detectLibCFromLibCInstallation(arena, target, libc);
+    }
+
     if (target_util.canBuildLibC(target)) {
         const generic_name = target_util.libCGenericName(target);
         // Some architectures are handled by the same set of headers.
-        const arch_name = if (target.abi.isMusl()) target_util.archMuslName(target.cpu.arch) else @tagName(target.cpu.arch);
+        const arch_name = if (target.abi.isMusl())
+            target_util.archMuslName(target.cpu.arch)
+        else if (target.cpu.arch.isThumb())
+            // ARM headers are valid for Thumb too.
+            switch (target.cpu.arch) {
+                .thumb => "arm",
+                .thumbeb => "armeb",
+                else => unreachable,
+            }
+        else
+            @tagName(target.cpu.arch);
         const os_name = @tagName(target.os.tag);
         // Musl's headers are ABI-agnostic and so they all have the "musl" ABI name.
         const abi_name = if (target.abi.isMusl()) "musl" else @tagName(target.abi);
@@ -2935,12 +2938,6 @@ fn detectLibCIncludeDirs(
             .libc_include_dir_list = list,
             .libc_installation = null,
         };
-    }
-
-    if (is_native_os) {
-        const libc = try arena.create(LibCInstallation);
-        libc.* = try LibCInstallation.findNative(.{ .allocator = arena });
-        return detectLibCFromLibCInstallation(arena, target, libc);
     }
 
     return LibCDirs{
@@ -3026,7 +3023,6 @@ fn wantBuildLibUnwindFromSource(comp: *Compilation) bool {
         .Exe => true,
     };
     return comp.bin_file.options.link_libc and is_exe_or_dyn_lib and
-        comp.bin_file.options.libc_installation == null and
         target_util.libcNeedsLibUnwind(comp.getTarget());
 }
 
