@@ -76,7 +76,7 @@ pub const addrinfo = extern struct {
     next: ?*addrinfo,
 };
 
-pub const EAI = extern enum(c_int) {
+pub const EAI = enum(c_int) {
     /// address family for hostname not supported
     ADDRFAMILY = -9,
 
@@ -808,7 +808,7 @@ comptime {
         std.debug.assert(@sizeOf(siginfo_t) == 136);
 }
 
-pub usingnamespace switch (builtin.arch) {
+pub usingnamespace switch (builtin.target.cpu.arch) {
     .x86_64 => struct {
         pub const ucontext_t = extern struct {
             sc_rdi: c_long,
@@ -985,7 +985,7 @@ pub const EPROTO = 95; // Protocol error
 
 pub const ELAST = 95; // Must equal largest errno
 
-const _MAX_PAGE_SHIFT = switch (builtin.arch) {
+const _MAX_PAGE_SHIFT = switch (builtin.target.cpu.arch) {
     .i386 => 12,
     .sparcv9 => 13,
 };
@@ -1176,7 +1176,7 @@ pub const IPPROTO_PFSYNC = 240;
 /// raw IP packet
 pub const IPPROTO_RAW = 255;
 
-pub const rlimit_resource = extern enum(c_int) {
+pub const rlimit_resource = enum(c_int) {
     CPU,
     FSIZE,
     DATA,

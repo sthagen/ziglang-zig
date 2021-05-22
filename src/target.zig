@@ -57,6 +57,7 @@ pub const available_libcs = [_]ArchOsAbi{
     .{ .arch = .sparc, .os = .linux, .abi = .gnu },
     .{ .arch = .sparcv9, .os = .linux, .abi = .gnu },
     .{ .arch = .wasm32, .os = .freestanding, .abi = .musl },
+    .{ .arch = .wasm32, .os = .wasi, .abi = .musl },
     .{ .arch = .x86_64, .os = .linux, .abi = .gnu },
     .{ .arch = .x86_64, .os = .linux, .abi = .gnux32 },
     .{ .arch = .x86_64, .os = .linux, .abi = .musl },
@@ -145,6 +146,7 @@ pub fn libcNeedsLibUnwind(target: std.Target) bool {
         .watchos,
         .tvos,
         .freestanding,
+        .wasi, // Wasm/WASI currently doesn't offer support for libunwind, so don't link it.
         => false,
 
         .windows => target.abi != .msvc,
@@ -394,4 +396,10 @@ pub fn libcFullLinkFlags(target: std.Target) []const []const u8 {
             "-lutil",
         },
     };
+}
+
+pub fn clangMightShellOutForAssembly(target: std.Target) bool {
+    // Clang defaults to using the system assembler over the internal one
+    // when targeting a non-BSD OS.
+    return target.cpu.arch.isSPARC();
 }

@@ -3499,4 +3499,34 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\    '\u{1f4af}',
         \\};
     });
+
+    cases.add("global assembly",
+       \\__asm__(".globl func\n\t"
+       \\        ".type func, @function\n\t"
+       \\        "func:\n\t"
+       \\        ".cfi_startproc\n\t"
+       \\        "movl $42, %eax\n\t"
+       \\        "ret\n\t"
+       \\        ".cfi_endproc");
+    , &[_][]const u8{
+       \\comptime {
+       \\    asm (".globl func\n\t.type func, @function\n\tfunc:\n\t.cfi_startproc\n\tmovl $42, %eax\n\tret\n\t.cfi_endproc");
+       \\}
+    });
+
+    cases.add("Demote function that initializes opaque struct",
+        \\struct my_struct {
+        \\    unsigned a: 15;
+        \\    unsigned: 2;
+        \\    unsigned b: 15;
+        \\};
+        \\void initialize(void) {
+        \\    struct my_struct S = {.a = 1, .b = 2};
+        \\}
+    , &[_][]const u8{
+        \\warning: Cannot initialize opaque type
+        ,
+        \\warning: unable to translate function, demoted to extern
+        \\pub extern fn initialize() void;
+    });
 }
