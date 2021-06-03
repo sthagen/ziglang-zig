@@ -328,7 +328,7 @@ pub fn build(b: *Builder) !void {
     ));
 
     toolchain_step.dependOn(tests.addCompareOutputTests(b, test_filter, modes));
-    toolchain_step.dependOn(tests.addStandaloneTests(b, test_filter, modes));
+    toolchain_step.dependOn(tests.addStandaloneTests(b, test_filter, modes, skip_non_native, target));
     toolchain_step.dependOn(tests.addStackTraceTests(b, test_filter, modes));
     toolchain_step.dependOn(tests.addCliTests(b, test_filter, modes));
     toolchain_step.dependOn(tests.addAssembleAndLinkTests(b, test_filter, modes));
@@ -741,7 +741,7 @@ const softfloat_sources = [_][]const u8{
 
 const stage1_sources = [_][]const u8{
     "src/stage1/analyze.cpp",
-    "src/stage1/ast_render.cpp",
+    "src/stage1/astgen.cpp",
     "src/stage1/bigfloat.cpp",
     "src/stage1/bigint.cpp",
     "src/stage1/buffer.cpp",

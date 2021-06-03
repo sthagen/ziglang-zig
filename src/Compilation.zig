@@ -357,16 +357,18 @@ pub const AllErrors = struct {
                     ttyconf.setColor(stderr, .Bold);
                     try stderr.print(" {s}\n", .{src.msg});
                     ttyconf.setColor(stderr, .Reset);
-                    if (src.source_line) |line| {
-                        for (line) |b| switch (b) {
-                            '\t' => try stderr.writeByte(' '),
-                            else => try stderr.writeByte(b),
-                        };
-                        try stderr.writeByte('\n');
-                        try stderr.writeByteNTimes(' ', src.column);
-                        ttyconf.setColor(stderr, .Green);
-                        try stderr.writeAll("^\n");
-                        ttyconf.setColor(stderr, .Reset);
+                    if (ttyconf != .no_color) {
+                        if (src.source_line) |line| {
+                            for (line) |b| switch (b) {
+                                '\t' => try stderr.writeByte(' '),
+                                else => try stderr.writeByte(b),
+                            };
+                            try stderr.writeByte('\n');
+                            try stderr.writeByteNTimes(' ', src.column);
+                            ttyconf.setColor(stderr, .Green);
+                            try stderr.writeAll("^\n");
+                            ttyconf.setColor(stderr, .Reset);
+                        }
                     }
                     for (src.notes) |note| {
                         try note.renderToStdErrInner(ttyconf, stderr_file, "note:", .Cyan, indent);
@@ -1405,7 +1407,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
         }
         if (comp.wantBuildMuslFromSource()) {
             try comp.work_queue.ensureUnusedCapacity(6);
-            if (target_util.libc_needs_crti_crtn(comp.getTarget())) {
+            if (musl.needsCrtiCrtn(comp.getTarget())) {
                 comp.work_queue.writeAssumeCapacity(&[_]Job{
                     .{ .musl_crt_file = .crti_o },
                     .{ .musl_crt_file = .crtn_o },
@@ -2774,6 +2776,15 @@ pub fn addCCArgs(
         try argv.append("-D_LIBCPP_HAS_NO_VENDOR_AVAILABILITY_ANNOTATIONS");
     }
 
+    if (comp.bin_file.options.link_libunwind) {
+        const libunwind_include_path = try std.fs.path.join(arena, &[_][]const u8{
+            comp.zig_lib_directory.path.?, "libunwind", "include",
+        });
+
+        try argv.append("-isystem");
+        try argv.append(libunwind_include_path);
+    }
+
     const llvm_triple = try @import("codegen/llvm.zig").targetTriple(arena, target);
     try argv.appendSlice(&[_][]const u8{ "-target", llvm_triple });
 
@@ -2943,8 +2954,9 @@ pub fn addCCArgs(
         },
         .shared_library, .ll, .bc, .unknown, .static_library, .object, .zig => {},
         .assembly => {
-            // Argh, why doesn't the assembler accept the list of CPU features?!
-            // I don't see a way to do this other than hard coding everything.
+            // The Clang assembler does not accept the list of CPU features like the
+            // compiler frontend does. Therefore we must hard-code the -m flags for
+            // all CPU features here.
             switch (target.cpu.arch) {
                 .riscv32, .riscv64 => {
                     if (std.Target.riscv.featureSetHas(target.cpu.features, .relax)) {
@@ -2957,14 +2969,21 @@ pub fn addCCArgs(
                     // TODO
                 },
             }
-            if (target.cpu.model.llvm_name) |ln|
-                try argv.append(try std.fmt.allocPrint(arena, "-mcpu={s}", .{ln}));
+            if (target_util.clangAssemblerSupportsMcpuArg(target)) {
+                if (target.cpu.model.llvm_name) |llvm_name| {
+                    try argv.append(try std.fmt.allocPrint(arena, "-mcpu={s}", .{llvm_name}));
+                }
+            }
         },
     }
     if (out_dep_path) |p| {
         try argv.appendSlice(&[_][]const u8{ "-MD", "-MV", "-MF", p });
     }
 
+    // We never want clang to invoke the system assembler for anything. So we would want
+    // this option always enabled. However, it only matters for some targets. To avoid
+    // "unused parameter" warnings, and to keep CLI spam to a minimum, we only put this
+    // flag on the command line if it is necessary.
     if (target_util.clangMightShellOutForAssembly(target)) {
         try argv.append("-integrated-as");
     }
@@ -3166,7 +3185,7 @@ fn detectLibCIncludeDirs(
 
     // If linking system libraries and targeting the native abi, default to
     // using the system libc installation.
-    if (link_system_libs and is_native_abi) {
+    if (link_system_libs and is_native_abi and !target.isMinGW()) {
         const libc = try arena.create(LibCInstallation);
         libc.* = try LibCInstallation.findNative(.{ .allocator = arena, .verbose = true });
         return detectLibCFromLibCInstallation(arena, target, libc);
@@ -3178,7 +3197,7 @@ fn detectLibCIncludeDirs(
         const generic_name = target_util.libCGenericName(target);
         // Some architectures are handled by the same set of headers.
         const arch_name = if (target.abi.isMusl())
-            target_util.archMuslName(target.cpu.arch)
+            musl.archName(target.cpu.arch)
         else if (target.cpu.arch.isThumb())
             // ARM headers are valid for Thumb too.
             switch (target.cpu.arch) {

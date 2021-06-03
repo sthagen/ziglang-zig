@@ -204,6 +204,7 @@ pub fn updateDecl(self: *Wasm, module: *Module, decl: *Module.Decl) !void {
         .err_msg = undefined,
         .locals = .{},
         .target = self.base.options.target,
+        .global_error_set = self.base.options.module.?.global_error_set,
     };
     defer context.deinit();
 
@@ -698,7 +699,7 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
 
         if (link_in_crt) {
             // TODO work out if we want standard crt, a reactor or a command
-            try argv.append(try comp.get_libc_crt_file(arena, "crt.o.wasm"));
+            try argv.append(try comp.get_libc_crt_file(arena, "crt.o"));
         }
 
         if (!is_obj and self.base.options.link_libc) {

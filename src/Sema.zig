@@ -52,7 +52,7 @@ const Sema = @This();
 const Value = @import("value.zig").Value;
 const Type = @import("type.zig").Type;
 const TypedValue = @import("TypedValue.zig");
-const ir = @import("ir.zig");
+const ir = @import("air.zig");
 const Zir = @import("Zir.zig");
 const Module = @import("Module.zig");
 const Inst = ir.Inst;
@@ -2483,7 +2483,7 @@ fn zirIntToError(sema: *Sema, block: *Scope.Block, inst: Zir.Inst.Index) InnerEr
         const payload = try sema.arena.create(Value.Payload.Error);
         payload.* = .{
             .base = .{ .tag = .@"error" },
-            .data = .{ .name = sema.mod.error_name_list.items[int] },
+            .data = .{ .name = sema.mod.error_name_list.items[@intCast(usize, int)] },
         };
         return sema.mod.constInst(sema.arena, src, .{
             .ty = Type.initTag(.anyerror),

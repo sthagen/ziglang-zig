@@ -297,9 +297,10 @@ fn posixCallMainAndExit() noreturn {
             std.os.linux.tls.initStaticTLS();
         }
 
-        // Linux ignores the stack size from the ELF file, and instead always gives 8 MiB.
-        // Here we look for the stack size in our program headers and tell the kernel,
-        // no, seriously, give me that stack space, I wasn't joking.
+        // The way Linux executables represent stack size is via the PT_GNU_STACK
+        // program header. However the kernel does not recognize it; it always gives 8 MiB.
+        // Here we look for the stack size in our program headers and use setrlimit
+        // to ask for more stack space.
         {
             var i: usize = 0;
             var at_phdr: usize = undefined;
@@ -330,15 +331,14 @@ fn expandStackSize(at_phdr: usize, at_phnum: usize) void {
                     .cur = wanted_stack_size,
                     .max = wanted_stack_size,
                 }) catch {
-                    // If this is a debug build, it will be useful to find out
-                    // why this failed. If it is a release build, we allow the
-                    // stack overflow to cause a segmentation fault. Memory safety
-                    // is not compromised, however, depending on runtime state,
-                    // the application may crash due to provided stack space not
-                    // matching the known upper bound.
-                    if (builtin.mode == .Debug) {
-                        @panic("unable to increase stack size");
-                    }
+                    // Because we could not increase the stack size to the upper bound,
+                    // depending on what happens at runtime, a stack overflow may occur.
+                    // However it would cause a segmentation fault, thanks to stack probing,
+                    // so we do not have a memory safety issue here.
+                    // This is intentional silent failure.
+                    // This logic should be revisited when the following issues are addressed:
+                    // https://github.com/ziglang/zig/issues/157
+                    // https://github.com/ziglang/zig/issues/1006
                 };
                 break;
             },
@@ -375,7 +375,7 @@ const bad_main_ret = "expected return type of main to be 'void', '!void', 'noret
 
 // This is marked inline because for some reason LLVM in release mode fails to inline it,
 // and we want fewer call frames in stack traces.
-fn initEventLoopAndCallMain() callconv(.Inline) u8 {
+inline fn initEventLoopAndCallMain() u8 {
     if (std.event.Loop.instance) |loop| {
         if (!@hasDecl(root, "event_loop")) {
             loop.init() catch |err| {
@@ -404,7 +404,7 @@ fn initEventLoopAndCallMain() callconv(.Inline) u8 {
 // and we want fewer call frames in stack traces.
 // TODO This function is duplicated from initEventLoopAndCallMain instead of using generics
 // because it is working around stage1 compiler bugs.
-fn initEventLoopAndCallWinMain() callconv(.Inline) std.os.windows.INT {
+inline fn initEventLoopAndCallWinMain() std.os.windows.INT {
     if (std.event.Loop.instance) |loop| {
         if (!@hasDecl(root, "event_loop")) {
             loop.init() catch |err| {

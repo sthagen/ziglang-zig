@@ -43,21 +43,29 @@ const normal_usage =
     \\Commands:
     \\
     \\  build            Build project from build.zig
+    \\  init-exe         Initialize a `zig build` application in the cwd
+    \\  init-lib         Initialize a `zig build` library in the cwd
+    \\
+    \\  ast-check        Look for simple compile errors in any set of files
     \\  build-exe        Create executable from source or object files
     \\  build-lib        Create library from source or object files
     \\  build-obj        Create object from source or object files
+    \\  fmt              Reformat Zig source into canonical form
+    \\  run              Create executable and run immediately
+    \\  test             Create and run a test build
+    \\  translate-c      Convert C code to Zig code
+    \\
+    \\  ar               Use Zig as a drop-in archiver
     \\  cc               Use Zig as a drop-in C compiler
     \\  c++              Use Zig as a drop-in C++ compiler
+    \\  dlltool          Use Zig as a drop-in dlltool.exe
+    \\  lib              Use Zig as a drop-in lib.exe
+    \\  ranlib           Use Zig as a drop-in ranlib
+    \\
     \\  env              Print lib path, std path, cache directory, and version
-    \\  fmt              Reformat Zig source into canonical form
     \\  help             Print this help and exit
-    \\  init-exe         Initialize a `zig build` application in the cwd
-    \\  init-lib         Initialize a `zig build` library in the cwd
     \\  libc             Display native libc paths file or validate one
-    \\  run              Create executable and run immediately
-    \\  translate-c      Convert C code to Zig code
     \\  targets          List available compilation targets
-    \\  test             Create and run a test build
     \\  version          Print version number and exit
     \\  zen              Print Zen of Zig and exit
     \\
@@ -71,7 +79,6 @@ const debug_usage = normal_usage ++
     \\
     \\Debug Commands:
     \\
-    \\  astgen           Print ZIR code for a .zig source file
     \\  changelist       Compute mappings from old ZIR to new ZIR
     \\
 ;
@@ -201,6 +208,12 @@ pub fn mainArgs(gpa: *Allocator, arena: *Allocator, args: []const []const u8) !v
         return buildOutputType(gpa, arena, args, .zig_test);
     } else if (mem.eql(u8, cmd, "run")) {
         return buildOutputType(gpa, arena, args, .run);
+    } else if (mem.eql(u8, cmd, "dlltool") or
+        mem.eql(u8, cmd, "ranlib") or
+        mem.eql(u8, cmd, "lib") or
+        mem.eql(u8, cmd, "ar"))
+    {
+        return punt_to_llvm_ar(arena, args);
     } else if (mem.eql(u8, cmd, "cc")) {
         return buildOutputType(gpa, arena, args, .cc);
     } else if (mem.eql(u8, cmd, "c++")) {
@@ -239,8 +252,8 @@ pub fn mainArgs(gpa: *Allocator, arena: *Allocator, args: []const []const u8) !v
         return io.getStdOut().writeAll(info_zen);
     } else if (mem.eql(u8, cmd, "help") or mem.eql(u8, cmd, "-h") or mem.eql(u8, cmd, "--help")) {
         return io.getStdOut().writeAll(usage);
-    } else if (debug_extensions_enabled and mem.eql(u8, cmd, "astgen")) {
-        return cmdAstgen(gpa, arena, cmd_args);
+    } else if (mem.eql(u8, cmd, "ast-check")) {
+        return cmdAstCheck(gpa, arena, cmd_args);
     } else if (debug_extensions_enabled and mem.eql(u8, cmd, "changelist")) {
         return cmdChangelist(gpa, arena, cmd_args);
     } else {
@@ -1548,12 +1561,6 @@ fn buildOutputType(
             link_libcpp = true;
     }
 
-    if (cross_target.getCpuArch().isWasm() and output_mode == .Lib and link_mode == null) {
-        // If link_mode is unspecified, always link as dynamic library when targeting Wasm,
-        // so that wasm-ld is invoked rather than standard archiver.
-        link_mode = .Dynamic;
-    }
-
     // Now that we have target info, we can find out if any of the system libraries
     // are part of libc or libc++. We remove them from the list and communicate their
     // existence via flags instead.
@@ -2252,7 +2259,8 @@ fn updateModule(gpa: *Allocator, comp: *Compilation, hook: AfterUpdateHook) !voi
 
     if (errors.list.len != 0) {
         const ttyconf: std.debug.TTY.Config = switch (comp.color) {
-            .auto, .on => std.debug.detectTTYConfig(),
+            .auto => std.debug.detectTTYConfig(),
+            .on => .escape_codes,
             .off => .no_color,
         };
         for (errors.list) |full_err_msg| {
@@ -2829,13 +2837,17 @@ fn argvCmd(allocator: *Allocator, argv: []const []const u8) ![]u8 {
     return cmd.toOwnedSlice();
 }
 
-fn readSourceFileToEndAlloc(allocator: *mem.Allocator, input: *const fs.File, size_hint: ?usize) ![]const u8 {
+fn readSourceFileToEndAlloc(
+    allocator: *mem.Allocator,
+    input: *const fs.File,
+    size_hint: ?usize,
+) ![:0]u8 {
     const source_code = input.readToEndAllocOptions(
         allocator,
         max_src_size,
         size_hint,
         @alignOf(u16),
-        null,
+        0,
     ) catch |err| switch (err) {
         error.ConnectionResetByPeer => unreachable,
         error.ConnectionTimedOut => unreachable,
@@ -2859,7 +2871,7 @@ fn readSourceFileToEndAlloc(allocator: *mem.Allocator, input: *const fs.File, si
     // If the file starts with a UTF-16 little endian BOM, translate it to UTF-8
     if (mem.startsWith(u8, source_code, "\xff\xfe")) {
         const source_code_utf16_le = mem.bytesAsSlice(u16, source_code);
-        const source_code_utf8 = std.unicode.utf16leToUtf8Alloc(allocator, source_code_utf16_le) catch |err| switch (err) {
+        const source_code_utf8 = std.unicode.utf16leToUtf8AllocZ(allocator, source_code_utf16_le) catch |err| switch (err) {
             error.DanglingSurrogateHalf => error.UnsupportedEncoding,
             error.ExpectedSecondSurrogateHalf => error.UnsupportedEncoding,
             error.UnexpectedSecondSurrogateHalf => error.UnsupportedEncoding,
@@ -2987,13 +2999,7 @@ pub fn cmdFmt(gpa: *Allocator, args: []const []const u8) !void {
     defer fmt.out_buffer.deinit();
 
     for (input_files.items) |file_path| {
-        // Get the real path here to avoid Windows failing on relative file paths with . or .. in them.
-        const real_path = fs.realpathAlloc(gpa, file_path) catch |err| {
-            fatal("unable to open '{s}': {s}", .{ file_path, @errorName(err) });
-        };
-        defer gpa.free(real_path);
-
-        try fmtPath(&fmt, file_path, check_flag, fs.cwd(), real_path);
+        try fmtPath(&fmt, file_path, check_flag, fs.cwd(), file_path);
     }
     if (fmt.any_error) {
         process.exit(1);
@@ -3204,6 +3210,7 @@ pub const info_zen =
 ;
 
 extern "c" fn ZigClang_main(argc: c_int, argv: [*:null]?[*:0]u8) c_int;
+extern "c" fn ZigLlvmAr_main(argc: c_int, argv: [*:null]?[*:0]u8) c_int;
 
 /// TODO https://github.com/ziglang/zig/issues/3257
 fn punt_to_clang(arena: *Allocator, args: []const []const u8) error{OutOfMemory} {
@@ -3216,6 +3223,23 @@ fn punt_to_clang(arena: *Allocator, args: []const []const u8) error{OutOfMemory}
     }
     argv[args.len] = null;
     const exit_code = ZigClang_main(@intCast(c_int, args.len), argv[0..args.len :null].ptr);
+    process.exit(@bitCast(u8, @truncate(i8, exit_code)));
+}
+
+/// TODO https://github.com/ziglang/zig/issues/3257
+fn punt_to_llvm_ar(arena: *Allocator, args: []const []const u8) error{OutOfMemory} {
+    if (!build_options.have_llvm)
+        fatal("`zig ar`, `zig dlltool`, `zig ranlib', and `zig lib` unavailable: compiler built without LLVM extensions", .{});
+
+    // Convert the args to the format llvm-ar expects.
+    // We subtract 1 to shave off the zig binary from args[0].
+    const argv = try arena.allocSentinel(?[*:0]u8, args.len - 1, null);
+    for (args[1..]) |arg, i| {
+        // TODO If there was an argsAllocZ we could avoid this allocation.
+        argv[i] = try arena.dupeZ(u8, arg);
+    }
+    const argc = @intCast(c_int, argv.len);
+    const exit_code = ZigLlvmAr_main(argc, argv.ptr);
     process.exit(@bitCast(u8, @truncate(i8, exit_code)));
 }
 
@@ -3568,8 +3592,22 @@ pub fn cleanExit() void {
     }
 }
 
-/// This is only enabled for debug builds.
-pub fn cmdAstgen(
+const usage_ast_check =
+    \\Usage: zig ast-check [file]
+    \\
+    \\    Given a .zig source file, reports any compile errors that can be
+    \\    ascertained on the basis of the source code alone, without target
+    \\    information or type checking.
+    \\
+    \\    If [file] is omitted, stdin is used.
+    \\
+    \\Options:
+    \\  -h, --help            Print this help and exit
+    \\  --color [auto|off|on] Enable or disable colored error messages
+    \\  -t                    (debug option) Output ZIR in text form to stdout
+;
+
+pub fn cmdAstCheck(
     gpa: *Allocator,
     arena: *Allocator,
     args: []const []const u8,
@@ -3578,45 +3616,91 @@ pub fn cmdAstgen(
     const AstGen = @import("AstGen.zig");
     const Zir = @import("Zir.zig");
 
-    const zig_source_file = args[0];
+    var color: Color = .auto;
+    var want_output_text = false;
+    var have_zig_source_file = false;
+    var zig_source_file: ?[]const u8 = null;
 
-    var f = try fs.cwd().openFile(zig_source_file, .{});
-    defer f.close();
-
-    const stat = try f.stat();
-
-    if (stat.size > max_src_size)
-        return error.FileTooBig;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (mem.startsWith(u8, arg, "-")) {
+            if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
+                try io.getStdOut().writeAll(usage_ast_check);
+                return cleanExit();
+            } else if (mem.eql(u8, arg, "-t")) {
+                want_output_text = true;
+            } else if (mem.eql(u8, arg, "--color")) {
+                if (i + 1 >= args.len) {
+                    fatal("expected [auto|on|off] after --color", .{});
+                }
+                i += 1;
+                const next_arg = args[i];
+                color = std.meta.stringToEnum(Color, next_arg) orelse {
+                    fatal("expected [auto|on|off] after --color, found '{s}'", .{next_arg});
+                };
+            } else {
+                fatal("unrecognized parameter: '{s}'", .{arg});
+            }
+        } else if (zig_source_file == null) {
+            zig_source_file = arg;
+        } else {
+            fatal("extra positional parameter: '{s}'", .{arg});
+        }
+    }
 
     var file: Module.Scope.File = .{
         .status = .never_loaded,
         .source_loaded = false,
         .tree_loaded = false,
         .zir_loaded = false,
-        .sub_file_path = zig_source_file,
+        .sub_file_path = undefined,
         .source = undefined,
-        .stat_size = stat.size,
-        .stat_inode = stat.inode,
-        .stat_mtime = stat.mtime,
+        .stat_size = undefined,
+        .stat_inode = undefined,
+        .stat_mtime = undefined,
         .tree = undefined,
         .zir = undefined,
         .pkg = undefined,
         .root_decl = null,
     };
+    if (zig_source_file) |file_name| {
+        var f = try fs.cwd().openFile(file_name, .{});
+        defer f.close();
 
-    const source = try arena.allocSentinel(u8, stat.size, 0);
-    const amt = try f.readAll(source);
-    if (amt != stat.size)
-        return error.UnexpectedEndOfFile;
-    file.source = source;
-    file.source_loaded = true;
+        const stat = try f.stat();
+
+        if (stat.size > max_src_size)
+            return error.FileTooBig;
+
+        const source = try arena.allocSentinel(u8, @intCast(usize, stat.size), 0);
+        const amt = try f.readAll(source);
+        if (amt != stat.size)
+            return error.UnexpectedEndOfFile;
+
+        file.sub_file_path = file_name;
+        file.source = source;
+        file.source_loaded = true;
+        file.stat_size = stat.size;
+        file.stat_inode = stat.inode;
+        file.stat_mtime = stat.mtime;
+    } else {
+        const stdin = io.getStdIn();
+        const source = readSourceFileToEndAlloc(arena, &stdin, null) catch |err| {
+            fatal("unable to read stdin: {s}", .{err});
+        };
+        file.sub_file_path = "<stdin>";
+        file.source = source;
+        file.source_loaded = true;
+        file.stat_size = source.len;
+    }
 
     file.tree = try std.zig.parse(gpa, file.source);
     file.tree_loaded = true;
     defer file.tree.deinit(gpa);
 
     for (file.tree.errors) |parse_error| {
-        try printErrMsgToFile(gpa, parse_error, file.tree, zig_source_file, io.getStdErr(), .auto);
+        try printErrMsgToFile(gpa, parse_error, file.tree, file.sub_file_path, io.getStdErr(), color);
     }
     if (file.tree.errors.len != 0) {
         process.exit(1);
@@ -3625,6 +3709,27 @@ pub fn cmdAstgen(
     file.zir = try AstGen.generate(gpa, file.tree);
     file.zir_loaded = true;
     defer file.zir.deinit(gpa);
+
+    if (file.zir.hasCompileErrors()) {
+        var errors = std.ArrayList(Compilation.AllErrors.Message).init(arena);
+        try Compilation.AllErrors.addZir(arena, &errors, &file);
+        const ttyconf: std.debug.TTY.Config = switch (color) {
+            .auto => std.debug.detectTTYConfig(),
+            .on => .escape_codes,
+            .off => .no_color,
+        };
+        for (errors.items) |full_err_msg| {
+            full_err_msg.renderToStdErr(ttyconf);
+        }
+        process.exit(1);
+    }
+
+    if (!want_output_text) {
+        return cleanExit();
+    }
+    if (!debug_extensions_enabled) {
+        fatal("-t option only available in debug builds of zig", .{});
+    }
 
     {
         const token_bytes = @sizeOf(std.zig.ast.TokenList) +
@@ -3653,7 +3758,7 @@ pub fn cmdAstgen(
             \\# Extra Data Items:   {d} ({})
             \\
         , .{
-            fmtIntSizeBin(source.len),
+            fmtIntSizeBin(file.source.len),
             file.tree.tokens.len, fmtIntSizeBin(token_bytes),
             file.tree.nodes.len, fmtIntSizeBin(tree_bytes),
             fmtIntSizeBin(total_bytes),
@@ -3662,16 +3767,6 @@ pub fn cmdAstgen(
             file.zir.extra.len, fmtIntSizeBin(extra_bytes),
         });
         // zig fmt: on
-    }
-
-    if (file.zir.hasCompileErrors()) {
-        var errors = std.ArrayList(Compilation.AllErrors.Message).init(arena);
-        try Compilation.AllErrors.addZir(arena, &errors, &file);
-        const ttyconf = std.debug.detectTTYConfig();
-        for (errors.items) |full_err_msg| {
-            full_err_msg.renderToStdErr(ttyconf);
-        }
-        process.exit(1);
     }
 
     return Zir.renderAsTextToFile(gpa, &file, io.getStdOut());
@@ -3714,7 +3809,7 @@ pub fn cmdChangelist(
         .root_decl = null,
     };
 
-    const source = try arena.allocSentinel(u8, stat.size, 0);
+    const source = try arena.allocSentinel(u8, @intCast(usize, stat.size), 0);
     const amt = try f.readAll(source);
     if (amt != stat.size)
         return error.UnexpectedEndOfFile;
@@ -3754,7 +3849,7 @@ pub fn cmdChangelist(
     if (new_stat.size > max_src_size)
         return error.FileTooBig;
 
-    const new_source = try arena.allocSentinel(u8, new_stat.size, 0);
+    const new_source = try arena.allocSentinel(u8, @intCast(usize, new_stat.size), 0);
     const new_amt = try new_f.readAll(new_source);
     if (new_amt != new_stat.size)
         return error.UnexpectedEndOfFile;

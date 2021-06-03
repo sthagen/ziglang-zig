@@ -71,6 +71,7 @@ pub const Node = extern union {
         array_init,
         tuple,
         container_init,
+        container_init_dot,
         std_meta_cast,
         /// _ = operand;
         discard,
@@ -332,6 +333,7 @@ pub const Node = extern union {
                 .ptr_cast,
                 .div_exact,
                 .byte_offset_of,
+                .std_meta_cast,
                 => Payload.BinOp,
 
                 .integer_literal,
@@ -354,7 +356,7 @@ pub const Node = extern union {
                 .@"struct", .@"union" => Payload.Record,
                 .tuple => Payload.TupleInit,
                 .container_init => Payload.ContainerInit,
-                .std_meta_cast => Payload.Infix,
+                .container_init_dot => Payload.ContainerInitDot,
                 .std_meta_promoteIntLiteral => Payload.PromoteIntLiteral,
                 .block => Payload.Block,
                 .c_pointer, .single_pointer => Payload.Pointer,
@@ -447,14 +449,6 @@ pub const Node = extern union {
 
 pub const Payload = struct {
     tag: Node.Tag,
-
-    pub const Infix = struct {
-        base: Payload,
-        data: struct {
-            lhs: Node,
-            rhs: Node,
-        },
-    };
 
     pub const Value = struct {
         base: Payload,
@@ -593,6 +587,16 @@ pub const Payload = struct {
             lhs: Node,
             inits: []Initializer,
         },
+
+        pub const Initializer = struct {
+            name: []const u8,
+            value: Node,
+        };
+    };
+
+    pub const ContainerInitDot = struct {
+        base: Payload,
+        data: []Initializer,
 
         pub const Initializer = struct {
             name: []const u8,
@@ -1893,6 +1897,44 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
                 });
             }
         },
+        .container_init_dot => {
+            const payload = node.castTag(.container_init_dot).?.data;
+            _ = try c.addToken(.period, ".");
+            const l_brace = try c.addToken(.l_brace, "{");
+            var inits = try c.gpa.alloc(NodeIndex, std.math.max(payload.len, 2));
+            defer c.gpa.free(inits);
+            inits[0] = 0;
+            inits[1] = 0;
+            for (payload) |init, i| {
+                _ = try c.addToken(.period, ".");
+                _ = try c.addIdentifier(init.name);
+                _ = try c.addToken(.equal, "=");
+                inits[i] = try renderNode(c, init.value);
+                _ = try c.addToken(.comma, ",");
+            }
+            _ = try c.addToken(.r_brace, "}");
+
+            if (payload.len < 3) {
+                return c.addNode(.{
+                    .tag = .struct_init_dot_two_comma,
+                    .main_token = l_brace,
+                    .data = .{
+                        .lhs = inits[0],
+                        .rhs = inits[1],
+                    },
+                });
+            } else {
+                const span = try c.listToSpan(inits);
+                return c.addNode(.{
+                    .tag = .struct_init_dot_comma,
+                    .main_token = l_brace,
+                    .data = .{
+                        .lhs = span.start,
+                        .rhs = span.end,
+                    },
+                });
+            }
+        },
         .container_init => {
             const payload = node.castTag(.container_init).?.data;
             const lhs = try renderNode(c, payload.lhs);
@@ -2257,6 +2299,7 @@ fn renderNodeGrouped(c: *Context, node: Node) !NodeIndex {
         .array_init,
         .tuple,
         .container_init,
+        .container_init_dot,
         .block,
         => return c.addNode(.{
             .tag = .grouped_expression,
@@ -2689,6 +2732,7 @@ fn renderFunc(c: *Context, node: Node) !NodeIndex {
 fn renderMacroFunc(c: *Context, node: Node) !NodeIndex {
     const payload = node.castTag(.pub_inline_fn).?.data;
     _ = try c.addToken(.keyword_pub, "pub");
+    _ = try c.addToken(.keyword_inline, "inline");
     const fn_token = try c.addToken(.keyword_fn, "fn");
     _ = try c.addIdentifier(payload.name);
 
@@ -2697,50 +2741,31 @@ fn renderMacroFunc(c: *Context, node: Node) !NodeIndex {
     var span: NodeSubRange = undefined;
     if (params.items.len > 1) span = try c.listToSpan(params.items);
 
-    const callconv_expr = blk: {
-        _ = try c.addToken(.keyword_callconv, "callconv");
-        _ = try c.addToken(.l_paren, "(");
-        _ = try c.addToken(.period, ".");
-        const res = try c.addNode(.{
-            .tag = .enum_literal,
-            .main_token = try c.addToken(.identifier, "Inline"),
-            .data = undefined,
-        });
-        _ = try c.addToken(.r_paren, ")");
-        break :blk res;
-    };
     const return_type_expr = try renderNodeGrouped(c, payload.return_type);
 
-    const fn_proto = try blk: {
-        if (params.items.len < 2)
-            break :blk c.addNode(.{
-                .tag = .fn_proto_one,
+    const fn_proto = blk: {
+        if (params.items.len < 2) {
+            break :blk try c.addNode(.{
+                .tag = .fn_proto_simple,
                 .main_token = fn_token,
                 .data = .{
-                    .lhs = try c.addExtra(std.zig.ast.Node.FnProtoOne{
-                        .param = params.items[0],
-                        .align_expr = 0,
-                        .section_expr = 0,
-                        .callconv_expr = callconv_expr,
-                    }),
+                    .lhs = params.items[0],
                     .rhs = return_type_expr,
                 },
-            })
-        else
-            break :blk c.addNode(.{
-                .tag = .fn_proto,
+            });
+        } else {
+            break :blk try c.addNode(.{
+                .tag = .fn_proto_multi,
                 .main_token = fn_token,
                 .data = .{
-                    .lhs = try c.addExtra(std.zig.ast.Node.FnProto{
-                        .params_start = span.start,
-                        .params_end = span.end,
-                        .align_expr = 0,
-                        .section_expr = 0,
-                        .callconv_expr = callconv_expr,
+                    .lhs = try c.addExtra(std.zig.ast.Node.SubRange{
+                        .start = span.start,
+                        .end = span.end,
                     }),
                     .rhs = return_type_expr,
                 },
             });
+        }
     };
     return c.addNode(.{
         .tag = .fn_decl,

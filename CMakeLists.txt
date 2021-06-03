@@ -67,6 +67,7 @@ message("Configuring zig version ${ZIG_VERSION}")
 
 set(ZIG_STATIC off CACHE BOOL "Attempt to build a static zig executable (not compatible with glibc)")
 set(ZIG_STATIC_LLVM off CACHE BOOL "Prefer linking against static LLVM libraries")
+set(ZIG_STATIC_ZLIB off CACHE BOOL "Prefer linking against static zlib")
 set(ZIG_PREFER_CLANG_CPP_DYLIB off CACHE BOOL "Try to link against -lclang-cpp")
 set(ZIG_USE_CCACHE off CACHE BOOL "Use ccache if available")
 
@@ -75,7 +76,8 @@ if(CCACHE_PROGRAM AND ZIG_USE_CCACHE)
 endif()
 
 if(ZIG_STATIC)
-    set(ZIG_STATIC_LLVM "on")
+    set(ZIG_STATIC_LLVM ON)
+    set(ZIG_STATIC_ZLIB ON)
 endif()
 
 string(REGEX REPLACE "\\\\" "\\\\\\\\" ZIG_LIBC_LIB_DIR_ESCAPED "${ZIG_LIBC_LIB_DIR}")
@@ -101,11 +103,13 @@ find_package(llvm)
 find_package(clang)
 find_package(lld)
 
-if(APPLE AND ZIG_STATIC)
+if(ZIG_STATIC_ZLIB)
     list(REMOVE_ITEM LLVM_LIBRARIES "-lz")
-    find_library(ZLIB NAMES libz.a z zlib libz)
+    find_library(ZLIB NAMES libz.a libzlibstatic.a z zlib libz)
     list(APPEND LLVM_LIBRARIES "${ZLIB}")
+endif()
 
+if(APPLE AND ZIG_STATIC)
     list(REMOVE_ITEM LLVM_LIBRARIES "-lcurses")
     find_library(CURSES NAMES libcurses.a curses libcurses libncurses.a ncurses libncurses)
     list(APPEND LLVM_LIBRARIES "${CURSES}")
@@ -292,7 +296,7 @@ set(ZIG0_SOURCES
 
 set(STAGE1_SOURCES
     "${CMAKE_SOURCE_DIR}/src/stage1/analyze.cpp"
-    "${CMAKE_SOURCE_DIR}/src/stage1/ast_render.cpp"
+    "${CMAKE_SOURCE_DIR}/src/stage1/astgen.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/bigfloat.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/bigint.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/buffer.cpp"
@@ -307,11 +311,11 @@ set(STAGE1_SOURCES
     "${CMAKE_SOURCE_DIR}/src/stage1/os.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/parser.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/range_set.cpp"
+    "${CMAKE_SOURCE_DIR}/src/stage1/softfloat_ext.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/stage1.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/target.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/tokenizer.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/util.cpp"
-    "${CMAKE_SOURCE_DIR}/src/stage1/softfloat_ext.cpp"
 )
 set(OPTIMIZED_C_SOURCES
     "${CMAKE_SOURCE_DIR}/src/stage1/parse_f128.c"
@@ -319,6 +323,7 @@ set(OPTIMIZED_C_SOURCES
 set(ZIG_CPP_SOURCES
     # These are planned to stay even when we are self-hosted.
     "${CMAKE_SOURCE_DIR}/src/zig_llvm.cpp"
+    "${CMAKE_SOURCE_DIR}/src/zig_llvm-ar.cpp"
     "${CMAKE_SOURCE_DIR}/src/zig_clang.cpp"
     "${CMAKE_SOURCE_DIR}/src/zig_clang_driver.cpp"
     "${CMAKE_SOURCE_DIR}/src/zig_clang_cc1_main.cpp"
@@ -336,8 +341,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/array_list.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/ascii.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/atomic.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/atomic/bool.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/atomic/int.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/atomic/Atomic.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/atomic/queue.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/atomic/stack.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/base64.zig"
@@ -554,7 +558,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/codegen/x86_64.zig"
     "${CMAKE_SOURCE_DIR}/src/glibc.zig"
     "${CMAKE_SOURCE_DIR}/src/introspect.zig"
-    "${CMAKE_SOURCE_DIR}/src/ir.zig"
+    "${CMAKE_SOURCE_DIR}/src/air.zig"
     "${CMAKE_SOURCE_DIR}/src/libc_installation.zig"
     "${CMAKE_SOURCE_DIR}/src/libcxx.zig"
     "${CMAKE_SOURCE_DIR}/src/libtsan.zig"

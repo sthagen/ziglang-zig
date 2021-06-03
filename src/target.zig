@@ -99,23 +99,6 @@ pub fn libCGenericName(target: std.Target) [:0]const u8 {
     }
 }
 
-pub fn archMuslName(arch: std.Target.Cpu.Arch) [:0]const u8 {
-    switch (arch) {
-        .aarch64, .aarch64_be => return "aarch64",
-        .arm, .armeb, .thumb, .thumbeb => return "arm",
-        .mips, .mipsel => return "mips",
-        .mips64el, .mips64 => return "mips64",
-        .powerpc => return "powerpc",
-        .powerpc64, .powerpc64le => return "powerpc64",
-        .s390x => return "s390x",
-        .i386 => return "i386",
-        .x86_64 => return "x86_64",
-        .riscv64 => return "riscv64",
-        .wasm32, .wasm64 => return "wasm",
-        else => unreachable,
-    }
-}
-
 pub fn canBuildLibC(target: std.Target) bool {
     for (available_libcs) |libc| {
         if (target.cpu.arch == libc.arch and target.os.tag == libc.os and target.abi == libc.abi) {
@@ -170,10 +153,6 @@ pub fn requiresPIC(target: std.Target, linking_libc: bool) bool {
 /// C compiler argument is valid to Clang.
 pub fn supports_fpic(target: std.Target) bool {
     return target.os.tag != .windows;
-}
-
-pub fn libc_needs_crti_crtn(target: std.Target) bool {
-    return !(target.cpu.arch.isRISCV() or target.isAndroid() or target.os.tag == .openbsd);
 }
 
 pub fn isSingleThreaded(target: std.Target) bool {
@@ -387,13 +366,26 @@ pub fn libcFullLinkFlags(target: std.Target) []const []const u8 {
             "-lc",
             "-lutil",
         },
-        else => &[_][]const u8{
+        .haiku => &[_][]const u8{
             "-lm",
+            "-lroot",
             "-lpthread",
             "-lc",
-            "-ldl",
-            "-lrt",
-            "-lutil",
+        },
+        else => switch (target.abi) {
+            .android => &[_][]const u8{
+                "-lm",
+                "-lc",
+                "-ldl",
+            },
+            else => &[_][]const u8{
+                "-lm",
+                "-lpthread",
+                "-lc",
+                "-ldl",
+                "-lrt",
+                "-lutil",
+            },
         },
     };
 }
@@ -402,4 +394,13 @@ pub fn clangMightShellOutForAssembly(target: std.Target) bool {
     // Clang defaults to using the system assembler over the internal one
     // when targeting a non-BSD OS.
     return target.cpu.arch.isSPARC();
+}
+
+/// Each backend architecture in Clang has a different codepath which may or may not
+/// support an -mcpu flag.
+pub fn clangAssemblerSupportsMcpuArg(target: std.Target) bool {
+    return switch (target.cpu.arch) {
+        .arm, .armeb, .thumb, .thumbeb => true,
+        else => false,
+    };
 }

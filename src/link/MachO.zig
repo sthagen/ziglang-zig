@@ -698,8 +698,8 @@ fn linkWithLLD(self: *MachO, comp: *Compilation) !void {
                 try positionals.append(comp.libcxx_static_lib.?.full_object_path);
             }
 
-            // Shared libraries.
-            var shared_libs = std.ArrayList([]const u8).init(arena);
+            // Shared and static libraries passed via `-l` flag.
+            var libs = std.ArrayList([]const u8).init(arena);
             var search_lib_names = std.ArrayList([]const u8).init(arena);
 
             const system_libs = self.base.options.system_libs.items();
@@ -708,9 +708,8 @@ fn linkWithLLD(self: *MachO, comp: *Compilation) !void {
                 // By this time, we depend on these libs being dynamically linked libraries and not static libraries
                 // (the check for that needs to be earlier), but they could be full paths to .dylib files, in which
                 // case we want to avoid prepending "-l".
-                // TODO I think they should go as an input file instead of via shared_libs.
                 if (Compilation.classifyFileExt(link_lib) == .shared_library) {
-                    try shared_libs.append(link_lib);
+                    try positionals.append(link_lib);
                     continue;
                 }
 
@@ -760,24 +759,31 @@ fn linkWithLLD(self: *MachO, comp: *Compilation) !void {
                 }
             }
 
+            // Search for static libraries first, then dynamic libraries.
+            // TODO Respect flags such as -search_paths_first to the linker.
+            // TODO text-based API, or .tbd files.
+            const exts = &[_][]const u8{ "a", "dylib" };
+
             for (search_lib_names.items) |l_name| {
-                // TODO text-based API, or .tbd files.
-                const l_name_ext = try std.fmt.allocPrint(arena, "lib{s}.dylib", .{l_name});
-
                 var found = false;
-                for (search_lib_dirs.items) |lib_dir| {
-                    const full_path = try fs.path.join(arena, &[_][]const u8{ lib_dir, l_name_ext });
 
-                    // Check if the dylib file exists.
-                    const tmp = fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
-                        error.FileNotFound => continue,
-                        else => |e| return e,
-                    };
-                    defer tmp.close();
+                ext: for (exts) |ext| {
+                    const l_name_ext = try std.fmt.allocPrint(arena, "lib{s}.{s}", .{ l_name, ext });
 
-                    try shared_libs.append(full_path);
-                    found = true;
-                    break;
+                    for (search_lib_dirs.items) |lib_dir| {
+                        const full_path = try fs.path.join(arena, &[_][]const u8{ lib_dir, l_name_ext });
+
+                        // Check if the lib file exists.
+                        const tmp = fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
+                            error.FileNotFound => continue,
+                            else => |e| return e,
+                        };
+                        defer tmp.close();
+
+                        try libs.append(full_path);
+                        found = true;
+                        break :ext;
+                    }
                 }
 
                 if (!found) {
@@ -835,7 +841,7 @@ fn linkWithLLD(self: *MachO, comp: *Compilation) !void {
             }
 
             try zld.link(positionals.items, full_out_path, .{
-                .shared_libs = shared_libs.items,
+                .libs = libs.items,
                 .rpaths = rpaths.items,
             });
 
@@ -2513,7 +2519,6 @@ fn allocatedSizeLinkedit(self: *MachO, start: u64) u64 {
 
     return min_pos - start;
 }
-
 fn checkForCollision(start: u64, end: u64, off: u64, size: u64) callconv(.Inline) ?u64 {
     const increased_size = padToIdeal(size);
     const test_end = off + increased_size;

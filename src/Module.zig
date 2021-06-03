@@ -21,7 +21,7 @@ const Type = @import("type.zig").Type;
 const TypedValue = @import("TypedValue.zig");
 const Package = @import("Package.zig");
 const link = @import("link.zig");
-const ir = @import("ir.zig");
+const ir = @import("air.zig");
 const Zir = @import("Zir.zig");
 const trace = @import("tracy.zig").trace;
 const AstGen = @import("AstGen.zig");
@@ -1071,7 +1071,7 @@ pub const Scope = struct {
             if (stat.size > std.math.maxInt(u32))
                 return error.FileTooBig;
 
-            const source = try gpa.allocSentinel(u8, stat.size, 0);
+            const source = try gpa.allocSentinel(u8, @intCast(usize, stat.size), 0);
             defer if (!file.source_loaded) gpa.free(source);
             const amt = try f.readAll(source);
             if (amt != stat.size)
@@ -2441,7 +2441,7 @@ pub fn astGenFile(mod: *Module, file: *Scope.File, prog_node: *std.Progress.Node
     if (stat.size > std.math.maxInt(u32))
         return error.FileTooBig;
 
-    const source = try gpa.allocSentinel(u8, stat.size, 0);
+    const source = try gpa.allocSentinel(u8, @intCast(usize, stat.size), 0);
     defer if (!file.source_loaded) gpa.free(source);
     const amt = try source_file.readAll(source);
     if (amt != stat.size)

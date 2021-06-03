@@ -86,6 +86,7 @@ pub fn generate(gpa: *Allocator, tree: ast.Tree) InnerError!Zir {
 
     var gen_scope: GenZir = .{
         .force_comptime = true,
+        .in_defer = false,
         .parent = &top_scope.base,
         .anon_name_strategy = .parent,
         .decl_node_index = 0,
@@ -248,9 +249,9 @@ pub const bool_rl: ResultLoc = .{ .ty = .bool_type };
 fn typeExpr(gz: *GenZir, scope: *Scope, type_node: ast.Node.Index) InnerError!Zir.Inst.Ref {
     const prev_force_comptime = gz.force_comptime;
     gz.force_comptime = true;
-    const e = expr(gz, scope, .{ .ty = .type_type }, type_node);
-    gz.force_comptime = prev_force_comptime;
-    return e;
+    defer gz.force_comptime = prev_force_comptime;
+
+    return expr(gz, scope, .{ .ty = .type_type }, type_node);
 }
 
 fn lvalExpr(gz: *GenZir, scope: *Scope, node: ast.Node.Index) InnerError!Zir.Inst.Ref {
@@ -995,7 +996,7 @@ fn fnProtoExpr(
     const token_tags = tree.tokens.items(.tag);
 
     const is_extern = blk: {
-        const maybe_extern_token = fn_proto.extern_export_token orelse break :blk false;
+        const maybe_extern_token = fn_proto.extern_export_inline_token orelse break :blk false;
         break :blk token_tags[maybe_extern_token] == .keyword_extern;
     };
     assert(!is_extern);
@@ -1464,9 +1465,9 @@ fn comptimeExpr(
 ) InnerError!Zir.Inst.Ref {
     const prev_force_comptime = gz.force_comptime;
     gz.force_comptime = true;
-    const result = try expr(gz, scope, rl, node);
-    gz.force_comptime = prev_force_comptime;
-    return result;
+    defer gz.force_comptime = prev_force_comptime;
+
+    return expr(gz, scope, rl, node);
 }
 
 /// This one is for an actual `comptime` syntax, and will emit a compile error if
@@ -2118,6 +2119,9 @@ fn genDefers(
                 const defer_scope = scope.cast(Scope.Defer).?;
                 scope = defer_scope.parent;
                 const expr_node = node_datas[defer_scope.defer_node].rhs;
+                const prev_in_defer = gz.in_defer;
+                gz.in_defer = true;
+                defer gz.in_defer = prev_in_defer;
                 try unusedResultExpr(gz, defer_scope.parent, expr_node);
             },
             .defer_error => {
@@ -2125,6 +2129,9 @@ fn genDefers(
                 scope = defer_scope.parent;
                 if (err_code == .none) continue;
                 const expr_node = node_datas[defer_scope.defer_node].rhs;
+                const prev_in_defer = gz.in_defer;
+                gz.in_defer = true;
+                defer gz.in_defer = prev_in_defer;
                 try unusedResultExpr(gz, defer_scope.parent, expr_node);
             },
             .namespace => unreachable,
@@ -2728,6 +2735,7 @@ fn fnDecl(
 
     var decl_gz: GenZir = .{
         .force_comptime = true,
+        .in_defer = false,
         .decl_node_index = fn_proto.ast.proto_node,
         .decl_line = gz.calcLine(decl_node),
         .parent = scope,
@@ -2735,14 +2743,19 @@ fn fnDecl(
     };
     defer decl_gz.instructions.deinit(gpa);
 
+    // TODO: support noinline
     const is_pub = fn_proto.visib_token != null;
     const is_export = blk: {
-        const maybe_export_token = fn_proto.extern_export_token orelse break :blk false;
+        const maybe_export_token = fn_proto.extern_export_inline_token orelse break :blk false;
         break :blk token_tags[maybe_export_token] == .keyword_export;
     };
     const is_extern = blk: {
-        const maybe_extern_token = fn_proto.extern_export_token orelse break :blk false;
+        const maybe_extern_token = fn_proto.extern_export_inline_token orelse break :blk false;
         break :blk token_tags[maybe_extern_token] == .keyword_extern;
+    };
+    const has_inline_keyword = blk: {
+        const maybe_inline_token = fn_proto.extern_export_inline_token orelse break :blk false;
+        break :blk token_tags[maybe_inline_token] == .keyword_inline;
     };
     const align_inst: Zir.Inst.Ref = if (fn_proto.ast.align_expr == 0) .none else inst: {
         break :inst try expr(&decl_gz, &decl_gz.base, align_rl, fn_proto.ast.align_expr);
@@ -2812,17 +2825,30 @@ fn fnDecl(
         fn_proto.ast.return_type,
     );
 
-    const cc: Zir.Inst.Ref = if (fn_proto.ast.callconv_expr != 0)
-        try AstGen.expr(
-            &decl_gz,
-            &decl_gz.base,
-            .{ .ty = .calling_convention_type },
-            fn_proto.ast.callconv_expr,
-        )
-    else if (is_extern) // note: https://github.com/ziglang/zig/issues/5269
-        Zir.Inst.Ref.calling_convention_c
-    else
-        Zir.Inst.Ref.none;
+    const cc: Zir.Inst.Ref = blk: {
+        if (fn_proto.ast.callconv_expr != 0) {
+            if (has_inline_keyword) {
+                return astgen.failNode(
+                    fn_proto.ast.callconv_expr,
+                    "explicit callconv incompatible with inline keyword",
+                    .{},
+                );
+            }
+            break :blk try AstGen.expr(
+                &decl_gz,
+                &decl_gz.base,
+                .{ .ty = .calling_convention_type },
+                fn_proto.ast.callconv_expr,
+            );
+        } else if (is_extern) {
+            // note: https://github.com/ziglang/zig/issues/5269
+            break :blk .calling_convention_c;
+        } else if (has_inline_keyword) {
+            break :blk .calling_convention_inline;
+        } else {
+            break :blk .none;
+        }
+    };
 
     const func_inst: Zir.Inst.Ref = if (body_node == 0) func: {
         if (!is_extern) {
@@ -2851,6 +2877,7 @@ fn fnDecl(
 
         var fn_gz: GenZir = .{
             .force_comptime = false,
+            .in_defer = false,
             .decl_node_index = fn_proto.ast.proto_node,
             .decl_line = decl_gz.decl_line,
             .parent = &decl_gz.base,
@@ -2860,6 +2887,7 @@ fn fnDecl(
 
         const prev_fn_block = astgen.fn_block;
         astgen.fn_block = &fn_gz;
+        defer astgen.fn_block = prev_fn_block;
 
         // Iterate over the parameters. We put the param names as the first N
         // items inside `extra` so that debug info later can refer to the parameter names
@@ -2910,8 +2938,6 @@ fn fnDecl(
             // We do this by using the `ret_coerce` instruction.
             _ = try fn_gz.addUnTok(.ret_coerce, .void_value, tree.lastToken(body_node));
         }
-
-        astgen.fn_block = prev_fn_block;
 
         break :func try decl_gz.addFunc(.{
             .src_node = decl_node,
@@ -2981,6 +3007,7 @@ fn globalVarDecl(
         .decl_line = gz.calcLine(node),
         .astgen = astgen,
         .force_comptime = true,
+        .in_defer = false,
         .anon_name_strategy = .parent,
     };
     defer block_scope.instructions.deinit(gpa);
@@ -3117,6 +3144,7 @@ fn comptimeDecl(
 
     var decl_block: GenZir = .{
         .force_comptime = true,
+        .in_defer = false,
         .decl_node_index = node,
         .decl_line = gz.calcLine(node),
         .parent = scope,
@@ -3169,6 +3197,7 @@ fn usingnamespaceDecl(
 
     var decl_block: GenZir = .{
         .force_comptime = true,
+        .in_defer = false,
         .decl_node_index = node,
         .decl_line = gz.calcLine(node),
         .parent = scope,
@@ -3214,6 +3243,7 @@ fn testDecl(
 
     var decl_block: GenZir = .{
         .force_comptime = true,
+        .in_defer = false,
         .decl_node_index = node,
         .decl_line = gz.calcLine(node),
         .parent = scope,
@@ -3235,6 +3265,7 @@ fn testDecl(
 
     var fn_block: GenZir = .{
         .force_comptime = false,
+        .in_defer = false,
         .decl_node_index = node,
         .decl_line = decl_block.decl_line,
         .parent = &decl_block.base,
@@ -3244,6 +3275,7 @@ fn testDecl(
 
     const prev_fn_block = astgen.fn_block;
     astgen.fn_block = &fn_block;
+    defer astgen.fn_block = prev_fn_block;
 
     const block_result = try expr(&fn_block, &fn_block.base, .none, body_node);
     if (fn_block.instructions.items.len == 0 or !fn_block.refIsNoReturn(block_result)) {
@@ -3251,8 +3283,6 @@ fn testDecl(
         // We do this by using the `ret_coerce` instruction.
         _ = try fn_block.addUnTok(.ret_coerce, .void_value, tree.lastToken(body_node));
     }
-
-    astgen.fn_block = prev_fn_block;
 
     const func_inst = try decl_block.addFunc(.{
         .src_node = node,
@@ -3319,6 +3349,7 @@ fn structDeclInner(
         .decl_line = gz.calcLine(node),
         .astgen = astgen,
         .force_comptime = true,
+        .in_defer = false,
         .ref_start_index = gz.ref_start_index,
     };
     defer block_scope.instructions.deinit(gpa);
@@ -3580,6 +3611,7 @@ fn unionDeclInner(
         .decl_line = gz.calcLine(node),
         .astgen = astgen,
         .force_comptime = true,
+        .in_defer = false,
         .ref_start_index = gz.ref_start_index,
     };
     defer block_scope.instructions.deinit(gpa);
@@ -3976,6 +4008,7 @@ fn containerDecl(
                 .decl_line = gz.calcLine(node),
                 .astgen = astgen,
                 .force_comptime = true,
+                .in_defer = false,
                 .ref_start_index = gz.ref_start_index,
             };
             defer block_scope.instructions.deinit(gpa);
@@ -4431,6 +4464,8 @@ fn tryExpr(
     const fn_block = astgen.fn_block orelse {
         return astgen.failNode(node, "invalid 'try' outside function scope", .{});
     };
+
+    if (parent_gz.in_defer) return astgen.failNode(node, "try is not allowed inside defer expression", .{});
 
     var block_scope = parent_gz.makeSubBlock(scope);
     block_scope.setBreakResultLoc(rl);
@@ -5961,6 +5996,8 @@ fn ret(gz: *GenZir, scope: *Scope, node: ast.Node.Index) InnerError!Zir.Inst.Ref
     const tree = astgen.tree;
     const node_datas = tree.nodes.items(.data);
     const main_tokens = tree.nodes.items(.main_token);
+
+    if (gz.in_defer) return astgen.failNode(node, "cannot return from defer expression", .{});
 
     const operand_node = node_datas[node].lhs;
     if (operand_node != 0) {
@@ -8040,6 +8077,7 @@ const GenZir = struct {
     const base_tag: Scope.Tag = .gen_zir;
     base: Scope = Scope{ .tag = base_tag },
     force_comptime: bool,
+    in_defer: bool,
     /// How decls created in this scope should be named.
     anon_name_strategy: Zir.Inst.NameStrategy = .anon,
     /// The end of special indexes. `Zir.Inst.Ref` subtracts against this number to convert
@@ -8087,6 +8125,7 @@ const GenZir = struct {
     fn makeSubBlock(gz: *GenZir, scope: *Scope) GenZir {
         return .{
             .force_comptime = gz.force_comptime,
+            .in_defer = gz.in_defer,
             .ref_start_index = gz.ref_start_index,
             .decl_node_index = gz.decl_node_index,
             .decl_line = gz.decl_line,
