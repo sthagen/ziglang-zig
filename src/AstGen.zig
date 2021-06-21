@@ -59,7 +59,7 @@ fn appendRefsAssumeCapacity(astgen: *AstGen, refs: []const Zir.Inst.Ref) void {
     astgen.extra.appendSliceAssumeCapacity(coerced);
 }
 
-pub fn generate(gpa: *Allocator, tree: ast.Tree) InnerError!Zir {
+pub fn generate(gpa: *Allocator, tree: ast.Tree) Allocator.Error!Zir {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
@@ -551,7 +551,23 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
         .mul_wrap => return simpleBinOp(gz, scope, rl, node, .mulwrap),
         .div      => return simpleBinOp(gz, scope, rl, node, .div),
         .mod      => return simpleBinOp(gz, scope, rl, node, .mod_rem),
-        .bit_and  => return simpleBinOp(gz, scope, rl, node, .bit_and),
+        .bit_and  => {
+            const current_ampersand_token = main_tokens[node];
+            if (token_tags[current_ampersand_token + 1] == .ampersand) {
+                const token_starts = tree.tokens.items(.start);
+                const current_token_offset = token_starts[current_ampersand_token];
+                const next_token_offset = token_starts[current_ampersand_token + 1];
+                if (current_token_offset + 1 == next_token_offset) {
+                    return astgen.failTok(
+                        current_ampersand_token,
+                        "`&&` is invalid; note that `and` is boolean AND",
+                        .{},
+                    );
+                }
+            }
+
+            return simpleBinOp(gz, scope, rl, node, .bit_and);
+        },
         .bit_or   => return simpleBinOp(gz, scope, rl, node, .bit_or),
         .bit_xor  => return simpleBinOp(gz, scope, rl, node, .xor),
 
@@ -662,7 +678,7 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
             const lhs = try expr(gz, scope, .ref, node_datas[node].lhs);
             const extra = tree.extraData(node_datas[node].rhs, ast.Node.SliceSentinel);
             const start = try expr(gz, scope, .{ .ty = .usize_type }, extra.start);
-            const end = try expr(gz, scope, .{ .ty = .usize_type }, extra.end);
+            const end = if (extra.end != 0) try expr(gz, scope, .{ .ty = .usize_type }, extra.end) else .none;
             const sentinel = try expr(gz, scope, .{ .ty = .usize_type }, extra.sentinel);
             const result = try gz.addPlNode(.slice_sentinel, node, Zir.Inst.SliceSentinel{
                 .lhs = lhs,
@@ -2027,7 +2043,7 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: ast.Node.Index) Inner
             .shl_exact,
             .shr_exact,
             .bit_offset_of,
-            .byte_offset_of,
+            .offset_of,
             .cmpxchg_strong,
             .cmpxchg_weak,
             .splat,
@@ -2353,11 +2369,12 @@ fn varDecl(
                 .name = ident_name,
                 .ptr = init_scope.rl_ptr,
                 .token_src = name_token,
+                .is_comptime = true,
             };
             return &sub_scope.base;
         },
         .keyword_var => {
-            const is_comptime = var_decl.comptime_token != null;
+            const is_comptime = var_decl.comptime_token != null or gz.force_comptime;
             var resolve_inferred_alloc: Zir.Inst.Ref = .none;
             const var_data: struct {
                 result_loc: ResultLoc,
@@ -2408,6 +2425,7 @@ fn varDecl(
                 .name = ident_name,
                 .ptr = var_data.alloc,
                 .token_src = name_token,
+                .is_comptime = is_comptime,
             };
             return &sub_scope.base;
         },
@@ -3352,7 +3370,7 @@ fn structDeclInner(
     };
     defer block_scope.instructions.deinit(gpa);
 
-    var namespace: Scope.Namespace = .{ .parent = &gz.base };
+    var namespace: Scope.Namespace = .{ .parent = scope };
     defer namespace.decls.deinit(gpa);
 
     var wip_decls: WipDecls = .{};
@@ -3875,6 +3893,10 @@ fn containerDecl(
     const node_tags = tree.nodes.items(.tag);
     const node_datas = tree.nodes.items(.data);
 
+    const prev_fn_block = astgen.fn_block;
+    astgen.fn_block = null;
+    defer astgen.fn_block = prev_fn_block;
+
     // We must not create any types until Sema. Here the goal is only to generate
     // ZIR for all the field types, alignments, and default value expressions.
 
@@ -3974,7 +3996,7 @@ fn containerDecl(
                     .nonexhaustive_node = nonexhaustive_node,
                 };
             };
-            if (counts.total_fields == 0) {
+            if (counts.total_fields == 0 and counts.nonexhaustive_node == 0) {
                 // One can construct an enum with no tags, and it functions the same as `noreturn`. But
                 // this is only useful for generic code; when explicitly using `enum {}` syntax, there
                 // must be at least one tag.
@@ -5345,6 +5367,7 @@ fn forExpr(
             .name = index_name,
             .ptr = index_ptr,
             .token_src = index_token,
+            .is_comptime = parent_gz.force_comptime,
         };
         break :blk &index_scope.base;
     };
@@ -5998,22 +6021,55 @@ fn ret(gz: *GenZir, scope: *Scope, node: ast.Node.Index) InnerError!Zir.Inst.Ref
     if (gz.in_defer) return astgen.failNode(node, "cannot return from defer expression", .{});
 
     const operand_node = node_datas[node].lhs;
-    if (operand_node != 0) {
-        const rl: ResultLoc = if (nodeMayNeedMemoryLocation(tree, operand_node)) .{
-            .ptr = try gz.addNodeExtended(.ret_ptr, node),
-        } else .{
-            .ty = try gz.addNodeExtended(.ret_type, node),
-        };
-        const operand = try expr(gz, scope, rl, operand_node);
-        // TODO check operand to see if we need to generate errdefers
+    if (operand_node == 0) {
+        // Returning a void value; skip error defers.
         try genDefers(gz, &astgen.fn_block.?.base, scope, .none);
-        _ = try gz.addUnNode(.ret_node, operand, node);
+        _ = try gz.addUnNode(.ret_node, .void_value, node);
         return Zir.Inst.Ref.unreachable_value;
     }
-    // Returning a void value; skip error defers.
-    try genDefers(gz, &astgen.fn_block.?.base, scope, .none);
-    _ = try gz.addUnNode(.ret_node, .void_value, node);
-    return Zir.Inst.Ref.unreachable_value;
+
+    const rl: ResultLoc = if (nodeMayNeedMemoryLocation(tree, operand_node)) .{
+        .ptr = try gz.addNodeExtended(.ret_ptr, node),
+    } else .{
+        .ty = try gz.addNodeExtended(.ret_type, node),
+    };
+    const operand = try expr(gz, scope, rl, operand_node);
+
+    switch (nodeMayEvalToError(tree, operand_node)) {
+        .never => {
+            // Returning a value that cannot be an error; skip error defers.
+            try genDefers(gz, &astgen.fn_block.?.base, scope, .none);
+            _ = try gz.addUnNode(.ret_node, operand, node);
+            return Zir.Inst.Ref.unreachable_value;
+        },
+        .always => {
+            // Value is always an error. Emit both error defers and regular defers.
+            const err_code = try gz.addUnNode(.err_union_code, operand, node);
+            try genDefers(gz, &astgen.fn_block.?.base, scope, err_code);
+            _ = try gz.addUnNode(.ret_node, operand, node);
+            return Zir.Inst.Ref.unreachable_value;
+        },
+        .maybe => {
+            // Emit conditional branch for generating errdefers.
+            const is_err = try gz.addUnNode(.is_err, operand, node);
+            const condbr = try gz.addCondBr(.condbr, node);
+
+            var then_scope = gz.makeSubBlock(scope);
+            defer then_scope.instructions.deinit(astgen.gpa);
+            const err_code = try then_scope.addUnNode(.err_union_code, operand, node);
+            try genDefers(&then_scope, &astgen.fn_block.?.base, scope, err_code);
+            _ = try then_scope.addUnNode(.ret_node, operand, node);
+
+            var else_scope = gz.makeSubBlock(scope);
+            defer else_scope.instructions.deinit(astgen.gpa);
+            try genDefers(&else_scope, &astgen.fn_block.?.base, scope, .none);
+            _ = try else_scope.addUnNode(.ret_node, operand, node);
+
+            try setCondBrPayload(condbr, is_err, &then_scope, &else_scope);
+
+            return Zir.Inst.Ref.unreachable_value;
+        },
+    }
 }
 
 fn identifier(
@@ -6070,9 +6126,16 @@ fn identifier(
     const name_str_index = try astgen.identAsString(ident_token);
     {
         var s = scope;
+        var found_already: ?ast.Node.Index = null; // we have found a decl with the same name already
+        var hit_namespace = false;
         while (true) switch (s.tag) {
             .local_val => {
                 const local_val = s.cast(Scope.LocalVal).?;
+                if (hit_namespace) {
+                    // captures of non-locals need to be emitted as decl_val or decl_ref
+                    // This *might* be capturable depending on if it is comptime known
+                    break;
+                }
                 if (local_val.name == name_str_index) {
                     return rvalue(gz, scope, rl, local_val.inst, ident);
                 }
@@ -6081,6 +6144,15 @@ fn identifier(
             .local_ptr => {
                 const local_ptr = s.cast(Scope.LocalPtr).?;
                 if (local_ptr.name == name_str_index) {
+                    if (hit_namespace) {
+                        if (local_ptr.is_comptime)
+                            break
+                        else
+                            return astgen.failNodeNotes(ident, "'{s}' not accessible from inner function", .{ident_name}, &.{
+                                try astgen.errNoteTok(local_ptr.token_src, "declared here", .{}),
+                                // TODO add crossed function definition here note.
+                            });
+                    }
                     switch (rl) {
                         .ref, .none_or_ref => return local_ptr.ptr,
                         else => {
@@ -6093,7 +6165,22 @@ fn identifier(
             },
             .gen_zir => s = s.cast(GenZir).?.parent,
             .defer_normal, .defer_error => s = s.cast(Scope.Defer).?.parent,
-            .namespace, .top => break, // TODO look for ambiguous references to decls
+            // look for ambiguous references to decls
+            .namespace => {
+                const ns = s.cast(Scope.Namespace).?;
+                if (ns.decls.get(name_str_index)) |i| {
+                    if (found_already) |f|
+                        return astgen.failNodeNotes(ident, "ambiguous reference", .{}, &.{
+                            try astgen.errNoteNode(i, "declared here", .{}),
+                            try astgen.errNoteNode(f, "also declared here", .{}),
+                        })
+                    else
+                        found_already = i;
+                }
+                hit_namespace = true;
+                s = ns.parent;
+            },
+            .top => break,
         };
     }
 
@@ -6668,18 +6755,33 @@ fn builtinCall(
 
         .@"export" => {
             const node_tags = tree.nodes.items(.tag);
+            const node_datas = tree.nodes.items(.data);
             // This function causes a Decl to be exported. The first parameter is not an expression,
             // but an identifier of the Decl to be exported.
-            if (node_tags[params[0]] != .identifier) {
-                return astgen.failNode(params[0], "the first @export parameter must be an identifier", .{});
+            var namespace: Zir.Inst.Ref = .none;
+            var decl_name: u32 = 0;
+            switch (node_tags[params[0]]) {
+                .identifier => {
+                    const ident_token = main_tokens[params[0]];
+                    decl_name = try astgen.identAsString(ident_token);
+                    // TODO look for local variables in scope matching `decl_name` and emit a compile
+                    // error. Only top-level declarations can be exported. Until this is done, the
+                    // compile error will end up being "use of undeclared identifier" in Sema.
+                },
+                .field_access => {
+                    const namespace_node = node_datas[params[0]].lhs;
+                    namespace = try typeExpr(gz, scope, namespace_node);
+                    const dot_token = main_tokens[params[0]];
+                    const field_ident = dot_token + 1;
+                    decl_name = try astgen.identAsString(field_ident);
+                },
+                else => return astgen.failNode(
+                    params[0], "the first @export parameter must be an identifier", .{},
+                ),
             }
-            const ident_token = main_tokens[params[0]];
-            const decl_name = try astgen.identAsString(ident_token);
-            // TODO look for local variables in scope matching `decl_name` and emit a compile
-            // error. Only top-level declarations can be exported. Until this is done, the
-            // compile error will end up being "use of undeclared identifier" in Sema.
             const options = try comptimeExpr(gz, scope, .{ .ty = .export_options_type }, params[1]);
             _ = try gz.addPlNode(.@"export", node, Zir.Inst.Export{
+                .namespace = namespace,
                 .decl_name = decl_name,
                 .options = options,
             });
@@ -6782,7 +6884,7 @@ fn builtinCall(
         .shr_exact => return shiftOp(gz, scope, rl, node, params[0], params[1], .shr_exact),
 
         .bit_offset_of  => return offsetOf(gz, scope, rl, node, params[0], params[1], .bit_offset_of),
-        .byte_offset_of => return offsetOf(gz, scope, rl, node, params[0], params[1], .byte_offset_of),
+        .offset_of => return offsetOf(gz, scope, rl, node, params[0], params[1], .offset_of),
 
         .c_undef   => return simpleCBuiltin(gz, scope, rl, node, params[0], .c_undef),
         .c_include => return simpleCBuiltin(gz, scope, rl, node, params[0], .c_include),
@@ -7555,6 +7657,219 @@ fn nodeMayNeedMemoryLocation(tree: *const ast.Tree, start_node: ast.Node.Index) 
     }
 }
 
+fn nodeMayEvalToError(tree: *const ast.Tree, start_node: ast.Node.Index) enum { never, always, maybe } {
+    const node_tags = tree.nodes.items(.tag);
+    const node_datas = tree.nodes.items(.data);
+    const main_tokens = tree.nodes.items(.main_token);
+    const token_tags = tree.tokens.items(.tag);
+
+    var node = start_node;
+    while (true) {
+        switch (node_tags[node]) {
+            .root,
+            .@"usingnamespace",
+            .test_decl,
+            .switch_case,
+            .switch_case_one,
+            .container_field_init,
+            .container_field_align,
+            .container_field,
+            .asm_output,
+            .asm_input,
+            => unreachable,
+
+            .error_value => return .always,
+
+            .@"asm",
+            .asm_simple,
+            .identifier,
+            .field_access,
+            .deref,
+            .array_access,
+            .while_simple,
+            .while_cont,
+            .for_simple,
+            .if_simple,
+            .@"while",
+            .@"if",
+            .@"for",
+            .@"switch",
+            .switch_comma,
+            .call_one,
+            .call_one_comma,
+            .async_call_one,
+            .async_call_one_comma,
+            .call,
+            .call_comma,
+            .async_call,
+            .async_call_comma,
+            => return .maybe,
+
+            .@"return",
+            .@"break",
+            .@"continue",
+            .bit_not,
+            .bool_not,
+            .global_var_decl,
+            .local_var_decl,
+            .simple_var_decl,
+            .aligned_var_decl,
+            .@"defer",
+            .@"errdefer",
+            .address_of,
+            .optional_type,
+            .negation,
+            .negation_wrap,
+            .@"resume",
+            .array_type,
+            .array_type_sentinel,
+            .ptr_type_aligned,
+            .ptr_type_sentinel,
+            .ptr_type,
+            .ptr_type_bit_range,
+            .@"suspend",
+            .@"anytype",
+            .fn_proto_simple,
+            .fn_proto_multi,
+            .fn_proto_one,
+            .fn_proto,
+            .fn_decl,
+            .anyframe_type,
+            .anyframe_literal,
+            .integer_literal,
+            .float_literal,
+            .enum_literal,
+            .string_literal,
+            .multiline_string_literal,
+            .char_literal,
+            .true_literal,
+            .false_literal,
+            .null_literal,
+            .undefined_literal,
+            .unreachable_literal,
+            .error_set_decl,
+            .container_decl,
+            .container_decl_trailing,
+            .container_decl_two,
+            .container_decl_two_trailing,
+            .container_decl_arg,
+            .container_decl_arg_trailing,
+            .tagged_union,
+            .tagged_union_trailing,
+            .tagged_union_two,
+            .tagged_union_two_trailing,
+            .tagged_union_enum_tag,
+            .tagged_union_enum_tag_trailing,
+            .add,
+            .add_wrap,
+            .array_cat,
+            .array_mult,
+            .assign,
+            .assign_bit_and,
+            .assign_bit_or,
+            .assign_bit_shift_left,
+            .assign_bit_shift_right,
+            .assign_bit_xor,
+            .assign_div,
+            .assign_sub,
+            .assign_sub_wrap,
+            .assign_mod,
+            .assign_add,
+            .assign_add_wrap,
+            .assign_mul,
+            .assign_mul_wrap,
+            .bang_equal,
+            .bit_and,
+            .bit_or,
+            .bit_shift_left,
+            .bit_shift_right,
+            .bit_xor,
+            .bool_and,
+            .bool_or,
+            .div,
+            .equal_equal,
+            .error_union,
+            .greater_or_equal,
+            .greater_than,
+            .less_or_equal,
+            .less_than,
+            .merge_error_sets,
+            .mod,
+            .mul,
+            .mul_wrap,
+            .switch_range,
+            .sub,
+            .sub_wrap,
+            .slice,
+            .slice_open,
+            .slice_sentinel,
+            .array_init_one,
+            .array_init_one_comma,
+            .array_init_dot_two,
+            .array_init_dot_two_comma,
+            .array_init_dot,
+            .array_init_dot_comma,
+            .array_init,
+            .array_init_comma,
+            .struct_init_one,
+            .struct_init_one_comma,
+            .struct_init_dot_two,
+            .struct_init_dot_two_comma,
+            .struct_init_dot,
+            .struct_init_dot_comma,
+            .struct_init,
+            .struct_init_comma,
+            => return .never,
+
+            // Forward the question to the LHS sub-expression.
+            .grouped_expression,
+            .@"try",
+            .@"await",
+            .@"comptime",
+            .@"nosuspend",
+            .unwrap_optional,
+            => node = node_datas[node].lhs,
+
+            // Forward the question to the RHS sub-expression.
+            .@"catch",
+            .@"orelse",
+            => node = node_datas[node].rhs,
+
+            .block_two,
+            .block_two_semicolon,
+            .block,
+            .block_semicolon,
+            => {
+                const lbrace = main_tokens[node];
+                if (token_tags[lbrace - 1] == .colon) {
+                    // Labeled blocks may need a memory location to forward
+                    // to their break statements.
+                    return .maybe;
+                } else {
+                    return .never;
+                }
+            },
+
+            .builtin_call,
+            .builtin_call_comma,
+            .builtin_call_two,
+            .builtin_call_two_comma,
+            => {
+                const builtin_token = main_tokens[node];
+                const builtin_name = tree.tokenSlice(builtin_token);
+                // If the builtin is an invalid name, we don't cause an error here; instead
+                // let it pass, and the error will be "invalid builtin function" later.
+                const builtin_info = BuiltinFn.list.get(builtin_name) orelse return .maybe;
+                if (builtin_info.tag == .err_set_cast) {
+                    return .always;
+                } else {
+                    return .never;
+                }
+            },
+        }
+    }
+}
+
 /// Applies `rl` semantics to `inst`. Expressions which do not do their own handling of
 /// result locations must call this function on their result.
 /// As an example, if the `ResultLoc` is `ptr`, it will write the result to the pointer.
@@ -8042,6 +8357,7 @@ const Scope = struct {
         token_src: ast.TokenIndex,
         /// String table index.
         name: u32,
+        is_comptime: bool,
     };
 
     const Defer = struct {

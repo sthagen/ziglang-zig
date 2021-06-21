@@ -66,7 +66,7 @@ pub fn build(b: *Builder) !void {
     if (!skip_install_lib_files) {
         b.installDirectory(InstallDirectoryOptions{
             .source_dir = "lib",
-            .install_dir = .Lib,
+            .install_dir = .lib,
             .install_subdir = "zig",
             .exclude_extensions = &[_][]const u8{
                 "README.md",
@@ -117,7 +117,7 @@ pub fn build(b: *Builder) !void {
             // of being built by cmake. But when built by zig it's gonna get a compiler_rt so that
             // is pointless.
             exe.addPackagePath("compiler_rt", "src/empty.zig");
-            exe.defineCMacro("ZIG_LINK_MODE=Static");
+            exe.defineCMacro("ZIG_LINK_MODE", "Static");
 
             const softfloat = b.addStaticLibrary("softfloat", null);
             softfloat.setBuildMode(.ReleaseFast);

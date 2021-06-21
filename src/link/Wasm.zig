@@ -15,6 +15,7 @@ const codegen = @import("../codegen/wasm.zig");
 const link = @import("../link.zig");
 const trace = @import("../tracy.zig").trace;
 const build_options = @import("build_options");
+const wasi_libc = @import("../wasi_libc.zig");
 const Cache = @import("../Cache.zig");
 const TypedValue = @import("../TypedValue.zig");
 
@@ -574,7 +575,6 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
         null;
 
     const target = self.base.options.target;
-    const link_in_crt = self.base.options.link_libc and self.base.options.output_mode == .Exe;
 
     const id_symlink_basename = "lld.id";
 
@@ -653,8 +653,6 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
             try fs.cwd().copyFile(the_object_path, fs.cwd(), full_out_path, .{});
         }
     } else {
-        const is_obj = self.base.options.output_mode == .Obj;
-
         // Create an LLD command line and invoke it.
         var argv = std.ArrayList([]const u8).init(self.base.allocator);
         defer argv.deinit();
@@ -662,10 +660,6 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
         // This is necessary because LLD does not behave properly as a library -
         // it calls exit() and does not reset all global data between invocations.
         try argv.appendSlice(&[_][]const u8{ comp.self_exe_path.?, "wasm-ld" });
-        if (is_obj) {
-            try argv.append("-r");
-        }
-
         try argv.append("-error-limit=0");
 
         if (self.base.options.lto) {
@@ -687,6 +681,12 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
             // Put stack before globals so that stack overflow results in segfault immediately
             // before corrupting globals. See https://github.com/ziglang/zig/issues/4496
             try argv.append("--stack-first");
+
+            // Reactor execution model does not have _start so lld doesn't look for it.
+            if (self.base.options.wasi_exec_model) |exec_model| blk: {
+                if (exec_model != .crt1_reactor_o) break :blk;
+                try argv.append("--no-entry");
+            }
         } else {
             try argv.append("--no-entry"); // So lld doesn't look for _start.
             try argv.append("--export-all");
@@ -697,16 +697,31 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
             full_out_path,
         });
 
-        if (link_in_crt) {
-            // TODO work out if we want standard crt, a reactor or a command
-            try argv.append(try comp.get_libc_crt_file(arena, "crt.o"));
-        }
+        if (target.os.tag == .wasi) {
+            const is_exe_or_dyn_lib = self.base.options.output_mode == .Exe or
+                (self.base.options.output_mode == .Lib and self.base.options.link_mode == .Dynamic);
+            if (is_exe_or_dyn_lib) {
+                const wasi_emulated_libs = self.base.options.wasi_emulated_libs;
+                for (wasi_emulated_libs) |crt_file| {
+                    try argv.append(try comp.get_libc_crt_file(
+                        arena,
+                        wasi_libc.emulatedLibCRFileLibName(crt_file),
+                    ));
+                }
 
-        if (!is_obj and self.base.options.link_libc) {
-            try argv.append(try comp.get_libc_crt_file(arena, switch (self.base.options.link_mode) {
-                .Static => "libc.a",
-                .Dynamic => unreachable,
-            }));
+                if (self.base.options.link_libc) {
+                    try argv.append(try comp.get_libc_crt_file(
+                        arena,
+                        wasi_libc.crtFileFullName(self.base.options.wasi_exec_model orelse .crt1_o),
+                    ));
+                    try argv.append(try comp.get_libc_crt_file(arena, "libc.a"));
+                }
+
+                if (self.base.options.link_libcpp) {
+                    try argv.append(comp.libcxx_static_lib.?.full_object_path);
+                    try argv.append(comp.libcxxabi_static_lib.?.full_object_path);
+                }
+            }
         }
 
         // Positional arguments to the linker such as object files.

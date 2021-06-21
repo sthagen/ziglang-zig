@@ -25,10 +25,8 @@ wget -nv "https://ziglang.org/deps/$QEMUBASE.tar.xz"
 tar xf "$QEMUBASE.tar.xz"
 export PATH="$(pwd)/$QEMUBASE/bin:$PATH"
 
-# Bump to v0.23 once this issue is resolved:
-# https://github.com/ziglang/zig/issues/8742
-WASMTIME="wasmtime-v0.22.1-x86_64-linux"
-wget -nv "https://github.com/bytecodealliance/wasmtime/releases/download/v0.22.1/$WASMTIME.tar.xz"
+WASMTIME="wasmtime-v0.26.1-x86_64-linux"
+wget -nv "https://github.com/bytecodealliance/wasmtime/releases/download/v0.26.1/$WASMTIME.tar.xz"
 tar xf "$WASMTIME.tar.xz"
 export PATH="$(pwd)/$WASMTIME:$PATH"
 
@@ -61,6 +59,10 @@ unset CXX
 
 make $JOBS install
 
+# Look for formatting errors and AST errors.
+# Formatting errors can be fixed by running `zig fmt` on the files printed here.
+release/bin/zig fmt --check --ast-check ..
+
 # Here we rebuild zig but this time using the Zig binary we just now produced to
 # build zig1.o rather than relying on the one built with stage0. See
 # https://github.com/ziglang/zig/issues/6830 for more details.
@@ -78,7 +80,7 @@ if [ "${BUILD_REASON}" != "PullRequest" ]; then
   # Produce the experimental std lib documentation.
   mkdir -p release/docs/std
   release/bin/zig test ../lib/std/std.zig \
-    --override-lib-dir ../lib \
+    --zig-lib-dir ../lib \
     -femit-docs=release/docs/std \
     -fno-emit-bin
 

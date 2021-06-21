@@ -1768,7 +1768,7 @@ enum BuiltinFnId {
     BuiltinFnIdPtrToInt,
     BuiltinFnIdTagName,
     BuiltinFnIdFieldParentPtr,
-    BuiltinFnIdByteOffsetOf,
+    BuiltinFnIdOffsetOf,
     BuiltinFnIdBitOffsetOf,
     BuiltinFnIdAsyncCall,
     BuiltinFnIdShlExact,
@@ -2121,8 +2121,6 @@ struct CodeGen {
     unsigned pointer_size_bytes;
     bool is_big_endian;
     bool have_err_ret_tracing;
-    bool verbose_tokenize;
-    bool verbose_ast;
     bool verbose_ir;
     bool verbose_llvm_ir;
     bool verbose_cimport;
@@ -2146,6 +2144,7 @@ struct CodeGen {
     bool have_pic;
     bool have_pie;
     bool have_lto;
+    bool unwind_tables;
     bool link_mode_dynamic;
     bool dll_export_fns;
     bool have_stack_probing;
@@ -2577,7 +2576,7 @@ enum IrInstSrcId {
     IrInstSrcIdPanic,
     IrInstSrcIdTagName,
     IrInstSrcIdFieldParentPtr,
-    IrInstSrcIdByteOffsetOf,
+    IrInstSrcIdOffsetOf,
     IrInstSrcIdBitOffsetOf,
     IrInstSrcIdTypeInfo,
     IrInstSrcIdType,
@@ -4048,7 +4047,7 @@ struct IrInstGenFieldParentPtr {
     TypeStructField *field;
 };
 
-struct IrInstSrcByteOffsetOf {
+struct IrInstSrcOffsetOf {
     IrInstSrc base;
 
     IrInstSrc *type_value;

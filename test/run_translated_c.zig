@@ -3,6 +3,16 @@ const tests = @import("tests.zig");
 const nl = std.cstr.line_sep;
 
 pub fn addCases(cases: *tests.RunTranslatedCContext) void {
+    cases.add("dereference address of",
+        \\#include <stdlib.h>
+        \\int main(void) {
+        \\    int i = 0;
+        \\    *&i = 42;
+        \\    if (i != 42) abort();
+        \\	  return 0;
+        \\}
+    , "");
+
     cases.add("division of floating literals",
         \\#define _NO_CRT_STDIO_INLINE 1
         \\#include <stdio.h>
@@ -1516,6 +1526,75 @@ pub fn addCases(cases: *tests.RunTranslatedCContext) void {
         \\    enum FOO x = BAR;
         \\    if (x) abort();
         \\    if (!BAZ) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("Flexible arrays",
+        \\#include <stdlib.h>
+        \\#include <stdint.h>
+        \\typedef struct { char foo; int bar; } ITEM;
+        \\typedef struct { size_t count; ITEM items[]; } ITEM_LIST;
+        \\typedef struct { unsigned char count; int items[]; } INT_LIST;
+        \\#define SIZE 10
+        \\int main(void) {
+        \\    ITEM_LIST *list = malloc(sizeof(ITEM_LIST) + SIZE * sizeof(ITEM));
+        \\    for (int i = 0; i < SIZE; i++) list->items[i] = (ITEM) {.foo = i, .bar = i + 1};
+        \\    const ITEM_LIST *const c_list = list;
+        \\    for (int i = 0; i < SIZE; i++) if (c_list->items[i].foo != i || c_list->items[i].bar != i + 1) abort();
+        \\    INT_LIST *int_list = malloc(sizeof(INT_LIST) + SIZE * sizeof(int));
+        \\    for (int i = 0; i < SIZE; i++) int_list->items[i] = i;
+        \\    const INT_LIST *const c_int_list = int_list;
+        \\    const int *const ints = int_list->items;
+        \\    for (int i = 0; i < SIZE; i++) if (ints[i] != i) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("enum with value that fits in c_uint but not c_int, issue #8003",
+        \\#include <stdlib.h>
+        \\enum my_enum {
+        \\    FORCE_UINT = 0xffffffff
+        \\};
+        \\int main(void) {
+        \\    if(FORCE_UINT != 0xffffffff) abort();
+        \\}
+    , "");
+
+    cases.add("block-scope static variable shadows function parameter. Issue #8208",
+        \\#include <stdlib.h>
+        \\int func1(int foo) { return foo + 1; }
+        \\int func2(void) {
+        \\    static int foo = 5;
+        \\    return foo++;
+        \\}
+        \\int main(void) {
+        \\    if (func1(42) != 43) abort();
+        \\    if (func2() != 5) abort();
+        \\    if (func2() != 6) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("nested same-name static locals",
+        \\#include <stdlib.h>
+        \\int func(int val) {
+        \\    static int foo;
+        \\    if (foo != val) abort();
+        \\    {
+        \\        foo += 1;
+        \\        static int foo = 2;
+        \\        if (foo != val + 2) abort();
+        \\        foo += 1;
+        \\    }
+        \\    return foo;
+        \\}
+        \\int main(void) {
+        \\    int foo = 1;
+        \\    if (func(0) != 1) abort();
+        \\    if (func(1) != 2) abort();
+        \\    if (func(2) != 3) abort();
+        \\    if (foo != 1) abort();
         \\    return 0;
         \\}
     , "");

@@ -15,6 +15,7 @@ pub fn addCases(cases: *tests.StandaloneContext) void {
     cases.addBuildFile("test/standalone/static_c_lib/build.zig", .{});
     cases.addBuildFile("test/standalone/link_interdependent_static_c_libs/build.zig", .{});
     cases.addBuildFile("test/standalone/link_static_lib_as_system_lib/build.zig", .{});
+    cases.addBuildFile("test/standalone/link_common_symbols/build.zig", .{});
     cases.addBuildFile("test/standalone/issue_339/build.zig", .{});
     cases.addBuildFile("test/standalone/issue_8550/build.zig", .{});
     cases.addBuildFile("test/standalone/issue_794/build.zig", .{});
@@ -31,4 +32,17 @@ pub fn addCases(cases: *tests.StandaloneContext) void {
         cases.addBuildFile("test/stage1/c_abi/build.zig", .{});
     }
     cases.addBuildFile("test/standalone/c_compiler/build.zig", .{ .build_modes = true, .cross_targets = true });
+
+    // Try to build and run a PIE executable.
+    if (std.Target.current.os.tag == .linux) {
+        cases.addBuildFile("test/standalone/pie/build.zig", .{});
+    }
+
+    // Ensure the development tools are buildable.
+    cases.add("tools/gen_spirv_spec.zig");
+    cases.add("tools/gen_stubs.zig");
+    cases.add("tools/update_clang_options.zig");
+    cases.add("tools/update_cpu_features.zig");
+    cases.add("tools/update_glibc.zig");
+    cases.add("tools/update_spirv_features.zig");
 }

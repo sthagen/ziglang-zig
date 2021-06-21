@@ -347,8 +347,9 @@ pub const Inst = struct {
         error_union_type,
         /// `error.Foo` syntax. Uses the `str_tok` field of the Data union.
         error_value,
-        /// Implements the `@export` builtin function.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
+        /// Implements the `@export` builtin function, based on either an identifier to a Decl,
+        /// or field access of a Decl.
+        /// Uses the `pl_node` union field. Payload is `Export`.
         @"export",
         /// Given a pointer to a struct or object that contains virtual fields, returns a pointer
         /// to the named field. The field name is stored in string_bytes. Used by a.b syntax.
@@ -859,9 +860,9 @@ pub const Inst = struct {
         /// Implements the `@bitOffsetOf` builtin.
         /// Uses the `pl_node` union field with payload `Bin`.
         bit_offset_of,
-        /// Implements the `@byteOffsetOf` builtin.
+        /// Implements the `@offsetOf` builtin.
         /// Uses the `pl_node` union field with payload `Bin`.
-        byte_offset_of,
+        offset_of,
         /// Implements the `@cmpxchgStrong` builtin.
         /// Uses the `pl_node` union field with payload `Cmpxchg`.
         cmpxchg_strong,
@@ -1166,7 +1167,7 @@ pub const Inst = struct {
                 .shl_exact,
                 .shr_exact,
                 .bit_offset_of,
-                .byte_offset_of,
+                .offset_of,
                 .cmpxchg_strong,
                 .cmpxchg_weak,
                 .splat,
@@ -1436,7 +1437,7 @@ pub const Inst = struct {
                 .shr_exact = .pl_node,
 
                 .bit_offset_of = .pl_node,
-                .byte_offset_of = .pl_node,
+                .offset_of = .pl_node,
                 .cmpxchg_strong = .pl_node,
                 .cmpxchg_weak = .pl_node,
                 .splat = .pl_node,
@@ -2738,6 +2739,9 @@ pub const Inst = struct {
     };
 
     pub const Export = struct {
+        /// If present, this is referring to a Decl via field access, e.g. `a.b`.
+        /// If omitted, this is referring to a Decl via identifier, e.g. `a`.
+        namespace: Ref,
         /// Null-terminated string index.
         decl_name: u32,
         options: Ref,
@@ -2992,7 +2996,7 @@ const Writer = struct {
             .mod,
             .rem,
             .bit_offset_of,
-            .byte_offset_of,
+            .offset_of,
             .splat,
             .reduce,
             .atomic_load,
@@ -3231,7 +3235,7 @@ const Writer = struct {
             .limbs = limbs,
             .positive = true,
         };
-        const as_string = try big_int.toStringAlloc(self.gpa, 10, false);
+        const as_string = try big_int.toStringAlloc(self.gpa, 10, .lower);
         defer self.gpa.free(as_string);
         try stream.print("{s})", .{as_string});
     }
@@ -3284,7 +3288,8 @@ const Writer = struct {
         const extra = self.code.extraData(Inst.Export, inst_data.payload_index).data;
         const decl_name = self.code.nullTerminatedString(extra.decl_name);
 
-        try stream.print("{}, ", .{std.zig.fmtId(decl_name)});
+        try self.writeInstRef(stream, extra.namespace);
+        try stream.print(", {}, ", .{std.zig.fmtId(decl_name)});
         try self.writeInstRef(stream, extra.options);
         try stream.writeAll(") ");
         try self.writeSrc(stream, inst_data.src());

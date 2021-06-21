@@ -30,6 +30,7 @@ pub usingnamespace switch (arch) {
 pub usingnamespace @import("linux/netlink.zig");
 pub usingnamespace @import("linux/prctl.zig");
 pub usingnamespace @import("linux/securebits.zig");
+pub usingnamespace @import("linux/xdp.zig");
 
 const is_mips = arch.isMIPS();
 const is_ppc = arch.isPPC();
@@ -408,7 +409,8 @@ pub const PF_VSOCK = 40;
 pub const PF_KCM = 41;
 pub const PF_QIPCRTR = 42;
 pub const PF_SMC = 43;
-pub const PF_MAX = 44;
+pub const PF_XDP = 44;
+pub const PF_MAX = 45;
 
 pub const AF_UNSPEC = PF_UNSPEC;
 pub const AF_LOCAL = PF_LOCAL;
@@ -457,6 +459,7 @@ pub const AF_VSOCK = PF_VSOCK;
 pub const AF_KCM = PF_KCM;
 pub const AF_QIPCRTR = PF_QIPCRTR;
 pub const AF_SMC = PF_SMC;
+pub const AF_XDP = PF_XDP;
 pub const AF_MAX = PF_MAX;
 
 pub usingnamespace if (is_mips)
@@ -601,6 +604,7 @@ pub const SOL_ALG = 279;
 pub const SOL_NFC = 280;
 pub const SOL_KCM = 281;
 pub const SOL_TLS = 282;
+pub const SOL_XDP = 283;
 
 pub const SOMAXCONN = 128;
 
@@ -1039,8 +1043,8 @@ pub const TFD_CLOEXEC = O_CLOEXEC;
 pub const TFD_TIMER_ABSTIME = 1;
 pub const TFD_TIMER_CANCEL_ON_SET = (1 << 1);
 
-pub fn WEXITSTATUS(s: u32) u32 {
-    return (s & 0xff00) >> 8;
+pub fn WEXITSTATUS(s: u32) u8 {
+    return @intCast(u8, (s & 0xff00) >> 8);
 }
 pub fn WTERMSIG(s: u32) u32 {
     return s & 0x7f;
@@ -2403,6 +2407,27 @@ pub const MADV_COLD = 20;
 pub const MADV_PAGEOUT = 21;
 pub const MADV_HWPOISON = 100;
 pub const MADV_SOFT_OFFLINE = 101;
+
+pub const POSIX_FADV_NORMAL = 0;
+pub const POSIX_FADV_RANDOM = 1;
+pub const POSIX_FADV_SEQUENTIAL = 2;
+pub const POSIX_FADV_WILLNEED = 3;
+pub usingnamespace switch (arch) {
+    .s390x => if (@typeInfo(usize).Int.bits == 64)
+        struct {
+            pub const POSIX_FADV_DONTNEED = 6;
+            pub const POSIX_FADV_NOREUSE = 7;
+        }
+    else
+        struct {
+            pub const POSIX_FADV_DONTNEED = 4;
+            pub const POSIX_FADV_NOREUSE = 5;
+        },
+    else => struct {
+        pub const POSIX_FADV_DONTNEED = 4;
+        pub const POSIX_FADV_NOREUSE = 5;
+    },
+};
 
 pub const __kernel_timespec = extern struct {
     tv_sec: i64,

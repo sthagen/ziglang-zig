@@ -332,8 +332,8 @@ pub const AT_REMOVEDIR = 2;
 pub const AT_EACCESS = 4;
 pub const AT_SYMLINK_FOLLOW = 8;
 
-pub fn WEXITSTATUS(s: u32) u32 {
-    return (s & 0xff00) >> 8;
+pub fn WEXITSTATUS(s: u32) u8 {
+    return @intCast(u8, (s & 0xff00) >> 8);
 }
 pub fn WTERMSIG(s: u32) u32 {
     return s & 0x7f;
@@ -360,7 +360,7 @@ pub const dirent = extern struct {
     d_name: [256]u8,
 
     pub fn reclen(self: dirent) u16 {
-        return (@byteOffsetOf(dirent, "d_name") + self.d_namlen + 1 + 7) & ~@as(u16, 7);
+        return (@offsetOf(dirent, "d_name") + self.d_namlen + 1 + 7) & ~@as(u16, 7);
     }
 };
 

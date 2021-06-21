@@ -10,7 +10,6 @@ const page_size = std.mem.page_size;
 pub const tokenizer = @import("c/tokenizer.zig");
 pub const Token = tokenizer.Token;
 pub const Tokenizer = tokenizer.Tokenizer;
-pub const builtins = @import("c/builtins.zig");
 
 test {
     _ = tokenizer;
@@ -103,7 +102,7 @@ pub extern "c" fn linkat(oldfd: fd_t, oldpath: [*:0]const u8, newfd: fd_t, newpa
 pub extern "c" fn unlink(path: [*:0]const u8) c_int;
 pub extern "c" fn unlinkat(dirfd: fd_t, path: [*:0]const u8, flags: c_uint) c_int;
 pub extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*]u8;
-pub extern "c" fn waitpid(pid: c_int, stat_loc: *c_uint, options: c_uint) c_int;
+pub extern "c" fn waitpid(pid: pid_t, stat_loc: ?*c_int, options: c_int) pid_t;
 pub extern "c" fn fork() c_int;
 pub extern "c" fn access(path: [*:0]const u8, mode: c_uint) c_int;
 pub extern "c" fn faccessat(dirfd: fd_t, path: [*:0]const u8, mode: c_uint, flags: c_uint) c_int;
@@ -192,6 +191,7 @@ pub usingnamespace switch (builtin.os.tag) {
         pub const sigaction = __sigaction14;
         pub const sigaltstack = __sigaltstack14;
         pub const sigprocmask = __sigprocmask14;
+        pub const socket = __socket30;
         pub const stat = __stat50;
     },
     .macos, .ios, .watchos, .tvos => struct {
@@ -208,6 +208,9 @@ pub usingnamespace switch (builtin.os.tag) {
         pub extern "c" fn sigprocmask(how: c_int, noalias set: ?*const sigset_t, noalias oset: ?*sigset_t) c_int;
         pub extern "c" fn socket(domain: c_uint, sock_type: c_uint, protocol: c_uint) c_int;
         pub extern "c" fn stat(noalias path: [*:0]const u8, noalias buf: *libc_stat) c_int;
+        pub extern "c" fn sigfillset(set: ?*sigset_t) void;
+        pub extern "c" fn alarm(seconds: c_uint) c_uint;
+        pub extern "c" fn sigwait(set: ?*sigset_t, sig: ?*c_int) c_int;
     },
     .windows => struct {
         // TODO: copied the else case and removed the socket function (because its in ws2_32)
@@ -222,6 +225,9 @@ pub usingnamespace switch (builtin.os.tag) {
         pub extern "c" fn sigaction(sig: c_int, noalias act: ?*const Sigaction, noalias oact: ?*Sigaction) c_int;
         pub extern "c" fn sigprocmask(how: c_int, noalias set: ?*const sigset_t, noalias oset: ?*sigset_t) c_int;
         pub extern "c" fn stat(noalias path: [*:0]const u8, noalias buf: *libc_stat) c_int;
+        pub extern "c" fn sigfillset(set: ?*sigset_t) void;
+        pub extern "c" fn alarm(seconds: c_uint) c_uint;
+        pub extern "c" fn sigwait(set: ?*sigset_t, sig: ?*c_int) c_int;
     },
     else => struct {
         pub extern "c" fn clock_getres(clk_id: c_int, tp: *timespec) c_int;
@@ -235,6 +241,9 @@ pub usingnamespace switch (builtin.os.tag) {
         pub extern "c" fn sigprocmask(how: c_int, noalias set: ?*const sigset_t, noalias oset: ?*sigset_t) c_int;
         pub extern "c" fn socket(domain: c_uint, sock_type: c_uint, protocol: c_uint) c_int;
         pub extern "c" fn stat(noalias path: [*:0]const u8, noalias buf: *libc_stat) c_int;
+        pub extern "c" fn sigfillset(set: ?*sigset_t) void;
+        pub extern "c" fn alarm(seconds: c_uint) c_uint;
+        pub extern "c" fn sigwait(set: ?*sigset_t, sig: ?*c_int) c_int;
     },
 };
 

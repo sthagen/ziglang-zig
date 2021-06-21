@@ -133,7 +133,7 @@
             color: #bbb;
         }
         a {
-            color: #88f;
+            color: #f7a31d;
         }
         table, th, td {
             border-color: grey;
@@ -193,7 +193,7 @@
         <a href="https://ziglang.org/documentation/0.4.0/">0.4.0</a> |
         <a href="https://ziglang.org/documentation/0.5.0/">0.5.0</a> |
         <a href="https://ziglang.org/documentation/0.6.0/">0.6.0</a> |
-        <a href="https://ziglang.org/documentation/0.7.0/">0.7.0</a> |
+        <a href="https://ziglang.org/documentation/0.7.1/">0.7.1</a> |
         <a href="https://ziglang.org/documentation/0.8.0/">0.8.0</a> |
         master
         <h1>Contents</h1>
@@ -218,10 +218,6 @@
       Often the most efficient way to learn something new is to see examples, so
       this documentation shows how to use each of Zig's features. It is
       all on one page so you can search with your browser's search tool.
-      </p>
-      <p>
-      If you search for something specific in this documentation and do not find it,
-      please <a href="https://github.com/ziglang/www.ziglang.org/issues/new?title=I%20searched%20for%20___%20in%20the%20docs%20and%20didn%27t%20find%20it">file an issue</a> or <a href="https://webchat.freenode.net/?channels=%23zig">say something on IRC</a>.
       </p>
       <p>
       The code samples in this document are compiled and tested as part of the main test suite of Zig.
@@ -2719,7 +2715,7 @@ test "pointer to non-bit-aligned field" {
 }
       {#code_end#}
       <p>
-      This can be observed with {#link|@bitOffsetOf#} and {#link|byteOffsetOf#}:
+      This can be observed with {#link|@bitOffsetOf#} and {#link|offsetOf#}:
       </p>
       {#code_begin|test#}
 const std = @import("std");
@@ -2737,9 +2733,9 @@ test "pointer to non-bit-aligned field" {
         try expect(@bitOffsetOf(BitField, "b") == 3);
         try expect(@bitOffsetOf(BitField, "c") == 6);
 
-        try expect(@byteOffsetOf(BitField, "a") == 0);
-        try expect(@byteOffsetOf(BitField, "b") == 0);
-        try expect(@byteOffsetOf(BitField, "c") == 0);
+        try expect(@offsetOf(BitField, "a") == 0);
+        try expect(@offsetOf(BitField, "b") == 0);
+        try expect(@offsetOf(BitField, "c") == 0);
     }
 }
       {#code_end#}
@@ -2990,7 +2986,7 @@ test "@typeInfo" {
     try expect(mem.eql(u8, @typeInfo(Small).Enum.fields[1].name, "two"));
 }
 
-// @tagName gives a []const u8 representation of an enum value:
+// @tagName gives a [:0]const u8 representation of an enum value:
 test "@tagName" {
     try expect(mem.eql(u8, @tagName(Small.three), "three"));
 }
@@ -3237,7 +3233,7 @@ test "union method" {
       {#code_end#}
       <p>
       {#link|@tagName#} can be used to return a {#link|comptime#}
-      {#syntax#}[]const u8{#endsyntax#} value representing the field name:
+      {#syntax#}[:0]const u8{#endsyntax#} value representing the field name:
       </p>
       {#code_begin|test#}
 const std = @import("std");
@@ -6266,7 +6262,7 @@ pub fn printValue(self: *Writer, value: anytype) !void {
       <p>
       And now, what happens if we give too many arguments to {#syntax#}printf{#endsyntax#}?
       </p>
-      {#code_begin|test_err|Unused arguments#}
+      {#code_begin|test_err|Unused argument in "here is a string: '{s}' here is a number: {}#}
 const print = @import("std").debug.print;
 
 const a_number: i32 = 1234;
@@ -7030,7 +7026,7 @@ fn func(y: *i32) void {
       For packed structs, non-byte-aligned fields will share a byte offset, but they will have different
       bit offsets.
       </p>
-      {#see_also|@byteOffsetOf#}
+      {#see_also|@offsetOf#}
       {#header_close#}
 
       {#header_open|@boolToInt#}
@@ -7110,8 +7106,8 @@ fn func(y: *i32) void {
       </p>
       {#header_close#}
 
-      {#header_open|@byteOffsetOf#}
-      <pre>{#syntax#}@byteOffsetOf(comptime T: type, comptime field_name: []const u8) comptime_int{#endsyntax#}</pre>
+      {#header_open|@offsetOf#}
+      <pre>{#syntax#}@offsetOf(comptime T: type, comptime field_name: []const u8) comptime_int{#endsyntax#}</pre>
       <p>
       Returns the byte offset of a field relative to its containing struct.
       </p>
@@ -7451,7 +7447,7 @@ test "main" {
       {#see_also|@divFloor|@divExact#}
       {#header_close#}
       {#header_open|@embedFile#}
-      <pre>{#syntax#}@embedFile(comptime path: []const u8) *const [X:0]u8{#endsyntax#}</pre>
+      <pre>{#syntax#}@embedFile(comptime path: []const u8) *const [N:0]u8{#endsyntax#}</pre>
       <p>
       This function returns a compile time constant pointer to null-terminated,
       fixed-size array with length equal to the byte count of the file given by
@@ -7479,7 +7475,7 @@ test "main" {
       {#header_close#}
 
       {#header_open|@errorName#}
-      <pre>{#syntax#}@errorName(err: anyerror) []const u8{#endsyntax#}</pre>
+      <pre>{#syntax#}@errorName(err: anyerror) [:0]const u8{#endsyntax#}</pre>
       <p>
       This function returns the string representation of an error. The string representation
       of {#syntax#}error.OutOfMem{#endsyntax#} is {#syntax#}"OutOfMem"{#endsyntax#}.
@@ -7529,13 +7525,22 @@ test "main" {
       {#header_close#}
 
       {#header_open|@export#}
-      <pre>{#syntax#}@export(identifier, comptime options: std.builtin.ExportOptions) void{#endsyntax#}</pre>
+      <pre>{#syntax#}@export(declaration, comptime options: std.builtin.ExportOptions) void{#endsyntax#}</pre>
       <p>
       Creates a symbol in the output object file.
       </p>
       <p>
-      This function can be called from a {#link|comptime#} block to conditionally export symbols.
-      When {#syntax#}identifier{#endsyntax#} is a function with the C calling convention and
+      <code>declaration</code> must be one of two things:
+      </p>
+      <ul>
+        <li>An identifier ({#syntax#}x{#endsyntax#}) identifying a {#link|function|Functions#} or
+          {#link|global variable|Global Variables#}.</li>
+        <li>Field access ({#syntax#}x.y{#endsyntax#}) looking up a {#link|function|Functions#} or
+          {#link|global variable|Global Variables#}.</li>
+      </ul>
+      <p>
+      This builtin can be called from a {#link|comptime#} block to conditionally export symbols.
+      When <code>declaration</code> is a function with the C calling convention and
       {#syntax#}options.linkage{#endsyntax#} is {#syntax#}Strong{#endsyntax#}, this is equivalent to
       the {#syntax#}export{#endsyntax#} keyword used on a function:
       </p>
@@ -8489,9 +8494,9 @@ fn doTheTest() !void {
       {#header_close#}
 
       {#header_open|@tagName#}
-      <pre>{#syntax#}@tagName(value: anytype) []const u8{#endsyntax#}</pre>
+      <pre>{#syntax#}@tagName(value: anytype) [:0]const u8{#endsyntax#}</pre>
       <p>
-      Converts an enum value or union value to a slice of bytes representing the name.</p><p>If the enum is non-exhaustive and the tag value does not map to a name, it invokes safety-checked {#link|Undefined Behavior#}.
+      Converts an enum value or union value to a string literal representing the name.</p><p>If the enum is non-exhaustive and the tag value does not map to a name, it invokes safety-checked {#link|Undefined Behavior#}.
       </p>
       {#header_close#}
 
@@ -8618,7 +8623,7 @@ test "integer truncation" {
       {#header_close#}
 
       {#header_open|@typeName#}
-      <pre>{#syntax#}@typeName(T: type) [N]u8{#endsyntax#}</pre>
+      <pre>{#syntax#}@typeName(T: type) *const [N:0]u8{#endsyntax#}</pre>
       <p>
       This function returns the string representation of a type, as
       an array. It is equivalent to a string literal of the type name.

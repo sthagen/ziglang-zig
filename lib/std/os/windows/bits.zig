@@ -52,23 +52,19 @@ pub const INT = c_int;
 pub const LPBYTE = *BYTE;
 pub const LPCH = *CHAR;
 pub const LPCSTR = [*:0]const CHAR;
-pub const LPCTSTR = [*:0]const TCHAR;
 pub const LPCVOID = *const c_void;
 pub const LPDWORD = *DWORD;
 pub const LPSTR = [*:0]CHAR;
-pub const LPTSTR = if (UNICODE) LPWSTR else LPSTR;
 pub const LPVOID = *c_void;
 pub const LPWSTR = [*:0]WCHAR;
 pub const LPCWSTR = [*:0]const WCHAR;
 pub const PVOID = *c_void;
 pub const PWSTR = [*:0]WCHAR;
 pub const SIZE_T = usize;
-pub const TCHAR = if (UNICODE) WCHAR else u8;
 pub const UINT = c_uint;
 pub const ULONG_PTR = usize;
 pub const LONG_PTR = isize;
 pub const DWORD_PTR = ULONG_PTR;
-pub const UNICODE = false;
 pub const WCHAR = u16;
 pub const WORD = u16;
 pub const DWORD = u32;
@@ -363,11 +359,24 @@ pub const FILE_INFORMATION_CLASS = enum(c_int) {
 pub const OVERLAPPED = extern struct {
     Internal: ULONG_PTR,
     InternalHigh: ULONG_PTR,
-    Offset: DWORD,
-    OffsetHigh: DWORD,
+    DUMMYUNIONNAME: extern union {
+        DUMMYSTRUCTNAME: extern struct {
+            Offset: DWORD,
+            OffsetHigh: DWORD,
+        },
+        Pointer: ?PVOID,
+    },
     hEvent: ?HANDLE,
 };
 pub const LPOVERLAPPED = *OVERLAPPED;
+
+pub const OVERLAPPED_ENTRY = extern struct {
+    lpCompletionKey: ULONG_PTR,
+    lpOverlapped: LPOVERLAPPED,
+    Internal: ULONG_PTR,
+    dwNumberOfBytesTransferred: DWORD,
+};
+pub const LPOVERLAPPED_ENTRY = *OVERLAPPED_ENTRY;
 
 pub const MAX_PATH = 260;
 

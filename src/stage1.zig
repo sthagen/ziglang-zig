@@ -58,7 +58,7 @@ pub const OS = c_int;
 /// Matches std.builtin.BuildMode
 pub const BuildMode = c_int;
 
-pub const TargetSubsystem = extern enum(c_int) {
+pub const TargetSubsystem = enum(c_int) {
     Console,
     Windows,
     Posix,
@@ -110,6 +110,7 @@ pub const Module = extern struct {
     pic: bool,
     pie: bool,
     lto: bool,
+    unwind_tables: bool,
     link_libc: bool,
     link_libcpp: bool,
     strip: bool,
@@ -124,8 +125,6 @@ pub const Module = extern struct {
     enable_time_report: bool,
     enable_stack_report: bool,
     test_is_evented: bool,
-    verbose_tokenize: bool,
-    verbose_ast: bool,
     verbose_ir: bool,
     verbose_llvm_ir: bool,
     verbose_cimport: bool,
@@ -172,7 +171,7 @@ export fn stage2_panic(ptr: [*]const u8, len: usize) void {
 }
 
 // ABI warning
-const Error = extern enum {
+const Error = enum(c_int) {
     None,
     OutOfMemory,
     InvalidFormat,

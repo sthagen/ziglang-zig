@@ -60,6 +60,8 @@ pub const Node = extern union {
         array_access,
         call,
         var_decl,
+        /// const name = struct { init }
+        static_local_var,
         func,
         warning,
         /// All enums are non-exhaustive
@@ -72,7 +74,7 @@ pub const Node = extern union {
         tuple,
         container_init,
         container_init_dot,
-        std_meta_cast,
+        helpers_cast,
         /// _ = operand;
         discard,
 
@@ -122,8 +124,8 @@ pub const Node = extern union {
         std_math_Log2Int,
         /// @intCast(lhs, rhs)
         int_cast,
-        /// @import("std").meta.promoteIntLiteral(value, type, radix)
-        std_meta_promoteIntLiteral,
+        /// @import("std").zig.c_translation.promoteIntLiteral(value, type, radix)
+        helpers_promoteIntLiteral,
         /// @import("std").meta.alignment(value)
         std_meta_alignment,
         /// @rem(lhs, rhs)
@@ -158,8 +160,8 @@ pub const Node = extern union {
         ptr_cast,
         /// @divExact(lhs, rhs)
         div_exact,
-        /// @byteOffsetOf(lhs, rhs)
-        byte_offset_of,
+        /// @offsetOf(lhs, rhs)
+        offset_of,
         /// @shuffle(type, a, b, mask)
         shuffle,
 
@@ -191,10 +193,12 @@ pub const Node = extern union {
         array_type,
         null_sentinel_array_type,
 
-        /// @import("std").meta.sizeof(operand)
-        std_meta_sizeof,
-        /// @import("std").meta.shuffleVectorIndex(lhs, rhs)
-        std_meta_shuffle_vector_index,
+        /// @import("std").zig.c_translation.sizeof(operand)
+        helpers_sizeof,
+        /// @import("std").zig.c_translation.FlexibleArrayType(lhs, rhs)
+        helpers_flexible_array_type,
+        /// @import("std").zig.c_translation.shuffleVectorIndex(lhs, rhs)
+        helpers_shuffle_vector_index,
         /// @import("std").meta.Vector(lhs, rhs)
         std_meta_vector,
         /// @import("std").mem.zeroes(operand)
@@ -268,7 +272,7 @@ pub const Node = extern union {
                 .if_not_break,
                 .switch_else,
                 .block_single,
-                .std_meta_sizeof,
+                .helpers_sizeof,
                 .std_meta_alignment,
                 .bool_to_int,
                 .sizeof,
@@ -328,12 +332,13 @@ pub const Node = extern union {
                 .align_cast,
                 .array_access,
                 .std_mem_zeroinit,
-                .std_meta_shuffle_vector_index,
+                .helpers_flexible_array_type,
+                .helpers_shuffle_vector_index,
                 .std_meta_vector,
                 .ptr_cast,
                 .div_exact,
-                .byte_offset_of,
-                .std_meta_cast,
+                .offset_of,
+                .helpers_cast,
                 => Payload.BinOp,
 
                 .integer_literal,
@@ -357,13 +362,13 @@ pub const Node = extern union {
                 .tuple => Payload.TupleInit,
                 .container_init => Payload.ContainerInit,
                 .container_init_dot => Payload.ContainerInitDot,
-                .std_meta_promoteIntLiteral => Payload.PromoteIntLiteral,
+                .helpers_promoteIntLiteral => Payload.PromoteIntLiteral,
                 .block => Payload.Block,
                 .c_pointer, .single_pointer => Payload.Pointer,
                 .array_type, .null_sentinel_array_type => Payload.Array,
                 .arg_redecl, .alias, .fail_decl => Payload.ArgRedecl,
                 .log2_int_type => Payload.Log2IntType,
-                .var_simple, .pub_var_simple => Payload.SimpleVarDecl,
+                .var_simple, .pub_var_simple, .static_local_var => Payload.SimpleVarDecl,
                 .pub_enum_redecl, .enum_redecl => Payload.EnumRedecl,
                 .array_filler => Payload.ArrayFiller,
                 .pub_inline_fn => Payload.PubInlineFn,
@@ -567,6 +572,7 @@ pub const Payload = struct {
         data: struct {
             is_packed: bool,
             fields: []Field,
+            functions: []Node,
         },
 
         pub const Field = struct {
@@ -862,7 +868,7 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
             // pub usingnamespace @import("std").c.builtins;
             _ = try c.addToken(.keyword_pub, "pub");
             const usingnamespace_token = try c.addToken(.keyword_usingnamespace, "usingnamespace");
-            const import_node = try renderStdImport(c, "c", "builtins");
+            const import_node = try renderStdImport(c, &.{ "zig", "c_builtins" });
             _ = try c.addToken(.semicolon, ";");
 
             return c.addNode(.{
@@ -876,47 +882,52 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
         },
         .std_math_Log2Int => {
             const payload = node.castTag(.std_math_Log2Int).?.data;
-            const import_node = try renderStdImport(c, "math", "Log2Int");
+            const import_node = try renderStdImport(c, &.{ "math", "Log2Int" });
             return renderCall(c, import_node, &.{payload});
         },
-        .std_meta_cast => {
-            const payload = node.castTag(.std_meta_cast).?.data;
-            const import_node = try renderStdImport(c, "meta", "cast");
+        .helpers_cast => {
+            const payload = node.castTag(.helpers_cast).?.data;
+            const import_node = try renderStdImport(c, &.{ "zig", "c_translation", "cast" });
             return renderCall(c, import_node, &.{ payload.lhs, payload.rhs });
         },
-        .std_meta_promoteIntLiteral => {
-            const payload = node.castTag(.std_meta_promoteIntLiteral).?.data;
-            const import_node = try renderStdImport(c, "meta", "promoteIntLiteral");
+        .helpers_promoteIntLiteral => {
+            const payload = node.castTag(.helpers_promoteIntLiteral).?.data;
+            const import_node = try renderStdImport(c, &.{ "zig", "c_translation", "promoteIntLiteral" });
             return renderCall(c, import_node, &.{ payload.type, payload.value, payload.radix });
         },
         .std_meta_alignment => {
             const payload = node.castTag(.std_meta_alignment).?.data;
-            const import_node = try renderStdImport(c, "meta", "alignment");
+            const import_node = try renderStdImport(c, &.{ "meta", "alignment" });
             return renderCall(c, import_node, &.{payload});
         },
-        .std_meta_sizeof => {
-            const payload = node.castTag(.std_meta_sizeof).?.data;
-            const import_node = try renderStdImport(c, "meta", "sizeof");
+        .helpers_sizeof => {
+            const payload = node.castTag(.helpers_sizeof).?.data;
+            const import_node = try renderStdImport(c, &.{ "zig", "c_translation", "sizeof" });
             return renderCall(c, import_node, &.{payload});
         },
         .std_mem_zeroes => {
             const payload = node.castTag(.std_mem_zeroes).?.data;
-            const import_node = try renderStdImport(c, "mem", "zeroes");
+            const import_node = try renderStdImport(c, &.{ "mem", "zeroes" });
             return renderCall(c, import_node, &.{payload});
         },
         .std_mem_zeroinit => {
             const payload = node.castTag(.std_mem_zeroinit).?.data;
-            const import_node = try renderStdImport(c, "mem", "zeroInit");
+            const import_node = try renderStdImport(c, &.{ "mem", "zeroInit" });
             return renderCall(c, import_node, &.{ payload.lhs, payload.rhs });
         },
-        .std_meta_shuffle_vector_index => {
-            const payload = node.castTag(.std_meta_shuffle_vector_index).?.data;
-            const import_node = try renderStdImport(c, "meta", "shuffleVectorIndex");
+        .helpers_flexible_array_type => {
+            const payload = node.castTag(.helpers_flexible_array_type).?.data;
+            const import_node = try renderStdImport(c, &.{ "zig", "c_translation", "FlexibleArrayType" });
+            return renderCall(c, import_node, &.{ payload.lhs, payload.rhs });
+        },
+        .helpers_shuffle_vector_index => {
+            const payload = node.castTag(.helpers_shuffle_vector_index).?.data;
+            const import_node = try renderStdImport(c, &.{ "zig", "c_translation", "shuffleVectorIndex" });
             return renderCall(c, import_node, &.{ payload.lhs, payload.rhs });
         },
         .std_meta_vector => {
             const payload = node.castTag(.std_meta_vector).?.data;
-            const import_node = try renderStdImport(c, "meta", "Vector");
+            const import_node = try renderStdImport(c, &.{ "meta", "Vector" });
             return renderCall(c, import_node, &.{ payload.lhs, payload.rhs });
         },
         .call => {
@@ -1200,6 +1211,35 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
                 },
             });
         },
+        .static_local_var => {
+            const payload = node.castTag(.static_local_var).?.data;
+
+            const const_tok = try c.addToken(.keyword_const, "const");
+            _ = try c.addIdentifier(payload.name);
+            _ = try c.addToken(.equal, "=");
+
+            const kind_tok = try c.addToken(.keyword_struct, "struct");
+            _ = try c.addToken(.l_brace, "{");
+
+            const container_def = try c.addNode(.{
+                .tag = .container_decl_two_trailing,
+                .main_token = kind_tok,
+                .data = .{
+                    .lhs = try renderNode(c, payload.init),
+                    .rhs = 0,
+                },
+            });
+            _ = try c.addToken(.r_brace, "}");
+
+            return c.addNode(.{
+                .tag = .simple_var_decl,
+                .main_token = const_tok,
+                .data = .{
+                    .lhs = 0,
+                    .rhs = container_def,
+                },
+            });
+        },
         .var_decl => return renderVar(c, node),
         .arg_redecl, .alias => {
             const payload = @fieldParentPtr(Payload.ArgRedecl, "base", node.ptr_otherwise).data;
@@ -1295,9 +1335,9 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
             const payload = node.castTag(.div_exact).?.data;
             return renderBuiltinCall(c, "@divExact", &.{ payload.lhs, payload.rhs });
         },
-        .byte_offset_of => {
-            const payload = node.castTag(.byte_offset_of).?.data;
-            return renderBuiltinCall(c, "@byteOffsetOf", &.{ payload.lhs, payload.rhs });
+        .offset_of => {
+            const payload = node.castTag(.offset_of).?.data;
+            return renderBuiltinCall(c, "@offsetOf", &.{ payload.lhs, payload.rhs });
         },
         .sizeof => {
             const payload = node.castTag(.sizeof).?.data;
@@ -1992,7 +2032,10 @@ fn renderRecord(c: *Context, node: Node) !NodeIndex {
         try c.addToken(.keyword_union, "union");
 
     _ = try c.addToken(.l_brace, "{");
-    const members = try c.gpa.alloc(NodeIndex, std.math.max(payload.fields.len, 2));
+
+    const num_funcs = payload.functions.len;
+    const total_members = payload.fields.len + num_funcs;
+    const members = try c.gpa.alloc(NodeIndex, std.math.max(total_members, 2));
     defer c.gpa.free(members);
     members[0] = 0;
     members[1] = 0;
@@ -2033,9 +2076,12 @@ fn renderRecord(c: *Context, node: Node) !NodeIndex {
         });
         _ = try c.addToken(.comma, ",");
     }
+    for (payload.functions) |function, i| {
+        members[payload.fields.len + i] = try renderNode(c, function);
+    }
     _ = try c.addToken(.r_brace, "}");
 
-    if (payload.fields.len == 0) {
+    if (total_members == 0) {
         return c.addNode(.{
             .tag = .container_decl_two,
             .main_token = kind_tok,
@@ -2044,9 +2090,9 @@ fn renderRecord(c: *Context, node: Node) !NodeIndex {
                 .rhs = 0,
             },
         });
-    } else if (payload.fields.len <= 2) {
+    } else if (total_members <= 2) {
         return c.addNode(.{
-            .tag = .container_decl_two_trailing,
+            .tag = if (num_funcs == 0) .container_decl_two_trailing else .container_decl_two,
             .main_token = kind_tok,
             .data = .{
                 .lhs = members[0],
@@ -2056,7 +2102,7 @@ fn renderRecord(c: *Context, node: Node) !NodeIndex {
     } else {
         const span = try c.listToSpan(members);
         return c.addNode(.{
-            .tag = .container_decl_trailing,
+            .tag = if (num_funcs == 0) .container_decl_trailing else .container_decl,
             .main_token = kind_tok,
             .data = .{
                 .lhs = span.start,
@@ -2223,12 +2269,13 @@ fn renderNodeGrouped(c: *Context, node: Node) !NodeIndex {
         .alignof,
         .typeof,
         .typeinfo,
-        .std_meta_sizeof,
         .std_meta_alignment,
-        .std_meta_cast,
-        .std_meta_promoteIntLiteral,
         .std_meta_vector,
-        .std_meta_shuffle_vector_index,
+        .helpers_sizeof,
+        .helpers_cast,
+        .helpers_promoteIntLiteral,
+        .helpers_shuffle_vector_index,
+        .helpers_flexible_array_type,
         .std_mem_zeroinit,
         .integer_literal,
         .float_literal,
@@ -2247,7 +2294,6 @@ fn renderNodeGrouped(c: *Context, node: Node) !NodeIndex {
         .single_pointer,
         .unwrap,
         .deref,
-        .address_of,
         .not,
         .negate,
         .negate_wrap,
@@ -2258,8 +2304,9 @@ fn renderNodeGrouped(c: *Context, node: Node) !NodeIndex {
         .null_sentinel_array_type,
         .bool_to_int,
         .div_exact,
-        .byte_offset_of,
+        .offset_of,
         .shuffle,
+        .static_local_var,
         => {
             // no grouping needed
             return renderNode(c, node);
@@ -2301,6 +2348,7 @@ fn renderNodeGrouped(c: *Context, node: Node) !NodeIndex {
         .container_init,
         .container_init_dot,
         .block,
+        .address_of,
         => return c.addNode(.{
             .tag = .grouped_expression,
             .main_token = try c.addToken(.l_paren, "("),
@@ -2394,7 +2442,7 @@ fn renderBinOp(c: *Context, node: Node, tag: std.zig.ast.Node.Tag, tok_tag: Toke
     });
 }
 
-fn renderStdImport(c: *Context, first: []const u8, second: []const u8) !NodeIndex {
+fn renderStdImport(c: *Context, parts: []const []const u8) !NodeIndex {
     const import_tok = try c.addToken(.builtin, "@import");
     _ = try c.addToken(.l_paren, "(");
     const std_tok = try c.addToken(.string_literal, "\"std\"");
@@ -2415,8 +2463,9 @@ fn renderStdImport(c: *Context, first: []const u8, second: []const u8) !NodeInde
     });
 
     var access_chain = import_node;
-    access_chain = try renderFieldAccess(c, access_chain, first);
-    access_chain = try renderFieldAccess(c, access_chain, second);
+    for (parts) |part| {
+        access_chain = try renderFieldAccess(c, access_chain, part);
+    }
     return access_chain;
 }
 

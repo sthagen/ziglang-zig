@@ -54,6 +54,11 @@ pub const Section = struct {
     inner: macho.section_64,
     code: []u8,
     relocs: ?[]*Relocation,
+    target_map: ?struct {
+        segment_id: u16,
+        section_id: u16,
+        offset: u32,
+    } = null,
 
     pub fn deinit(self: *Section, allocator: *Allocator) void {
         allocator.free(self.code);
@@ -64,6 +69,43 @@ pub const Section = struct {
             }
             allocator.free(relocs);
         }
+    }
+
+    pub fn segname(self: Section) []const u8 {
+        return parseName(&self.inner.segname);
+    }
+
+    pub fn sectname(self: Section) []const u8 {
+        return parseName(&self.inner.sectname);
+    }
+
+    pub fn flags(self: Section) u32 {
+        return self.inner.flags;
+    }
+
+    pub fn sectionType(self: Section) u8 {
+        return @truncate(u8, self.flags() & 0xff);
+    }
+
+    pub fn sectionAttrs(self: Section) u32 {
+        return self.flags() & 0xffffff00;
+    }
+
+    pub fn isCode(self: Section) bool {
+        const attr = self.sectionAttrs();
+        return attr & macho.S_ATTR_PURE_INSTRUCTIONS != 0 and attr & macho.S_ATTR_SOME_INSTRUCTIONS != 0;
+    }
+
+    pub fn isDebug(self: Section) bool {
+        return self.sectionAttrs() & macho.S_ATTR_DEBUG != 0;
+    }
+
+    pub fn dontDeadStrip(self: Section) bool {
+        return self.sectionAttrs() & macho.S_ATTR_NO_DEAD_STRIP != 0;
+    }
+
+    pub fn dontDeadStripIfReferencesLive(self: Section) bool {
+        return self.sectionAttrs() & macho.S_ATTR_LIVE_SUPPORT != 0;
     }
 };
 
@@ -346,15 +388,15 @@ pub fn parseSymbols(self: *Object) !void {
         const sym_name = mem.spanZ(@ptrCast([*:0]const u8, strtab.ptr + sym.n_strx));
 
         if (Symbol.isStab(sym)) {
-            log.err("stab {s} in {s}", .{ sym_name, self.name.? });
+            log.err("unhandled symbol type: stab {s} in {s}", .{ sym_name, self.name.? });
             return error.UnhandledSymbolType;
         }
         if (Symbol.isIndr(sym)) {
-            log.err("indirect symbol {s} in {s}", .{ sym_name, self.name.? });
+            log.err("unhandled symbol type: indirect {s} in {s}", .{ sym_name, self.name.? });
             return error.UnhandledSymbolType;
         }
         if (Symbol.isAbs(sym)) {
-            log.err("absolute symbol {s} in {s}", .{ sym_name, self.name.? });
+            log.err("unhandled symbol type: absolute {s} in {s}", .{ sym_name, self.name.? });
             return error.UnhandledSymbolType;
         }
 
@@ -383,11 +425,18 @@ pub fn parseSymbols(self: *Object) !void {
             }
 
             if (sym.n_value != 0) {
-                log.err("common symbol {s} in {s}", .{ sym_name, self.name.? });
-                return error.UnhandledSymbolType;
-                // const comm_size = sym.n_value;
-                // const comm_align = (sym.n_desc >> 8) & 0x0f;
-                // log.warn("Common symbol: size 0x{x}, align 0x{x}", .{ comm_size, comm_align });
+                const tentative = try self.allocator.create(Symbol.Tentative);
+                errdefer self.allocator.destroy(tentative);
+                tentative.* = .{
+                    .base = .{
+                        .@"type" = .tentative,
+                        .name = name,
+                    },
+                    .size = sym.n_value,
+                    .alignment = (sym.n_desc >> 8) & 0x0f,
+                    .file = self,
+                };
+                break :symbol &tentative.base;
             }
 
             const undef = try self.allocator.create(Symbol.Unresolved);

@@ -758,10 +758,11 @@ fn linkWithLLD(self: *MachO, comp: *Compilation) !void {
                 }
             }
 
-            // Search for static libraries first, then dynamic libraries.
-            // TODO Respect flags such as -search_paths_first to the linker.
+            // Assume ld64 default: -search_paths_first
+            // Look in each directory for a dylib (tbd), and then for archive
+            // TODO implement alternative: -search_dylibs_first
             // TODO text-based API, or .tbd files.
-            const exts = &[_][]const u8{ "a", "dylib" };
+            const exts = &[_][]const u8{ "dylib", "a" };
 
             for (search_lib_names.items) |l_name| {
                 var found = false;
@@ -805,6 +806,11 @@ fn linkWithLLD(self: *MachO, comp: *Compilation) !void {
             try rpaths.ensureCapacity(rpath_table.count());
             for (rpath_table.keys()) |*key| {
                 rpaths.appendAssumeCapacity(key.*);
+            }
+
+            // frameworks
+            for (self.base.options.frameworks) |framework| {
+                log.warn("frameworks not yet supported for '-framework {s}'", .{framework});
             }
 
             if (self.base.options.verbose_link) {
@@ -2517,7 +2523,7 @@ fn allocatedSizeLinkedit(self: *MachO, start: u64) u64 {
 
     return min_pos - start;
 }
-fn checkForCollision(start: u64, end: u64, off: u64, size: u64) callconv(.Inline) ?u64 {
+inline fn checkForCollision(start: u64, end: u64, off: u64, size: u64) ?u64 {
     const increased_size = padToIdeal(size);
     const test_end = off + increased_size;
     if (end > off and start < test_end) {
@@ -2695,7 +2701,7 @@ fn writeStubHelperPreamble(self: *MachO) !void {
                 const this_addr = stub_helper.addr;
                 const target_addr = data.addr;
                 data_blk: {
-                    const displacement = math.cast(i21, target_addr - this_addr) catch |_| break :data_blk;
+                    const displacement = math.cast(i21, target_addr - this_addr) catch break :data_blk;
                     // adr x17, disp
                     mem.writeIntLittle(u32, code[0..4], aarch64.Instruction.adr(.x17, displacement).toU32());
                     // nop
@@ -2704,7 +2710,7 @@ fn writeStubHelperPreamble(self: *MachO) !void {
                 }
                 data_blk: {
                     const new_this_addr = this_addr + @sizeOf(u32);
-                    const displacement = math.cast(i21, target_addr - new_this_addr) catch |_| break :data_blk;
+                    const displacement = math.cast(i21, target_addr - new_this_addr) catch break :data_blk;
                     // nop
                     mem.writeIntLittle(u32, code[0..4], aarch64.Instruction.nop().toU32());
                     // adr x17, disp
@@ -2733,8 +2739,8 @@ fn writeStubHelperPreamble(self: *MachO) !void {
                 const this_addr = stub_helper.addr + 3 * @sizeOf(u32);
                 const target_addr = got.addr;
                 binder_blk: {
-                    const displacement = math.divExact(u64, target_addr - this_addr, 4) catch |_| break :binder_blk;
-                    const literal = math.cast(u18, displacement) catch |_| break :binder_blk;
+                    const displacement = math.divExact(u64, target_addr - this_addr, 4) catch break :binder_blk;
+                    const literal = math.cast(u18, displacement) catch break :binder_blk;
                     // ldr x16, label
                     mem.writeIntLittle(u32, code[12..16], aarch64.Instruction.ldr(.x16, .{
                         .literal = literal,
@@ -2745,8 +2751,8 @@ fn writeStubHelperPreamble(self: *MachO) !void {
                 }
                 binder_blk: {
                     const new_this_addr = this_addr + @sizeOf(u32);
-                    const displacement = math.divExact(u64, target_addr - new_this_addr, 4) catch |_| break :binder_blk;
-                    const literal = math.cast(u18, displacement) catch |_| break :binder_blk;
+                    const displacement = math.divExact(u64, target_addr - new_this_addr, 4) catch break :binder_blk;
+                    const literal = math.cast(u18, displacement) catch break :binder_blk;
                     // nop
                     mem.writeIntLittle(u32, code[12..16], aarch64.Instruction.nop().toU32());
                     // ldr x16, label
@@ -2811,8 +2817,8 @@ fn writeStub(self: *MachO, index: u32) !void {
                 const this_addr = stub_addr;
                 const target_addr = la_ptr_addr;
                 inner: {
-                    const displacement = math.divExact(u64, target_addr - this_addr, 4) catch |_| break :inner;
-                    const literal = math.cast(u18, displacement) catch |_| break :inner;
+                    const displacement = math.divExact(u64, target_addr - this_addr, 4) catch break :inner;
+                    const literal = math.cast(u18, displacement) catch break :inner;
                     // ldr x16, literal
                     mem.writeIntLittle(u32, code[0..4], aarch64.Instruction.ldr(.x16, .{
                         .literal = literal,
@@ -2823,8 +2829,8 @@ fn writeStub(self: *MachO, index: u32) !void {
                 }
                 inner: {
                     const new_this_addr = this_addr + @sizeOf(u32);
-                    const displacement = math.divExact(u64, target_addr - new_this_addr, 4) catch |_| break :inner;
-                    const literal = math.cast(u18, displacement) catch |_| break :inner;
+                    const displacement = math.divExact(u64, target_addr - new_this_addr, 4) catch break :inner;
+                    const literal = math.cast(u18, displacement) catch break :inner;
                     // nop
                     mem.writeIntLittle(u32, code[0..4], aarch64.Instruction.nop().toU32());
                     // ldr x16, literal

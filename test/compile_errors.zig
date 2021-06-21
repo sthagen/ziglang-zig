@@ -2,6 +2,14 @@ const tests = @import("tests.zig");
 const std = @import("std");
 
 pub fn addCases(cases: *tests.CompileErrorContext) void {
+    cases.add("std.fmt error for unused arguments",
+        \\pub fn main() !void {
+        \\    @import("std").debug.print("{d} {d} {d} {d} {d}", .{1,2,3,4,5,6,7,8,9,10,11,12,13,14,15});
+        \\}
+    , &.{
+        \\error: 10 unused arguments in "{d} {d} {d} {d} {d}"
+    });
+
     cases.add("lazy pointer with undefined element type",
         \\export fn foo() void {
         \\    comptime var T: type = undefined;
@@ -6031,14 +6039,27 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("truncate sign mismatch",
-        \\fn f() i8 {
+        \\export fn entry1() i8 {
         \\    var x: u32 = 10;
         \\    return @truncate(i8, x);
         \\}
-        \\
-        \\export fn entry() usize { return @sizeOf(@TypeOf(f)); }
+        \\export fn entry2() u8 {
+        \\    var x: i32 = -10;
+        \\    return @truncate(u8, x);
+        \\}
+        \\export fn entry3() i8 {
+        \\    comptime var x: u32 = 10;
+        \\    return @truncate(i8, x);
+        \\}
+        \\export fn entry4() u8 {
+        \\    comptime var x: i32 = -10;
+        \\    return @truncate(u8, x);
+        \\}
     , &[_][]const u8{
         "tmp.zig:3:26: error: expected signed integer type, found 'u32'",
+        "tmp.zig:7:26: error: expected unsigned integer type, found 'i32'",
+        "tmp.zig:11:26: error: expected signed integer type, found 'u32'",
+        "tmp.zig:15:26: error: expected unsigned integer type, found 'i32'",
     });
 
     cases.add("try in function with non error return type",
@@ -6656,24 +6677,24 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "tmp.zig:8:29: error: field 'b' has index 1 but pointer value is index 0 of struct 'Foo'",
     });
 
-    cases.add("@byteOffsetOf - non struct",
+    cases.add("@offsetOf - non struct",
         \\const Foo = i32;
         \\export fn foo() usize {
-        \\    return @byteOffsetOf(Foo, "a",);
+        \\    return @offsetOf(Foo, "a",);
         \\}
     , &[_][]const u8{
-        "tmp.zig:3:26: error: expected struct type, found 'i32'",
+        "tmp.zig:3:22: error: expected struct type, found 'i32'",
     });
 
-    cases.add("@byteOffsetOf - bad field name",
+    cases.add("@offsetOf - bad field name",
         \\const Foo = struct {
         \\    derp: i32,
         \\};
         \\export fn foo() usize {
-        \\    return @byteOffsetOf(Foo, "a",);
+        \\    return @offsetOf(Foo, "a",);
         \\}
     , &[_][]const u8{
-        "tmp.zig:5:31: error: struct 'Foo' has no field 'a'",
+        "tmp.zig:5:27: error: struct 'Foo' has no field 'a'",
     });
 
     cases.addExe("missing main fn in executable",
@@ -7680,10 +7701,10 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    val: void,
         \\};
         \\export fn foo() void {
-        \\    const fieldOffset = @byteOffsetOf(Empty, "val",);
+        \\    const fieldOffset = @offsetOf(Empty, "val",);
         \\}
     , &[_][]const u8{
-        "tmp.zig:5:46: error: zero-bit field 'val' in struct 'Empty' has no offset",
+        "tmp.zig:5:42: error: zero-bit field 'val' in struct 'Empty' has no offset",
     });
 
     cases.add("taking bit offset of void field in struct",

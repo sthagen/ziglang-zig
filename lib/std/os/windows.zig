@@ -25,6 +25,7 @@ pub const shell32 = @import("windows/shell32.zig");
 pub const user32 = @import("windows/user32.zig");
 pub const ws2_32 = @import("windows/ws2_32.zig");
 pub const gdi32 = @import("windows/gdi32.zig");
+pub const winmm = @import("windows/winmm.zig");
 
 pub usingnamespace @import("windows/bits.zig");
 
@@ -454,8 +455,12 @@ pub fn ReadFile(in_hFile: HANDLE, buffer: []u8, offset: ?u64, io_mode: std.io.Mo
                 .overlapped = OVERLAPPED{
                     .Internal = 0,
                     .InternalHigh = 0,
-                    .Offset = @truncate(u32, off),
-                    .OffsetHigh = @truncate(u32, off >> 32),
+                    .DUMMYUNIONNAME = .{
+                        .DUMMYSTRUCTNAME = .{
+                            .Offset = @truncate(u32, off),
+                            .OffsetHigh = @truncate(u32, off >> 32),
+                        },
+                    },
                     .hEvent = null,
                 },
             },
@@ -490,8 +495,12 @@ pub fn ReadFile(in_hFile: HANDLE, buffer: []u8, offset: ?u64, io_mode: std.io.Mo
                 overlapped_data = .{
                     .Internal = 0,
                     .InternalHigh = 0,
-                    .Offset = @truncate(u32, off),
-                    .OffsetHigh = @truncate(u32, off >> 32),
+                    .DUMMYUNIONNAME = .{
+                        .DUMMYSTRUCTNAME = .{
+                            .Offset = @truncate(u32, off),
+                            .OffsetHigh = @truncate(u32, off >> 32),
+                        },
+                    },
                     .hEvent = null,
                 };
                 break :blk &overlapped_data;
@@ -534,8 +543,12 @@ pub fn WriteFile(
                 .overlapped = OVERLAPPED{
                     .Internal = 0,
                     .InternalHigh = 0,
-                    .Offset = @truncate(u32, off),
-                    .OffsetHigh = @truncate(u32, off >> 32),
+                    .DUMMYUNIONNAME = .{
+                        .DUMMYSTRUCTNAME = .{
+                            .Offset = @truncate(u32, off),
+                            .OffsetHigh = @truncate(u32, off >> 32),
+                        },
+                    },
                     .hEvent = null,
                 },
             },
@@ -570,8 +583,12 @@ pub fn WriteFile(
             overlapped_data = .{
                 .Internal = 0,
                 .InternalHigh = 0,
-                .Offset = @truncate(u32, off),
-                .OffsetHigh = @truncate(u32, off >> 32),
+                .DUMMYUNIONNAME = .{
+                    .DUMMYSTRUCTNAME = .{
+                        .Offset = @truncate(u32, off),
+                        .OffsetHigh = @truncate(u32, off >> 32),
+                    },
+                },
                 .hEvent = null,
             };
             break :blk &overlapped_data;
@@ -1922,19 +1939,19 @@ pub fn loadWinsockExtensionFunction(comptime T: type, sock: ws2_32.SOCKET, guid:
 pub fn unexpectedError(err: Win32Error) std.os.UnexpectedError {
     if (std.os.unexpected_error_tracing) {
         // 614 is the length of the longest windows error desciption
-        var buf_u16: [614]u16 = undefined;
-        var buf_u8: [614]u8 = undefined;
+        var buf_wstr: [614]WCHAR = undefined;
+        var buf_utf8: [614]u8 = undefined;
         const len = kernel32.FormatMessageW(
             FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
             null,
             err,
             MAKELANGID(LANG.NEUTRAL, SUBLANG.DEFAULT),
-            &buf_u16,
-            buf_u16.len / @sizeOf(TCHAR),
+            &buf_wstr,
+            buf_wstr.len,
             null,
         );
-        _ = std.unicode.utf16leToUtf8(&buf_u8, buf_u16[0..len]) catch unreachable;
-        std.debug.warn("error.Unexpected: GetLastError({}): {s}\n", .{ @enumToInt(err), buf_u8[0..len] });
+        _ = std.unicode.utf16leToUtf8(&buf_utf8, buf_wstr[0..len]) catch unreachable;
+        std.debug.warn("error.Unexpected: GetLastError({}): {s}\n", .{ @enumToInt(err), buf_utf8[0..len] });
         std.debug.dumpCurrentStackTrace(null);
     }
     return error.Unexpected;

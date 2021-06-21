@@ -15,6 +15,7 @@ const Package = @import("Package.zig");
 const build_options = @import("build_options");
 const introspect = @import("introspect.zig");
 const LibCInstallation = @import("libc_installation.zig").LibCInstallation;
+const wasi_libc = @import("wasi_libc.zig");
 const translate_c = @import("translate_c.zig");
 const Cache = @import("Cache.zig");
 const target_util = @import("target.zig");
@@ -263,22 +264,26 @@ pub fn mainArgs(gpa: *Allocator, arena: *Allocator, args: []const []const u8) !v
 }
 
 const usage_build_generic =
-    \\Usage: zig build-exe <options> [files]
-    \\       zig build-lib <options> [files]
-    \\       zig build-obj <options> [files]
-    \\       zig test <options> [files]
-    \\       zig run <options> [file] [-- [args]]
+    \\Usage: zig build-exe   <options> [files]
+    \\       zig build-lib   <options> [files]
+    \\       zig build-obj   <options> [files]
+    \\       zig test        <options> [files]
+    \\       zig run         <options> [file] [-- [args]]
+    \\       zig translate-c <options> [file]
     \\
     \\Supported file types:
     \\                    .zig    Zig source code
     \\                      .o    ELF object file
-    \\                      .o    MACH-O (macOS) object file
+    \\                      .o    Mach-O (macOS) object file
+    \\                      .o    WebAssembly object file
     \\                    .obj    COFF (Windows) object file
     \\                    .lib    COFF (Windows) static library
     \\                      .a    ELF static library
+    \\                      .a    Mach-O (macOS) static library
+    \\                      .a    WebAssembly static library
     \\                     .so    ELF shared object (dynamic link)
     \\                    .dll    Windows Dynamic Link Library
-    \\                  .dylib    MACH-O (macOS) dynamic library
+    \\                  .dylib    Mach-O (macOS) dynamic library
     \\                    .tbd    (macOS) text-based dylib definition
     \\                      .s    Target-specific assembly source code
     \\                      .S    Assembly with C preprocessor (requires LLVM extensions)
@@ -305,7 +310,7 @@ const usage_build_generic =
     \\  --show-builtin            Output the source of @import("builtin") then exit
     \\  --cache-dir [path]        Override the local cache directory
     \\  --global-cache-dir [path] Override the global cache directory
-    \\  --override-lib-dir [path] Override path to Zig installation lib directory
+    \\  --zig-lib-dir [path]      Override path to Zig installation lib directory
     \\  --enable-cache            Output to cache directory; print path to stdout
     \\
     \\Compile Options:
@@ -341,6 +346,8 @@ const usage_build_generic =
     \\  -fno-sanitize-thread      Disable Thread Sanitizer
     \\  -fdll-export-fns          Mark exported functions as DLL exports (Windows)
     \\  -fno-dll-export-fns       Force-disable marking exported functions as DLL exports
+    \\  -funwind-tables           Always produce unwind table entries for all functions
+    \\  -fno-unwind-tables        Never produce unwind table entries
     \\  -fLLVM                    Force using LLVM as the codegen backend
     \\  -fno-LLVM                 Prevent using LLVM as a codegen backend
     \\  -fClang                   Force using Clang as the C/C++ compilation backend
@@ -407,9 +414,7 @@ const usage_build_generic =
     \\  -fstack-report               Print stack size diagnostics
     \\  --verbose-link               Display linker invocations
     \\  --verbose-cc                 Display C compiler invocations
-    \\  --verbose-tokenize           Enable compiler debug output for tokenization
-    \\  --verbose-ast                Enable compiler debug output for AST parsing
-    \\  --verbose-ir                 Enable compiler debug output for Zig IR
+    \\  --verbose-air                Enable compiler debug output for Zig AIR
     \\  --verbose-llvm-ir            Enable compiler debug output for LLVM IR
     \\  --verbose-cimport            Enable compiler debug output for C imports
     \\  --verbose-llvm-cpu-features  Enable compiler debug output for LLVM CPU features
@@ -541,9 +546,7 @@ fn buildOutputType(
     var watch = false;
     var verbose_link = try optionalBoolEnvVar(arena, "ZIG_VERBOSE_LINK");
     var verbose_cc = try optionalBoolEnvVar(arena, "ZIG_VERBOSE_CC");
-    var verbose_tokenize = false;
-    var verbose_ast = false;
-    var verbose_ir = false;
+    var verbose_air = false;
     var verbose_llvm_ir = false;
     var verbose_cimport = false;
     var verbose_llvm_cpu_features = false;
@@ -572,6 +575,7 @@ fn buildOutputType(
     var want_pic: ?bool = null;
     var want_pie: ?bool = null;
     var want_lto: ?bool = null;
+    var want_unwind_tables: ?bool = null;
     var want_sanitize_c: ?bool = null;
     var want_stack_check: ?bool = null;
     var want_red_zone: ?bool = null;
@@ -612,9 +616,13 @@ fn buildOutputType(
     var subsystem: ?std.Target.SubSystem = null;
     var major_subsystem_version: ?u32 = null;
     var minor_subsystem_version: ?u32 = null;
+    var wasi_exec_model: ?wasi_libc.CRTFile = null;
 
     var system_libs = std.ArrayList([]const u8).init(gpa);
     defer system_libs.deinit();
+
+    var wasi_emulated_libs = std.ArrayList(wasi_libc.CRTFile).init(gpa);
+    defer wasi_emulated_libs.deinit();
 
     var clang_argv = std.ArrayList([]const u8).init(gpa);
     defer clang_argv.deinit();
@@ -880,7 +888,7 @@ fn buildOutputType(
                         if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
                         i += 1;
                         override_global_cache_dir = args[i];
-                    } else if (mem.eql(u8, arg, "--override-lib-dir")) {
+                    } else if (mem.eql(u8, arg, "--zig-lib-dir")) {
                         if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
                         i += 1;
                         override_lib_dir = args[i];
@@ -924,6 +932,10 @@ fn buildOutputType(
                         want_lto = true;
                     } else if (mem.eql(u8, arg, "-fno-lto")) {
                         want_lto = false;
+                    } else if (mem.eql(u8, arg, "-funwind-tables")) {
+                        want_unwind_tables = true;
+                    } else if (mem.eql(u8, arg, "-fno-unwind-tables")) {
+                        want_unwind_tables = false;
                     } else if (mem.eql(u8, arg, "-fstack-check")) {
                         want_stack_check = true;
                     } else if (mem.eql(u8, arg, "-fno-stack-check")) {
@@ -1031,12 +1043,8 @@ fn buildOutputType(
                         verbose_link = true;
                     } else if (mem.eql(u8, arg, "--verbose-cc")) {
                         verbose_cc = true;
-                    } else if (mem.eql(u8, arg, "--verbose-tokenize")) {
-                        verbose_tokenize = true;
-                    } else if (mem.eql(u8, arg, "--verbose-ast")) {
-                        verbose_ast = true;
-                    } else if (mem.eql(u8, arg, "--verbose-ir")) {
-                        verbose_ir = true;
+                    } else if (mem.eql(u8, arg, "--verbose-air")) {
+                        verbose_air = true;
                     } else if (mem.eql(u8, arg, "--verbose-llvm-ir")) {
                         verbose_llvm_ir = true;
                     } else if (mem.eql(u8, arg, "--verbose-cimport")) {
@@ -1159,6 +1167,8 @@ fn buildOutputType(
                     .no_lto => want_lto = false,
                     .red_zone => want_red_zone = true,
                     .no_red_zone => want_red_zone = false,
+                    .unwind_tables => want_unwind_tables = true,
+                    .no_unwind_tables => want_unwind_tables = false,
                     .nostdlib => ensure_libc_on_non_freestanding = false,
                     .nostdlib_cpp => ensure_libcpp_on_non_freestanding = false,
                     .shared => {
@@ -1169,6 +1179,16 @@ fn buildOutputType(
                     .wl => {
                         var split_it = mem.split(it.only_arg, ",");
                         while (split_it.next()) |linker_arg| {
+                            // Handle nested-joined args like `-Wl,-rpath=foo`.
+                            // Must be prefixed with 1 or 2 dashes.
+                            if (linker_arg.len >= 3 and linker_arg[0] == '-' and linker_arg[2] != '-') {
+                                if (mem.indexOfScalar(u8, linker_arg, '=')) |equals_pos| {
+                                    try linker_args.append(linker_arg[0..equals_pos]);
+                                    try linker_args.append(linker_arg[equals_pos + 1 ..]);
+                                    continue;
+                                }
+                            }
+
                             try linker_args.append(linker_arg);
                         }
                     },
@@ -1250,6 +1270,13 @@ fn buildOutputType(
                     .framework => try frameworks.append(it.only_arg),
                     .nostdlibinc => want_native_include_dirs = false,
                     .strip => strip = true,
+                    .exec_model => {
+                        if (std.mem.eql(u8, it.only_arg, "reactor")) {
+                            wasi_exec_model = .crt1_reactor_o;
+                        } else if (std.mem.eql(u8, it.only_arg, "command")) {
+                            wasi_exec_model = .crt1_command_o;
+                        }
+                    },
                 }
             }
             // Parse linker args.
@@ -1377,7 +1404,7 @@ fn buildOutputType(
                     image_base_override = std.fmt.parseUnsigned(u64, linker_args.items[i], 0) catch |err| {
                         fatal("unable to parse '{s}': {s}", .{ arg, @errorName(err) });
                     };
-                } else if (mem.eql(u8, arg, "-T")) {
+                } else if (mem.eql(u8, arg, "-T") or mem.eql(u8, arg, "--script")) {
                     i += 1;
                     if (i >= linker_args.items.len) {
                         fatal("expected linker arg after '{s}'", .{arg});
@@ -1403,30 +1430,40 @@ fn buildOutputType(
                     // We don't need to care about these because these args are
                     // for resolving circular dependencies but our linker takes
                     // care of this without explicit args.
-                } else if (mem.startsWith(u8, arg, "--major-os-version") or
-                    mem.startsWith(u8, arg, "--minor-os-version"))
+                } else if (mem.eql(u8, arg, "--major-os-version") or
+                    mem.eql(u8, arg, "--minor-os-version"))
                 {
+                    i += 1;
+                    if (i >= linker_args.items.len) {
+                        fatal("expected linker arg after '{s}'", .{arg});
+                    }
                     // This option does not do anything.
-                } else if (mem.startsWith(u8, arg, "--major-subsystem-version=")) {
+                } else if (mem.eql(u8, arg, "--major-subsystem-version")) {
+                    i += 1;
+                    if (i >= linker_args.items.len) {
+                        fatal("expected linker arg after '{s}'", .{arg});
+                    }
+
                     major_subsystem_version = std.fmt.parseUnsigned(
                         u32,
-                        arg["--major-subsystem-version=".len..],
+                        linker_args.items[i],
                         10,
                     ) catch |err| {
                         fatal("unable to parse '{s}': {s}", .{ arg, @errorName(err) });
                     };
-                } else if (mem.startsWith(u8, arg, "--minor-subsystem-version=")) {
+                } else if (mem.eql(u8, arg, "--minor-subsystem-version")) {
+                    i += 1;
+                    if (i >= linker_args.items.len) {
+                        fatal("expected linker arg after '{s}'", .{arg});
+                    }
+
                     minor_subsystem_version = std.fmt.parseUnsigned(
                         u32,
-                        arg["--minor-subsystem-version=".len..],
+                        linker_args.items[i],
                         10,
                     ) catch |err| {
                         fatal("unable to parse '{s}': {s}", .{ arg, @errorName(err) });
                     };
-                } else if (mem.startsWith(u8, arg, "--major-os-version=") or
-                    mem.startsWith(u8, arg, "--minor-os-version="))
-                {
-                    // These args do nothing.
                 } else {
                     warn("unsupported linker arg: {s}", .{arg});
                 }
@@ -1585,6 +1622,13 @@ fn buildOutputType(
             }
             if (std.fs.path.isAbsolute(lib_name)) {
                 fatal("cannot use absolute path as a system library: {s}", .{lib_name});
+            }
+            if (target_info.target.os.tag == .wasi) {
+                if (wasi_libc.getEmulatedLibCRTFile(lib_name)) |crt_file| {
+                    try wasi_emulated_libs.append(crt_file);
+                    _ = system_libs.orderedRemove(i);
+                    continue;
+                }
             }
             i += 1;
         }
@@ -1809,7 +1853,7 @@ fn buildOutputType(
 
     if (libc_paths_file) |paths_file| {
         libc_installation = LibCInstallation.parse(gpa, paths_file) catch |err| {
-            fatal("unable to parse libc paths file: {s}", .{@errorName(err)});
+            fatal("unable to parse libc paths file at path {s}: {s}", .{ paths_file, @errorName(err) });
         };
     }
 
@@ -1895,12 +1939,14 @@ fn buildOutputType(
         .framework_dirs = framework_dirs.items,
         .frameworks = frameworks.items,
         .system_libs = system_libs.items,
+        .wasi_emulated_libs = wasi_emulated_libs.items,
         .link_libc = link_libc,
         .link_libcpp = link_libcpp,
         .link_libunwind = link_libunwind,
         .want_pic = want_pic,
         .want_pie = want_pie,
         .want_lto = want_lto,
+        .want_unwind_tables = want_unwind_tables,
         .want_sanitize_c = want_sanitize_c,
         .want_stack_check = want_stack_check,
         .want_red_zone = want_red_zone,
@@ -1940,9 +1986,7 @@ fn buildOutputType(
         .libc_installation = if (libc_installation) |*lci| lci else null,
         .verbose_cc = verbose_cc,
         .verbose_link = verbose_link,
-        .verbose_tokenize = verbose_tokenize,
-        .verbose_ast = verbose_ast,
-        .verbose_ir = verbose_ir,
+        .verbose_air = verbose_air,
         .verbose_llvm_ir = verbose_llvm_ir,
         .verbose_cimport = verbose_cimport,
         .verbose_llvm_cpu_features = verbose_llvm_cpu_features,
@@ -1957,6 +2001,7 @@ fn buildOutputType(
         .test_name_prefix = test_name_prefix,
         .disable_lld_caching = !have_enable_cache,
         .subsystem = subsystem,
+        .wasi_exec_model = wasi_exec_model,
     }) catch |err| {
         fatal("unable to create compilation: {s}", .{@errorName(err)});
     };
@@ -2483,7 +2528,7 @@ pub fn cmdLibC(gpa: *Allocator, args: []const []const u8) !void {
     }
     if (input_file) |libc_file| {
         var libc = LibCInstallation.parse(gpa, libc_file) catch |err| {
-            fatal("unable to parse libc file: {s}", .{@errorName(err)});
+            fatal("unable to parse libc file at path {s}: {s}", .{ libc_file, @errorName(err) });
         };
         defer libc.deinit(gpa);
     } else {
@@ -2639,7 +2684,7 @@ pub fn cmdBuild(gpa: *Allocator, arena: *Allocator, args: []const []const u8) !v
                         i += 1;
                         build_file = args[i];
                         continue;
-                    } else if (mem.eql(u8, arg, "--override-lib-dir")) {
+                    } else if (mem.eql(u8, arg, "--zig-lib-dir")) {
                         if (i + 1 >= args.len) fatal("expected argument after '{s}'", .{arg});
                         i += 1;
                         override_lib_dir = args[i];
@@ -2898,6 +2943,7 @@ pub const usage_fmt =
     \\   --stdin                Format code from stdin; output to stdout
     \\   --check                List non-conforming files and exit with an error
     \\                          if the list is non-empty
+    \\   --ast-check            Run zig ast-check on every file
     \\
     \\
 ;
@@ -2905,6 +2951,7 @@ pub const usage_fmt =
 const Fmt = struct {
     seen: SeenMap,
     any_error: bool,
+    check_ast: bool,
     color: Color,
     gpa: *Allocator,
     out_buffer: std.ArrayList(u8),
@@ -2913,10 +2960,10 @@ const Fmt = struct {
 };
 
 pub fn cmdFmt(gpa: *Allocator, args: []const []const u8) !void {
-    const stderr_file = io.getStdErr();
     var color: Color = .auto;
     var stdin_flag: bool = false;
     var check_flag: bool = false;
+    var check_ast_flag: bool = false;
     var input_files = ArrayList([]const u8).init(gpa);
     defer input_files.deinit();
 
@@ -2942,6 +2989,8 @@ pub fn cmdFmt(gpa: *Allocator, args: []const []const u8) !void {
                     stdin_flag = true;
                 } else if (mem.eql(u8, arg, "--check")) {
                     check_flag = true;
+                } else if (mem.eql(u8, arg, "--ast-check")) {
+                    check_ast_flag = true;
                 } else {
                     fatal("unrecognized parameter: '{s}'", .{arg});
                 }
@@ -2968,9 +3017,52 @@ pub fn cmdFmt(gpa: *Allocator, args: []const []const u8) !void {
         defer tree.deinit(gpa);
 
         for (tree.errors) |parse_error| {
-            try printErrMsgToFile(gpa, parse_error, tree, "<stdin>", stderr_file, color);
+            try printErrMsgToStdErr(gpa, parse_error, tree, "<stdin>", color);
         }
-        if (tree.errors.len != 0) {
+        var has_ast_error = false;
+        if (check_ast_flag) {
+            const Module = @import("Module.zig");
+            const AstGen = @import("AstGen.zig");
+
+            var file: Module.Scope.File = .{
+                .status = .never_loaded,
+                .source_loaded = true,
+                .zir_loaded = false,
+                .sub_file_path = "<stdin>",
+                .source = source_code,
+                .stat_size = undefined,
+                .stat_inode = undefined,
+                .stat_mtime = undefined,
+                .tree = tree,
+                .tree_loaded = true,
+                .zir = undefined,
+                .pkg = undefined,
+                .root_decl = null,
+            };
+
+            file.zir = try AstGen.generate(gpa, file.tree);
+            file.zir_loaded = true;
+            defer file.zir.deinit(gpa);
+
+            if (file.zir.hasCompileErrors()) {
+                var arena_instance = std.heap.ArenaAllocator.init(gpa);
+                defer arena_instance.deinit();
+                var errors = std.ArrayList(Compilation.AllErrors.Message).init(gpa);
+                defer errors.deinit();
+
+                try Compilation.AllErrors.addZir(&arena_instance.allocator, &errors, &file);
+                const ttyconf: std.debug.TTY.Config = switch (color) {
+                    .auto => std.debug.detectTTYConfig(),
+                    .on => .escape_codes,
+                    .off => .no_color,
+                };
+                for (errors.items) |full_err_msg| {
+                    full_err_msg.renderToStdErr(ttyconf);
+                }
+                has_ast_error = true;
+            }
+        }
+        if (tree.errors.len != 0 or has_ast_error) {
             process.exit(1);
         }
         const formatted = try tree.render(gpa);
@@ -2992,6 +3084,7 @@ pub fn cmdFmt(gpa: *Allocator, args: []const []const u8) !void {
         .gpa = gpa,
         .seen = Fmt.SeenMap.init(gpa),
         .any_error = false,
+        .check_ast = check_ast_flag,
         .color = color,
         .out_buffer = std.ArrayList(u8).init(gpa),
     };
@@ -3060,7 +3153,7 @@ fn fmtPathDir(
     while (try dir_it.next()) |entry| {
         const is_dir = entry.kind == .Directory;
 
-        if (is_dir and std.mem.eql(u8, entry.name, "zig-cache")) continue;
+        if (is_dir and (mem.eql(u8, entry.name, "zig-cache") or mem.eql(u8, entry.name, "zig-out"))) continue;
 
         if (is_dir or mem.endsWith(u8, entry.name, ".zig")) {
             const full_path = try fs.path.join(fmt.gpa, &[_][]const u8{ file_path, entry.name });
@@ -3112,11 +3205,57 @@ fn fmtPathFile(
     defer tree.deinit(fmt.gpa);
 
     for (tree.errors) |parse_error| {
-        try printErrMsgToFile(fmt.gpa, parse_error, tree, file_path, std.io.getStdErr(), fmt.color);
+        try printErrMsgToStdErr(fmt.gpa, parse_error, tree, file_path, fmt.color);
     }
     if (tree.errors.len != 0) {
         fmt.any_error = true;
         return;
+    }
+
+    if (fmt.check_ast) {
+        const Module = @import("Module.zig");
+        const AstGen = @import("AstGen.zig");
+
+        var file: Module.Scope.File = .{
+            .status = .never_loaded,
+            .source_loaded = true,
+            .zir_loaded = false,
+            .sub_file_path = file_path,
+            .source = source_code,
+            .stat_size = stat.size,
+            .stat_inode = stat.inode,
+            .stat_mtime = stat.mtime,
+            .tree = tree,
+            .tree_loaded = true,
+            .zir = undefined,
+            .pkg = undefined,
+            .root_decl = null,
+        };
+
+        if (stat.size > max_src_size)
+            return error.FileTooBig;
+
+        file.zir = try AstGen.generate(fmt.gpa, file.tree);
+        file.zir_loaded = true;
+        defer file.zir.deinit(fmt.gpa);
+
+        if (file.zir.hasCompileErrors()) {
+            var arena_instance = std.heap.ArenaAllocator.init(fmt.gpa);
+            defer arena_instance.deinit();
+            var errors = std.ArrayList(Compilation.AllErrors.Message).init(fmt.gpa);
+            defer errors.deinit();
+
+            try Compilation.AllErrors.addZir(&arena_instance.allocator, &errors, &file);
+            const ttyconf: std.debug.TTY.Config = switch (fmt.color) {
+                .auto => std.debug.detectTTYConfig(),
+                .on => .escape_codes,
+                .off => .no_color,
+            };
+            for (errors.items) |full_err_msg| {
+                full_err_msg.renderToStdErr(ttyconf);
+            }
+            fmt.any_error = true;
+        }
     }
 
     // As a heuristic, we make enough capacity for the same as the input source.
@@ -3142,25 +3281,16 @@ fn fmtPathFile(
     }
 }
 
-fn printErrMsgToFile(
+fn printErrMsgToStdErr(
     gpa: *mem.Allocator,
     parse_error: ast.Error,
     tree: ast.Tree,
     path: []const u8,
-    file: fs.File,
     color: Color,
 ) !void {
-    const color_on = switch (color) {
-        .auto => file.isTty(),
-        .on => true,
-        .off => false,
-    };
     const lok_token = parse_error.token;
-
-    const token_starts = tree.tokens.items(.start);
-    const token_tags = tree.tokens.items(.tag);
-    const first_token_start = token_starts[lok_token];
     const start_loc = tree.tokenLocation(0, lok_token);
+    const source_line = tree.source[start_loc.line_start..start_loc.line_end];
 
     var text_buf = std.ArrayList(u8).init(gpa);
     defer text_buf.deinit();
@@ -3168,26 +3298,24 @@ fn printErrMsgToFile(
     try tree.renderError(parse_error, writer);
     const text = text_buf.items;
 
-    const stream = file.writer();
-    try stream.print("{s}:{d}:{d}: error: {s}\n", .{ path, start_loc.line + 1, start_loc.column + 1, text });
+    const message: Compilation.AllErrors.Message = .{
+        .src = .{
+            .src_path = path,
+            .msg = text,
+            .byte_offset = @intCast(u32, start_loc.line_start),
+            .line = @intCast(u32, start_loc.line),
+            .column = @intCast(u32, start_loc.column),
+            .source_line = source_line,
+        },
+    };
 
-    if (!color_on) return;
+    const ttyconf: std.debug.TTY.Config = switch (color) {
+        .auto => std.debug.detectTTYConfig(),
+        .on => .escape_codes,
+        .off => .no_color,
+    };
 
-    // Print \r and \t as one space each so that column counts line up
-    for (tree.source[start_loc.line_start..start_loc.line_end]) |byte| {
-        try stream.writeByte(switch (byte) {
-            '\r', '\t' => ' ',
-            else => byte,
-        });
-    }
-    try stream.writeByte('\n');
-    try stream.writeByteNTimes(' ', start_loc.column);
-    if (token_tags[lok_token].lexeme()) |lexeme| {
-        try stream.writeByteNTimes('~', lexeme.len);
-        try stream.writeByte('\n');
-    } else {
-        try stream.writeAll("^\n");
-    }
+    message.renderToStdErr(ttyconf);
 }
 
 pub const info_zen =
@@ -3304,6 +3432,8 @@ pub const ClangArgIterator = struct {
         no_pie,
         lto,
         no_lto,
+        unwind_tables,
+        no_unwind_tables,
         nostdlib,
         nostdlib_cpp,
         shared,
@@ -3329,6 +3459,7 @@ pub const ClangArgIterator = struct {
         red_zone,
         no_red_zone,
         strip,
+        exec_model,
     };
 
     const Args = struct {
@@ -3700,7 +3831,7 @@ pub fn cmdAstCheck(
     defer file.tree.deinit(gpa);
 
     for (file.tree.errors) |parse_error| {
-        try printErrMsgToFile(gpa, parse_error, file.tree, file.sub_file_path, io.getStdErr(), color);
+        try printErrMsgToStdErr(gpa, parse_error, file.tree, file.sub_file_path, color);
     }
     if (file.tree.errors.len != 0) {
         process.exit(1);
@@ -3821,7 +3952,7 @@ pub fn cmdChangelist(
     defer file.tree.deinit(gpa);
 
     for (file.tree.errors) |parse_error| {
-        try printErrMsgToFile(gpa, parse_error, file.tree, old_source_file, io.getStdErr(), .auto);
+        try printErrMsgToStdErr(gpa, parse_error, file.tree, old_source_file, .auto);
     }
     if (file.tree.errors.len != 0) {
         process.exit(1);
@@ -3858,7 +3989,7 @@ pub fn cmdChangelist(
     defer new_tree.deinit(gpa);
 
     for (new_tree.errors) |parse_error| {
-        try printErrMsgToFile(gpa, parse_error, new_tree, new_source_file, io.getStdErr(), .auto);
+        try printErrMsgToStdErr(gpa, parse_error, new_tree, new_source_file, .auto);
     }
     if (new_tree.errors.len != 0) {
         process.exit(1);

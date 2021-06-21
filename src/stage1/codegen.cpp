@@ -211,7 +211,7 @@ static ZigLLVM_CallingConv get_llvm_cc(CodeGen *g, CallingConvention cc) {
 }
 
 static void add_uwtable_attr(CodeGen *g, LLVMValueRef fn_val) {
-    if (g->zig_target->os == OsWindows) {
+    if (g->unwind_tables) {
         addLLVMFnAttr(fn_val, "uwtable");
     }
 }
@@ -1022,7 +1022,7 @@ static LLVMValueRef get_panic_msg_ptr_val(CodeGen *g, PanicMsgId msg_id) {
 
         Buf *buf_msg = panic_msg_buf(msg_id);
         ZigValue *array_val = create_const_str_lit(g, buf_msg)->data.x_ptr.data.ref.pointee;
-        init_const_slice(g, val, array_val, 0, buf_len(buf_msg), true);
+        init_const_slice(g, val, array_val, 0, buf_len(buf_msg), true, nullptr);
 
         render_const_val(g, val, "");
         render_const_val_global(g, val, "");
@@ -2161,11 +2161,11 @@ static bool iter_function_params_c_abi(CodeGen *g, ZigType *fn_type, FnWalk *fn_
             // Register 2: (ptr + 1).*
 
             // One floating point register per f64 or 2 f32's
-            size_t number_of_fp_regs = (size_t)ceilf((float)ty_size / (float)8);
+            size_t number_of_fp_regs = (ty_size + 7) / 8;
 
             switch (fn_walk->id) {
                 case FnWalkIdAttrs: {
-                    fn_walk->data.attrs.gen_i += 1;
+                    fn_walk->data.attrs.gen_i += number_of_fp_regs;
                     break;
                 }
                 case FnWalkIdCall: {
@@ -8902,7 +8902,7 @@ static void define_builtin_fns(CodeGen *g) {
     create_builtin_fn(g, BuiltinFnIdPtrToInt, "ptrToInt", 1);
     create_builtin_fn(g, BuiltinFnIdTagName, "tagName", 1);
     create_builtin_fn(g, BuiltinFnIdFieldParentPtr, "fieldParentPtr", 3);
-    create_builtin_fn(g, BuiltinFnIdByteOffsetOf, "byteOffsetOf", 2);
+    create_builtin_fn(g, BuiltinFnIdOffsetOf, "offsetOf", 2);
     create_builtin_fn(g, BuiltinFnIdBitOffsetOf, "bitOffsetOf", 2);
     create_builtin_fn(g, BuiltinFnIdDivExact, "divExact", 2);
     create_builtin_fn(g, BuiltinFnIdDivTrunc, "divTrunc", 2);
@@ -9289,6 +9289,10 @@ static void init(CodeGen *g) {
         ZigLLVMSetModulePIELevel(g->module);
     }
 
+    if (g->code_model != CodeModelDefault) {
+        ZigLLVMSetModuleCodeModel(g->module, to_llvm_code_model(g));
+    }
+
     const char *target_specific_cpu_args = "";
     const char *target_specific_features = "";
 
@@ -9424,7 +9428,7 @@ static void update_test_functions_builtin_decl(CodeGen *g) {
 
         ZigValue *name_field = this_val->data.x_struct.fields[0];
         ZigValue *name_array_val = create_const_str_lit(g, &test_fn_entry->symbol_name)->data.x_ptr.data.ref.pointee;
-        init_const_slice(g, name_field, name_array_val, 0, buf_len(&test_fn_entry->symbol_name), true);
+        init_const_slice(g, name_field, name_array_val, 0, buf_len(&test_fn_entry->symbol_name), true, nullptr);
 
         ZigValue *fn_field = this_val->data.x_struct.fields[1];
         fn_field->type = fn_type;
@@ -9448,7 +9452,7 @@ static void update_test_functions_builtin_decl(CodeGen *g) {
     }
     report_errors_and_maybe_exit(g);
 
-    ZigValue *test_fn_slice = create_const_slice(g, test_fn_array, 0, g->test_fns.length, true);
+    ZigValue *test_fn_slice = create_const_slice(g, test_fn_array, 0, g->test_fns.length, true, nullptr);
 
     update_compile_var(g, buf_create_from_str("test_functions"), test_fn_slice);
     assert(g->test_runner_package != nullptr);

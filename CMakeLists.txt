@@ -520,6 +520,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/target/x86.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/Thread.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/Thread/AutoResetEvent.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Thread/Futex.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/Thread/Mutex.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/Thread/ResetEvent.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/Thread/StaticResetEvent.zig"
@@ -781,7 +782,7 @@ set(BUILD_ZIG1_ARGS
     -target "${ZIG_TARGET_TRIPLE}"
     "-mcpu=${ZIG_TARGET_MCPU}"
     --name zig1
-    --override-lib-dir "${CMAKE_SOURCE_DIR}/lib"
+    --zig-lib-dir "${CMAKE_SOURCE_DIR}/lib"
     "-femit-bin=${ZIG1_OBJECT}"
     "${ZIG1_RELEASE_ARG}"
     "${ZIG1_SINGLE_THREADED_ARG}"
@@ -835,7 +836,7 @@ set(ZIG_SKIP_INSTALL_LIB_FILES off CACHE BOOL
 
 if(NOT ZIG_SKIP_INSTALL_LIB_FILES)
     set(ZIG_INSTALL_ARGS "build"
-        --override-lib-dir "${CMAKE_SOURCE_DIR}/lib"
+        --zig-lib-dir "${CMAKE_SOURCE_DIR}/lib"
         "-Dlib-files-only"
         --prefix "${CMAKE_INSTALL_PREFIX}"
         "-Dconfig_h=${ZIG_CONFIG_H_OUT}"

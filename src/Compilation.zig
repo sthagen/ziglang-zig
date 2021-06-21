@@ -74,15 +74,14 @@ clang_passthrough_mode: bool,
 clang_preprocessor_mode: ClangPreprocessorMode,
 /// Whether to print clang argvs to stdout.
 verbose_cc: bool,
-verbose_tokenize: bool,
-verbose_ast: bool,
-verbose_ir: bool,
+verbose_air: bool,
 verbose_llvm_ir: bool,
 verbose_cimport: bool,
 verbose_llvm_cpu_features: bool,
 disable_c_depfile: bool,
 time_report: bool,
 stack_report: bool,
+unwind_tables: bool,
 
 c_source_files: []const CSourceFile,
 clang_argv: []const []const u8,
@@ -203,8 +202,8 @@ const Job = union(enum) {
     /// needed when not linking libc and using LLVM for code generation because it generates
     /// calls to, for example, memcpy and memset.
     zig_libc: void,
-    /// WASI libc sysroot
-    wasi_libc_sysroot: void,
+    /// one of WASI libc static objects
+    wasi_libc_crt_file: wasi_libc.CRTFile,
 
     /// Use stage1 C++ code to compile zig code into an object file.
     stage1_module: void,
@@ -279,7 +278,7 @@ pub const MiscTask = enum {
     libcxx,
     libcxxabi,
     libtsan,
-    wasi_libc_sysroot,
+    wasi_libc_crt_file,
     compiler_rt,
     libssp,
     zig_libc,
@@ -646,6 +645,12 @@ pub const InitOptions = struct {
     framework_dirs: []const []const u8 = &[0][]const u8{},
     frameworks: []const []const u8 = &[0][]const u8{},
     system_libs: []const []const u8 = &[0][]const u8{},
+    /// These correspond to the WASI libc emulated subcomponents including:
+    /// * process clocks
+    /// * getpid
+    /// * mman
+    /// * signal
+    wasi_emulated_libs: []const wasi_libc.CRTFile = &[0]wasi_libc.CRTFile{},
     link_libc: bool = false,
     link_libcpp: bool = false,
     link_libunwind: bool = false,
@@ -661,6 +666,7 @@ pub const InitOptions = struct {
     want_tsan: ?bool = null,
     want_compiler_rt: ?bool = null,
     want_lto: ?bool = null,
+    want_unwind_tables: ?bool = null,
     use_llvm: ?bool = null,
     use_lld: ?bool = null,
     use_clang: ?bool = null,
@@ -692,9 +698,7 @@ pub const InitOptions = struct {
     clang_passthrough_mode: bool = false,
     verbose_cc: bool = false,
     verbose_link: bool = false,
-    verbose_tokenize: bool = false,
-    verbose_ast: bool = false,
-    verbose_ir: bool = false,
+    verbose_air: bool = false,
     verbose_llvm_ir: bool = false,
     verbose_cimport: bool = false,
     verbose_llvm_cpu_features: bool = false,
@@ -719,6 +723,8 @@ pub const InitOptions = struct {
     test_filter: ?[]const u8 = null,
     test_name_prefix: ?[]const u8 = null,
     subsystem: ?std.Target.SubSystem = null,
+    /// WASI-only. Type of WASI execution model ("command" or "reactor").
+    wasi_exec_model: ?wasi_libc.CRTFile = null,
 };
 
 fn addPackageTableToCacheHash(
@@ -819,8 +825,20 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             return error.MachineCodeModelNotSupported;
         }
 
+        const tsan = options.want_tsan orelse false;
+        // TSAN is implemented in C++ so it requires linking libc++.
+        const link_libcpp = options.link_libcpp or tsan;
+        const link_libc = link_libcpp or options.link_libc or
+            target_util.osRequiresLibC(options.target);
+
+        const link_libunwind = options.link_libunwind or
+            (link_libcpp and target_util.libcNeedsLibUnwind(options.target));
+        const unwind_tables = options.want_unwind_tables orelse
+            (link_libunwind or target_util.needUnwindTables(options.target));
+        const link_eh_frame_hdr = options.link_eh_frame_hdr or unwind_tables;
+
         // Make a decision on whether to use LLD or our own linker.
-        const use_lld = if (options.use_lld) |explicit| explicit else blk: {
+        const use_lld = options.use_lld orelse blk: {
             if (!build_options.have_llvm)
                 break :blk false;
 
@@ -839,7 +857,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
                 options.frameworks.len != 0 or
                 options.system_libs.len != 0 or
                 options.link_libc or options.link_libcpp or
-                options.link_eh_frame_hdr or
+                link_eh_frame_hdr or
                 options.link_emit_relocs or
                 options.output_mode == .Lib or
                 options.lld_argv.len != 0 or
@@ -897,15 +915,6 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
                 },
             }
         };
-
-        const tsan = options.want_tsan orelse false;
-        // TSAN is implemented in C++ so it requires linking libc++.
-        const link_libcpp = options.link_libcpp or tsan;
-        const link_libc = link_libcpp or options.link_libc or
-            target_util.osRequiresLibC(options.target);
-
-        const link_libunwind = options.link_libunwind or
-            (link_libcpp and target_util.libcNeedsLibUnwind(options.target));
 
         const must_dynamic_link = dl: {
             if (target_util.cannotDynamicLink(options.target))
@@ -1076,6 +1085,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
         cache.hash.add(pic);
         cache.hash.add(pie);
         cache.hash.add(lto);
+        cache.hash.add(unwind_tables);
         cache.hash.add(tsan);
         cache.hash.add(stack_check);
         cache.hash.add(red_zone);
@@ -1286,6 +1296,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .framework_dirs = options.framework_dirs,
             .system_libs = system_libs,
             .syslibroot = darwin_options.syslibroot,
+            .wasi_emulated_libs = options.wasi_emulated_libs,
             .lib_dirs = options.lib_dirs,
             .rpath_list = options.rpath_list,
             .strip = strip,
@@ -1307,7 +1318,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .linker_script = options.linker_script,
             .version_script = options.version_script,
             .gc_sections = options.linker_gc_sections,
-            .eh_frame_hdr = options.link_eh_frame_hdr,
+            .eh_frame_hdr = link_eh_frame_hdr,
             .emit_relocs = options.link_emit_relocs,
             .rdynamic = options.rdynamic,
             .extra_lld_args = options.lld_argv,
@@ -1333,6 +1344,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .disable_lld_caching = options.disable_lld_caching,
             .subsystem = options.subsystem,
             .is_test = options.is_test,
+            .wasi_exec_model = options.wasi_exec_model,
         });
         errdefer bin_file.destroy();
         comp.* = .{
@@ -1361,9 +1373,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .clang_passthrough_mode = options.clang_passthrough_mode,
             .clang_preprocessor_mode = options.clang_preprocessor_mode,
             .verbose_cc = options.verbose_cc,
-            .verbose_tokenize = options.verbose_tokenize,
-            .verbose_ast = options.verbose_ast,
-            .verbose_ir = options.verbose_ir,
+            .verbose_air = options.verbose_air,
             .verbose_llvm_ir = options.verbose_llvm_ir,
             .verbose_cimport = options.verbose_cimport,
             .verbose_llvm_cpu_features = options.verbose_llvm_cpu_features,
@@ -1372,6 +1382,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .color = options.color,
             .time_report = options.time_report,
             .stack_report = options.stack_report,
+            .unwind_tables = unwind_tables,
             .test_filter = options.test_filter,
             .test_name_prefix = options.test_name_prefix,
             .test_evented_io = options.test_evented_io,
@@ -1426,8 +1437,18 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
                 },
             });
         }
-        if (comp.wantBuildWasiLibcSysrootFromSource()) {
-            try comp.work_queue.write(&[_]Job{.{ .wasi_libc_sysroot = {} }});
+        if (comp.wantBuildWasiLibcFromSource()) {
+            const wasi_emulated_libs = comp.bin_file.options.wasi_emulated_libs;
+            try comp.work_queue.ensureUnusedCapacity(wasi_emulated_libs.len + 2); // worst-case we need all components
+            for (wasi_emulated_libs) |crt_file| {
+                comp.work_queue.writeItemAssumeCapacity(.{
+                    .wasi_libc_crt_file = crt_file,
+                });
+            }
+            comp.work_queue.writeAssumeCapacity(&[_]Job{
+                .{ .wasi_libc_crt_file = comp.bin_file.options.wasi_exec_model orelse .crt1_o },
+                .{ .wasi_libc_crt_file = .libc_a },
+            });
         }
         if (comp.wantBuildMinGWFromSource()) {
             const static_lib_jobs = [_]Job{
@@ -1850,7 +1871,7 @@ pub fn getAllErrorsAlloc(self: *Compilation) !AllErrors {
 
             for (keys[1..]) |key, i| {
                 err_msg.notes[i] = .{
-                    .src_loc = key.nodeOffsetSrcLoc(values[i+1]),
+                    .src_loc = key.nodeOffsetSrcLoc(values[i + 1]),
                     .msg = "also here",
                 };
             }
@@ -1968,7 +1989,7 @@ pub fn performAllTheWork(self: *Compilation) error{ TimerUnsupported, OutOfMemor
                     log.debug("analyze liveness of {s}", .{decl.name});
                     try liveness.analyze(module.gpa, &decl_arena.allocator, func.body);
 
-                    if (std.builtin.mode == .Debug and self.verbose_ir) {
+                    if (std.builtin.mode == .Debug and self.verbose_air) {
                         func.dump(module.*);
                     }
                 }
@@ -2169,12 +2190,12 @@ pub fn performAllTheWork(self: *Compilation) error{ TimerUnsupported, OutOfMemor
                 );
             };
         },
-        .wasi_libc_sysroot => {
-            wasi_libc.buildWasiLibcSysroot(self) catch |err| {
+        .wasi_libc_crt_file => |crt_file| {
+            wasi_libc.buildCRTFile(self, crt_file) catch |err| {
                 // TODO Surface more error details.
                 try self.setMiscFailure(
-                    .wasi_libc_sysroot,
-                    "unable to build WASI libc sysroot: {s}",
+                    .wasi_libc_crt_file,
+                    "unable to build WASI libc CRT file: {s}",
                     .{@errorName(err)},
                 );
             };
@@ -2969,6 +2990,12 @@ pub fn addCCArgs(
             if (target_util.supports_fpic(target) and comp.bin_file.options.pic) {
                 try argv.append("-fPIC");
             }
+
+            if (comp.unwind_tables) {
+                try argv.append("-funwind-tables");
+            } else {
+                try argv.append("-fno-unwind-tables");
+            }
         },
         .shared_library, .ll, .bc, .unknown, .static_library, .object, .zig => {},
         .assembly => {
@@ -2977,10 +3004,49 @@ pub fn addCCArgs(
             // all CPU features here.
             switch (target.cpu.arch) {
                 .riscv32, .riscv64 => {
+                    const RvArchFeat = struct { char: u8, feat: std.Target.riscv.Feature };
+                    const letters = [_]RvArchFeat{
+                        .{ .char = 'm', .feat = .m },
+                        .{ .char = 'a', .feat = .a },
+                        .{ .char = 'f', .feat = .f },
+                        .{ .char = 'd', .feat = .d },
+                        .{ .char = 'c', .feat = .c },
+                    };
+                    const prefix: []const u8 = if (target.cpu.arch == .riscv64) "rv64" else "rv32";
+                    const prefix_len = 4;
+                    assert(prefix.len == prefix_len);
+                    var march_buf: [prefix_len + letters.len + 1]u8 = undefined;
+                    var march_index: usize = prefix_len;
+                    mem.copy(u8, &march_buf, prefix);
+
+                    if (std.Target.riscv.featureSetHas(target.cpu.features, .e)) {
+                        march_buf[march_index] = 'e';
+                    } else {
+                        march_buf[march_index] = 'i';
+                    }
+                    march_index += 1;
+
+                    for (letters) |letter| {
+                        if (std.Target.riscv.featureSetHas(target.cpu.features, letter.feat)) {
+                            march_buf[march_index] = letter.char;
+                            march_index += 1;
+                        }
+                    }
+
+                    const march_arg = try std.fmt.allocPrint(arena, "-march={s}", .{
+                        march_buf[0..march_index],
+                    });
+                    try argv.append(march_arg);
+
                     if (std.Target.riscv.featureSetHas(target.cpu.features, .relax)) {
                         try argv.append("-mrelax");
                     } else {
                         try argv.append("-mno-relax");
+                    }
+                    if (std.Target.riscv.featureSetHas(target.cpu.features, .save_restore)) {
+                        try argv.append("-msave-restore");
+                    } else {
+                        try argv.append("-mno-save-restore");
                     }
                 },
                 else => {
@@ -3303,7 +3369,7 @@ pub fn get_libc_crt_file(comp: *Compilation, arena: *Allocator, basename: []cons
     if (comp.wantBuildGLibCFromSource() or
         comp.wantBuildMuslFromSource() or
         comp.wantBuildMinGWFromSource() or
-        comp.wantBuildWasiLibcSysrootFromSource())
+        comp.wantBuildWasiLibcFromSource())
     {
         return comp.crt_files.get(basename).?.full_object_path;
     }
@@ -3343,8 +3409,9 @@ fn wantBuildMuslFromSource(comp: Compilation) bool {
         !comp.getTarget().isWasm();
 }
 
-fn wantBuildWasiLibcSysrootFromSource(comp: Compilation) bool {
-    return comp.wantBuildLibCFromSource() and comp.getTarget().isWasm();
+fn wantBuildWasiLibcFromSource(comp: Compilation) bool {
+    return comp.wantBuildLibCFromSource() and comp.getTarget().isWasm() and
+        comp.getTarget().os.tag == .wasi;
 }
 
 fn wantBuildMinGWFromSource(comp: Compilation) bool {
@@ -3689,9 +3756,7 @@ fn buildOutputFromZig(
         .self_exe_path = comp.self_exe_path,
         .verbose_cc = comp.verbose_cc,
         .verbose_link = comp.bin_file.options.verbose_link,
-        .verbose_tokenize = comp.verbose_tokenize,
-        .verbose_ast = comp.verbose_ast,
-        .verbose_ir = comp.verbose_ir,
+        .verbose_air = comp.verbose_air,
         .verbose_llvm_ir = comp.verbose_llvm_ir,
         .verbose_cimport = comp.verbose_cimport,
         .verbose_llvm_cpu_features = comp.verbose_llvm_cpu_features,
@@ -3935,6 +4000,7 @@ fn updateStage1Module(comp: *Compilation, main_progress_node: *std.Progress.Node
         .pic = comp.bin_file.options.pic,
         .pie = comp.bin_file.options.pie,
         .lto = comp.bin_file.options.lto,
+        .unwind_tables = comp.unwind_tables,
         .link_libc = comp.bin_file.options.link_libc,
         .link_libcpp = comp.bin_file.options.link_libcpp,
         .strip = comp.bin_file.options.strip,
@@ -3949,9 +4015,7 @@ fn updateStage1Module(comp: *Compilation, main_progress_node: *std.Progress.Node
         .enable_time_report = comp.time_report,
         .enable_stack_report = comp.stack_report,
         .test_is_evented = comp.test_evented_io,
-        .verbose_tokenize = comp.verbose_tokenize,
-        .verbose_ast = comp.verbose_ast,
-        .verbose_ir = comp.verbose_ir,
+        .verbose_ir = comp.verbose_air,
         .verbose_llvm_ir = comp.verbose_llvm_ir,
         .verbose_cimport = comp.verbose_cimport,
         .verbose_llvm_cpu_features = comp.verbose_llvm_cpu_features,
@@ -3998,7 +4062,7 @@ fn updateStage1Module(comp: *Compilation, main_progress_node: *std.Progress.Node
     });
     var digest_plus_flags: [digest.len + 2]u8 = undefined;
     digest_plus_flags[0..digest.len].* = digest;
-    assert(std.fmt.formatIntBuf(digest_plus_flags[digest.len..], stage1_flags_byte, 16, false, .{
+    assert(std.fmt.formatIntBuf(digest_plus_flags[digest.len..], stage1_flags_byte, 16, .lower, .{
         .width = 2,
         .fill = '0',
     }) == 2);
@@ -4107,9 +4171,7 @@ pub fn build_crt_file(
         .c_source_files = c_source_files,
         .verbose_cc = comp.verbose_cc,
         .verbose_link = comp.bin_file.options.verbose_link,
-        .verbose_tokenize = comp.verbose_tokenize,
-        .verbose_ast = comp.verbose_ast,
-        .verbose_ir = comp.verbose_ir,
+        .verbose_air = comp.verbose_air,
         .verbose_llvm_ir = comp.verbose_llvm_ir,
         .verbose_cimport = comp.verbose_cimport,
         .verbose_llvm_cpu_features = comp.verbose_llvm_cpu_features,

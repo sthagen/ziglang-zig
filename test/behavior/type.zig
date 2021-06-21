@@ -182,7 +182,7 @@ test "Type.Optional" {
 }
 
 test "Type.ErrorUnion" {
-   try testTypes(&[_]type{
+    try testTypes(&[_]type{
         error{}!void,
         error{Error}!void,
     });
@@ -410,7 +410,7 @@ test "Type.Union from Type.Enum" {
 }
 
 test "Type.Union from regular enum" {
-    const E = enum { working_as_expected = 0 };
+    const E = enum { working_as_expected };
     const T = @Type(.{
         .Union = .{
             .layout = .Auto,

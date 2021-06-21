@@ -3,6 +3,7 @@
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
+const root = @import("root");
 const builtin = std.builtin;
 const std = @import("std.zig");
 const os = std.os;
@@ -47,7 +48,10 @@ pub const MAX_PATH_BYTES = switch (builtin.os.tag) {
     .windows => os.windows.PATH_MAX_WIDE * 3 + 1,
     // TODO work out what a reasonable value we should use here
     .wasi => 4096,
-    else => @compileError("Unsupported OS"),
+    else => if (@hasDecl(root, "os") and @hasDecl(root.os, "PATH_MAX"))
+        root.os.PATH_MAX
+    else
+        @compileError("PATH_MAX not implemented for " ++ @tagName(builtin.os.tag)),
 };
 
 pub const base64_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".*;
@@ -1264,11 +1268,9 @@ pub const Dir = struct {
     pub fn openDirWasi(self: Dir, sub_path: []const u8, args: OpenDirOptions) OpenError!Dir {
         const w = os.wasi;
         var base: w.rights_t = w.RIGHT_FD_FILESTAT_GET | w.RIGHT_FD_FDSTAT_SET_FLAGS | w.RIGHT_FD_FILESTAT_SET_TIMES;
-        if (args.iterate) {
-            base |= w.RIGHT_FD_READDIR;
-        }
         if (args.access_sub_paths) {
-            base |= w.RIGHT_PATH_CREATE_DIRECTORY |
+            base |= w.RIGHT_FD_READDIR |
+                w.RIGHT_PATH_CREATE_DIRECTORY |
                 w.RIGHT_PATH_CREATE_FILE |
                 w.RIGHT_PATH_LINK_SOURCE |
                 w.RIGHT_PATH_LINK_TARGET |
