@@ -144,7 +144,7 @@ const FileEntry = struct {
 };
 
 const LineNumberProgram = struct {
-    address: usize,
+    address: u64,
     file: usize,
     line: i64,
     column: u64,
@@ -153,12 +153,12 @@ const LineNumberProgram = struct {
     end_sequence: bool,
 
     default_is_stmt: bool,
-    target_address: usize,
+    target_address: u64,
     include_dirs: []const []const u8,
     file_entries: *ArrayList(FileEntry),
 
     prev_valid: bool,
-    prev_address: usize,
+    prev_address: u64,
     prev_file: usize,
     prev_line: i64,
     prev_column: u64,
@@ -186,7 +186,7 @@ const LineNumberProgram = struct {
         self.prev_end_sequence = undefined;
     }
 
-    pub fn init(is_stmt: bool, include_dirs: []const []const u8, file_entries: *ArrayList(FileEntry), target_address: usize) LineNumberProgram {
+    pub fn init(is_stmt: bool, include_dirs: []const []const u8, file_entries: *ArrayList(FileEntry), target_address: u64) LineNumberProgram {
         return LineNumberProgram{
             .address = 0,
             .file = 1,
@@ -283,6 +283,7 @@ fn parseFormValueBlock(allocator: *mem.Allocator, in_stream: anytype, endian: bu
 }
 
 fn parseFormValueConstant(allocator: *mem.Allocator, in_stream: anytype, signed: bool, endian: builtin.Endian, comptime size: i32) !FormValue {
+    _ = allocator;
     // TODO: Please forgive me, I've worked around zig not properly spilling some intermediate values here.
     // `nosuspend` should be removed from all the function calls once it is fixed.
     return FormValue{
@@ -310,6 +311,7 @@ fn parseFormValueConstant(allocator: *mem.Allocator, in_stream: anytype, signed:
 
 // TODO the nosuspends here are workarounds
 fn parseFormValueRef(allocator: *mem.Allocator, in_stream: anytype, endian: builtin.Endian, size: i32) !FormValue {
+    _ = allocator;
     return FormValue{
         .Ref = switch (size) {
             1 => try nosuspend in_stream.readInt(u8, endian),
@@ -453,13 +455,13 @@ pub const DwarfInfo = struct {
                                 if (this_die_obj.getAttr(AT_name)) |_| {
                                     const name = try this_die_obj.getAttrString(di, AT_name);
                                     break :x name;
-                                } else if (this_die_obj.getAttr(AT_abstract_origin)) |ref| {
+                                } else if (this_die_obj.getAttr(AT_abstract_origin)) |_| {
                                     // Follow the DIE it points to and repeat
                                     const ref_offset = try this_die_obj.getAttrRef(AT_abstract_origin);
                                     if (ref_offset > next_offset) return error.InvalidDebugInfo;
                                     try seekable.seekTo(this_unit_offset + ref_offset);
                                     this_die_obj = (try di.parseDie(in, abbrev_table, is_64)) orelse return error.InvalidDebugInfo;
-                                } else if (this_die_obj.getAttr(AT_specification)) |ref| {
+                                } else if (this_die_obj.getAttr(AT_specification)) |_| {
                                     // Follow the DIE it points to and repeat
                                     const ref_offset = try this_die_obj.getAttrRef(AT_specification);
                                     if (ref_offset > next_offset) return error.InvalidDebugInfo;
@@ -691,7 +693,7 @@ pub const DwarfInfo = struct {
         return result;
     }
 
-    pub fn getLineNumberInfo(di: *DwarfInfo, compile_unit: CompileUnit, target_address: usize) !debug.LineInfo {
+    pub fn getLineNumberInfo(di: *DwarfInfo, compile_unit: CompileUnit, target_address: u64) !debug.LineInfo {
         var stream = io.fixedBufferStream(di.debug_line);
         const in = &stream.reader();
         const seekable = &stream.seekableStream();

@@ -290,6 +290,7 @@ const usage_build_generic =
     \\                      .c    C source code (requires LLVM extensions)
     \\                    .cpp    C++ source code (requires LLVM extensions)
     \\                            Other C++ extensions: .C .cc .cxx
+    \\                      .m    Objective-C source code (requires LLVM extensions)
     \\
     \\General Options:
     \\  -h, --help                Print this help and exit
@@ -500,7 +501,7 @@ const Emit = union(enum) {
 };
 
 fn optionalBoolEnvVar(arena: *Allocator, name: []const u8) !bool {
-    if (std.process.getEnvVarOwned(arena, name)) |value| {
+    if (std.process.getEnvVarOwned(arena, name)) |_| {
         return true;
     } else |err| switch (err) {
         error.EnvironmentVariableNotFound => return false,
@@ -1072,7 +1073,7 @@ fn buildOutputType(
                     .object, .static_library, .shared_library => {
                         try link_objects.append(arg);
                     },
-                    .assembly, .c, .cpp, .h, .ll, .bc => {
+                    .assembly, .c, .cpp, .h, .ll, .bc, .m => {
                         try c_source_files.append(.{
                             .src_path = arg,
                             .extra_flags = try arena.dupe([]const u8, extra_cflags.items),
@@ -1135,7 +1136,7 @@ fn buildOutputType(
                     .positional => {
                         const file_ext = Compilation.classifyFileExt(mem.spanZ(it.only_arg));
                         switch (file_ext) {
-                            .assembly, .c, .cpp, .ll, .bc, .h => try c_source_files.append(.{ .src_path = it.only_arg }),
+                            .assembly, .c, .cpp, .ll, .bc, .h, .m => try c_source_files.append(.{ .src_path = it.only_arg }),
                             .unknown, .shared_library, .object, .static_library => {
                                 try link_objects.append(it.only_arg);
                             },
@@ -2565,6 +2566,7 @@ pub fn cmdInit(
     args: []const []const u8,
     output_mode: std.builtin.OutputMode,
 ) !void {
+    _ = gpa;
     {
         var i: usize = 0;
         while (i < args.len) : (i += 1) {
@@ -3749,7 +3751,6 @@ pub fn cmdAstCheck(
 
     var color: Color = .auto;
     var want_output_text = false;
-    var have_zig_source_file = false;
     var zig_source_file: ?[]const u8 = null;
 
     var i: usize = 0;

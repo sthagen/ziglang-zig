@@ -626,6 +626,7 @@ pub const Value = extern union {
             return std.mem.dupe(allocator, u8, payload.data);
         }
         if (self.castTag(.repeated)) |payload| {
+            _ = payload;
             @panic("TODO implement toAllocatedBytes for this Value tag");
         }
         if (self.castTag(.decl_ref)) |payload| {
@@ -747,6 +748,7 @@ pub const Value = extern union {
 
     /// Asserts the type is an enum type.
     pub fn toEnum(val: Value, enum_ty: Type, comptime E: type) E {
+        _ = enum_ty;
         // TODO this needs to resolve other kinds of Value tags rather than
         // assuming the tag will be .enum_field_index.
         const field_index = val.castTag(.enum_field_index).?.data;
@@ -935,6 +937,7 @@ pub const Value = extern union {
     /// Converts an integer or a float to a float.
     /// Returns `error.Overflow` if the value does not fit in the new type.
     pub fn floatCast(self: Value, allocator: *Allocator, ty: Type, target: Target) !Value {
+        _ = target;
         switch (ty.tag()) {
             .f16 => {
                 @panic("TODO add __trunctfhf2 to compiler-rt");
@@ -975,6 +978,26 @@ pub const Value = extern union {
             // .float_128 => @rem(self.castTag(.float_128).?.data, 1) != 0,
             .float_128 => @panic("TODO lld: error: undefined symbol: fmodl"),
 
+            else => unreachable,
+        };
+    }
+
+    /// Asserts the value is numeric
+    pub fn isZero(self: Value) bool {
+        return switch (self.tag()) {
+            .zero => true,
+            .one => false,
+
+            .int_u64 => self.castTag(.int_u64).?.data == 0,
+            .int_i64 => self.castTag(.int_i64).?.data == 0,
+
+            .float_16 => self.castTag(.float_16).?.data == 0,
+            .float_32 => self.castTag(.float_32).?.data == 0,
+            .float_64 => self.castTag(.float_64).?.data == 0,
+            .float_128 => self.castTag(.float_128).?.data == 0,
+
+            .int_big_positive => self.castTag(.int_big_positive).?.asBigInt().eqZero(),
+            .int_big_negative => self.castTag(.int_big_negative).?.asBigInt().eqZero(),
             else => unreachable,
         };
     }
@@ -1272,17 +1295,21 @@ pub const Value = extern union {
 
     pub const ArrayHashContext = struct {
         pub fn hash(self: @This(), v: Value) u32 {
+            _ = self;
             return v.hash_u32();
         }
         pub fn eql(self: @This(), a: Value, b: Value) bool {
+            _ = self;
             return a.eql(b);
         }
     };
     pub const HashContext = struct {
         pub fn hash(self: @This(), v: Value) u64 {
+            _ = self;
             return v.hash();
         }
         pub fn eql(self: @This(), a: Value, b: Value) bool {
+            _ = self;
             return a.eql(b);
         }
     };
@@ -1325,6 +1352,7 @@ pub const Value = extern union {
     }
 
     pub fn fieldValue(val: Value, allocator: *Allocator, index: usize) error{OutOfMemory}!Value {
+        _ = allocator;
         switch (val.tag()) {
             .@"struct" => {
                 const field_values = val.castTag(.@"struct").?.data;

@@ -19,7 +19,6 @@ const MachO = @import("../MachO.zig");
 const SrcFn = MachO.SrcFn;
 const TextBlock = MachO.TextBlock;
 const padToIdeal = MachO.padToIdeal;
-const makeStaticString = MachO.makeStaticString;
 
 usingnamespace @import("commands.zig");
 
@@ -212,18 +211,11 @@ pub fn populateMissingMetadata(self: *DebugSymbols, allocator: *Allocator) !void
         log.debug("found dSym __DWARF segment free space 0x{x} to 0x{x}", .{ off, off + needed_size });
 
         try self.load_commands.append(allocator, .{
-            .Segment = SegmentCommand.empty(.{
-                .cmd = macho.LC_SEGMENT_64,
-                .cmdsize = @sizeOf(macho.segment_command_64),
-                .segname = makeStaticString("__DWARF"),
+            .Segment = SegmentCommand.empty("__DWARF", .{
                 .vmaddr = vmaddr,
                 .vmsize = needed_size,
                 .fileoff = off,
                 .filesize = needed_size,
-                .maxprot = 0,
-                .initprot = 0,
-                .nsects = 0,
-                .flags = 0,
             }),
         });
         self.header_dirty = true;
@@ -234,19 +226,11 @@ pub fn populateMissingMetadata(self: *DebugSymbols, allocator: *Allocator) !void
         self.debug_str_section_index = @intCast(u16, dwarf_segment.sections.items.len);
         assert(self.debug_string_table.items.len == 0);
 
-        try dwarf_segment.addSection(allocator, .{
-            .sectname = makeStaticString("__debug_str"),
-            .segname = makeStaticString("__DWARF"),
+        try dwarf_segment.addSection(allocator, "__debug_str", .{
             .addr = dwarf_segment.inner.vmaddr,
             .size = @intCast(u32, self.debug_string_table.items.len),
             .offset = @intCast(u32, dwarf_segment.inner.fileoff),
             .@"align" = 1,
-            .reloff = 0,
-            .nreloc = 0,
-            .flags = macho.S_REGULAR,
-            .reserved1 = 0,
-            .reserved2 = 0,
-            .reserved3 = 0,
         });
         self.header_dirty = true;
         self.load_commands_dirty = true;
@@ -262,19 +246,11 @@ pub fn populateMissingMetadata(self: *DebugSymbols, allocator: *Allocator) !void
 
         log.debug("found dSym __debug_info free space 0x{x} to 0x{x}", .{ off, off + file_size_hint });
 
-        try dwarf_segment.addSection(allocator, .{
-            .sectname = makeStaticString("__debug_info"),
-            .segname = makeStaticString("__DWARF"),
+        try dwarf_segment.addSection(allocator, "__debug_info", .{
             .addr = dwarf_segment.inner.vmaddr + off - dwarf_segment.inner.fileoff,
             .size = file_size_hint,
             .offset = @intCast(u32, off),
             .@"align" = p_align,
-            .reloff = 0,
-            .nreloc = 0,
-            .flags = macho.S_REGULAR,
-            .reserved1 = 0,
-            .reserved2 = 0,
-            .reserved3 = 0,
         });
         self.header_dirty = true;
         self.load_commands_dirty = true;
@@ -290,19 +266,11 @@ pub fn populateMissingMetadata(self: *DebugSymbols, allocator: *Allocator) !void
 
         log.debug("found dSym __debug_abbrev free space 0x{x} to 0x{x}", .{ off, off + file_size_hint });
 
-        try dwarf_segment.addSection(allocator, .{
-            .sectname = makeStaticString("__debug_abbrev"),
-            .segname = makeStaticString("__DWARF"),
+        try dwarf_segment.addSection(allocator, "__debug_abbrev", .{
             .addr = dwarf_segment.inner.vmaddr + off - dwarf_segment.inner.fileoff,
             .size = file_size_hint,
             .offset = @intCast(u32, off),
             .@"align" = p_align,
-            .reloff = 0,
-            .nreloc = 0,
-            .flags = macho.S_REGULAR,
-            .reserved1 = 0,
-            .reserved2 = 0,
-            .reserved3 = 0,
         });
         self.header_dirty = true;
         self.load_commands_dirty = true;
@@ -318,19 +286,11 @@ pub fn populateMissingMetadata(self: *DebugSymbols, allocator: *Allocator) !void
 
         log.debug("found dSym __debug_aranges free space 0x{x} to 0x{x}", .{ off, off + file_size_hint });
 
-        try dwarf_segment.addSection(allocator, .{
-            .sectname = makeStaticString("__debug_aranges"),
-            .segname = makeStaticString("__DWARF"),
+        try dwarf_segment.addSection(allocator, "__debug_aranges", .{
             .addr = dwarf_segment.inner.vmaddr + off - dwarf_segment.inner.fileoff,
             .size = file_size_hint,
             .offset = @intCast(u32, off),
             .@"align" = p_align,
-            .reloff = 0,
-            .nreloc = 0,
-            .flags = macho.S_REGULAR,
-            .reserved1 = 0,
-            .reserved2 = 0,
-            .reserved3 = 0,
         });
         self.header_dirty = true;
         self.load_commands_dirty = true;
@@ -346,19 +306,11 @@ pub fn populateMissingMetadata(self: *DebugSymbols, allocator: *Allocator) !void
 
         log.debug("found dSym __debug_line free space 0x{x} to 0x{x}", .{ off, off + file_size_hint });
 
-        try dwarf_segment.addSection(allocator, .{
-            .sectname = makeStaticString("__debug_line"),
-            .segname = makeStaticString("__DWARF"),
+        try dwarf_segment.addSection(allocator, "__debug_line", .{
             .addr = dwarf_segment.inner.vmaddr + off - dwarf_segment.inner.fileoff,
             .size = file_size_hint,
             .offset = @intCast(u32, off),
             .@"align" = p_align,
-            .reloff = 0,
-            .nreloc = 0,
-            .flags = macho.S_REGULAR,
-            .reserved1 = 0,
-            .reserved2 = 0,
-            .reserved3 = 0,
         });
         self.header_dirty = true;
         self.load_commands_dirty = true;
@@ -500,7 +452,6 @@ pub fn flushModule(self: *DebugSymbols, allocator: *Allocator, options: link.Opt
     if (self.debug_aranges_section_dirty) {
         const dwarf_segment = &self.load_commands.items[self.dwarf_segment_cmd_index.?].Segment;
         const debug_aranges_sect = &dwarf_segment.sections.items[self.debug_aranges_section_index.?];
-        const debug_info_sect = dwarf_segment.sections.items[self.debug_info_section_index.?];
 
         var di_buf = std.ArrayList(u8).init(allocator);
         defer di_buf.deinit();
@@ -693,14 +644,10 @@ pub fn deinit(self: *DebugSymbols, allocator: *Allocator) void {
 }
 
 fn copySegmentCommand(self: *DebugSymbols, allocator: *Allocator, base_cmd: SegmentCommand) !SegmentCommand {
-    var cmd = SegmentCommand.empty(.{
-        .cmd = macho.LC_SEGMENT_64,
+    var cmd = SegmentCommand.empty("", .{
         .cmdsize = base_cmd.inner.cmdsize,
-        .segname = undefined,
         .vmaddr = base_cmd.inner.vmaddr,
         .vmsize = base_cmd.inner.vmsize,
-        .fileoff = 0,
-        .filesize = 0,
         .maxprot = base_cmd.inner.maxprot,
         .initprot = base_cmd.inner.initprot,
         .nsects = base_cmd.inner.nsects,
@@ -844,7 +791,6 @@ fn relocateSymbolTable(self: *DebugSymbols) !void {
     const nsyms = nlocals + nglobals;
 
     if (symtab.nsyms < nsyms) {
-        const linkedit_segment = self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
         const needed_size = nsyms * @sizeOf(macho.nlist_64);
         if (needed_size > self.allocatedSizeLinkedit(symtab.symoff)) {
             // Move the entire symbol table to a new location
@@ -901,13 +847,9 @@ fn writeStringTable(self: *DebugSymbols) !void {
 }
 
 pub fn updateDeclLineNumber(self: *DebugSymbols, module: *Module, decl: *const Module.Decl) !void {
+    _ = module;
     const tracy = trace(@src());
     defer tracy.end();
-
-    const tree = decl.namespace.file_scope.tree;
-    const node_tags = tree.nodes.items(.tag);
-    const node_datas = tree.nodes.items(.data);
-    const token_starts = tree.tokens.items(.start);
 
     const func = decl.val.castTag(.function).?.data;
     const line_off = @intCast(u28, decl.src_line + func.lbrace_line);
@@ -933,6 +875,8 @@ pub fn initDeclDebugBuffers(
     module: *Module,
     decl: *Module.Decl,
 ) !DeclDebugBuffers {
+    _ = self;
+    _ = module;
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -1195,6 +1139,7 @@ fn addDbgInfoType(
     dbg_info_buffer: *std.ArrayList(u8),
     target: std.Target,
 ) !void {
+    _ = self;
     switch (ty.zigTypeTag()) {
         .Void => unreachable,
         .NoReturn => unreachable,
@@ -1371,6 +1316,7 @@ fn getRelocDbgInfoSubprogramHighPC() u32 {
 }
 
 fn dbgLineNeededHeaderBytes(self: DebugSymbols, module: *Module) u32 {
+    _ = self;
     const directory_entry_format_count = 1;
     const file_name_entry_format_count = 1;
     const directory_count = 1;
@@ -1385,6 +1331,7 @@ fn dbgLineNeededHeaderBytes(self: DebugSymbols, module: *Module) u32 {
 }
 
 fn dbgInfoNeededHeaderBytes(self: DebugSymbols) u32 {
+    _ = self;
     return 120;
 }
 

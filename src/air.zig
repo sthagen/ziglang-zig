@@ -92,10 +92,6 @@ pub const Inst = struct {
         is_err,
         /// *E!T => bool
         is_err_ptr,
-        /// E => u16
-        error_to_int,
-        /// u16 => E
-        int_to_error,
         bool_and,
         bool_or,
         /// Read a value from a pointer.
@@ -159,8 +155,6 @@ pub const Inst = struct {
                 .is_null_ptr,
                 .is_err,
                 .is_err_ptr,
-                .int_to_error,
-                .error_to_int,
                 .ptrtoint,
                 .floatcast,
                 .intcast,
@@ -310,9 +304,12 @@ pub const Inst = struct {
         base: Inst,
 
         pub fn operandCount(self: *const NoOp) usize {
+            _ = self;
             return 0;
         }
         pub fn getOperand(self: *const NoOp, index: usize) ?*Inst {
+            _ = self;
+            _ = index;
             return null;
         }
     };
@@ -322,6 +319,7 @@ pub const Inst = struct {
         operand: *Inst,
 
         pub fn operandCount(self: *const UnOp) usize {
+            _ = self;
             return 1;
         }
         pub fn getOperand(self: *const UnOp, index: usize) ?*Inst {
@@ -337,6 +335,7 @@ pub const Inst = struct {
         rhs: *Inst,
 
         pub fn operandCount(self: *const BinOp) usize {
+            _ = self;
             return 2;
         }
         pub fn getOperand(self: *const BinOp, index: usize) ?*Inst {
@@ -362,9 +361,12 @@ pub const Inst = struct {
         name: [*:0]const u8,
 
         pub fn operandCount(self: *const Arg) usize {
+            _ = self;
             return 0;
         }
         pub fn getOperand(self: *const Arg, index: usize) ?*Inst {
+            _ = self;
+            _ = index;
             return null;
         }
     };
@@ -397,9 +399,12 @@ pub const Inst = struct {
         body: Body,
 
         pub fn operandCount(self: *const Block) usize {
+            _ = self;
             return 0;
         }
         pub fn getOperand(self: *const Block, index: usize) ?*Inst {
+            _ = self;
+            _ = index;
             return null;
         }
     };
@@ -418,9 +423,12 @@ pub const Inst = struct {
         body: Body,
 
         pub fn operandCount(self: *const BrBlockFlat) usize {
+            _ = self;
             return 0;
         }
         pub fn getOperand(self: *const BrBlockFlat, index: usize) ?*Inst {
+            _ = self;
+            _ = index;
             return null;
         }
     };
@@ -433,9 +441,11 @@ pub const Inst = struct {
         operand: *Inst,
 
         pub fn operandCount(self: *const Br) usize {
+            _ = self;
             return 1;
         }
         pub fn getOperand(self: *const Br, index: usize) ?*Inst {
+            _ = self;
             if (index == 0)
                 return self.operand;
             return null;
@@ -449,9 +459,12 @@ pub const Inst = struct {
         block: *Block,
 
         pub fn operandCount(self: *const BrVoid) usize {
+            _ = self;
             return 0;
         }
         pub fn getOperand(self: *const BrVoid, index: usize) ?*Inst {
+            _ = self;
+            _ = index;
             return null;
         }
     };
@@ -496,6 +509,7 @@ pub const Inst = struct {
         else_death_count: u32 = 0,
 
         pub fn operandCount(self: *const CondBr) usize {
+            _ = self;
             return 1;
         }
         pub fn getOperand(self: *const CondBr, index: usize) ?*Inst {
@@ -522,9 +536,12 @@ pub const Inst = struct {
         val: Value,
 
         pub fn operandCount(self: *const Constant) usize {
+            _ = self;
             return 0;
         }
         pub fn getOperand(self: *const Constant, index: usize) ?*Inst {
+            _ = self;
+            _ = index;
             return null;
         }
     };
@@ -536,9 +553,12 @@ pub const Inst = struct {
         body: Body,
 
         pub fn operandCount(self: *const Loop) usize {
+            _ = self;
             return 0;
         }
         pub fn getOperand(self: *const Loop, index: usize) ?*Inst {
+            _ = self;
+            _ = index;
             return null;
         }
     };
@@ -550,9 +570,12 @@ pub const Inst = struct {
         variable: *Module.Var,
 
         pub fn operandCount(self: *const VarPtr) usize {
+            _ = self;
             return 0;
         }
         pub fn getOperand(self: *const VarPtr, index: usize) ?*Inst {
+            _ = self;
+            _ = index;
             return null;
         }
     };
@@ -565,9 +588,12 @@ pub const Inst = struct {
         field_index: usize,
 
         pub fn operandCount(self: *const StructFieldPtr) usize {
+            _ = self;
             return 1;
         }
         pub fn getOperand(self: *const StructFieldPtr, index: usize) ?*Inst {
+            _ = self;
+            _ = index;
             var i = index;
 
             if (i < 1)
@@ -599,6 +625,7 @@ pub const Inst = struct {
         };
 
         pub fn operandCount(self: *const SwitchBr) usize {
+            _ = self;
             return 1;
         }
         pub fn getOperand(self: *const SwitchBr, index: usize) ?*Inst {
@@ -627,9 +654,12 @@ pub const Inst = struct {
         column: u32,
 
         pub fn operandCount(self: *const DbgStmt) usize {
+            _ = self;
             return 0;
         }
         pub fn getOperand(self: *const DbgStmt, index: usize) ?*Inst {
+            _ = self;
+            _ = index;
             return null;
         }
     };
@@ -730,8 +760,6 @@ const DumpTzir = struct {
                 .is_null_ptr,
                 .is_err,
                 .is_err_ptr,
-                .error_to_int,
-                .int_to_error,
                 .ptrtoint,
                 .floatcast,
                 .intcast,
@@ -865,8 +893,6 @@ const DumpTzir = struct {
                 .is_null_ptr,
                 .is_err,
                 .is_err_ptr,
-                .error_to_int,
-                .int_to_error,
                 .ptrtoint,
                 .floatcast,
                 .intcast,
