@@ -39,7 +39,6 @@ gpa: *Allocator,
 arena_state: std.heap.ArenaAllocator.State,
 bin_file: *link.File,
 c_object_table: std.AutoArrayHashMapUnmanaged(*CObject, void) = .{},
-c_object_cache_digest_set: std.AutoHashMapUnmanaged(Cache.BinDigest, void) = .{},
 stage1_lock: ?Cache.Lock = null,
 stage1_cache_manifest: *Cache.Manifest = undefined,
 
@@ -403,10 +402,10 @@ pub const AllErrors = struct {
             const source = try module_note.src_loc.file_scope.getSource(module.gpa);
             const byte_offset = try module_note.src_loc.byteOffset(module.gpa);
             const loc = std.zig.findLineColumn(source, byte_offset);
-            const file_path = try module_note.src_loc.file_scope.fullPath(&arena.allocator);
+            const sub_file_path = module_note.src_loc.file_scope.sub_file_path;
             note.* = .{
                 .src = .{
-                    .src_path = file_path,
+                    .src_path = try arena.allocator.dupe(u8, sub_file_path),
                     .msg = try arena.allocator.dupe(u8, module_note.msg),
                     .byte_offset = byte_offset,
                     .line = @intCast(u32, loc.line),
@@ -426,10 +425,10 @@ pub const AllErrors = struct {
         const source = try module_err_msg.src_loc.file_scope.getSource(module.gpa);
         const byte_offset = try module_err_msg.src_loc.byteOffset(module.gpa);
         const loc = std.zig.findLineColumn(source, byte_offset);
-        const file_path = try module_err_msg.src_loc.file_scope.fullPath(&arena.allocator);
+        const sub_file_path = module_err_msg.src_loc.file_scope.sub_file_path;
         try errors.append(.{
             .src = .{
-                .src_path = file_path,
+                .src_path = try arena.allocator.dupe(u8, sub_file_path),
                 .msg = try arena.allocator.dupe(u8, module_err_msg.msg),
                 .byte_offset = byte_offset,
                 .line = @intCast(u32, loc.line),
@@ -480,7 +479,7 @@ pub const AllErrors = struct {
 
                     note.* = .{
                         .src = .{
-                            .src_path = try file.fullPath(arena),
+                            .src_path = try arena.dupe(u8, file.sub_file_path),
                             .msg = try arena.dupe(u8, msg),
                             .byte_offset = byte_offset,
                             .line = @intCast(u32, loc.line),
@@ -506,7 +505,7 @@ pub const AllErrors = struct {
 
             try errors.append(.{
                 .src = .{
-                    .src_path = try file.fullPath(arena),
+                    .src_path = try arena.dupe(u8, file.sub_file_path),
                     .msg = try arena.dupe(u8, msg),
                     .byte_offset = byte_offset,
                     .line = @intCast(u32, loc.line),
@@ -880,24 +879,16 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             break :blk false;
         };
 
-        const darwin_can_use_system_linker_and_sdk =
+        const darwin_can_use_system_sdk =
             // comptime conditions
             ((build_options.have_llvm and comptime std.Target.current.isDarwin()) and
             // runtime conditions
             (use_lld and std.builtin.os.tag == .macos and options.target.isDarwin()));
 
-        const darwin_system_linker_hack = blk: {
-            if (darwin_can_use_system_linker_and_sdk) {
-                break :blk std.os.getenv("ZIG_SYSTEM_LINKER_HACK") != null;
-            } else {
-                break :blk false;
-            }
-        };
-
         const sysroot = blk: {
             if (options.sysroot) |sysroot| {
                 break :blk sysroot;
-            } else if (darwin_can_use_system_linker_and_sdk) {
+            } else if (darwin_can_use_system_sdk) {
                 // TODO Revisit this targeting versions lower than macOS 11 when LLVM 12 is out.
                 // See https://github.com/ziglang/zig/issues/6996
                 const at_least_big_sur = options.target.os.getVersionRange().semver.min.major >= 11;
@@ -915,8 +906,6 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             } else if (!use_lld) {
                 break :blk false;
             } else if (options.c_source_files.len == 0) {
-                break :blk false;
-            } else if (darwin_system_linker_hack) {
                 break :blk false;
             } else switch (options.output_mode) {
                 .Lib, .Obj => break :blk false,
@@ -1296,7 +1285,6 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .optimize_mode = options.optimize_mode,
             .use_lld = use_lld,
             .use_llvm = use_llvm,
-            .system_linker_hack = darwin_system_linker_hack,
             .link_libc = link_libc,
             .link_libcpp = link_libcpp,
             .link_libunwind = link_libunwind,
@@ -1590,7 +1578,6 @@ pub fn destroy(self: *Compilation) void {
         key.destroy(gpa);
     }
     self.c_object_table.deinit(gpa);
-    self.c_object_cache_digest_set.deinit(gpa);
 
     for (self.failed_c_objects.values()) |value| {
         value.destroy(gpa);
@@ -1627,7 +1614,6 @@ pub fn update(self: *Compilation) !void {
     defer tracy.end();
 
     self.clearMiscFailures();
-    self.c_object_cache_digest_set.clearRetainingCapacity();
 
     // For compiling C objects, we rely on the cache hash system to avoid duplicating work.
     // Add a Job for each C object.
@@ -2614,25 +2600,6 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: *std.P
     man.hash.add(comp.clang_preprocessor_mode);
 
     try man.hashCSource(c_object.src);
-
-    {
-        const is_collision = blk: {
-            const bin_digest = man.hash.peekBin();
-
-            const lock = comp.mutex.acquire();
-            defer lock.release();
-
-            const gop = try comp.c_object_cache_digest_set.getOrPut(comp.gpa, bin_digest);
-            break :blk gop.found_existing;
-        };
-        if (is_collision) {
-            return comp.failCObj(
-                c_object,
-                "the same source file was already added to the same compilation with the same flags",
-                .{},
-            );
-        }
-    }
 
     var arena_allocator = std.heap.ArenaAllocator.init(comp.gpa);
     defer arena_allocator.deinit();

@@ -25,21 +25,19 @@ usingnamespace @import("bind.zig");
 
 allocator: *Allocator,
 
-arch: ?std.Target.Cpu.Arch = null,
+target: ?std.Target = null,
 page_size: ?u16 = null,
 file: ?fs.File = null,
-out_path: ?[]const u8 = null,
+output: ?Output = null,
 
 // TODO these args will become obselete once Zld is coalesced with incremental
 // linker.
-syslibroot: ?[]const u8 = null,
 stack_size: u64 = 0,
 
 objects: std.ArrayListUnmanaged(*Object) = .{},
 archives: std.ArrayListUnmanaged(*Archive) = .{},
 dylibs: std.ArrayListUnmanaged(*Dylib) = .{},
 
-libsystem_dylib_index: ?u16 = null,
 next_dylib_ordinal: u16 = 1,
 
 load_commands: std.ArrayListUnmanaged(LoadCommand) = .{},
@@ -56,6 +54,7 @@ dylinker_cmd_index: ?u16 = null,
 data_in_code_cmd_index: ?u16 = null,
 function_starts_cmd_index: ?u16 = null,
 main_cmd_index: ?u16 = null,
+dylib_id_cmd_index: ?u16 = null,
 version_min_cmd_index: ?u16 = null,
 source_version_cmd_index: ?u16 = null,
 uuid_cmd_index: ?u16 = null,
@@ -119,6 +118,12 @@ stubs: std.ArrayListUnmanaged(*Symbol) = .{},
 got_entries: std.ArrayListUnmanaged(*Symbol) = .{},
 
 stub_helper_stubs_start_off: ?u64 = null,
+
+pub const Output = struct {
+    tag: enum { exe, dylib },
+    path: []const u8,
+    install_name: ?[]const u8 = null,
+};
 
 const TlvOffset = struct {
     source_addr: u64,
@@ -197,50 +202,30 @@ pub fn closeFiles(self: Zld) void {
 }
 
 const LinkArgs = struct {
+    syslibroot: ?[]const u8,
     libs: []const []const u8,
     rpaths: []const []const u8,
-    libc_stub_path: []const u8,
 };
 
-pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8, args: LinkArgs) !void {
+pub fn link(self: *Zld, files: []const []const u8, output: Output, args: LinkArgs) !void {
     if (files.len == 0) return error.NoInputFiles;
-    if (out_path.len == 0) return error.EmptyOutputPath;
+    if (output.path.len == 0) return error.EmptyOutputPath;
 
-    if (self.arch == null) {
-        // Try inferring the arch from the object files.
-        self.arch = blk: {
-            const file = try fs.cwd().openFile(files[0], .{});
-            defer file.close();
-            var reader = file.reader();
-            const header = try reader.readStruct(macho.mach_header_64);
-            const arch: std.Target.Cpu.Arch = switch (header.cputype) {
-                macho.CPU_TYPE_X86_64 => .x86_64,
-                macho.CPU_TYPE_ARM64 => .aarch64,
-                else => |value| {
-                    log.err("unsupported cpu architecture 0x{x}", .{value});
-                    return error.UnsupportedCpuArchitecture;
-                },
-            };
-            break :blk arch;
-        };
-    }
-
-    self.page_size = switch (self.arch.?) {
+    self.page_size = switch (self.target.?.cpu.arch) {
         .aarch64 => 0x4000,
         .x86_64 => 0x1000,
         else => unreachable,
     };
-    self.out_path = out_path;
-    self.file = try fs.cwd().createFile(out_path, .{
+    self.output = output;
+    self.file = try fs.cwd().createFile(self.output.?.path, .{
         .truncate = true,
         .read = true,
         .mode = if (std.Target.current.os.tag == .windows) 0 else 0o777,
     });
 
     try self.populateMetadata();
-    try self.parseInputFiles(files);
-    try self.parseLibs(args.libs);
-    try self.parseLibSystem(args.libc_stub_path);
+    try self.parseInputFiles(files, args.syslibroot);
+    try self.parseLibs(args.libs, args.syslibroot);
     try self.resolveSymbols();
     try self.resolveStubsAndGotEntries();
     try self.updateMetadata();
@@ -258,7 +243,7 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8, args: L
     try self.flush();
 }
 
-fn parseInputFiles(self: *Zld, files: []const []const u8) !void {
+fn parseInputFiles(self: *Zld, files: []const []const u8, syslibroot: ?[]const u8) !void {
     for (files) |file_name| {
         const full_path = full_path: {
             var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
@@ -266,21 +251,21 @@ fn parseInputFiles(self: *Zld, files: []const []const u8) !void {
             break :full_path try self.allocator.dupe(u8, path);
         };
 
-        if (try Object.createAndParseFromPath(self.allocator, self.arch.?, full_path)) |object| {
+        if (try Object.createAndParseFromPath(self.allocator, self.target.?.cpu.arch, full_path)) |object| {
             try self.objects.append(self.allocator, object);
             continue;
         }
 
-        if (try Archive.createAndParseFromPath(self.allocator, self.arch.?, full_path)) |archive| {
+        if (try Archive.createAndParseFromPath(self.allocator, self.target.?.cpu.arch, full_path)) |archive| {
             try self.archives.append(self.allocator, archive);
             continue;
         }
 
         if (try Dylib.createAndParseFromPath(
             self.allocator,
-            self.arch.?,
+            self.target.?.cpu.arch,
             full_path,
-            self.syslibroot,
+            .{ .syslibroot = syslibroot },
         )) |dylibs| {
             defer self.allocator.free(dylibs);
             try self.dylibs.appendSlice(self.allocator, dylibs);
@@ -291,56 +276,26 @@ fn parseInputFiles(self: *Zld, files: []const []const u8) !void {
     }
 }
 
-fn parseLibs(self: *Zld, libs: []const []const u8) !void {
+fn parseLibs(self: *Zld, libs: []const []const u8, syslibroot: ?[]const u8) !void {
     for (libs) |lib| {
         if (try Dylib.createAndParseFromPath(
             self.allocator,
-            self.arch.?,
+            self.target.?.cpu.arch,
             lib,
-            self.syslibroot,
+            .{ .syslibroot = syslibroot },
         )) |dylibs| {
             defer self.allocator.free(dylibs);
             try self.dylibs.appendSlice(self.allocator, dylibs);
             continue;
         }
 
-        if (try Archive.createAndParseFromPath(self.allocator, self.arch.?, lib)) |archive| {
+        if (try Archive.createAndParseFromPath(self.allocator, self.target.?.cpu.arch, lib)) |archive| {
             try self.archives.append(self.allocator, archive);
             continue;
         }
 
         log.warn("unknown filetype for a library: '{s}'", .{lib});
     }
-}
-
-fn parseLibSystem(self: *Zld, libc_stub_path: []const u8) !void {
-    const dylibs = (try Dylib.createAndParseFromPath(
-        self.allocator,
-        self.arch.?,
-        libc_stub_path,
-        self.syslibroot,
-    )) orelse return error.FailedToParseLibSystem;
-    defer self.allocator.free(dylibs);
-
-    assert(dylibs.len == 1); // More than one dylib output from parsing libSystem!
-    const dylib = dylibs[0];
-
-    self.libsystem_dylib_index = @intCast(u16, self.dylibs.items.len);
-    try self.dylibs.append(self.allocator, dylib);
-
-    // Add LC_LOAD_DYLIB load command.
-    dylib.ordinal = self.next_dylib_ordinal;
-    const dylib_id = dylib.id orelse unreachable;
-    var dylib_cmd = try createLoadDylibCommand(
-        self.allocator,
-        dylib_id.name,
-        dylib_id.timestamp,
-        dylib_id.current_version,
-        dylib_id.compatibility_version,
-    );
-    errdefer dylib_cmd.deinit(self.allocator);
-    try self.load_commands.append(self.allocator, .{ .Dylib = dylib_cmd });
-    self.next_dylib_ordinal += 1;
 }
 
 fn mapAndUpdateSections(
@@ -1022,7 +977,7 @@ fn allocateTextSegment(self: *Zld) !void {
     const stub_helper = &seg.sections.items[self.stub_helper_section_index.?];
     stubs.size += nstubs * stubs.reserved2;
 
-    const stub_size: u4 = switch (self.arch.?) {
+    const stub_size: u4 = switch (self.target.?.cpu.arch) {
         .x86_64 => 10,
         .aarch64 => 3 * @sizeOf(u32),
         else => unreachable,
@@ -1259,7 +1214,7 @@ fn writeStubHelperCommon(self: *Zld) !void {
     const data = &data_segment.sections.items[self.data_section_index.?];
 
     self.stub_helper_stubs_start_off = blk: {
-        switch (self.arch.?) {
+        switch (self.target.?.cpu.arch) {
             .x86_64 => {
                 const code_size = 15;
                 var code: [code_size]u8 = undefined;
@@ -1391,7 +1346,7 @@ fn writeLazySymbolPointer(self: *Zld, index: u32) !void {
     const data_segment = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
     const la_symbol_ptr = data_segment.sections.items[self.la_symbol_ptr_section_index.?];
 
-    const stub_size: u4 = switch (self.arch.?) {
+    const stub_size: u4 = switch (self.target.?.cpu.arch) {
         .x86_64 => 10,
         .aarch64 => 3 * @sizeOf(u32),
         else => unreachable,
@@ -1417,7 +1372,7 @@ fn writeStub(self: *Zld, index: u32) !void {
     log.debug("writing stub at 0x{x}", .{stub_off});
     var code = try self.allocator.alloc(u8, stubs.reserved2);
     defer self.allocator.free(code);
-    switch (self.arch.?) {
+    switch (self.target.?.cpu.arch) {
         .x86_64 => {
             assert(la_ptr_addr >= stub_addr + stubs.reserved2);
             const displacement = try math.cast(u32, la_ptr_addr - stub_addr - stubs.reserved2);
@@ -1480,7 +1435,7 @@ fn writeStubInStubHelper(self: *Zld, index: u32) !void {
     const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
     const stub_helper = text_segment.sections.items[self.stub_helper_section_index.?];
 
-    const stub_size: u4 = switch (self.arch.?) {
+    const stub_size: u4 = switch (self.target.?.cpu.arch) {
         .x86_64 => 10,
         .aarch64 => 3 * @sizeOf(u32),
         else => unreachable,
@@ -1488,7 +1443,7 @@ fn writeStubInStubHelper(self: *Zld, index: u32) !void {
     const stub_off = self.stub_helper_stubs_start_off.? + index * stub_size;
     var code = try self.allocator.alloc(u8, stub_size);
     defer self.allocator.free(code);
-    switch (self.arch.?) {
+    switch (self.target.?.cpu.arch) {
         .x86_64 => {
             const displacement = try math.cast(
                 i32,
@@ -1656,17 +1611,30 @@ fn resolveSymbols(self: *Zld) !void {
     }
     self.unresolved.clearRetainingCapacity();
 
+    // Put dyld_stub_binder as an unresolved special symbol.
+    {
+        const name = try self.allocator.dupe(u8, "dyld_stub_binder");
+        errdefer self.allocator.free(name);
+        const undef = try self.allocator.create(Symbol.Unresolved);
+        errdefer self.allocator.destroy(undef);
+        undef.* = .{
+            .base = .{
+                .@"type" = .unresolved,
+                .name = name,
+            },
+        };
+        try unresolved.append(&undef.base);
+    }
+
     var referenced = std.AutoHashMap(*Dylib, void).init(self.allocator);
     defer referenced.deinit();
 
     loop: while (unresolved.popOrNull()) |undef| {
         const proxy = self.imports.get(undef.name) orelse outer: {
             const proxy = inner: {
-                for (self.dylibs.items) |dylib, i| {
+                for (self.dylibs.items) |dylib| {
                     const proxy = (try dylib.createProxy(undef.name)) orelse continue;
-                    if (self.libsystem_dylib_index.? != @intCast(u16, i)) { // LibSystem gets load command seperately.
-                        try referenced.put(dylib, {});
-                    }
+                    try referenced.put(dylib, {});
                     break :inner proxy;
                 }
                 if (mem.eql(u8, undef.name, "___dso_handle")) {
@@ -1681,7 +1649,6 @@ fn resolveSymbols(self: *Zld) !void {
                             .@"type" = .proxy,
                             .name = name,
                         },
-                        .file = null,
                     };
                     break :inner &proxy.base;
                 }
@@ -1717,21 +1684,13 @@ fn resolveSymbols(self: *Zld) !void {
     if (self.unresolved.count() > 0) {
         for (self.unresolved.values()) |undef| {
             log.err("undefined reference to symbol '{s}'", .{undef.name});
-            log.err("    | referenced in {s}", .{
-                undef.cast(Symbol.Unresolved).?.file.name.?,
-            });
+            if (undef.cast(Symbol.Unresolved).?.file) |file| {
+                log.err("    | referenced in {s}", .{file.name.?});
+            }
         }
 
         return error.UndefinedSymbolReference;
     }
-
-    // Finally put dyld_stub_binder as an Import
-    const libsystem_dylib = self.dylibs.items[self.libsystem_dylib_index.?];
-    const proxy = (try libsystem_dylib.createProxy("dyld_stub_binder")) orelse {
-        log.err("undefined reference to symbol 'dyld_stub_binder'", .{});
-        return error.UndefinedSymbolReference;
-    };
-    try self.imports.putNoClobber(self.allocator, proxy.name, proxy);
 }
 
 fn resolveStubsAndGotEntries(self: *Zld) !void {
@@ -2028,7 +1987,7 @@ fn populateMetadata(self: *Zld) !void {
     if (self.text_section_index == null) {
         const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
         self.text_section_index = @intCast(u16, text_seg.sections.items.len);
-        const alignment: u2 = switch (self.arch.?) {
+        const alignment: u2 = switch (self.target.?.cpu.arch) {
             .x86_64 => 0,
             .aarch64 => 2,
             else => unreachable, // unhandled architecture type
@@ -2042,12 +2001,12 @@ fn populateMetadata(self: *Zld) !void {
     if (self.stubs_section_index == null) {
         const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
         self.stubs_section_index = @intCast(u16, text_seg.sections.items.len);
-        const alignment: u2 = switch (self.arch.?) {
+        const alignment: u2 = switch (self.target.?.cpu.arch) {
             .x86_64 => 0,
             .aarch64 => 2,
             else => unreachable, // unhandled architecture type
         };
-        const stub_size: u4 = switch (self.arch.?) {
+        const stub_size: u4 = switch (self.target.?.cpu.arch) {
             .x86_64 => 6,
             .aarch64 => 3 * @sizeOf(u32),
             else => unreachable, // unhandled architecture type
@@ -2062,12 +2021,12 @@ fn populateMetadata(self: *Zld) !void {
     if (self.stub_helper_section_index == null) {
         const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
         self.stub_helper_section_index = @intCast(u16, text_seg.sections.items.len);
-        const alignment: u2 = switch (self.arch.?) {
+        const alignment: u2 = switch (self.target.?.cpu.arch) {
             .x86_64 => 0,
             .aarch64 => 2,
             else => unreachable, // unhandled architecture type
         };
-        const stub_helper_size: u6 = switch (self.arch.?) {
+        const stub_helper_size: u6 = switch (self.target.?.cpu.arch) {
             .x86_64 => 15,
             .aarch64 => 6 * @sizeOf(u32),
             else => unreachable,
@@ -2216,7 +2175,7 @@ fn populateMetadata(self: *Zld) !void {
         try self.load_commands.append(self.allocator, .{ .Dylinker = dylinker_cmd });
     }
 
-    if (self.main_cmd_index == null) {
+    if (self.main_cmd_index == null and self.output.?.tag == .exe) {
         self.main_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.allocator, .{
             .Main = .{
@@ -2224,6 +2183,41 @@ fn populateMetadata(self: *Zld) !void {
                 .cmdsize = @sizeOf(macho.entry_point_command),
                 .entryoff = 0x0,
                 .stacksize = 0,
+            },
+        });
+    }
+
+    if (self.dylib_id_cmd_index == null and self.output.?.tag == .dylib) {
+        self.dylib_id_cmd_index = @intCast(u16, self.load_commands.items.len);
+        var dylib_cmd = try createLoadDylibCommand(
+            self.allocator,
+            self.output.?.install_name.?,
+            2,
+            0x10000, // TODO forward user-provided versions
+            0x10000,
+        );
+        errdefer dylib_cmd.deinit(self.allocator);
+        dylib_cmd.inner.cmd = macho.LC_ID_DYLIB;
+        try self.load_commands.append(self.allocator, .{ .Dylib = dylib_cmd });
+    }
+
+    if (self.version_min_cmd_index == null) {
+        self.version_min_cmd_index = @intCast(u16, self.load_commands.items.len);
+        const cmd: u32 = switch (self.target.?.os.tag) {
+            .macos => macho.LC_VERSION_MIN_MACOSX,
+            .ios => macho.LC_VERSION_MIN_IPHONEOS,
+            .tvos => macho.LC_VERSION_MIN_TVOS,
+            .watchos => macho.LC_VERSION_MIN_WATCHOS,
+            else => unreachable, // wrong OS
+        };
+        const ver = self.target.?.os.version_range.semver.min;
+        const version = ver.major << 16 | ver.minor << 8 | ver.patch;
+        try self.load_commands.append(self.allocator, .{
+            .VersionMin = .{
+                .cmd = cmd,
+                .cmdsize = @sizeOf(macho.version_min_command),
+                .version = version,
+                .sdk = version,
             },
         });
     }
@@ -2266,7 +2260,7 @@ fn addDataInCodeLC(self: *Zld) !void {
 }
 
 fn addCodeSignatureLC(self: *Zld) !void {
-    if (self.code_signature_cmd_index == null and self.arch.? == .aarch64) {
+    if (self.code_signature_cmd_index == null and self.target.?.cpu.arch == .aarch64) {
         self.code_signature_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.allocator, .{
             .LinkeditData = .{
@@ -2384,19 +2378,20 @@ fn flush(self: *Zld) !void {
         seg.inner.vmsize = mem.alignForwardGeneric(u64, seg.inner.filesize, self.page_size.?);
     }
 
-    if (self.arch.? == .aarch64) {
+    if (self.target.?.cpu.arch == .aarch64) {
         try self.writeCodeSignaturePadding();
     }
 
     try self.writeLoadCommands();
     try self.writeHeader();
 
-    if (self.arch.? == .aarch64) {
+    if (self.target.?.cpu.arch == .aarch64) {
         try self.writeCodeSignature();
     }
 
     if (comptime std.Target.current.isDarwin() and std.Target.current.cpu.arch == .aarch64) {
-        try fs.cwd().copyFile(self.out_path.?, fs.cwd(), self.out_path.?, .{});
+        const out_path = self.output.?.path;
+        try fs.cwd().copyFile(out_path, fs.cwd(), out_path, .{});
     }
 }
 
@@ -2421,6 +2416,8 @@ fn writeGotEntries(self: *Zld) !void {
 }
 
 fn setEntryPoint(self: *Zld) !void {
+    if (self.output.?.tag != .exe) return;
+
     // TODO we should respect the -entry flag passed in by the user to set a custom
     // entrypoint. For now, assume default of `_main`.
     const seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
@@ -2665,12 +2662,12 @@ fn populateLazyBindOffsetsInStubHelper(self: *Zld, buffer: []const u8) !void {
     }
     assert(self.stubs.items.len <= offsets.items.len);
 
-    const stub_size: u4 = switch (self.arch.?) {
+    const stub_size: u4 = switch (self.target.?.cpu.arch) {
         .x86_64 => 10,
         .aarch64 => 3 * @sizeOf(u32),
         else => unreachable,
     };
-    const off: u4 = switch (self.arch.?) {
+    const off: u4 = switch (self.target.?.cpu.arch) {
         .x86_64 => 1,
         .aarch64 => 2 * @sizeOf(u32),
         else => unreachable,
@@ -2689,17 +2686,40 @@ fn writeExportInfo(self: *Zld) !void {
     defer trie.deinit();
 
     const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+    const base_address = text_segment.inner.vmaddr;
 
-    // TODO export items for dylibs
-    const sym = self.globals.get("_main") orelse return error.MissingMainEntrypoint;
-    const reg = sym.cast(Symbol.Regular) orelse unreachable;
-    assert(reg.address >= text_segment.inner.vmaddr);
+    // TODO handle macho.EXPORT_SYMBOL_FLAGS_REEXPORT and macho.EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER.
+    log.debug("writing export trie", .{});
 
-    try trie.put(.{
-        .name = sym.name,
-        .vmaddr_offset = reg.address - text_segment.inner.vmaddr,
-        .export_flags = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR,
-    });
+    const Sorter = struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return mem.lessThan(u8, a, b);
+        }
+    };
+
+    var sorted_globals = std.ArrayList([]const u8).init(self.allocator);
+    defer sorted_globals.deinit();
+
+    for (self.globals.values()) |sym| {
+        const reg = sym.cast(Symbol.Regular) orelse continue;
+        if (reg.linkage != .global) continue;
+        try sorted_globals.append(sym.name);
+    }
+
+    std.sort.sort([]const u8, sorted_globals.items, {}, Sorter.lessThan);
+
+    for (sorted_globals.items) |sym_name| {
+        const sym = self.globals.get(sym_name) orelse unreachable;
+        const reg = sym.cast(Symbol.Regular) orelse unreachable;
+
+        log.debug("  | putting '{s}' defined at 0x{x}", .{ reg.base.name, reg.address });
+
+        try trie.put(.{
+            .name = sym.name,
+            .vmaddr_offset = reg.address - base_address,
+            .export_flags = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR,
+        });
+    }
 
     try trie.finalize();
 
@@ -3004,7 +3024,7 @@ fn writeStringTable(self: *Zld) !void {
 
     try self.file.?.pwriteAll(self.strtab.items, symtab.stroff);
 
-    if (symtab.strsize > self.strtab.items.len and self.arch.? == .x86_64) {
+    if (symtab.strsize > self.strtab.items.len and self.target.?.cpu.arch == .x86_64) {
         // This is the last section, so we need to pad it out.
         try self.file.?.pwriteAll(&[_]u8{0}, seg.inner.fileoff + seg.inner.filesize - 1);
     }
@@ -3052,7 +3072,7 @@ fn writeCodeSignaturePadding(self: *Zld) !void {
     const code_sig_cmd = &self.load_commands.items[self.code_signature_cmd_index.?].LinkeditData;
     const fileoff = seg.inner.fileoff + seg.inner.filesize;
     const needed_size = CodeSignature.calcCodeSignaturePaddingSize(
-        self.out_path.?,
+        self.output.?.path,
         fileoff,
         self.page_size.?,
     );
@@ -3078,7 +3098,7 @@ fn writeCodeSignature(self: *Zld) !void {
     defer code_sig.deinit();
     try code_sig.calcAdhocSignature(
         self.file.?,
-        self.out_path.?,
+        self.output.?.path,
         text_seg.inner,
         code_sig_cmd,
         .Exe,
@@ -3120,7 +3140,7 @@ fn writeHeader(self: *Zld) !void {
         cpu_subtype: macho.cpu_subtype_t,
     };
 
-    const cpu_info: CpuInfo = switch (self.arch.?) {
+    const cpu_info: CpuInfo = switch (self.target.?.cpu.arch) {
         .aarch64 => .{
             .cpu_type = macho.CPU_TYPE_ARM64,
             .cpu_subtype = macho.CPU_SUBTYPE_ARM_ALL,
@@ -3133,8 +3153,22 @@ fn writeHeader(self: *Zld) !void {
     };
     header.cputype = cpu_info.cpu_type;
     header.cpusubtype = cpu_info.cpu_subtype;
-    header.filetype = macho.MH_EXECUTE;
-    header.flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK | macho.MH_PIE | macho.MH_TWOLEVEL;
+
+    switch (self.output.?.tag) {
+        .exe => {
+            header.filetype = macho.MH_EXECUTE;
+            header.flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK | macho.MH_PIE | macho.MH_TWOLEVEL;
+        },
+        .dylib => {
+            header.filetype = macho.MH_DYLIB;
+            header.flags = macho.MH_NOUNDEFS |
+                macho.MH_DYLDLINK |
+                macho.MH_PIE |
+                macho.MH_TWOLEVEL |
+                macho.MH_NO_REEXPORTED_DYLIBS;
+        },
+    }
+
     header.reserved = 0;
 
     if (self.tlv_section_index) |_|
@@ -3172,34 +3206,4 @@ fn getString(self: *const Zld, str_off: u32) []const u8 {
 pub fn parseName(name: *const [16]u8) []const u8 {
     const len = mem.indexOfScalar(u8, name, @as(u8, 0)) orelse name.len;
     return name[0..len];
-}
-
-fn printSymbols(self: *Zld) void {
-    log.debug("globals", .{});
-    for (self.globals.values()) |value| {
-        const sym = value.cast(Symbol.Regular) orelse unreachable;
-        log.debug("    | {s} @ {*}", .{ sym.base.name, value });
-        log.debug("      => alias of {*}", .{sym.base.alias});
-        log.debug("      => linkage {s}", .{sym.linkage});
-        log.debug("      => defined in {s}", .{sym.file.name.?});
-    }
-    for (self.objects.items) |object| {
-        log.debug("locals in {s}", .{object.name.?});
-        for (object.symbols.items) |sym| {
-            log.debug("    | {s} @ {*}", .{ sym.name, sym });
-            log.debug("      => alias of {*}", .{sym.alias});
-            if (sym.cast(Symbol.Regular)) |reg| {
-                log.debug("      => linkage {s}", .{reg.linkage});
-            } else {
-                log.debug("      => unresolved", .{});
-            }
-        }
-    }
-    log.debug("proxies", .{});
-    for (self.imports.values()) |value| {
-        const sym = value.cast(Symbol.Proxy) orelse unreachable;
-        log.debug("    | {s} @ {*}", .{ sym.base.name, value });
-        log.debug("      => alias of {*}", .{sym.base.alias});
-        log.debug("      => defined in libSystem.B.dylib", .{});
-    }
 }
