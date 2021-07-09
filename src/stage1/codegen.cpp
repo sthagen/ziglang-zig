@@ -908,14 +908,14 @@ static LLVMValueRef get_handle_value(CodeGen *g, LLVMValueRef ptr, ZigType *type
 
 static void ir_assert_impl(bool ok, IrInstGen *source_instruction, const char *file, unsigned int line) {
     if (ok) return;
-    src_assert_impl(ok, source_instruction->base.source_node, file, line);
+    src_assert_impl(ok, source_instruction->source_node, file, line);
 }
 
 #define ir_assert(OK, SOURCE_INSTRUCTION) ir_assert_impl((OK), (SOURCE_INSTRUCTION), __FILE__, __LINE__)
 
 static bool ir_want_fast_math(CodeGen *g, IrInstGen *instruction) {
     // TODO memoize
-    Scope *scope = instruction->base.scope;
+    Scope *scope = instruction->scope;
     while (scope) {
         if (scope->id == ScopeIdBlock) {
             ScopeBlock *block_scope = (ScopeBlock *)scope;
@@ -951,7 +951,7 @@ static bool ir_want_runtime_safety_scope(CodeGen *g, Scope *scope) {
 }
 
 static bool ir_want_runtime_safety(CodeGen *g, IrInstGen *instruction) {
-    return ir_want_runtime_safety_scope(g, instruction->base.scope);
+    return ir_want_runtime_safety_scope(g, instruction->scope);
 }
 
 static Buf *panic_msg_buf(PanicMsgId msg_id) {
@@ -1078,7 +1078,7 @@ static void gen_assertion_scope(CodeGen *g, PanicMsgId msg_id, Scope *source_sco
 }
 
 static void gen_assertion(CodeGen *g, PanicMsgId msg_id, IrInstGen *source_instruction) {
-    return gen_assertion_scope(g, msg_id, source_instruction->base.scope);
+    return gen_assertion_scope(g, msg_id, source_instruction->scope);
 }
 
 static LLVMValueRef gen_wasm_memory_size(CodeGen *g) {
@@ -1923,7 +1923,7 @@ static bool iter_function_params_c_abi(CodeGen *g, ZigType *fn_type, FnWalk *fn_
                 return false;
             IrInstGen *arg = fn_walk->data.call.inst->args[src_i];
             ty = arg->value->type;
-            source_node = arg->base.source_node;
+            source_node = arg->source_node;
             val = ir_llvm_value(g, arg);
             break;
         }
@@ -2451,7 +2451,7 @@ static LLVMValueRef ir_render_save_err_ret_addr(CodeGen *g, Stage1Air *executabl
 
     LLVMValueRef return_err_fn = get_return_err_fn(g);
     bool is_llvm_alloca;
-    LLVMValueRef my_err_trace_val = get_cur_err_ret_trace_val(g, save_err_ret_addr_instruction->base.base.scope,
+    LLVMValueRef my_err_trace_val = get_cur_err_ret_trace_val(g, save_err_ret_addr_instruction->base.scope,
             &is_llvm_alloca);
     ZigLLVMBuildCall(g->builder, return_err_fn, &my_err_trace_val, 1,
             get_llvm_cc(g, CallingConventionUnspecified), ZigLLVM_CallAttrAuto, "");
@@ -2622,7 +2622,7 @@ static void gen_async_return(CodeGen *g, IrInstGenReturn *instruction) {
                     frame_index_trace_arg(g, ret_type) + 1, "");
             LLVMValueRef dest_trace_ptr = LLVMBuildLoad(g->builder, awaiter_trace_ptr_ptr, "");
             bool is_llvm_alloca;
-            LLVMValueRef my_err_trace_val = get_cur_err_ret_trace_val(g, instruction->base.base.scope, &is_llvm_alloca);
+            LLVMValueRef my_err_trace_val = get_cur_err_ret_trace_val(g, instruction->base.scope, &is_llvm_alloca);
             LLVMValueRef args[] = { dest_trace_ptr, my_err_trace_val };
             ZigLLVMBuildCall(g->builder, get_merge_err_ret_traces_fn_val(g), args, 2,
                     get_llvm_cc(g, CallingConventionUnspecified), ZigLLVM_CallAttrAuto, "");
@@ -3778,6 +3778,12 @@ static bool value_is_all_undef(CodeGen *g, ZigValue *const_val) {
         case ConstValSpecialStatic:
             if (const_val->type->id == ZigTypeIdStruct) {
                 for (size_t i = 0; i < const_val->type->data.structure.src_field_count; i += 1) {
+                    TypeStructField *field = const_val->type->data.structure.fields[i];
+                    if (field->is_comptime) {
+                        // Comptime fields are part of the type, may be uninitialized,
+                        // and should not be inspected.
+                        continue;
+                    }
                     if (!value_is_all_undef(g, const_val->data.x_struct.fields[i]))
                         return false;
                 }
@@ -3900,7 +3906,7 @@ static LLVMValueRef ir_render_store_ptr(CodeGen *g, Stage1Air *executable, IrIns
         codegen_report_errors_and_exit(g);
     if (!ptr_type_has_bits)
         return nullptr;
-    if (instruction->ptr->base.ref_count == 0) {
+    if (instruction->ptr->ref_count == 0) {
         // In this case, this StorePtr instruction should be elided. Something happened like this:
         //     var t = true;
         //     const x = if (t) Num.Two else unreachable;
@@ -4365,7 +4371,7 @@ static LLVMValueRef ir_render_call(CodeGen *g, Stage1Air *executable, IrInstGenC
                 LLVMValueRef err_ret_trace_ptr_ptr = LLVMBuildStructGEP(g->builder, frame_result_loc,
                         frame_index_trace_arg(g, src_return_type) + 1, "");
                 bool is_llvm_alloca;
-                LLVMValueRef my_err_ret_trace_val = get_cur_err_ret_trace_val(g, instruction->base.base.scope,
+                LLVMValueRef my_err_ret_trace_val = get_cur_err_ret_trace_val(g, instruction->base.scope,
                         &is_llvm_alloca);
                 LLVMBuildStore(g->builder, my_err_ret_trace_val, err_ret_trace_ptr_ptr);
             }
@@ -4424,7 +4430,7 @@ static LLVMValueRef ir_render_call(CodeGen *g, Stage1Air *executable, IrInstGenC
                 gen_init_stack_trace(g, trace_field_ptr, addrs_field_ptr);
 
                 bool is_llvm_alloca;
-                gen_param_values.append(get_cur_err_ret_trace_val(g, instruction->base.base.scope, &is_llvm_alloca));
+                gen_param_values.append(get_cur_err_ret_trace_val(g, instruction->base.scope, &is_llvm_alloca));
             }
         }
     } else {
@@ -4433,7 +4439,7 @@ static LLVMValueRef ir_render_call(CodeGen *g, Stage1Air *executable, IrInstGenC
         }
         if (prefix_arg_err_ret_stack) {
             bool is_llvm_alloca;
-            gen_param_values.append(get_cur_err_ret_trace_val(g, instruction->base.base.scope, &is_llvm_alloca));
+            gen_param_values.append(get_cur_err_ret_trace_val(g, instruction->base.scope, &is_llvm_alloca));
         }
     }
     FnWalk fn_walk = {};
@@ -4567,7 +4573,7 @@ static LLVMValueRef ir_render_call(CodeGen *g, Stage1Air *executable, IrInstGenC
 
             LLVMPositionBuilderAtEnd(g->builder, call_bb);
             gen_assert_resume_id(g, &instruction->base, ResumeIdReturn, PanicMsgIdResumedAnAwaitingFn, nullptr);
-            render_async_var_decls(g, instruction->base.base.scope);
+            render_async_var_decls(g, instruction->base.scope);
 
             if (!type_has_bits(g, src_return_type))
                 return nullptr;
@@ -4795,7 +4801,7 @@ static size_t find_asm_index(CodeGen *g, AstNode *node, AsmToken *tok, Buf *src_
 }
 
 static LLVMValueRef ir_render_asm_gen(CodeGen *g, Stage1Air *executable, IrInstGenAsm *instruction) {
-    AstNode *asm_node = instruction->base.base.source_node;
+    AstNode *asm_node = instruction->base.source_node;
     assert(asm_node->type == NodeTypeAsmExpr);
     AstNodeAsmExpr *asm_expr = &asm_node->data.asm_expr;
 
@@ -5463,7 +5469,7 @@ static LLVMValueRef ir_render_error_return_trace(CodeGen *g, Stage1Air *executab
         IrInstGenErrorReturnTrace *instruction)
 {
     bool is_llvm_alloca;
-    LLVMValueRef cur_err_ret_trace_val = get_cur_err_ret_trace_val(g, instruction->base.base.scope, &is_llvm_alloca);
+    LLVMValueRef cur_err_ret_trace_val = get_cur_err_ret_trace_val(g, instruction->base.scope, &is_llvm_alloca);
     if (cur_err_ret_trace_val == nullptr) {
         return LLVMConstNull(get_llvm_type(g, ptr_to_stack_trace_type(g)));
     }
@@ -5692,7 +5698,7 @@ static LLVMValueRef ir_render_memset(CodeGen *g, Stage1Air *executable, IrInstGe
     bool val_is_undef = value_is_all_undef(g, instruction->byte->value);
     LLVMValueRef fill_char;
     if (val_is_undef) {
-        if (ir_want_runtime_safety_scope(g, instruction->base.base.scope)) {
+        if (ir_want_runtime_safety_scope(g, instruction->base.scope)) {
             fill_char = LLVMConstInt(LLVMInt8Type(), 0xaa, false);
         } else {
             return nullptr;
@@ -6179,7 +6185,7 @@ static LLVMValueRef ir_render_unwrap_err_payload(CodeGen *g, Stage1Air *executab
         LLVMBuildCondBr(g->builder, cond_val, ok_block, err_block);
 
         LLVMPositionBuilderAtEnd(g->builder, err_block);
-        gen_safety_crash_for_err(g, err_val, instruction->base.base.scope);
+        gen_safety_crash_for_err(g, err_val, instruction->base.scope);
 
         LLVMPositionBuilderAtEnd(g->builder, ok_block);
     }
@@ -6306,7 +6312,7 @@ static LLVMValueRef ir_render_union_tag(CodeGen *g, Stage1Air *executable, IrIns
 
 static LLVMValueRef ir_render_panic(CodeGen *g, Stage1Air *executable, IrInstGenPanic *instruction) {
     bool is_llvm_alloca;
-    LLVMValueRef err_ret_trace_val = get_cur_err_ret_trace_val(g, instruction->base.base.scope, &is_llvm_alloca);
+    LLVMValueRef err_ret_trace_val = get_cur_err_ret_trace_val(g, instruction->base.scope, &is_llvm_alloca);
     gen_panic(g, ir_llvm_value(g, instruction->msg), err_ret_trace_val, is_llvm_alloca);
     return nullptr;
 }
@@ -6619,7 +6625,7 @@ static LLVMValueRef ir_render_suspend_finish(CodeGen *g, Stage1Air *executable,
     if (ir_want_runtime_safety(g, &instruction->base)) {
         LLVMBuildStore(g->builder, g->cur_bad_not_suspended_index, g->cur_async_resume_index_ptr);
     }
-    render_async_var_decls(g, instruction->base.base.scope);
+    render_async_var_decls(g, instruction->base.scope);
     return nullptr;
 }
 
@@ -6649,7 +6655,7 @@ static LLVMValueRef gen_await_early_return(CodeGen *g, IrInstGen *source_instr,
                 frame_index_trace_arg(g, result_type), "");
         LLVMValueRef src_trace_ptr = LLVMBuildLoad(g->builder, their_trace_ptr_ptr, "");
         bool is_llvm_alloca;
-        LLVMValueRef dest_trace_ptr = get_cur_err_ret_trace_val(g, source_instr->base.scope, &is_llvm_alloca);
+        LLVMValueRef dest_trace_ptr = get_cur_err_ret_trace_val(g, source_instr->scope, &is_llvm_alloca);
         LLVMValueRef args[] = { dest_trace_ptr, src_trace_ptr };
         ZigLLVMBuildCall(g->builder, get_merge_err_ret_traces_fn_val(g), args, 2,
                 get_llvm_cc(g, CallingConventionUnspecified), ZigLLVM_CallAttrAuto, "");
@@ -6701,7 +6707,7 @@ static LLVMValueRef ir_render_await(CodeGen *g, Stage1Air *executable, IrInstGen
     // supply the error return trace pointer
     if (codegen_fn_has_err_ret_tracing_arg(g, result_type)) {
         bool is_llvm_alloca;
-        LLVMValueRef my_err_ret_trace_val = get_cur_err_ret_trace_val(g, instruction->base.base.scope, &is_llvm_alloca);
+        LLVMValueRef my_err_ret_trace_val = get_cur_err_ret_trace_val(g, instruction->base.scope, &is_llvm_alloca);
         assert(my_err_ret_trace_val != nullptr);
         LLVMValueRef err_ret_trace_ptr_ptr = LLVMBuildStructGEP(g->builder, target_frame_ptr,
                 frame_index_trace_arg(g, result_type) + 1, "");
@@ -6810,8 +6816,8 @@ static LLVMValueRef ir_render_vector_extract_elem(CodeGen *g, Stage1Air *executa
 }
 
 static void set_debug_location(CodeGen *g, IrInstGen *instruction) {
-    AstNode *source_node = instruction->base.source_node;
-    Scope *scope = instruction->base.scope;
+    AstNode *source_node = instruction->source_node;
+    Scope *scope = instruction->scope;
 
     assert(source_node);
     assert(scope);
@@ -7020,9 +7026,9 @@ static void ir_render(CodeGen *g, ZigFn *fn_entry) {
         LLVMPositionBuilderAtEnd(g->builder, current_block->llvm_block);
         for (size_t instr_i = 0; instr_i < current_block->instruction_list.length; instr_i += 1) {
             IrInstGen *instruction = current_block->instruction_list.at(instr_i);
-            if (instruction->base.ref_count == 0 && !ir_inst_gen_has_side_effects(instruction))
+            if (instruction->ref_count == 0 && !ir_inst_gen_has_side_effects(instruction))
                 continue;
-            if (get_scope_typeof(instruction->base.scope) != nullptr)
+            if (get_scope_typeof(instruction->scope) != nullptr)
                 continue;
 
             if (!g->strip_debug_symbols) {
@@ -7285,7 +7291,7 @@ static LLVMValueRef pack_const_int(CodeGen *g, LLVMTypeRef big_int_type_ref, Zig
                 size_t used_bits = 0;
                 for (size_t i = 0; i < type_entry->data.structure.src_field_count; i += 1) {
                     TypeStructField *field = type_entry->data.structure.fields[i];
-                    if (field->gen_index == SIZE_MAX) {
+                    if (field->gen_index == SIZE_MAX || field->is_comptime) {
                         continue;
                     }
                     LLVMValueRef child_val = pack_const_int(g, big_int_type_ref, const_val->data.x_struct.fields[i]);
@@ -7573,7 +7579,7 @@ static LLVMValueRef gen_const_val(CodeGen *g, ZigValue *const_val, const char *n
                     size_t src_field_index = 0;
                     while (src_field_index < src_field_count) {
                         TypeStructField *type_struct_field = type_entry->data.structure.fields[src_field_index];
-                        if (type_struct_field->gen_index == SIZE_MAX) {
+                        if (type_struct_field->gen_index == SIZE_MAX || type_struct_field->is_comptime) {
                             src_field_index += 1;
                             continue;
                         }
@@ -7642,7 +7648,7 @@ static LLVMValueRef gen_const_val(CodeGen *g, ZigValue *const_val, const char *n
                 } else {
                     for (uint32_t i = 0; i < src_field_count; i += 1) {
                         TypeStructField *type_struct_field = type_entry->data.structure.fields[i];
-                        if (type_struct_field->gen_index == SIZE_MAX) {
+                        if (type_struct_field->gen_index == SIZE_MAX || type_struct_field->is_comptime) {
                             continue;
                         }
                         ZigValue *field_val = const_val->data.x_struct.fields[i];
@@ -8270,7 +8276,7 @@ static void do_code_gen(CodeGen *g) {
                     zig_unreachable();
                 if (!type_has_bits(g, child_type))
                     continue;
-                if (instruction->base.base.ref_count == 0)
+                if (instruction->base.ref_count == 0)
                     continue;
                 if (instruction->base.value->special != ConstValSpecialRuntime) {
                     if (const_ptr_pointee(nullptr, g, instruction->base.value, nullptr)->special !=
@@ -8448,7 +8454,7 @@ static void do_code_gen(CodeGen *g) {
 
                 gen_init_stack_trace(g, trace_field_ptr, addrs_field_ptr);
             }
-            render_async_var_decls(g, entry_block->instruction_list.at(0)->base.scope);
+            render_async_var_decls(g, entry_block->instruction_list.at(0)->scope);
         } else {
             // create debug variable declarations for parameters
             // rely on the first variables in the variable_list being parameters.

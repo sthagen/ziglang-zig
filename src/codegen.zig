@@ -142,40 +142,52 @@ pub fn generateSymbol(
                 ),
             };
         },
-        .Pointer => {
-            // TODO populate .debug_info for the pointer
-            if (typed_value.val.castTag(.decl_ref)) |payload| {
-                const decl = payload.data;
-                if (decl.analysis != .complete) return error.AnalysisFail;
-                // TODO handle the dependency of this symbol on the decl's vaddr.
-                // If the decl changes vaddr, then this symbol needs to get regenerated.
-                const vaddr = bin_file.getDeclVAddr(decl);
-                const endian = bin_file.options.target.cpu.arch.endian();
-                switch (bin_file.options.target.cpu.arch.ptrBitWidth()) {
-                    16 => {
-                        try code.resize(2);
-                        mem.writeInt(u16, code.items[0..2], @intCast(u16, vaddr), endian);
-                    },
-                    32 => {
-                        try code.resize(4);
-                        mem.writeInt(u32, code.items[0..4], @intCast(u32, vaddr), endian);
-                    },
-                    64 => {
-                        try code.resize(8);
-                        mem.writeInt(u64, code.items[0..8], vaddr, endian);
-                    },
-                    else => unreachable,
+        .Pointer => switch (typed_value.ty.ptrSize()) {
+            .Slice => {
+                return Result{
+                    .fail = try ErrorMsg.create(
+                        bin_file.allocator,
+                        src_loc,
+                        "TODO implement generateSymbol for slice {}",
+                        .{typed_value.val},
+                    ),
+                };
+            },
+            else => {
+                // TODO populate .debug_info for the pointer
+                if (typed_value.val.castTag(.decl_ref)) |payload| {
+                    const decl = payload.data;
+                    if (decl.analysis != .complete) return error.AnalysisFail;
+                    // TODO handle the dependency of this symbol on the decl's vaddr.
+                    // If the decl changes vaddr, then this symbol needs to get regenerated.
+                    const vaddr = bin_file.getDeclVAddr(decl);
+                    const endian = bin_file.options.target.cpu.arch.endian();
+                    switch (bin_file.options.target.cpu.arch.ptrBitWidth()) {
+                        16 => {
+                            try code.resize(2);
+                            mem.writeInt(u16, code.items[0..2], @intCast(u16, vaddr), endian);
+                        },
+                        32 => {
+                            try code.resize(4);
+                            mem.writeInt(u32, code.items[0..4], @intCast(u32, vaddr), endian);
+                        },
+                        64 => {
+                            try code.resize(8);
+                            mem.writeInt(u64, code.items[0..8], vaddr, endian);
+                        },
+                        else => unreachable,
+                    }
+                    return Result{ .appended = {} };
                 }
-                return Result{ .appended = {} };
-            }
-            return Result{
-                .fail = try ErrorMsg.create(
-                    bin_file.allocator,
-                    src_loc,
-                    "TODO implement generateSymbol for pointer {}",
-                    .{typed_value.val},
-                ),
-            };
+                return Result{
+                    .fail = try ErrorMsg.create(
+                        bin_file.allocator,
+                        src_loc,
+                        "TODO implement generateSymbol for pointer {}",
+                        .{typed_value.val},
+                    ),
+                };
+            },
         },
         .Int => {
             // TODO populate .debug_info for the integer
@@ -847,6 +859,8 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 .is_non_null_ptr => return self.genIsNonNullPtr(inst.castTag(.is_non_null_ptr).?),
                 .is_null => return self.genIsNull(inst.castTag(.is_null).?),
                 .is_null_ptr => return self.genIsNullPtr(inst.castTag(.is_null_ptr).?),
+                .is_non_err => return self.genIsNonErr(inst.castTag(.is_non_err).?),
+                .is_non_err_ptr => return self.genIsNonErrPtr(inst.castTag(.is_non_err_ptr).?),
                 .is_err => return self.genIsErr(inst.castTag(.is_err).?),
                 .is_err_ptr => return self.genIsErrPtr(inst.castTag(.is_err_ptr).?),
                 .load => return self.genLoad(inst.castTag(.load).?),
@@ -2244,10 +2258,10 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                                     try self.register_manager.getReg(reg, null);
                                     try self.genSetReg(arg.src, arg.ty, reg, arg_mcv);
                                 },
-                                .stack_offset => {
+                                .stack_offset => |off| {
                                     // Here we need to emit instructions like this:
                                     // mov     qword ptr [rsp + stack_offset], x
-                                    return self.fail(inst.base.src, "TODO implement calling with parameters in memory", .{});
+                                    try self.genSetStack(arg.src, arg.ty, off, arg_mcv);
                                 },
                                 .ptr_stack_offset => {
                                     return self.fail(inst.base.src, "TODO implement calling with MCValue.ptr_stack_offset arg", .{});
@@ -2542,9 +2556,60 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 } else {
                     return self.fail(inst.base.src, "TODO implement calling runtime known function pointer", .{});
                 }
-            } else {
-                unreachable;
-            }
+            } else if (self.bin_file.cast(link.File.Plan9)) |p9| {
+                switch (arch) {
+                    .x86_64 => {
+                        for (info.args) |mc_arg, arg_i| {
+                            const arg = inst.args[arg_i];
+                            const arg_mcv = try self.resolveInst(inst.args[arg_i]);
+                            // Here we do not use setRegOrMem even though the logic is similar, because
+                            // the function call will move the stack pointer, so the offsets are different.
+                            switch (mc_arg) {
+                                .none => continue,
+                                .register => |reg| {
+                                    try self.register_manager.getReg(reg, null);
+                                    try self.genSetReg(arg.src, arg.ty, reg, arg_mcv);
+                                },
+                                .stack_offset => {
+                                    // Here we need to emit instructions like this:
+                                    // mov     qword ptr [rsp + stack_offset], x
+                                    return self.fail(inst.base.src, "TODO implement calling with parameters in memory", .{});
+                                },
+                                .ptr_stack_offset => {
+                                    return self.fail(inst.base.src, "TODO implement calling with MCValue.ptr_stack_offset arg", .{});
+                                },
+                                .ptr_embedded_in_code => {
+                                    return self.fail(inst.base.src, "TODO implement calling with MCValue.ptr_embedded_in_code arg", .{});
+                                },
+                                .undef => unreachable,
+                                .immediate => unreachable,
+                                .unreach => unreachable,
+                                .dead => unreachable,
+                                .embedded_in_code => unreachable,
+                                .memory => unreachable,
+                                .compare_flags_signed => unreachable,
+                                .compare_flags_unsigned => unreachable,
+                            }
+                        }
+                        if (inst.func.value()) |func_value| {
+                            if (func_value.castTag(.function)) |func_payload| {
+                                const ptr_bits = self.target.cpu.arch.ptrBitWidth();
+                                const ptr_bytes: u64 = @divExact(ptr_bits, 8);
+                                const got_addr = p9.bases.data;
+                                const got_index = func_payload.data.owner_decl.link.plan9.got_index.?;
+                                // ff 14 25 xx xx xx xx    call [addr]
+                                try self.code.ensureCapacity(self.code.items.len + 7);
+                                self.code.appendSliceAssumeCapacity(&[3]u8{ 0xff, 0x14, 0x25 });
+                                const fn_got_addr = got_addr + got_index * ptr_bytes;
+                                mem.writeIntLittle(u32, self.code.addManyAsArrayAssumeCapacity(4), @intCast(u32, fn_got_addr));
+                            } else return self.fail(inst.base.src, "TODO implement calling extern fn on plan9", .{});
+                        } else {
+                            return self.fail(inst.base.src, "TODO implement calling runtime known function pointer", .{});
+                        }
+                    },
+                    else => return self.fail(inst.base.src, "TODO implement call on plan9 for {}", .{self.target.cpu.arch}),
+                }
+            } else unreachable;
 
             switch (info.return_value) {
                 .register => |reg| {
@@ -2960,6 +3025,16 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             return self.fail(inst.base.src, "TODO load the operand and call genIsErr", .{});
         }
 
+        fn genIsNonErr(self: *Self, inst: *ir.Inst.UnOp) !MCValue {
+            switch (arch) {
+                else => return self.fail(inst.base.src, "TODO implement is_non_err for {}", .{self.target.cpu.arch}),
+            }
+        }
+
+        fn genIsNonErrPtr(self: *Self, inst: *ir.Inst.UnOp) !MCValue {
+            return self.fail(inst.base.src, "TODO load the operand and call genIsNonErr", .{});
+        }
+
         fn genLoop(self: *Self, inst: *ir.Inst.Loop) !MCValue {
             // A loop is a setup to be able to jump back to the beginning.
             const start_index = self.code.items.len;
@@ -3255,10 +3330,44 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         try self.genSetReg(inst.base.src, arg.ty, reg, arg_mcv);
                     }
 
-                    if (mem.eql(u8, inst.asm_source, "syscall")) {
-                        try self.code.appendSlice(&[_]u8{ 0x0f, 0x05 });
-                    } else if (inst.asm_source.len != 0) {
-                        return self.fail(inst.base.src, "TODO implement support for more x86 assembly instructions", .{});
+                    {
+                        var iter = std.mem.tokenize(inst.asm_source, "\n\r");
+                        while (iter.next()) |ins| {
+                            if (mem.eql(u8, ins, "syscall")) {
+                                try self.code.appendSlice(&[_]u8{ 0x0f, 0x05 });
+                            } else if (mem.indexOf(u8, ins, "push")) |_| {
+                                const arg = ins[4..];
+                                if (mem.indexOf(u8, arg, "$")) |l| {
+                                    const n = std.fmt.parseInt(u8, ins[4 + l + 1 ..], 10) catch return self.fail(inst.base.src, "TODO implement more inline asm int parsing", .{});
+                                    try self.code.appendSlice(&.{ 0x6a, n });
+                                } else if (mem.indexOf(u8, arg, "%%")) |l| {
+                                    const reg_name = ins[4 + l + 2 ..];
+                                    const reg = parseRegName(reg_name) orelse
+                                        return self.fail(inst.base.src, "unrecognized register: '{s}'", .{reg_name});
+                                    const low_id: u8 = reg.low_id();
+                                    if (reg.isExtended()) {
+                                        try self.code.appendSlice(&.{ 0x41, 0b1010000 | low_id });
+                                    } else {
+                                        try self.code.append(0b1010000 | low_id);
+                                    }
+                                } else return self.fail(inst.base.src, "TODO more push operands", .{});
+                            } else if (mem.indexOf(u8, ins, "pop")) |_| {
+                                const arg = ins[3..];
+                                if (mem.indexOf(u8, arg, "%%")) |l| {
+                                    const reg_name = ins[3 + l + 2 ..];
+                                    const reg = parseRegName(reg_name) orelse
+                                        return self.fail(inst.base.src, "unrecognized register: '{s}'", .{reg_name});
+                                    const low_id: u8 = reg.low_id();
+                                    if (reg.isExtended()) {
+                                        try self.code.appendSlice(&.{ 0x41, 0b1011000 | low_id });
+                                    } else {
+                                        try self.code.append(0b1011000 | low_id);
+                                    }
+                                } else return self.fail(inst.base.src, "TODO more pop operands", .{});
+                            } else {
+                                return self.fail(inst.base.src, "TODO implement support for more x86 assembly instructions", .{});
+                            }
+                        }
                     }
 
                     if (inst.output_constraint) |output| {
@@ -3444,9 +3553,11 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             },
                         }
                     },
-                    .embedded_in_code => |code_offset| {
-                        _ = code_offset;
-                        return self.fail(src, "TODO implement set stack variable from embedded_in_code", .{});
+                    .embedded_in_code => {
+                        // TODO this and `.stack_offset` below need to get improved to support types greater than
+                        // register size, and do general memcpy
+                        const reg = try self.copyToTmpRegister(src, ty, mcv);
+                        return self.genSetStack(src, ty, stack_offset, MCValue{ .register = reg });
                     },
                     .register => |reg| {
                         try self.genX8664ModRMRegToStack(src, ty, stack_offset, reg, 0x89);
@@ -3456,6 +3567,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         return self.fail(src, "TODO implement set stack variable from memory vaddr", .{});
                     },
                     .stack_offset => |off| {
+                        // TODO this and `.embedded_in_code` above need to get improved to support types greater than
+                        // register size, and do general memcpy
+
                         if (stack_offset == off)
                             return; // Copy stack variable to itself; nothing to do.
 
@@ -4161,33 +4275,52 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             const ptr_bits = self.target.cpu.arch.ptrBitWidth();
             const ptr_bytes: u64 = @divExact(ptr_bits, 8);
             switch (typed_value.ty.zigTypeTag()) {
-                .Pointer => {
-                    if (typed_value.val.castTag(.decl_ref)) |payload| {
-                        if (self.bin_file.cast(link.File.Elf)) |elf_file| {
-                            const decl = payload.data;
-                            const got = &elf_file.program_headers.items[elf_file.phdr_got_index.?];
-                            const got_addr = got.p_vaddr + decl.link.elf.offset_table_index * ptr_bytes;
-                            return MCValue{ .memory = got_addr };
-                        } else if (self.bin_file.cast(link.File.MachO)) |macho_file| {
-                            const decl = payload.data;
-                            const got_addr = blk: {
-                                const seg = macho_file.load_commands.items[macho_file.data_const_segment_cmd_index.?].Segment;
-                                const got = seg.sections.items[macho_file.got_section_index.?];
-                                break :blk got.addr + decl.link.macho.offset_table_index * ptr_bytes;
-                            };
-                            return MCValue{ .memory = got_addr };
-                        } else if (self.bin_file.cast(link.File.Coff)) |coff_file| {
-                            const decl = payload.data;
-                            const got_addr = coff_file.offset_table_virtual_address + decl.link.coff.offset_table_index * ptr_bytes;
-                            return MCValue{ .memory = got_addr };
-                        } else {
-                            return self.fail(src, "TODO codegen non-ELF const Decl pointer", .{});
+                .Pointer => switch (typed_value.ty.ptrSize()) {
+                    .Slice => {
+                        var buf: Type.Payload.ElemType = undefined;
+                        const ptr_type = typed_value.ty.slicePtrFieldType(&buf);
+                        const ptr_mcv = try self.genTypedValue(src, .{ .ty = ptr_type, .val = typed_value.val });
+                        const slice_len = typed_value.val.sliceLen();
+                        // Codegen can't handle some kinds of indirection. If the wrong union field is accessed here it may mean
+                        // the Sema code needs to use anonymous Decls or alloca instructions to store data.
+                        const ptr_imm = ptr_mcv.memory;
+                        _ = slice_len;
+                        _ = ptr_imm;
+                        // We need more general support for const data being stored in memory to make this work.
+                        return self.fail(src, "TODO codegen for const slices", .{});
+                    },
+                    else => {
+                        if (typed_value.val.castTag(.decl_ref)) |payload| {
+                            if (self.bin_file.cast(link.File.Elf)) |elf_file| {
+                                const decl = payload.data;
+                                const got = &elf_file.program_headers.items[elf_file.phdr_got_index.?];
+                                const got_addr = got.p_vaddr + decl.link.elf.offset_table_index * ptr_bytes;
+                                return MCValue{ .memory = got_addr };
+                            } else if (self.bin_file.cast(link.File.MachO)) |macho_file| {
+                                const decl = payload.data;
+                                const got_addr = blk: {
+                                    const seg = macho_file.load_commands.items[macho_file.data_const_segment_cmd_index.?].Segment;
+                                    const got = seg.sections.items[macho_file.got_section_index.?];
+                                    break :blk got.addr + decl.link.macho.offset_table_index * ptr_bytes;
+                                };
+                                return MCValue{ .memory = got_addr };
+                            } else if (self.bin_file.cast(link.File.Coff)) |coff_file| {
+                                const decl = payload.data;
+                                const got_addr = coff_file.offset_table_virtual_address + decl.link.coff.offset_table_index * ptr_bytes;
+                                return MCValue{ .memory = got_addr };
+                            } else if (self.bin_file.cast(link.File.Plan9)) |p9| {
+                                const decl = payload.data;
+                                const got_addr = p9.bases.data + decl.link.plan9.got_index.? * ptr_bytes;
+                                return MCValue{ .memory = got_addr };
+                            } else {
+                                return self.fail(src, "TODO codegen non-ELF const Decl pointer", .{});
+                            }
                         }
-                    }
-                    if (typed_value.val.tag() == .int_u64) {
-                        return MCValue{ .immediate = typed_value.val.toUnsignedInt() };
-                    }
-                    return self.fail(src, "TODO codegen more kinds of const pointers", .{});
+                        if (typed_value.val.tag() == .int_u64) {
+                            return MCValue{ .immediate = typed_value.val.toUnsignedInt() };
+                        }
+                        return self.fail(src, "TODO codegen more kinds of const pointers", .{});
+                    },
                 },
                 .Int => {
                     const info = typed_value.ty.intInfo(self.target.*);
@@ -4264,27 +4397,39 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             var next_stack_offset: u32 = 0;
 
                             for (param_types) |ty, i| {
-                                switch (ty.zigTypeTag()) {
-                                    .Bool, .Int => {
-                                        if (!ty.hasCodeGenBits()) {
-                                            assert(cc != .C);
-                                            result.args[i] = .{ .none = {} };
-                                        } else {
-                                            const param_size = @intCast(u32, ty.abiSize(self.target.*));
-                                            if (next_int_reg >= c_abi_int_param_regs.len) {
-                                                result.args[i] = .{ .stack_offset = next_stack_offset };
-                                                next_stack_offset += param_size;
-                                            } else {
-                                                const aliased_reg = registerAlias(
-                                                    c_abi_int_param_regs[next_int_reg],
-                                                    param_size,
-                                                );
-                                                result.args[i] = .{ .register = aliased_reg };
-                                                next_int_reg += 1;
-                                            }
-                                        }
-                                    },
-                                    else => return self.fail(src, "TODO implement function parameters of type {s}", .{@tagName(ty.zigTypeTag())}),
+                                if (!ty.hasCodeGenBits()) {
+                                    assert(cc != .C);
+                                    result.args[i] = .{ .none = {} };
+                                    continue;
+                                }
+                                const param_size = @intCast(u32, ty.abiSize(self.target.*));
+                                const pass_in_reg = switch (ty.zigTypeTag()) {
+                                    .Bool => true,
+                                    .Int => param_size <= 8,
+                                    .Pointer => ty.ptrSize() != .Slice,
+                                    .Optional => ty.isPtrLikeOptional(),
+                                    else => false,
+                                };
+                                if (pass_in_reg) {
+                                    if (next_int_reg >= c_abi_int_param_regs.len) {
+                                        result.args[i] = .{ .stack_offset = next_stack_offset };
+                                        next_stack_offset += param_size;
+                                    } else {
+                                        const aliased_reg = registerAlias(
+                                            c_abi_int_param_regs[next_int_reg],
+                                            param_size,
+                                        );
+                                        result.args[i] = .{ .register = aliased_reg };
+                                        next_int_reg += 1;
+                                    }
+                                } else {
+                                    // For simplicity of codegen, slices and other types are always pushed onto the stack.
+                                    // TODO: look into optimizing this by passing things as registers sometimes,
+                                    // such as ptr and len of slices as separate registers.
+                                    // TODO: also we need to honor the C ABI for relevant types rather than passing on
+                                    // the stack here.
+                                    result.args[i] = .{ .stack_offset = next_stack_offset };
+                                    next_stack_offset += param_size;
                                 }
                             }
                             result.stack_byte_count = next_stack_offset;

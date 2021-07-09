@@ -90,11 +90,11 @@ pub fn getSelfDebugInfo() !*DebugInfo {
 }
 
 pub fn detectTTYConfig() TTY.Config {
-    var bytes: [128]u8 = undefined;
-    const allocator = &std.heap.FixedBufferAllocator.init(bytes[0..]).allocator;
-    if (process.getEnvVarOwned(allocator, "ZIG_DEBUG_COLOR")) |_| {
+    if (process.hasEnvVarConstant("ZIG_DEBUG_COLOR")) {
         return .escape_codes;
-    } else |_| {
+    } else if (process.hasEnvVarConstant("NO_COLOR")) {
+        return .no_color;
+    } else {
         const stderr_file = io.getStdErr();
         if (stderr_file.supportsAnsiEscapeCodes()) {
             return .escape_codes;
@@ -273,8 +273,8 @@ pub fn panicExtra(trace: ?*const builtin.StackTrace, first_trace_addr: ?usize, c
                 if (builtin.single_threaded) {
                     stderr.print("panic: ", .{}) catch os.abort();
                 } else {
-                    const current_thread_id = std.Thread.getCurrentThreadId();
-                    stderr.print("thread {d} panic: ", .{current_thread_id}) catch os.abort();
+                    const current_thread_id = std.Thread.getCurrentId();
+                    stderr.print("thread {} panic: ", .{current_thread_id}) catch os.abort();
                 }
                 stderr.print(format ++ "\n", args) catch os.abort();
                 if (trace) |t| {

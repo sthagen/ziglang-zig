@@ -65,6 +65,14 @@ comptime {
                 }
             } else if (native_os == .uefi) {
                 if (!@hasDecl(root, "EfiMain")) @export(EfiMain, .{ .name = "EfiMain" });
+            } else if (native_os == .wasi) {
+                const wasm_start_sym = switch (builtin.wasi_exec_model) {
+                    .reactor => "_initialize",
+                    .command => "_start",
+                };
+                if (!@hasDecl(root, wasm_start_sym)) {
+                    @export(wasi_start, .{ .name = wasm_start_sym });
+                }
             } else if (native_arch.isWasm() and native_os == .freestanding) {
                 if (!@hasDecl(root, start_sym_name)) @export(wasm_freestanding_start, .{ .name = start_sym_name });
             } else if (native_os != .other and native_os != .freestanding) {
@@ -87,30 +95,47 @@ fn _start2() callconv(.Naked) noreturn {
 }
 
 fn exit2(code: usize) noreturn {
-    switch (builtin.stage2_arch) {
-        .x86_64 => {
-            asm volatile ("syscall"
-                :
-                : [number] "{rax}" (231),
-                  [arg1] "{rdi}" (code)
-                : "rcx", "r11", "memory"
-            );
+    switch (builtin.stage2_os) {
+        .linux => switch (builtin.stage2_arch) {
+            .x86_64 => {
+                asm volatile ("syscall"
+                    :
+                    : [number] "{rax}" (231),
+                      [arg1] "{rdi}" (code)
+                    : "rcx", "r11", "memory"
+                );
+            },
+            .arm => {
+                asm volatile ("svc #0"
+                    :
+                    : [number] "{r7}" (1),
+                      [arg1] "{r0}" (code)
+                    : "memory"
+                );
+            },
+            .aarch64 => {
+                asm volatile ("svc #0"
+                    :
+                    : [number] "{x8}" (93),
+                      [arg1] "{x0}" (code)
+                    : "memory", "cc"
+                );
+            },
+            else => @compileError("TODO"),
         },
-        .arm => {
-            asm volatile ("svc #0"
-                :
-                : [number] "{r7}" (1),
-                  [arg1] "{r0}" (code)
-                : "memory"
-            );
-        },
-        .aarch64 => {
-            asm volatile ("svc #0"
-                :
-                : [number] "{x8}" (93),
-                  [arg1] "{x0}" (code)
-                : "memory", "cc"
-            );
+        // exits(0)
+        .plan9 => switch (builtin.stage2_arch) {
+            .x86_64 => {
+                asm volatile (
+                    \\push $0
+                    \\push $0
+                    \\syscall
+                    :
+                    : [syscall_number] "{rbp}" (8)
+                    : "rcx", "r11", "memory"
+                );
+            },
+            else => @compileError("TODO"),
         },
         else => @compileError("TODO"),
     }
@@ -136,9 +161,18 @@ fn _DllMainCRTStartup(
 }
 
 fn wasm_freestanding_start() callconv(.C) void {
-    // This is marked inline because for some reason LLVM in release mode fails to inline it,
-    // and we want fewer call frames in stack traces.
+    // This is marked inline because for some reason LLVM in
+    // release mode fails to inline it, and we want fewer call frames in stack traces.
     _ = @call(.{ .modifier = .always_inline }, callMain, .{});
+}
+
+fn wasi_start() callconv(.C) void {
+    // The function call is marked inline because for some reason LLVM in
+    // release mode fails to inline it, and we want fewer call frames in stack traces.
+    switch (builtin.wasi_exec_model) {
+        .reactor => _ = @call(.{ .modifier = .always_inline }, callMain, .{}),
+        .command => std.os.wasi.proc_exit(@call(.{ .modifier = .always_inline }, callMain, .{})),
+    }
 }
 
 fn EfiMain(handle: uefi.Handle, system_table: *uefi.tables.SystemTable) callconv(.C) usize {
@@ -164,12 +198,6 @@ fn EfiMain(handle: uefi.Handle, system_table: *uefi.tables.SystemTable) callconv
 }
 
 fn _start() callconv(.Naked) noreturn {
-    if (native_os == .wasi) {
-        // This is marked inline because for some reason LLVM in release mode fails to inline it,
-        // and we want fewer call frames in stack traces.
-        std.os.wasi.proc_exit(@call(.{ .modifier = .always_inline }, callMain, .{}));
-    }
-
     switch (native_arch) {
         .x86_64 => {
             argc_argv_ptr = asm volatile (

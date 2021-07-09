@@ -60,11 +60,19 @@ pub const Target = struct {
             opencl,
             glsl450,
             vulkan,
+            plan9,
             other,
 
             pub fn isDarwin(tag: Tag) bool {
                 return switch (tag) {
                     .ios, .macos, .watchos, .tvos => true,
+                    else => false,
+                };
+            }
+
+            pub fn isBSD(tag: Tag) bool {
+                return tag.isDarwin() or switch (tag) {
+                    .kfreebsd, .freebsd, .openbsd, .netbsd, .dragonfly => true,
                     else => false,
                 };
             }
@@ -255,6 +263,7 @@ pub const Target = struct {
                     .opencl, // TODO: OpenCL versions
                     .glsl450, // TODO: GLSL versions
                     .vulkan,
+                    .plan9,
                     .other,
                     => return .{ .none = {} },
 
@@ -413,6 +422,7 @@ pub const Target = struct {
                 .opencl,
                 .glsl450,
                 .vulkan,
+                .plan9,
                 .other,
                 => false,
             };
@@ -508,6 +518,7 @@ pub const Target = struct {
                 .opencl, // TODO: SPIR-V ABIs with Linkage capability
                 .glsl450,
                 .vulkan,
+                .plan9, // TODO specify abi
                 => return .none,
             }
         }
@@ -547,6 +558,7 @@ pub const Target = struct {
         spirv,
         hex,
         raw,
+        plan9,
     };
 
     pub const SubSystem = enum {
@@ -783,6 +795,13 @@ pub const Target = struct {
             pub fn isARM(arch: Arch) bool {
                 return switch (arch) {
                     .arm, .armeb => true,
+                    else => false,
+                };
+            }
+
+            pub fn isAARCH64(arch: Arch) bool {
+                return switch (arch) {
+                    .aarch64, .aarch64_be, .aarch64_32 => true,
                     else => false,
                 };
             }
@@ -1345,6 +1364,8 @@ pub const Target = struct {
         if (cpu_arch.isSPIRV()) {
             return .spirv;
         }
+        if (os_tag == .plan9)
+            return .plan9;
         return .elf;
     }
 
@@ -1365,10 +1386,7 @@ pub const Target = struct {
     }
 
     pub fn isAndroid(self: Target) bool {
-        return switch (self.abi) {
-            .android => true,
-            else => false,
-        };
+        return self.abi == .android;
     }
 
     pub fn isWasm(self: Target) bool {
@@ -1377,6 +1395,10 @@ pub const Target = struct {
 
     pub fn isDarwin(self: Target) bool {
         return self.os.tag.isDarwin();
+    }
+
+    pub fn isBSD(self: Target) bool {
+        return self.os.tag.isBSD();
     }
 
     pub fn isGnuLibC_os_tag_abi(os_tag: Os.Tag, abi: Abi) bool {
@@ -1417,6 +1439,7 @@ pub const Target = struct {
             .opencl,
             .glsl450,
             .vulkan,
+            .plan9,
             .other,
             => return false,
             else => return true,
@@ -1601,6 +1624,7 @@ pub const Target = struct {
             .glsl450,
             .vulkan,
             .other,
+            .plan9,
             => return result,
 
             // TODO revisit when multi-arch for Haiku is available

@@ -1,7 +1,7 @@
 //! Zig Intermediate Representation. Astgen.zig converts AST nodes to these
-//! untyped IR instructions. Next, Sema.zig processes these into TZIR.
+//! untyped IR instructions. Next, Sema.zig processes these into AIR.
 //! The minimum amount of information needed to represent a list of ZIR instructions.
-//! Once this structure is completed, it can be used to generate TZIR, followed by
+//! Once this structure is completed, it can be used to generate AIR, followed by
 //! machine code, without any memory access into the AST tree token list, node list,
 //! or source bytes. Exceptions include:
 //!  * Compile errors, which may need to reach into these data structures to
@@ -139,9 +139,15 @@ pub fn renderAsTextToFile(
     if (imports_index != 0) {
         try fs_file.writeAll("Imports:\n");
         const imports_len = scope_file.zir.extra[imports_index];
-        for (scope_file.zir.extra[imports_index + 1 ..][0..imports_len]) |str_index| {
-            const import_path = scope_file.zir.nullTerminatedString(str_index);
-            try fs_file.writer().print("  {s}\n", .{import_path});
+        for (scope_file.zir.extra[imports_index + 1 ..][0..imports_len]) |import_inst| {
+            const inst_data = writer.code.instructions.items(.data)[import_inst].str_tok;
+            const src = inst_data.src();
+            const import_path = inst_data.get(writer.code);
+            try fs_file.writer().print("  @import(\"{}\") ", .{
+                std.zig.fmtEscapes(import_path),
+            });
+            try writer.writeSrc(fs_file.writer(), src);
+            try fs_file.writer().writeAll("\n");
         }
     }
 }
@@ -392,26 +398,20 @@ pub const Inst = struct {
         /// Return a boolean false if an optional is null. `x != null`
         /// Uses the `un_node` field.
         is_non_null,
-        /// Return a boolean true if an optional is null. `x == null`
-        /// Uses the `un_node` field.
-        is_null,
         /// Return a boolean false if an optional is null. `x.* != null`
         /// Uses the `un_node` field.
         is_non_null_ptr,
-        /// Return a boolean true if an optional is null. `x.* == null`
+        /// Return a boolean false if value is an error
         /// Uses the `un_node` field.
-        is_null_ptr,
-        /// Return a boolean true if value is an error
+        is_non_err,
+        /// Return a boolean false if dereferenced pointer is an error
         /// Uses the `un_node` field.
-        is_err,
-        /// Return a boolean true if dereferenced pointer is an error
-        /// Uses the `un_node` field.
-        is_err_ptr,
+        is_non_err_ptr,
         /// A labeled block of code that loops forever. At the end of the body will have either
         /// a `repeat` instruction or a `repeat_inline` instruction.
         /// Uses the `pl_node` field. The AST node is either a for loop or while loop.
-        /// This ZIR instruction is needed because TZIR does not (yet?) match ZIR, and Sema
-        /// needs to emit more than 1 TZIR block for this instruction.
+        /// This ZIR instruction is needed because AIR does not (yet?) match ZIR, and Sema
+        /// needs to emit more than 1 AIR block for this instruction.
         /// The payload is `Block`.
         loop,
         /// Sends runtime control flow back to the beginning of the current block.
@@ -460,6 +460,19 @@ pub const Inst = struct {
         /// Uses the `un_tok` union field.
         /// The operand needs to get coerced to the function's return type.
         ret_coerce,
+        /// Sends control flow back to the function's callee.
+        /// The return operand is `error.foo` where `foo` is given by the string.
+        /// If the current function has an inferred error set, the error given by the
+        /// name is added to it.
+        /// Uses the `str_tok` union field.
+        ret_err_value,
+        /// A string name is provided which is an anonymous error set value.
+        /// If the current function has an inferred error set, the error given by the
+        /// name is added to it.
+        /// Results in the error code. Note that control flow is not diverted with
+        /// this instruction; a following 'ret' instruction will do the diversion.
+        /// Uses the `str_tok` union field.
+        ret_err_value_code,
         /// Create a pointer type that does not have a sentinel, alignment, or bit range specified.
         /// Uses the `ptr_type_simple` union field.
         ptr_type_simple,
@@ -1027,11 +1040,9 @@ pub const Inst = struct {
                 .float128,
                 .int_type,
                 .is_non_null,
-                .is_null,
                 .is_non_null_ptr,
-                .is_null_ptr,
-                .is_err,
-                .is_err_ptr,
+                .is_non_err,
+                .is_non_err_ptr,
                 .mod_rem,
                 .mul,
                 .mulwrap,
@@ -1187,6 +1198,7 @@ pub const Inst = struct {
                 .@"resume",
                 .@"await",
                 .await_nosuspend,
+                .ret_err_value_code,
                 .extended,
                 => false,
 
@@ -1197,6 +1209,7 @@ pub const Inst = struct {
                 .compile_error,
                 .ret_node,
                 .ret_coerce,
+                .ret_err_value,
                 .@"unreachable",
                 .repeat,
                 .repeat_inline,
@@ -1285,11 +1298,9 @@ pub const Inst = struct {
                 .float128 = .pl_node,
                 .int_type = .int_type,
                 .is_non_null = .un_node,
-                .is_null = .un_node,
                 .is_non_null_ptr = .un_node,
-                .is_null_ptr = .un_node,
-                .is_err = .un_node,
-                .is_err_ptr = .un_node,
+                .is_non_err = .un_node,
+                .is_non_err_ptr = .un_node,
                 .loop = .pl_node,
                 .repeat = .node,
                 .repeat_inline = .node,
@@ -1301,6 +1312,8 @@ pub const Inst = struct {
                 .ref = .un_tok,
                 .ret_node = .un_node,
                 .ret_coerce = .un_tok,
+                .ret_err_value = .str_tok,
+                .ret_err_value_code = .str_tok,
                 .ptr_type_simple = .ptr_type_simple,
                 .ptr_type = .ptr_type,
                 .slice_start = .pl_node,
@@ -2767,9 +2780,10 @@ pub const Inst = struct {
         };
     };
 
-    /// Trailing: for each `imports_len` there is a string table index.
+    /// Trailing: for each `imports_len` there is an instruction index
+    /// to an import instruction.
     pub const Imports = struct {
-        imports_len: u32,
+        imports_len: Zir.Inst.Index,
     };
 };
 
@@ -2833,11 +2847,9 @@ const Writer = struct {
             .err_union_code,
             .err_union_code_ptr,
             .is_non_null,
-            .is_null,
             .is_non_null_ptr,
-            .is_null_ptr,
-            .is_err,
-            .is_err_ptr,
+            .is_non_err,
+            .is_non_err_ptr,
             .typeof,
             .typeof_elem,
             .struct_init_empty,
@@ -3070,6 +3082,8 @@ const Writer = struct {
             .decl_val,
             .import,
             .arg,
+            .ret_err_value,
+            .ret_err_value_code,
             => try self.writeStrTok(stream, inst),
 
             .func => try self.writeFunc(stream, inst, false),

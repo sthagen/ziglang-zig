@@ -344,6 +344,82 @@ pub fn main() void {
       </p>
       {#see_also|Values|@import|Errors|Root Source File|Source Encoding#}
       {#header_close#}
+      {#header_open|Zig Test#}
+      <p>
+      <code>zig test</code> is a tool that can be used to quickly build and run Zig code
+      to make sure behavior meets expectations. {#syntax#}@import("builtin").is_test{#endsyntax#}
+      is available for code to detect whether the current build is a test build.
+      </p>
+      {#code_begin|test|detect_test#}
+const std = @import("std");
+const builtin = @import("builtin");
+const expect = std.testing.expect;
+
+test "builtin.is_test" {
+    try expect(builtin.is_test);
+}
+      {#code_end#}
+      <p>
+      Zig has lazy top level declaration analysis, which means that if a function is not called,
+      or otherwise used, it is not analyzed. This means that there may be an undiscovered
+      compile error in a function because it is never called.
+      </p>
+      {#code_begin|test|unused_fn#}
+fn unused() i32 {
+    return "wrong return type";
+}
+test "unused function" { }
+      {#code_end#}
+      <p>
+      Note that, while in {#link|Debug#} and {#link|ReleaseSafe#} modes, {#link|unreachable#} emits a
+      call to {#link|@panic#}, in {#link|ReleaseFast#} and {#link|ReleaseSmall#} modes, it is really
+      undefined behavior. The implementation of {#syntax#}std.debug.assert{#endsyntax#} is as
+      simple as:
+      </p>
+      {#code_begin|syntax#}
+pub fn assert(ok: bool) void {
+    if (!ok) unreachable;
+}
+      {#code_end#}
+      <p>
+      This means that when testing in ReleaseFast or ReleaseSmall mode, {#syntax#}assert{#endsyntax#}
+      is not sufficient to check the result of a computation:
+      </p>
+      {#code_begin|syntax#}
+const std = @import("std");
+const assert = std.debug.assert;
+
+test "assert in release fast mode" {
+    assert(false);
+}
+      {#code_end#}
+      <p>
+      When compiling this test in {#link|ReleaseFast#} mode, it invokes unchecked
+      {#link|Undefined Behavior#}. Since that could do anything, this documentation
+      cannot show you the output.
+      </p>
+      <p>
+      Better practice for checking the output when testing is to use {#syntax#}std.testing.expect{#endsyntax#}:
+      </p>
+      {#code_begin|test_err|test "expect in release fast mode"... FAIL (TestUnexpectedResult)#}
+      {#code_release_fast#}
+const std = @import("std");
+const expect = std.testing.expect;
+
+test "expect in release fast mode" {
+    try expect(false);
+}
+      {#code_end#}
+      <p>See the rest of the {#syntax#}std.testing{#endsyntax#} namespace for more available functions.</p>
+      <p>
+      <code>zig test</code> has a few command line parameters which affect the compilation. See
+      <code>zig --help</code> for a full list. The most interesting one is <code>--test-filter [text]</code>.
+      This makes the test build only include tests whose name contains the supplied filter text.
+      Again, thanks to lazy analysis, this can allow you to narrow a build to only a few functions in
+      isolation.
+      </p>
+      {#header_close#}
+
       {#header_open|Comments#}
       {#code_begin|test|comments#}
 const expect = @import("std").testing.expect;
@@ -923,21 +999,21 @@ fn foo() i32 {
         It is also possible to have local variables with static lifetime by using containers inside functions.
       </p>
       {#code_begin|test|static_local_variable#}
-  const std = @import("std");
-  const expect = std.testing.expect;
-  
-  test "static local variable" {
-      try expect(foo() == 1235);
-      try expect(foo() == 1236);
-  }
-  
-  fn foo() i32 {
-      const S = struct {
-          var x: i32 = 1234;
-      };
-      S.x += 1;
-      return S.x;
-  }
+const std = @import("std");
+const expect = std.testing.expect;
+
+test "static local variable" {
+    try expect(foo() == 1235);
+    try expect(foo() == 1236);
+}
+
+fn foo() i32 {
+    const S = struct {
+        var x: i32 = 1234;
+    };
+    S.x += 1;
+    return S.x;
+}
       {#code_end#}
       <p>
       The {#syntax#}extern{#endsyntax#} keyword or {#link|@extern#} builtin function can be used to link against a variable that is exported
@@ -958,14 +1034,14 @@ const assert = std.debug.assert;
 threadlocal var x: i32 = 1234;
 
 test "thread local storage" {
-    const thread1 = try std.Thread.spawn(testTls, {});
-    const thread2 = try std.Thread.spawn(testTls, {});
-    testTls({});
-    thread1.wait();
-    thread2.wait();
+    const thread1 = try std.Thread.spawn(.{}, testTls, .{});
+    const thread2 = try std.Thread.spawn(.{}, testTls, .{});
+    testTls();
+    thread1.join();
+    thread2.join();
 }
 
-fn testTls(_: void) void {
+fn testTls() void {
     assert(x == 1234);
     x += 1;
     assert(x == 1235);
@@ -3025,7 +3101,7 @@ test "@tagName" {
       </p>
       {#code_begin|obj_err|parameter of type 'Foo' not allowed in function with calling convention 'C'#}
 const Foo = enum { a, b, c };
-export fn entry(foo: Foo) void { }
+export fn entry(foo: Foo) void { _ = foo; }
       {#code_end#}
       <p>
       For a C-ABI-compatible enum, provide an explicit tag type to
@@ -3346,7 +3422,7 @@ test "call foo" {
       <p>
       Blocks are used to limit the scope of variable declarations:
       </p>
-      {#code_begin|test_err|undeclared identifier#}
+      {#code_begin|test_err|unused local variable#}
 test "access variable after block scope" {
     {
         var x: i32 = 1;
@@ -3377,7 +3453,7 @@ test "labeled break from labeled block expression" {
 
       {#header_open|Shadowing#}
       <p>It is never allowed for an identifier to "hide" another one by using the same name:</p>
-      {#code_begin|test_err|redefinition#}
+      {#code_begin|test_err|local shadows declaration#}
 const pi = 3.14;
 
 test "inside test block" {
@@ -4228,8 +4304,8 @@ test "type of unreachable" {
     comptime {
         // The type of unreachable is noreturn.
 
-        // However this assertion will still fail because
-        // evaluating unreachable at compile-time is a compile error.
+        // However this assertion will still fail to compile because
+        // unreachable expressions are compile errors.
 
         assert(@TypeOf(unreachable) == noreturn);
     }
@@ -5257,6 +5333,7 @@ test "float widening" {
 // Compile time coercion of float to int
 test "implicit cast to comptime_int" {
     var f: f32 = 54.0 / 5;
+    _ = f;
 }
       {#code_end#}
       {#header_close#}
@@ -5817,6 +5894,7 @@ fn foo(condition: bool) void {
         if (condition) f32 else u64,
         1234,
         5678);
+    _ = result;
 }
       {#code_end#}
       <p>
@@ -6313,7 +6391,7 @@ pub fn printValue(self: *Writer, value: anytype) !void {
       <p>
       And now, what happens if we give too many arguments to {#syntax#}printf{#endsyntax#}?
       </p>
-      {#code_begin|test_err|Unused argument in "here is a string: '{s}' here is a number: {}#}
+      {#code_begin|test_err|Unused argument in 'here is a string: '{s}' here is a number: {}#}
 const print = @import("std").debug.print;
 
 const a_number: i32 = 1234;
@@ -8853,6 +8931,7 @@ pub fn main() void {
 comptime {
     const array: [5]u8 = "hello".*;
     const garbage = array[5];
+    _ = garbage;
 }
       {#code_end#}
       <p>At runtime:</p>
@@ -8873,6 +8952,7 @@ fn foo(x: []const u8) u8 {
 comptime {
     const value: i32 = -1;
     const unsigned = @intCast(u32, value);
+    _ = unsigned;
 }
       {#code_end#}
       <p>At runtime:</p>
@@ -8895,6 +8975,7 @@ pub fn main() void {
 comptime {
     const spartan_count: u16 = 300;
     const byte = @intCast(u8, spartan_count);
+    _ = byte;
 }
       {#code_end#}
       <p>At runtime:</p>
@@ -9028,6 +9109,7 @@ test "wraparound addition and subtraction" {
       {#code_begin|test_err|operation caused overflow#}
 comptime {
     const x = @shlExact(@as(u8, 0b01010101), 2);
+    _ = x;
 }
       {#code_end#}
       <p>At runtime:</p>
@@ -9046,6 +9128,7 @@ pub fn main() void {
       {#code_begin|test_err|exact shift shifted out 1 bits#}
 comptime {
     const x = @shrExact(@as(u8, 0b10101010), 2);
+    _ = x;
 }
       {#code_end#}
       <p>At runtime:</p>
@@ -9066,6 +9149,7 @@ comptime {
     const a: i32 = 1;
     const b: i32 = 0;
     const c = a / b;
+    _ = c;
 }
       {#code_end#}
       <p>At runtime:</p>
@@ -9087,6 +9171,7 @@ comptime {
     const a: i32 = 10;
     const b: i32 = 0;
     const c = a % b;
+    _ = c;
 }
       {#code_end#}
       <p>At runtime:</p>
@@ -9108,6 +9193,7 @@ comptime {
     const a: u32 = 10;
     const b: u32 = 3;
     const c = @divExact(a, b);
+    _ = c;
 }
       {#code_end#}
       <p>At runtime:</p>
@@ -9300,6 +9386,7 @@ fn foo(set1: Set1) void {
 comptime {
     const ptr = @intToPtr(*align(1) i32, 0x1);
     const aligned = @alignCast(4, ptr);
+    _ = aligned;
 }
       {#code_end#}
       <p>At runtime:</p>
@@ -9414,6 +9501,7 @@ fn bar(f: *Foo) void {
 comptime {
     const opt_ptr: ?*i32 = null;
     const ptr = @ptrCast(*i32, opt_ptr);
+    _ = ptr;
 }
       {#code_end#}
       <p>At runtime:</p>
@@ -9595,10 +9683,7 @@ test "string literal to constant slice" {
       </p>
       <p>
       There are many example allocators to look at for inspiration. Look at std/heap.zig and
-      at this
-      <a href="https://github.com/andrewrk/zig-general-purpose-allocator/">work-in-progress general purpose allocator</a>.
-      TODO: once <a href="https://github.com/ziglang/zig/issues/21">#21</a> is done, link to the docs
-      here.
+      {#syntax#}std.heap.GeneralPurposeAllocator{#endsyntax#}.
       </p>
       {#header_close#}
 
@@ -9716,82 +9801,6 @@ const separator = if (builtin.os.tag == builtin.Os.windows) '\\' else '/';
       <p>TODO: lazy analysis</p>
       <p>TODO: using comptime { _ = @import() }</p>
       {#header_close#}
-      {#header_open|Zig Test#}
-      <p>
-      <code>zig test</code> is a tool that can be used to quickly build and run Zig code
-      to make sure behavior meets expectations. {#syntax#}@import("builtin").is_test{#endsyntax#}
-      is available for code to detect whether the current build is a test build.
-      </p>
-      {#code_begin|test|detect_test#}
-const std = @import("std");
-const builtin = @import("builtin");
-const expect = std.testing.expect;
-
-test "builtin.is_test" {
-    try expect(builtin.is_test);
-}
-      {#code_end#}
-      <p>
-      Zig has lazy top level declaration analysis, which means that if a function is not called,
-      or otherwise used, it is not analyzed. This means that there may be an undiscovered
-      compile error in a function because it is never called.
-      </p>
-      {#code_begin|test|unused_fn#}
-fn unused() i32 {
-    return "wrong return type";
-}
-test "unused function" { }
-      {#code_end#}
-      <p>
-      Note that, while in {#link|Debug#} and {#link|ReleaseSafe#} modes, {#link|unreachable#} emits a
-      call to {#link|@panic#}, in {#link|ReleaseFast#} and {#link|ReleaseSmall#} modes, it is really
-      undefined behavior. The implementation of {#syntax#}std.debug.assert{#endsyntax#} is as
-      simple as:
-      </p>
-      {#code_begin|syntax#}
-pub fn assert(ok: bool) void {
-    if (!ok) unreachable;
-}
-      {#code_end#}
-      <p>
-      This means that when testing in ReleaseFast or ReleaseSmall mode, {#syntax#}assert{#endsyntax#}
-      is not sufficient to check the result of a computation:
-      </p>
-      {#code_begin|syntax#}
-const std = @import("std");
-const assert = std.debug.assert;
-
-test "assert in release fast mode" {
-    assert(false);
-}
-      {#code_end#}
-      <p>
-      When compiling this test in {#link|ReleaseFast#} mode, it invokes unchecked
-      {#link|Undefined Behavior#}. Since that could do anything, this documentation
-      cannot show you the output.
-      </p>
-      <p>
-      Better practice for checking the output when testing is to use {#syntax#}std.testing.expect{#endsyntax#}:
-      </p>
-      {#code_begin|test_err|test "expect in release fast mode"... FAIL (TestUnexpectedResult)#}
-      {#code_release_fast#}
-const std = @import("std");
-const expect = std.testing.expect;
-
-test "expect in release fast mode" {
-    try expect(false);
-}
-      {#code_end#}
-      <p>See the rest of the {#syntax#}std.testing{#endsyntax#} namespace for more available functions.</p>
-      <p>
-      <code>zig test</code> has a few command line parameters which affect the compilation. See
-      <code>zig --help</code> for a full list. The most interesting one is <code>--test-filter [text]</code>.
-      This makes the test build only include tests whose name contains the supplied filter text.
-      Again, thanks to lazy analysis, this can allow you to narrow a build to only a few functions in
-      isolation.
-      </p>
-      {#header_close#}
-
       {#header_open|Zig Build System#}
       <p>
       The Zig Build System provides a cross-platform, dependency-free way to declare

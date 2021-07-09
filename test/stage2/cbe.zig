@@ -525,7 +525,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\}
         , &.{
             ":3:21: error: missing struct field: x",
-            ":1:15: note: struct 'test_case.Point' declared here",
+            ":1:15: note: struct 'tmp.Point' declared here",
         });
         case.addError(
             \\const Point = struct { x: i32, y: i32 };
@@ -538,7 +538,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    return p.y - p.x - p.x;
             \\}
         , &.{
-            ":6:10: error: no field named 'z' in struct 'test_case.Point'",
+            ":6:10: error: no field named 'z' in struct 'tmp.Point'",
             ":1:15: note: struct declared here",
         });
         case.addCompareOutput(
@@ -591,6 +591,7 @@ pub fn addCases(ctx: *TestContext) !void {
         , &.{
             ":3:5: error: enum fields cannot be marked comptime",
             ":8:8: error: enum fields do not have types",
+            ":6:12: note: consider 'union(enum)' here to make it a tagged union",
         });
 
         // @enumToInt, @intToEnum, enum literal coercion, field access syntax, comparison, switch
@@ -716,7 +717,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    _ = @intToEnum(E, 3);
             \\}
         , &.{
-            ":3:9: error: enum 'test_case.E' has no tag with value 3",
+            ":3:9: error: enum 'tmp.E' has no tag with value 3",
             ":1:11: note: enum declared here",
         });
 
@@ -732,7 +733,7 @@ pub fn addCases(ctx: *TestContext) !void {
         , &.{
             ":4:5: error: switch must handle all possibilities",
             ":4:5: note: unhandled enumeration value: 'b'",
-            ":1:11: note: enum 'test_case.E' declared here",
+            ":1:11: note: enum 'tmp.E' declared here",
         });
 
         case.addError(
@@ -787,7 +788,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    _ = E.d;
             \\}
         , &.{
-            ":3:10: error: enum 'test_case.E' has no member named 'd'",
+            ":3:10: error: enum 'tmp.E' has no member named 'd'",
             ":1:11: note: enum declared here",
         });
 
@@ -798,24 +799,81 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    _ = x;
             \\}
         , &.{
-            ":3:17: error: enum 'test_case.E' has no field named 'd'",
+            ":3:17: error: enum 'tmp.E' has no field named 'd'",
             ":1:11: note: enum declared here",
         });
     }
 
-    ctx.c("empty start function", linux_x64,
-        \\export fn _start() noreturn {
-        \\    unreachable;
-        \\}
-    ,
-        \\ZIG_EXTERN_C zig_noreturn void _start(void);
-        \\
-        \\zig_noreturn void _start(void) {
-        \\ zig_breakpoint();
-        \\ zig_unreachable();
-        \\}
-        \\
-    );
+    {
+        var case = ctx.exeFromCompiledC("inferred error sets", .{});
+
+        case.addCompareOutput(
+            \\pub export fn main() c_int {
+            \\    if (foo()) |_| {
+            \\        @panic("test fail");
+            \\    } else |err| {
+            \\        if (err != error.ItBroke) {
+            \\            @panic("test fail");
+            \\        }
+            \\    }
+            \\    return 0;
+            \\}
+            \\fn foo() !void {
+            \\    return error.ItBroke;
+            \\}
+        , "");
+    }
+
+    {
+        // TODO: add u64 tests, ran into issues with the literal generated for std.math.maxInt(u64)
+        var case = ctx.exeFromCompiledC("add/sub wrapping operations", .{});
+        case.addCompareOutput(
+            \\pub export fn main() c_int {
+            \\    // Addition
+            \\    if (!add_u3(1, 1, 2)) return 1;
+            \\    if (!add_u3(7, 1, 0)) return 1;
+            \\    if (!add_i3(1, 1, 2)) return 1;
+            \\    if (!add_i3(3, 2, -3)) return 1;
+            \\    if (!add_i3(-3, -2, 3)) return 1;
+            \\    if (!add_c_int(1, 1, 2)) return 1;
+            \\    // TODO enable these when stage2 supports std.math.maxInt
+            \\    //if (!add_c_int(maxInt(c_int), 2, minInt(c_int) + 1)) return 1;
+            \\    //if (!add_c_int(maxInt(c_int) + 1, -2, maxInt(c_int))) return 1;
+            \\
+            \\    // Subtraction
+            \\    if (!sub_u3(2, 1, 1)) return 1;
+            \\    if (!sub_u3(0, 1, 7)) return 1;
+            \\    if (!sub_i3(2, 1, 1)) return 1;
+            \\    if (!sub_i3(3, -2, -3)) return 1;
+            \\    if (!sub_i3(-3, 2, 3)) return 1;
+            \\    if (!sub_c_int(2, 1, 1)) return 1;
+            \\    // TODO enable these when stage2 supports std.math.maxInt
+            \\    //if (!sub_c_int(maxInt(c_int), -2, minInt(c_int) + 1)) return 1;
+            \\    //if (!sub_c_int(minInt(c_int) + 1, 2, maxInt(c_int))) return 1;
+            \\
+            \\    return 0;
+            \\}
+            \\fn add_u3(lhs: u3, rhs: u3, expected: u3) bool {
+            \\    return expected == lhs +% rhs;
+            \\}
+            \\fn add_i3(lhs: i3, rhs: i3, expected: i3) bool {
+            \\    return expected == lhs +% rhs;
+            \\}
+            \\fn add_c_int(lhs: c_int, rhs: c_int, expected: c_int) bool {
+            \\    return expected == lhs +% rhs;
+            \\}
+            \\fn sub_u3(lhs: u3, rhs: u3, expected: u3) bool {
+            \\    return expected == lhs -% rhs;
+            \\}
+            \\fn sub_i3(lhs: i3, rhs: i3, expected: i3) bool {
+            \\    return expected == lhs -% rhs;
+            \\}
+            \\fn sub_c_int(lhs: c_int, rhs: c_int, expected: c_int) bool {
+            \\    return expected == lhs -% rhs;
+            \\}
+        , "");
+    }
+
     ctx.h("simple header", linux_x64,
         \\export fn start() void{}
     ,

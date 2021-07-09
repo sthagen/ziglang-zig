@@ -248,7 +248,6 @@ pub const Node = extern union {
                 .@"comptime",
                 .@"defer",
                 .asm_simple,
-                .discard,
                 .std_math_Log2Int,
                 .negate,
                 .negate_wrap,
@@ -341,6 +340,7 @@ pub const Node = extern union {
                 .warning,
                 .type,
                 => Payload.Value,
+                .discard => Payload.Discard,
                 .@"if" => Payload.If,
                 .@"while" => Payload.While,
                 .@"switch", .array_init, .switch_prong => Payload.Switch,
@@ -460,6 +460,14 @@ pub const Payload = struct {
         data: struct {
             lhs: Node,
             rhs: Node,
+        },
+    };
+
+    pub const Discard = struct {
+        base: Payload,
+        data: struct {
+            should_skip: bool,
+            value: Node,
         },
     };
 
@@ -754,7 +762,7 @@ pub fn render(gpa: *Allocator, nodes: []const Node) !std.zig.ast.Tree {
     });
 
     return std.zig.ast.Tree{
-        .source = ctx.buf.toOwnedSlice(),
+        .source = try ctx.buf.toOwnedSliceSentinel(0),
         .tokens = ctx.tokens.toOwnedSlice(),
         .nodes = ctx.nodes.toOwnedSlice(),
         .extra_data = ctx.extra_data.toOwnedSlice(gpa),
@@ -1491,6 +1499,8 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
         .pub_inline_fn => return renderMacroFunc(c, node),
         .discard => {
             const payload = node.castTag(.discard).?.data;
+            if (payload.should_skip) return @as(NodeIndex, 0);
+
             const lhs = try c.addNode(.{
                 .tag = .identifier,
                 .main_token = try c.addToken(.identifier, "_"),
@@ -1501,7 +1511,7 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
                 .main_token = try c.addToken(.equal, "="),
                 .data = .{
                     .lhs = lhs,
-                    .rhs = try renderNode(c, payload),
+                    .rhs = try renderNode(c, payload.value),
                 },
             });
         },

@@ -27,6 +27,7 @@ const trace = @import("tracy.zig").trace;
 const AstGen = @import("AstGen.zig");
 const Sema = @import("Sema.zig");
 const target_util = @import("target.zig");
+const build_options = @import("build_options");
 
 /// General-purpose allocator. Used for both temporary and long-term storage.
 gpa: *Allocator,
@@ -754,6 +755,7 @@ pub const Fn = struct {
     rbrace_column: u16,
 
     state: Analysis,
+    is_cold: bool = false,
 
     pub const Analysis = enum {
         queued,
@@ -775,8 +777,19 @@ pub const Fn = struct {
     }
 
     pub fn deinit(func: *Fn, gpa: *Allocator) void {
-        _ = func;
-        _ = gpa;
+        if (func.getInferredErrorSet()) |map| {
+            map.deinit(gpa);
+        }
+    }
+
+    pub fn getInferredErrorSet(func: *Fn) ?*std.StringHashMapUnmanaged(void) {
+        const ret_ty = func.owner_decl.ty.fnReturnType();
+        if (ret_ty.zigTypeTag() == .ErrorUnion) {
+            if (ret_ty.errorUnionSet().castTag(.error_set_inferred)) |payload| {
+                return &payload.data.map;
+            }
+        }
+        return null;
     }
 };
 
@@ -1109,6 +1122,11 @@ pub const Scope = struct {
             defer buf.deinit();
             try file.renderFullyQualifiedName(buf.writer());
             return buf.toOwnedSliceSentinel(0);
+        }
+
+        /// Returns the full path to this file relative to its package.
+        pub fn fullPath(file: File, ally: *Allocator) ![]u8 {
+            return file.pkg.root_src_directory.join(ally, &[_][]const u8{file.sub_file_path});
         }
 
         pub fn dumpSrc(file: *File, src: LazySrcLoc) void {
@@ -2230,6 +2248,7 @@ pub fn astGenFile(mod: *Module, file: *Scope.File) !void {
     const want_local_cache = file.pkg == mod.root_pkg;
     const digest = hash: {
         var path_hash: Cache.HashHelper = .{};
+        path_hash.addBytes(build_options.version);
         if (!want_local_cache) {
             path_hash.addOptionalBytes(file.pkg.root_src_directory.path);
         }
@@ -2461,6 +2480,7 @@ pub fn astGenFile(mod: *Module, file: *Scope.File) !void {
         defer msg.deinit();
 
         const token_starts = file.tree.tokens.items(.start);
+        const token_tags = file.tree.tokens.items(.tag);
 
         try file.tree.renderError(parse_err, msg.writer());
         const err_msg = try gpa.create(ErrorMsg);
@@ -2472,6 +2492,15 @@ pub fn astGenFile(mod: *Module, file: *Scope.File) !void {
             },
             .msg = msg.toOwnedSlice(),
         };
+        if (token_tags[parse_err.token] == .invalid) {
+            const bad_off = @intCast(u32, file.tree.tokenSlice(parse_err.token).len);
+            const byte_abs = token_starts[parse_err.token] + bad_off;
+            try mod.errNoteNonLazy(.{
+                .file_scope = file,
+                .parent_decl_node = 0,
+                .lazy = .{ .byte_abs = byte_abs },
+            }, err_msg, "invalid byte: '{'}'", .{std.zig.fmtEscapes(source[byte_abs..][0..1])});
+        }
 
         {
             const lock = comp.mutex.acquire();
@@ -3408,6 +3437,9 @@ fn scanDecl(iter: *ScanDeclIter, decl_sub_index: usize, flags: u4) InnerError!vo
                 // in `Decl` to notice that the line number did not change.
                 mod.comp.work_queue.writeItemAssumeCapacity(.{ .update_line_number = decl });
             },
+            .plan9 => {
+                // TODO implement for plan9
+            },
             .c, .wasm, .spirv => {},
         }
     }
@@ -3436,6 +3468,9 @@ pub fn clearDecl(
     for (decl.dependencies.keys()) |dep| {
         dep.removeDependant(decl);
         if (dep.dependants.count() == 0 and !dep.deletion_flag) {
+            log.debug("insert {*} ({s}) dependant {*} ({s}) into deletion set", .{
+                decl, decl.name, dep, dep.name,
+            });
             // We don't recursively perform a deletion here, because during the update,
             // another reference to it may turn up.
             dep.deletion_flag = true;
@@ -3482,6 +3517,7 @@ pub fn clearDecl(
                 .coff => .{ .coff = link.File.Coff.TextBlock.empty },
                 .elf => .{ .elf = link.File.Elf.TextBlock.empty },
                 .macho => .{ .macho = link.File.MachO.TextBlock.empty },
+                .plan9 => .{ .plan9 = link.File.Plan9.DeclBlock.empty },
                 .c => .{ .c = link.File.C.DeclBlock.empty },
                 .wasm => .{ .wasm = link.File.Wasm.DeclBlock.empty },
                 .spirv => .{ .spirv = {} },
@@ -3490,6 +3526,7 @@ pub fn clearDecl(
                 .coff => .{ .coff = {} },
                 .elf => .{ .elf = link.File.Elf.SrcFn.empty },
                 .macho => .{ .macho = link.File.MachO.SrcFn.empty },
+                .plan9 => .{ .plan9 = {} },
                 .c => .{ .c = link.File.C.FnBlock.empty },
                 .wasm => .{ .wasm = link.File.Wasm.FnData.empty },
                 .spirv => .{ .spirv = .{} },
@@ -3657,6 +3694,7 @@ fn allocateNewDecl(mod: *Module, namespace: *Scope.Namespace, src_node: ast.Node
             .coff => .{ .coff = link.File.Coff.TextBlock.empty },
             .elf => .{ .elf = link.File.Elf.TextBlock.empty },
             .macho => .{ .macho = link.File.MachO.TextBlock.empty },
+            .plan9 => .{ .plan9 = link.File.Plan9.DeclBlock.empty },
             .c => .{ .c = link.File.C.DeclBlock.empty },
             .wasm => .{ .wasm = link.File.Wasm.DeclBlock.empty },
             .spirv => .{ .spirv = {} },
@@ -3665,6 +3703,7 @@ fn allocateNewDecl(mod: *Module, namespace: *Scope.Namespace, src_node: ast.Node
             .coff => .{ .coff = {} },
             .elf => .{ .elf = link.File.Elf.SrcFn.empty },
             .macho => .{ .macho = link.File.MachO.SrcFn.empty },
+            .plan9 => .{ .plan9 = {} },
             .c => .{ .c = link.File.C.FnBlock.empty },
             .wasm => .{ .wasm = link.File.Wasm.FnData.empty },
             .spirv => .{ .spirv = .{} },
@@ -3734,6 +3773,7 @@ pub fn analyzeExport(
             .coff => .{ .coff = {} },
             .elf => .{ .elf = link.File.Elf.Export{} },
             .macho => .{ .macho = link.File.MachO.Export{} },
+            .plan9 => .{ .plan9 = null },
             .c => .{ .c = {} },
             .wasm => .{ .wasm = {} },
             .spirv => .{ .spirv = {} },

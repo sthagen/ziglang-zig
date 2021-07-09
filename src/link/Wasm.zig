@@ -556,7 +556,7 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
     // If there is no Zig code to compile, then we should skip flushing the output file because it
     // will not be part of the linker line anyway.
     const module_obj_path: ?[]const u8 = if (self.base.options.module) |module| blk: {
-        const use_stage1 = build_options.is_stage1 and self.base.options.use_llvm;
+        const use_stage1 = build_options.is_stage1 and self.base.options.use_stage1;
         if (use_stage1) {
             const obj_basename = try std.zig.binNameAlloc(arena, .{
                 .root_name = self.base.options.root_name,
@@ -687,10 +687,15 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
             // before corrupting globals. See https://github.com/ziglang/zig/issues/4496
             try argv.append("--stack-first");
 
-            // Reactor execution model does not have _start so lld doesn't look for it.
-            if (self.base.options.wasi_exec_model) |exec_model| blk: {
-                if (exec_model != .crt1_reactor_o) break :blk;
+            if (self.base.options.wasi_exec_model == .reactor) {
+                // Reactor execution model does not have _start so lld doesn't look for it.
                 try argv.append("--no-entry");
+                // Make sure "_initialize" is exported even if this is pure Zig WASI reactor
+                // where WASM_SYMBOL_EXPORTED flag in LLVM is not set on _initialize.
+                try argv.appendSlice(&[_][]const u8{
+                    "--export",
+                    "_initialize",
+                });
             }
         } else {
             try argv.append("--no-entry"); // So lld doesn't look for _start.
@@ -717,7 +722,7 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
                 if (self.base.options.link_libc) {
                     try argv.append(try comp.get_libc_crt_file(
                         arena,
-                        wasi_libc.crtFileFullName(self.base.options.wasi_exec_model orelse .crt1_o),
+                        wasi_libc.execModelCrtFileFullName(self.base.options.wasi_exec_model),
                     ));
                     try argv.append(try comp.get_libc_crt_file(arena, "libc.a"));
                 }
