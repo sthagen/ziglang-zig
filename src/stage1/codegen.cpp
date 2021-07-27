@@ -428,8 +428,18 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
         // compiler as we're telling LLVM (using 'wasm-import-name' and
         // 'wasm-import-name') what the real function name is and where to find
         // it.
-        const bool use_mangled_name = target_is_wasm(g->zig_target) &&
+        bool use_mangled_name = target_is_wasm(g->zig_target) &&
                 fn_proto->is_extern && fn_proto->lib_name != nullptr;
+        // This is subtle but important to match libc symbols at static link time correctly.
+        // We treat "c" lib_name as a special library indicating that it should be defined
+        // in libc. But if we mangle a libc symbol name here with "c" module name, then wasm-ld cannot resolve
+        // the symbol. This is because at the static link time with wasm-ld, the linker does not
+        // take module names into account, and instead looking for a pure symbol name (i.e. function name)
+        // written into the ".linking" custom section (i.e. it does not use import section).
+        // This is the intended behavior of wasm-ld, because Wasm has a concept of host functions,
+        // which are undefined functions supposed to be resolved by host runtimes *with module names*
+        // at load times even if it is "static linked" with the linker.
+        use_mangled_name = use_mangled_name && (strcmp(buf_ptr(fn_proto->lib_name), "c") != 0);
         // Pick a weird name to avoid collisions...
         // This whole function should be burned to the ground.
         Buf *mangled_symbol_buf = use_mangled_name ?
@@ -452,6 +462,13 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
                 llvm_fn = LLVMAddFunction(g->module, symbol_name, fn_llvm_type);
 
                 if (use_mangled_name) {
+                    // Note that "wasm-import-module"ed symbols will not be resolved
+                    // in the future version of wasm-ld since the attribute basically means that
+                    // "the symbol should be resolved at load time by runtimes", though
+                    // the symbol is already mangled here and it is written into "linking" section
+                    // used by wasm-ld to match symbols, so it should not be expected by users.
+                    // tl;dr is that users should not put the lib_name specifier on extern statements
+                    // if they want to link symbols with wasm-ld.
                     addLLVMFnAttrStr(llvm_fn, "wasm-import-name", unmangled_name);
                     addLLVMFnAttrStr(llvm_fn, "wasm-import-module", buf_ptr(fn_proto->lib_name));
                 }
@@ -3231,6 +3248,30 @@ static LLVMValueRef ir_render_bin_op(CodeGen *g, Stage1Air *executable,
         case IrBinOpRemMod:
             return gen_rem(g, want_runtime_safety, ir_want_fast_math(g, &bin_op_instruction->base),
                     op1_value, op2_value, operand_type, RemKindMod);
+        case IrBinOpMaximum:
+            if (scalar_type->id == ZigTypeIdFloat) {
+                return ZigLLVMBuildMaxNum(g->builder, op1_value, op2_value, "");
+            } else if (scalar_type->id == ZigTypeIdInt) {
+                if (scalar_type->data.integral.is_signed) {
+                    return ZigLLVMBuildSMax(g->builder, op1_value, op2_value, "");
+                } else {
+                    return ZigLLVMBuildUMax(g->builder, op1_value, op2_value, "");
+                }
+            } else {
+                zig_unreachable();
+            }
+        case IrBinOpMinimum:
+            if (scalar_type->id == ZigTypeIdFloat) {
+                return ZigLLVMBuildMinNum(g->builder, op1_value, op2_value, "");
+            } else if (scalar_type->id == ZigTypeIdInt) {
+                if (scalar_type->data.integral.is_signed) {
+                    return ZigLLVMBuildSMin(g->builder, op1_value, op2_value, "");
+                } else {
+                    return ZigLLVMBuildUMin(g->builder, op1_value, op2_value, "");
+                }
+            } else {
+                zig_unreachable();
+            }
     }
     zig_unreachable();
 }
@@ -5053,6 +5094,7 @@ static LLVMValueRef get_int_builtin_fn(CodeGen *g, ZigType *expr_type, BuiltinFn
         n_args = 1;
         key.id = ZigLLVMFnIdPopCount;
         key.data.pop_count.bit_count = (uint32_t)int_type->data.integral.bit_count;
+        key.data.pop_count.vector_len = vector_len;
     } else if (fn_id == BuiltinFnIdBswap) {
         fn_name = "bswap";
         n_args = 1;
@@ -5142,6 +5184,13 @@ static LLVMValueRef ir_render_shuffle_vector(CodeGen *g, Stage1Air *executable, 
         ir_llvm_value(g, instruction->a),
         ir_llvm_value(g, instruction->b),
         llvm_mask_value, "");
+}
+
+static LLVMValueRef ir_render_select(CodeGen *g, Stage1Air *executable, Stage1AirInstSelect *instruction) {
+    LLVMValueRef pred = ir_llvm_value(g, instruction->pred);
+    LLVMValueRef a = ir_llvm_value(g, instruction->a);
+    LLVMValueRef b = ir_llvm_value(g, instruction->b);
+    return LLVMBuildSelect(g->builder, pred, a, b, "");
 }
 
 static LLVMValueRef ir_render_splat(CodeGen *g, Stage1Air *executable, Stage1AirInstSplat *instruction) {
@@ -6997,6 +7046,8 @@ static LLVMValueRef ir_render_instruction(CodeGen *g, Stage1Air *executable, Sta
             return ir_render_spill_end(g, executable, (Stage1AirInstSpillEnd *)instruction);
         case Stage1AirInstIdShuffleVector:
             return ir_render_shuffle_vector(g, executable, (Stage1AirInstShuffleVector *) instruction);
+        case Stage1AirInstIdSelect:
+            return ir_render_select(g, executable, (Stage1AirInstSelect *) instruction);
         case Stage1AirInstIdSplat:
             return ir_render_splat(g, executable, (Stage1AirInstSplat *) instruction);
         case Stage1AirInstIdVectorExtractElem:
@@ -8902,6 +8953,7 @@ static void define_builtin_fns(CodeGen *g) {
     create_builtin_fn(g, BuiltinFnIdCompileLog, "compileLog", SIZE_MAX);
     create_builtin_fn(g, BuiltinFnIdVectorType, "Vector", 2);
     create_builtin_fn(g, BuiltinFnIdShuffle, "shuffle", 4);
+    create_builtin_fn(g, BuiltinFnIdSelect, "select", 4);
     create_builtin_fn(g, BuiltinFnIdSplat, "splat", 2);
     create_builtin_fn(g, BuiltinFnIdSetCold, "setCold", 1);
     create_builtin_fn(g, BuiltinFnIdSetRuntimeSafety, "setRuntimeSafety", 1);
@@ -8962,6 +9014,8 @@ static void define_builtin_fns(CodeGen *g) {
     create_builtin_fn(g, BuiltinFnIdWasmMemoryGrow, "wasmMemoryGrow", 2);
     create_builtin_fn(g, BuiltinFnIdSrc, "src", 0);
     create_builtin_fn(g, BuiltinFnIdReduce, "reduce", 2);
+    create_builtin_fn(g, BuiltinFnIdMaximum, "maximum", 2);
+    create_builtin_fn(g, BuiltinFnIdMinimum, "minimum", 2);
 }
 
 static const char *bool_to_str(bool b) {

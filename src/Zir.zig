@@ -890,6 +890,9 @@ pub const Inst = struct {
         /// Implements the `@shuffle` builtin.
         /// Uses the `pl_node` union field with payload `Shuffle`.
         shuffle,
+        /// Implements the `@select` builtin.
+        /// Uses the `pl_node` union field with payload `Select`.
+        select,
         /// Implements the `@atomicLoad` builtin.
         /// Uses the `pl_node` union field with payload `Bin`.
         atomic_load,
@@ -912,12 +915,18 @@ pub const Inst = struct {
         /// Implements the `@fieldParentPtr` builtin.
         /// Uses the `pl_node` union field with payload `FieldParentPtr`.
         field_parent_ptr,
+        /// Implements the `@maximum` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`
+        maximum,
         /// Implements the `@memcpy` builtin.
         /// Uses the `pl_node` union field with payload `Memcpy`.
         memcpy,
         /// Implements the `@memset` builtin.
         /// Uses the `pl_node` union field with payload `Memset`.
         memset,
+        /// Implements the `@minimum` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`
+        minimum,
         /// Implements the `@asyncCall` builtin.
         /// Uses the `pl_node` union field with payload `AsyncCall`.
         builtin_async_call,
@@ -1181,6 +1190,7 @@ pub const Inst = struct {
                 .splat,
                 .reduce,
                 .shuffle,
+                .select,
                 .atomic_load,
                 .atomic_rmw,
                 .atomic_store,
@@ -1188,8 +1198,10 @@ pub const Inst = struct {
                 .builtin_call,
                 .field_ptr_type,
                 .field_parent_ptr,
+                .maximum,
                 .memcpy,
                 .memset,
+                .minimum,
                 .builtin_async_call,
                 .c_import,
                 .@"resume",
@@ -1451,6 +1463,7 @@ pub const Inst = struct {
                 .splat = .pl_node,
                 .reduce = .pl_node,
                 .shuffle = .pl_node,
+                .select = .pl_node,
                 .atomic_load = .pl_node,
                 .atomic_rmw = .pl_node,
                 .atomic_store = .pl_node,
@@ -1458,8 +1471,10 @@ pub const Inst = struct {
                 .builtin_call = .pl_node,
                 .field_ptr_type = .bin,
                 .field_parent_ptr = .pl_node,
+                .maximum = .pl_node,
                 .memcpy = .pl_node,
                 .memset = .pl_node,
+                .minimum = .pl_node,
                 .builtin_async_call = .pl_node,
                 .c_import = .pl_node,
 
@@ -2725,6 +2740,13 @@ pub const Inst = struct {
         mask: Ref,
     };
 
+    pub const Select = struct {
+        elem_type: Ref,
+        pred: Ref,
+        a: Ref,
+        b: Ref,
+    };
+
     pub const AsyncCall = struct {
         frame_buffer: Ref,
         result_ptr: Ref,
@@ -2935,6 +2957,7 @@ const Writer = struct {
             .cmpxchg_strong,
             .cmpxchg_weak,
             .shuffle,
+            .select,
             .atomic_rmw,
             .atomic_store,
             .mul_add,
@@ -3007,6 +3030,8 @@ const Writer = struct {
             .bitcast,
             .bitcast_result_ptr,
             .vector_type,
+            .maximum,
+            .minimum,
             => try self.writePlNodeBin(stream, inst),
 
             .@"export" => try self.writePlNodeExport(stream, inst),

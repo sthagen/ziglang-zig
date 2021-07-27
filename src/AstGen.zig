@@ -2090,6 +2090,7 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: ast.Node.Index) Inner
             .splat,
             .reduce,
             .shuffle,
+            .select,
             .atomic_load,
             .atomic_rmw,
             .atomic_store,
@@ -2097,8 +2098,10 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: ast.Node.Index) Inner
             .builtin_call,
             .field_ptr_type,
             .field_parent_ptr,
+            .maximum,
             .memcpy,
             .memset,
+            .minimum,
             .builtin_async_call,
             .c_import,
             .@"resume",
@@ -7226,6 +7229,25 @@ fn builtinCall(
             return rvalue(gz, rl, result, node);
         },
 
+        .maximum => {
+            const a = try expr(gz, scope, .none, params[0]);
+            const b = try expr(gz, scope, .none, params[1]);
+            const result = try gz.addPlNode(.maximum, node, Zir.Inst.Bin{
+                .lhs = a,
+                .rhs = b,
+            });
+            return rvalue(gz, rl, result, node);
+        },
+        .minimum => {
+            const a = try expr(gz, scope, .none, params[0]);
+            const b = try expr(gz, scope, .none, params[1]);
+            const result = try gz.addPlNode(.minimum, node, Zir.Inst.Bin{
+                .lhs = a,
+                .rhs = b,
+            });
+            return rvalue(gz, rl, result, node);
+        },
+
         .add_with_overflow => return overflowArithmetic(gz, scope, rl, node, params, .add_with_overflow),
         .sub_with_overflow => return overflowArithmetic(gz, scope, rl, node, params, .sub_with_overflow),
         .mul_with_overflow => return overflowArithmetic(gz, scope, rl, node, params, .mul_with_overflow),
@@ -7372,6 +7394,15 @@ fn builtinCall(
                 .a = try expr(gz, scope, .none, params[1]),
                 .b = try expr(gz, scope, .none, params[2]),
                 .mask = try comptimeExpr(gz, scope, .none, params[3]),
+            });
+            return rvalue(gz, rl, result, node);
+        },
+        .select => {
+            const result = try gz.addPlNode(.select, node, Zir.Inst.Select{
+                .elem_type = try typeExpr(gz, scope, params[0]),
+                .pred = try expr(gz, scope, .none, params[1]),
+                .a = try expr(gz, scope, .none, params[2]),
+                .b = try expr(gz, scope, .none, params[3]),
             });
             return rvalue(gz, rl, result, node);
         },

@@ -7125,6 +7125,7 @@ fn func(y: *i32) void {
       an integer or an enum.
       </p>
       {#header_close#}
+
       {#header_open|@bitCast#}
       <pre>{#syntax#}@bitCast(comptime DestType: type, value: anytype) DestType{#endsyntax#}</pre>
       <p>
@@ -7366,18 +7367,20 @@ pub const CallOptions = struct {
       {#header_close#}
 
       {#header_open|@clz#}
-      <pre>{#syntax#}@clz(comptime T: type, integer: T){#endsyntax#}</pre>
+      <pre>{#syntax#}@clz(comptime T: type, operand: T){#endsyntax#}</pre>
+      <p>{#syntax#}T{#endsyntax#} must be an integer type.</p>
+      <p>{#syntax#}operand{#endsyntax#} may be an {#link|integer|Integers#} or {#link|vector|Vectors#}.</p>
       <p>
-      This function counts the number of most-significant (leading in a big-Endian sense) zeroes in {#syntax#}integer{#endsyntax#}.
+      This function counts the number of most-significant (leading in a big-Endian sense) zeroes in an integer.
       </p>
       <p>
-      If {#syntax#}integer{#endsyntax#} is known at {#link|comptime#},
+      If {#syntax#}operand{#endsyntax#} is a {#link|comptime#}-known integer,
       the return type is {#syntax#}comptime_int{#endsyntax#}.
-      Otherwise, the return type is an unsigned integer with the minimum number
+      Otherwise, the return type is an unsigned integer or vector of unsigned integers with the minimum number
       of bits that can represent the bit count of the integer type.
       </p>
       <p>
-      If {#syntax#}integer{#endsyntax#} is zero, {#syntax#}@clz{#endsyntax#} returns the bit width
+      If {#syntax#}operand{#endsyntax#} is zero, {#syntax#}@clz{#endsyntax#} returns the bit width
       of integer type {#syntax#}T{#endsyntax#}.
       </p>
       {#see_also|@ctz|@popCount#}
@@ -7509,18 +7512,20 @@ test "main" {
       {#header_close#}
 
       {#header_open|@ctz#}
-      <pre>{#syntax#}@ctz(comptime T: type, integer: T){#endsyntax#}</pre>
+      <pre>{#syntax#}@ctz(comptime T: type, operand: T){#endsyntax#}</pre>
+      <p>{#syntax#}T{#endsyntax#} must be an integer type.</p>
+      <p>{#syntax#}operand{#endsyntax#} may be an {#link|integer|Integers#} or {#link|vector|Vectors#}.</p>
       <p>
-      This function counts the number of least-significant (trailing in a big-Endian sense) zeroes in {#syntax#}integer{#endsyntax#}.
+      This function counts the number of least-significant (trailing in a big-Endian sense) zeroes in an integer.
       </p>
       <p>
-      If {#syntax#}integer{#endsyntax#} is known at {#link|comptime#},
+      If {#syntax#}operand{#endsyntax#} is a {#link|comptime#}-known integer,
       the return type is {#syntax#}comptime_int{#endsyntax#}.
-      Otherwise, the return type is an unsigned integer with the minimum number
+      Otherwise, the return type is an unsigned integer or vector of unsigned integers with the minimum number
       of bits that can represent the bit count of the integer type.
       </p>
       <p>
-      If {#syntax#}integer{#endsyntax#} is zero, {#syntax#}@ctz{#endsyntax#} returns
+      If {#syntax#}operand{#endsyntax#} is zero, {#syntax#}@ctz{#endsyntax#} returns
       the bit width of integer type {#syntax#}T{#endsyntax#}.
       </p>
       {#see_also|@clz|@popCount#}
@@ -7983,6 +7988,17 @@ test "@hasDecl" {
       </p>
       {#header_close#}
 
+      {#header_open|@maximum#}
+      <pre>{#syntax#}@maximum(a: T, b: T) T{#endsyntax#}</pre>
+      <p>
+      Returns the maximum value of {#syntax#}a{#endsyntax#} and {#syntax#}b{#endsyntax#}. This builtin accepts integers, floats, and vectors of either. In the latter case, the operation is performed element wise.
+      </p>
+      <p>
+      NaNs are handled as follows: if one of the operands of a (pairwise) operation is NaN, the other operand is returned. If both operands are NaN, NaN is returned.
+      </p>
+      {#see_also|@minimum|SIMD|Vectors#}
+      {#header_close#}
+
       {#header_open|@memcpy#}
       <pre>{#syntax#}@memcpy(noalias dest: [*]u8, noalias source: [*]const u8, byte_count: usize){#endsyntax#}</pre>
       <p>
@@ -8018,6 +8034,17 @@ mem.copy(u8, dest[0..byte_count], source[0..byte_count]);{#endsyntax#}</pre>
       <p>There is also a standard library function for this:</p>
       <pre>{#syntax#}const mem = @import("std").mem;
 mem.set(u8, dest, c);{#endsyntax#}</pre>
+      {#header_close#}
+
+      {#header_open|@minimum#}
+      <pre>{#syntax#}@minimum(a: T, b: T) T{#endsyntax#}</pre>
+      <p>
+      Returns the minimum value of {#syntax#}a{#endsyntax#} and {#syntax#}b{#endsyntax#}. This builtin accepts integers, floats, and vectors of either. In the latter case, the operation is performed element wise.
+      </p>
+      <p>
+      NaNs are handled as follows: if one of the operands of a (pairwise) operation is NaN, the other operand is returned. If both operands are NaN, NaN is returned.
+      </p>
+      {#see_also|@maximum|SIMD|Vectors#}
       {#header_close#}
 
       {#header_open|@wasmMemorySize#}
@@ -8105,12 +8132,14 @@ test "@wasmMemoryGrow" {
       {#header_close#}
 
       {#header_open|@popCount#}
-      <pre>{#syntax#}@popCount(comptime T: type, integer: T){#endsyntax#}</pre>
+      <pre>{#syntax#}@popCount(comptime T: type, operand: T){#endsyntax#}</pre>
+      <p>{#syntax#}T{#endsyntax#} must be an integer type.</p>
+      <p>{#syntax#}operand{#endsyntax#} may be an {#link|integer|Integers#} or {#link|vector|Vectors#}.</p>
       <p>Counts the number of bits set in an integer.</p>
       <p>
-      If {#syntax#}integer{#endsyntax#} is known at {#link|comptime#},
+      If {#syntax#}operand{#endsyntax#} is a {#link|comptime#}-known integer,
       the return type is {#syntax#}comptime_int{#endsyntax#}.
-      Otherwise, the return type is an unsigned integer with the minimum number
+      Otherwise, the return type is an unsigned integer or vector of unsigned integers with the minimum number
       of bits that can represent the bit count of the integer type.
       </p>
       {#see_also|@ctz|@clz#}
@@ -8171,6 +8200,15 @@ test "@wasmMemoryGrow" {
       a calling function, the returned address will apply to the calling function.
       </p>
       {#header_close#}
+
+      {#header_open|@select#}
+      <pre>{#syntax#}@select(comptime T: type, pred: std.meta.Vector(len, bool), a: std.meta.Vector(len, T), b: std.meta.Vector(len, T)) std.meta.Vector(len, T){#endsyntax#}</pre>
+      <p>
+      Selects values element-wise from {#syntax#}a{#endsyntax#} or {#syntax#}b{#endsyntax#} based on {#syntax#}pred{#endsyntax#}. If {#syntax#}pred[i]{#endsyntax#} is {#syntax#}true{#endsyntax#}, the corresponding element in the result will be {#syntax#}a[i]{#endsyntax#} and otherwise {#syntax#}b[i]{#endsyntax#}.
+      </p>
+      {#see_also|SIMD|Vectors#}
+      {#header_close#}
+
       {#header_open|@setAlignStack#}
       <pre>{#syntax#}@setAlignStack(comptime alignment: u29){#endsyntax#}</pre>
       <p>
