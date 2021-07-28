@@ -1709,7 +1709,9 @@ pub fn update(self: *Compilation) !void {
         // in the start code, but when using the stage1 backend that won't happen,
         // so in order to run AstGen on the root source file we put it into the
         // import_table here.
-        if (use_stage1) {
+        // Likewise, in the case of `zig test`, the test runner is the root source file,
+        // and so there is nothing to import the main file.
+        if (use_stage1 or self.bin_file.options.is_test) {
             _ = try module.importPkg(module.main_pkg);
         }
 
@@ -1725,6 +1727,9 @@ pub fn update(self: *Compilation) !void {
 
         if (!use_stage1) {
             try self.work_queue.writeItem(.{ .analyze_pkg = std_pkg });
+            if (self.bin_file.options.is_test) {
+                try self.work_queue.writeItem(.{ .analyze_pkg = module.main_pkg });
+            }
         }
     }
 
@@ -1732,6 +1737,13 @@ pub fn update(self: *Compilation) !void {
 
     if (!use_stage1) {
         if (self.bin_file.options.module) |module| {
+            if (self.bin_file.options.is_test and self.totalErrorCount() == 0) {
+                // The `test_functions` decl has been intentionally postponed until now,
+                // at which point we must populate it with the list of test functions that
+                // have been discovered and not filtered out.
+                try module.populateTestFunctions();
+            }
+
             // Process the deletion set. We use a while loop here because the
             // deletion set may grow as we call `clearDecl` within this loop,
             // and more unreferenced Decls are revealed.
@@ -2053,24 +2065,7 @@ pub fn performAllTheWork(self: *Compilation) error{ TimerUnsupported, OutOfMemor
                 assert(decl.has_tv);
                 assert(decl.ty.hasCodeGenBits());
 
-                self.bin_file.updateDecl(module, decl) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.AnalysisFail => {
-                        decl.analysis = .codegen_failure;
-                        continue;
-                    },
-                    else => {
-                        try module.failed_decls.ensureUnusedCapacity(gpa, 1);
-                        module.failed_decls.putAssumeCapacityNoClobber(decl, try Module.ErrorMsg.create(
-                            gpa,
-                            decl.srcLoc(),
-                            "unable to codegen: {s}",
-                            .{@errorName(err)},
-                        ));
-                        decl.analysis = .codegen_failure_retryable;
-                        continue;
-                    },
-                };
+                try module.linkerUpdateDecl(decl);
             },
         },
         .codegen_func => |func| switch (func.owner_decl.analysis) {

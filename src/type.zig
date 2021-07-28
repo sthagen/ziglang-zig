@@ -23,6 +23,7 @@ pub const Type = extern union {
 
     pub fn zigTypeTag(self: Type) std.builtin.TypeId {
         switch (self.tag()) {
+            .u1,
             .u8,
             .i8,
             .u16,
@@ -638,6 +639,7 @@ pub const Type = extern union {
         if (self.tag_if_small_enough < Tag.no_payload_count) {
             return Type{ .tag_if_small_enough = self.tag_if_small_enough };
         } else switch (self.ptr_otherwise.tag) {
+            .u1,
             .u8,
             .i8,
             .u16,
@@ -819,6 +821,7 @@ pub const Type = extern union {
         while (true) {
             const t = ty.tag();
             switch (t) {
+                .u1,
                 .u8,
                 .i8,
                 .u16,
@@ -1082,6 +1085,7 @@ pub const Type = extern union {
 
     pub fn toValue(self: Type, allocator: *Allocator) Allocator.Error!Value {
         switch (self.tag()) {
+            .u1 => return Value.initTag(.u1_type),
             .u8 => return Value.initTag(.u8_type),
             .i8 => return Value.initTag(.i8_type),
             .u16 => return Value.initTag(.u16_type),
@@ -1141,6 +1145,7 @@ pub const Type = extern union {
 
     pub fn hasCodeGenBits(self: Type) bool {
         return switch (self.tag()) {
+            .u1,
             .u8,
             .i8,
             .u16,
@@ -1321,6 +1326,7 @@ pub const Type = extern union {
     /// Asserts that hasCodeGenBits() is true.
     pub fn abiAlignment(self: Type, target: Target) u32 {
         return switch (self.tag()) {
+            .u1,
             .u8,
             .i8,
             .bool,
@@ -1526,6 +1532,8 @@ pub const Type = extern union {
             .var_args_param => unreachable,
 
             .@"struct" => {
+                const s = self.castTag(.@"struct").?.data;
+                assert(s.status == .have_layout);
                 @panic("TODO abiSize struct");
             },
             .enum_simple, .enum_full, .enum_nonexhaustive => {
@@ -1537,6 +1545,7 @@ pub const Type = extern union {
                 @panic("TODO abiSize unions");
             },
 
+            .u1,
             .u8,
             .i8,
             .bool,
@@ -1702,7 +1711,7 @@ pub const Type = extern union {
 
             .u8, .i8 => 8,
 
-            .bool => 1,
+            .bool, .u1 => 1,
 
             .vector => {
                 const payload = self.castTag(.vector).?.data;
@@ -2215,12 +2224,13 @@ pub const Type = extern union {
     pub fn isUnsignedInt(self: Type) bool {
         return switch (self.tag()) {
             .int_unsigned,
-            .u8,
             .usize,
             .c_ushort,
             .c_uint,
             .c_ulong,
             .c_ulonglong,
+            .u1,
+            .u8,
             .u16,
             .u32,
             .u64,
@@ -2242,6 +2252,7 @@ pub const Type = extern union {
                 .signedness = .signed,
                 .bits = self.castTag(.int_signed).?.data,
             },
+            .u1 => .{ .signedness = .unsigned, .bits = 1 },
             .u8 => .{ .signedness = .unsigned, .bits = 8 },
             .i8 => .{ .signedness = .signed, .bits = 8 },
             .u16 => .{ .signedness = .unsigned, .bits = 16 },
@@ -2404,6 +2415,7 @@ pub const Type = extern union {
             .c_longdouble,
             .comptime_int,
             .comptime_float,
+            .u1,
             .u8,
             .i8,
             .u16,
@@ -2444,6 +2456,7 @@ pub const Type = extern union {
             .c_longdouble,
             .comptime_int,
             .comptime_float,
+            .u1,
             .u8,
             .i8,
             .u16,
@@ -2768,6 +2781,26 @@ pub const Type = extern union {
         }
     }
 
+    pub fn structFieldCount(ty: Type) usize {
+        switch (ty.tag()) {
+            .@"struct" => {
+                const struct_obj = ty.castTag(.@"struct").?.data;
+                return struct_obj.fields.count();
+            },
+            else => unreachable,
+        }
+    }
+
+    pub fn structFieldType(ty: Type, index: usize) Type {
+        switch (ty.tag()) {
+            .@"struct" => {
+                const struct_obj = ty.castTag(.@"struct").?.data;
+                return struct_obj.fields.values()[index].ty;
+            },
+            else => unreachable,
+        }
+    }
+
     pub fn declSrcLoc(ty: Type) Module.SrcLoc {
         switch (ty.tag()) {
             .enum_full, .enum_nonexhaustive => {
@@ -2889,6 +2922,7 @@ pub const Type = extern union {
     /// See `zigTypeTag` for the function that corresponds to `std.builtin.TypeId`.
     pub const Tag = enum {
         // The first section of this enum are tags that require no payload.
+        u1,
         u8,
         i8,
         u16,
@@ -2996,6 +3030,7 @@ pub const Type = extern union {
 
         pub fn Type(comptime t: Tag) type {
             return switch (t) {
+                .u1,
                 .u8,
                 .i8,
                 .u16,

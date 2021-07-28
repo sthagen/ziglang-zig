@@ -41,10 +41,12 @@ pub const Builder = struct {
     verbose_ast: bool,
     verbose_link: bool,
     verbose_cc: bool,
-    verbose_ir: bool,
+    verbose_air: bool,
     verbose_llvm_ir: bool,
     verbose_cimport: bool,
     verbose_llvm_cpu_features: bool,
+    /// The purpose of executing the command is for a human to read compile errors from the terminal
+    prominent_compile_errors: bool,
     color: enum { auto, on, off } = .auto,
     invalid_user_input: bool,
     zig_exe: []const u8,
@@ -153,10 +155,11 @@ pub const Builder = struct {
             .verbose_ast = false,
             .verbose_link = false,
             .verbose_cc = false,
-            .verbose_ir = false,
+            .verbose_air = false,
             .verbose_llvm_ir = false,
             .verbose_cimport = false,
             .verbose_llvm_cpu_features = false,
+            .prominent_compile_errors = false,
             .invalid_user_input = false,
             .allocator = allocator,
             .user_input_options = UserInputOptionsMap.init(allocator),
@@ -1162,8 +1165,13 @@ pub const Builder = struct {
             },
             error.ExitCodeFailure => {
                 if (src_step) |s| warn("{s}...", .{s.name});
-                warn("The following command exited with error code {d}:\n", .{code});
-                printCmd(null, argv);
+                if (self.prominent_compile_errors) {
+                    warn("The step exited with error code {d}\n", .{code});
+                } else {
+                    warn("The following command exited with error code {d}:\n", .{code});
+                    printCmd(null, argv);
+                }
+
                 std.os.exit(@truncate(u8, code));
             },
             error.ProcessTerminated => {
@@ -2443,7 +2451,7 @@ pub const LibExeObjStep = struct {
         if (builder.verbose_tokenize) zig_args.append("--verbose-tokenize") catch unreachable;
         if (builder.verbose_ast) zig_args.append("--verbose-ast") catch unreachable;
         if (builder.verbose_cimport) zig_args.append("--verbose-cimport") catch unreachable;
-        if (builder.verbose_ir) zig_args.append("--verbose-ir") catch unreachable;
+        if (builder.verbose_air) zig_args.append("--verbose-air") catch unreachable;
         if (builder.verbose_llvm_ir) zig_args.append("--verbose-llvm-ir") catch unreachable;
         if (builder.verbose_link or self.verbose_link) zig_args.append("--verbose-link") catch unreachable;
         if (builder.verbose_cc or self.verbose_cc) zig_args.append("--verbose-cc") catch unreachable;

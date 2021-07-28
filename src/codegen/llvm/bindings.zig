@@ -49,7 +49,12 @@ pub const Context = opaque {
     extern fn LLVMConstStringInContext(C: *const Context, Str: [*]const u8, Length: c_uint, DontNullTerminate: Bool) *const Value;
 
     pub const constStruct = LLVMConstStructInContext;
-    extern fn LLVMConstStructInContext(C: *const Context, ConstantVals: [*]*const Value, Count: c_uint, Packed: Bool) *const Value;
+    extern fn LLVMConstStructInContext(
+        C: *const Context,
+        ConstantVals: [*]const *const Value,
+        Count: c_uint,
+        Packed: Bool,
+    ) *const Value;
 
     pub const createBasicBlock = LLVMCreateBasicBlockInContext;
     extern fn LLVMCreateBasicBlockInContext(C: *const Context, Name: [*:0]const u8) *const BasicBlock;
@@ -100,6 +105,13 @@ pub const Value = opaque {
 
     pub const setAliasee = LLVMAliasSetAliasee;
     extern fn LLVMAliasSetAliasee(Alias: *const Value, Aliasee: *const Value) void;
+
+    pub const constInBoundsGEP = LLVMConstInBoundsGEP;
+    extern fn LLVMConstInBoundsGEP(
+        ConstantVal: *const Value,
+        ConstantIndices: [*]const *const Value,
+        NumIndices: c_uint,
+    ) *const Value;
 };
 
 pub const Type = opaque {
@@ -113,7 +125,7 @@ pub const Type = opaque {
     extern fn LLVMConstInt(IntTy: *const Type, N: c_ulonglong, SignExtend: Bool) *const Value;
 
     pub const constArray = LLVMConstArray;
-    extern fn LLVMConstArray(ElementTy: *const Type, ConstantVals: ?[*]*const Value, Length: c_uint) *const Value;
+    extern fn LLVMConstArray(ElementTy: *const Type, ConstantVals: [*]*const Value, Length: c_uint) *const Value;
 
     pub const getUndef = LLVMGetUndef;
     extern fn LLVMGetUndef(Ty: *const Type) *const Value;
@@ -181,7 +193,10 @@ pub const Module = opaque {
     pub const getNamedGlobalAlias = LLVMGetNamedGlobalAlias;
     extern fn LLVMGetNamedGlobalAlias(
         M: *const Module,
-        Name: [*]const u8,
+        /// Empirically, LLVM will call strlen() on `Name` and so it
+        /// must be both null terminated and also have `NameLen` set
+        /// to the size.
+        Name: [*:0]const u8,
         NameLen: usize,
     ) ?*const Value;
 };
