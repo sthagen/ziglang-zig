@@ -1731,6 +1731,7 @@ pub const LibExeObjStep = struct {
 
     pub fn setLinkerScriptPath(self: *LibExeObjStep, source: FileSource) void {
         self.linker_script = source.dupe(self.builder);
+        source.addStepDependencies(&self.step);
     }
 
     pub fn linkFramework(self: *LibExeObjStep, framework_name: []const u8) void {
@@ -3015,7 +3016,8 @@ pub const InstallDirStep = struct {
         const self = @fieldParentPtr(InstallDirStep, "step", step);
         const dest_prefix = self.builder.getInstallPath(self.options.install_dir, self.options.install_subdir);
         const full_src_dir = self.builder.pathFromRoot(self.options.source_dir);
-        var it = try fs.walkPath(self.builder.allocator, full_src_dir);
+        const src_dir = try std.fs.cwd().openDir(full_src_dir, .{ .iterate = true });
+        var it = try src_dir.walk(self.builder.allocator);
         next_entry: while (try it.next()) |entry| {
             for (self.options.exclude_extensions) |ext| {
                 if (mem.endsWith(u8, entry.path, ext)) {
@@ -3023,9 +3025,12 @@ pub const InstallDirStep = struct {
                 }
             }
 
-            const rel_path = entry.path[full_src_dir.len + 1 ..];
+            const full_path = try fs.path.join(self.builder.allocator, &[_][]const u8{
+                full_src_dir, entry.path,
+            });
+
             const dest_path = try fs.path.join(self.builder.allocator, &[_][]const u8{
-                dest_prefix, rel_path,
+                dest_prefix, entry.path,
             });
 
             switch (entry.kind) {
@@ -3038,7 +3043,7 @@ pub const InstallDirStep = struct {
                         }
                     }
 
-                    try self.builder.updateFile(entry.path, dest_path);
+                    try self.builder.updateFile(full_path, dest_path);
                 },
                 else => continue,
             }
