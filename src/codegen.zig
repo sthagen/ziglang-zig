@@ -19,7 +19,6 @@ const DW = std.dwarf;
 const leb128 = std.leb;
 const log = std.log.scoped(.codegen);
 const build_options = @import("build_options");
-const LazySrcLoc = Module.LazySrcLoc;
 const RegisterManager = @import("register_manager.zig").RegisterManager;
 
 const X8664Encoder = @import("codegen/x86_64.zig").Encoder;
@@ -2890,10 +2889,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     const src_mcv = try self.limitImmediateType(bin_op.rhs, i32);
 
                     try self.genX8664BinMathCode(Type.initTag(.bool), dst_mcv, src_mcv, 7, 0x38);
-                    const info = ty.intInfo(self.target.*);
-                    break :result switch (info.signedness) {
-                        .signed => MCValue{ .compare_flags_signed = op },
-                        .unsigned => MCValue{ .compare_flags_unsigned = op },
+                    break :result switch (ty.isSignedInt()) {
+                        true => MCValue{ .compare_flags_signed = op },
+                        false => MCValue{ .compare_flags_unsigned = op },
                     };
                 },
                 .arm, .armeb => result: {
@@ -2935,10 +2933,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     // The destination register is not present in the cmp instruction
                     try self.genArmBinOpCode(undefined, lhs_mcv, rhs_mcv, false, .cmp_eq);
 
-                    const info = ty.intInfo(self.target.*);
-                    break :result switch (info.signedness) {
-                        .signed => MCValue{ .compare_flags_signed = op },
-                        .unsigned => MCValue{ .compare_flags_unsigned = op },
+                    break :result switch (ty.isSignedInt()) {
+                        true => MCValue{ .compare_flags_signed = op },
+                        false => MCValue{ .compare_flags_unsigned = op },
                     };
                 },
                 else => return self.fail("TODO implement cmp for {}", .{self.target.cpu.arch}),
@@ -4740,6 +4737,56 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         return MCValue{ .immediate = @boolToInt(typed_value.val.isNull()) };
                     }
                     return self.fail("TODO non pointer optionals", .{});
+                },
+                .Enum => {
+                    if (typed_value.val.castTag(.enum_field_index)) |field_index| {
+                        switch (typed_value.ty.tag()) {
+                            .enum_simple => {
+                                return MCValue{ .immediate = field_index.data };
+                            },
+                            .enum_full, .enum_nonexhaustive => {
+                                const enum_full = typed_value.ty.cast(Type.Payload.EnumFull).?.data;
+                                if (enum_full.values.count() != 0) {
+                                    const tag_val = enum_full.values.keys()[field_index.data];
+                                    return self.genTypedValue(.{ .ty = enum_full.tag_ty, .val = tag_val });
+                                } else {
+                                    return MCValue{ .immediate = field_index.data };
+                                }
+                            },
+                            else => unreachable,
+                        }
+                    } else {
+                        var int_tag_buffer: Type.Payload.Bits = undefined;
+                        const int_tag_ty = typed_value.ty.intTagType(&int_tag_buffer);
+                        return self.genTypedValue(.{ .ty = int_tag_ty, .val = typed_value.val });
+                    }
+                },
+                .ErrorSet => {
+                    switch (typed_value.val.tag()) {
+                        .@"error" => {
+                            const err_name = typed_value.val.castTag(.@"error").?.data.name;
+                            const module = self.bin_file.options.module.?;
+                            const global_error_set = module.global_error_set;
+                            const error_index = global_error_set.get(err_name).?;
+                            return MCValue{ .immediate = error_index };
+                        },
+                        else => {
+                            // In this case we are rendering an error union which has a 0 bits payload.
+                            return MCValue{ .immediate = 0 };
+                        },
+                    }
+                },
+                .ErrorUnion => {
+                    const error_type = typed_value.ty.errorUnionSet();
+                    const payload_type = typed_value.ty.errorUnionPayload();
+                    const sub_val = typed_value.val.castTag(.error_union).?.data;
+
+                    if (!payload_type.hasCodeGenBits()) {
+                        // We use the error type directly as the type.
+                        return self.genTypedValue(.{ .ty = error_type, .val = sub_val });
+                    }
+
+                    return self.fail("TODO implement error union const of type '{}'", .{typed_value.ty});
                 },
                 else => return self.fail("TODO implement const of type '{}'", .{typed_value.ty}),
             }
