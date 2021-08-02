@@ -61,9 +61,9 @@ header_pad: u16 = 0x1000,
 /// The absolute address of the entry point.
 entry_addr: ?u64 = null,
 
-objects: std.ArrayListUnmanaged(*Object) = .{},
-archives: std.ArrayListUnmanaged(*Archive) = .{},
-dylibs: std.ArrayListUnmanaged(*Dylib) = .{},
+objects: std.ArrayListUnmanaged(Object) = .{},
+archives: std.ArrayListUnmanaged(Archive) = .{},
+dylibs: std.ArrayListUnmanaged(Dylib) = .{},
 
 next_dylib_ordinal: u16 = 1,
 
@@ -990,10 +990,11 @@ fn parseInputFiles(self: *MachO, files: []const []const u8, syslibroot: ?[]const
     const arch = self.base.options.target.cpu.arch;
     for (files) |file_name| {
         const full_path = full_path: {
-            var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
             const path = try std.fs.realpath(file_name, &buffer);
             break :full_path try self.base.allocator.dupe(u8, path);
         };
+        defer self.base.allocator.free(full_path);
 
         if (try Object.createAndParseFromPath(self.base.allocator, arch, full_path)) |object| {
             try self.objects.append(self.base.allocator, object);
@@ -1470,6 +1471,7 @@ fn sortSections(self: *MachO) !void {
             &self.cstring_section_index,
             &self.ustring_section_index,
             &self.text_const_section_index,
+            &self.objc_methlist_section_index,
             &self.objc_methname_section_index,
             &self.objc_methtype_section_index,
             &self.objc_classname_section_index,
@@ -1993,7 +1995,7 @@ fn writeStubHelperCommon(self: *MachO) !void {
 }
 
 fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
-    const object = self.objects.items[object_id];
+    const object = &self.objects.items[object_id];
 
     log.debug("resolving symbols in '{s}'", .{object.name});
 
@@ -2004,21 +2006,21 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
         if (symbolIsStab(sym)) {
             log.err("unhandled symbol type: stab", .{});
             log.err("  symbol '{s}'", .{sym_name});
-            log.err("  first definition in '{s}'", .{object.name.?});
+            log.err("  first definition in '{s}'", .{object.name});
             return error.UnhandledSymbolType;
         }
 
         if (symbolIsIndr(sym)) {
             log.err("unhandled symbol type: indirect", .{});
             log.err("  symbol '{s}'", .{sym_name});
-            log.err("  first definition in '{s}'", .{object.name.?});
+            log.err("  first definition in '{s}'", .{object.name});
             return error.UnhandledSymbolType;
         }
 
         if (symbolIsAbs(sym)) {
             log.err("unhandled symbol type: absolute", .{});
             log.err("  symbol '{s}'", .{sym_name});
-            log.err("  first definition in '{s}'", .{object.name.?});
+            log.err("  first definition in '{s}'", .{object.name});
             return error.UnhandledSymbolType;
         }
 
@@ -2068,8 +2070,8 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
                         !(symbolIsWeakDef(global.*) or symbolIsPext(global.*)))
                     {
                         log.err("symbol '{s}' defined multiple times", .{sym_name});
-                        log.err("  first definition in '{s}'", .{self.objects.items[resolv.file].name.?});
-                        log.err("  next definition in '{s}'", .{object.name.?});
+                        log.err("  first definition in '{s}'", .{self.objects.items[resolv.file].name});
+                        log.err("  next definition in '{s}'", .{object.name});
                         return error.MultipleSymbolDefinitions;
                     }
 
@@ -2228,9 +2230,13 @@ fn resolveSymbols(self: *MachO) !void {
             };
             assert(offsets.items.len > 0);
 
-            const object = try archive.parseObject(offsets.items[0]);
             const object_id = @intCast(u16, self.objects.items.len);
-            try self.objects.append(self.base.allocator, object);
+            const object = try self.objects.addOne(self.base.allocator);
+            object.* = try archive.parseObject(
+                self.base.allocator,
+                self.base.options.target.cpu.arch,
+                offsets.items[0],
+            );
             try self.resolveSymbolsInObject(object_id);
 
             continue :loop;
@@ -2329,17 +2335,17 @@ fn resolveSymbols(self: *MachO) !void {
         });
     }
 
-    var referenced = std.AutoHashMap(*Dylib, void).init(self.base.allocator);
+    var referenced = std.AutoHashMap(u16, void).init(self.base.allocator);
     defer referenced.deinit();
 
     loop: for (self.undefs.items) |sym| {
         if (symbolIsNull(sym)) continue;
 
         const sym_name = self.getString(sym.n_strx);
-        for (self.dylibs.items) |dylib| {
+        for (self.dylibs.items) |*dylib, id| {
             if (!dylib.symbols.contains(sym_name)) continue;
 
-            if (!referenced.contains(dylib)) {
+            if (!referenced.contains(@intCast(u16, id))) {
                 // Add LC_LOAD_DYLIB load command for each referenced dylib/stub.
                 dylib.ordinal = self.next_dylib_ordinal;
                 const dylib_id = dylib.id orelse unreachable;
@@ -2353,7 +2359,7 @@ fn resolveSymbols(self: *MachO) !void {
                 errdefer dylib_cmd.deinit(self.base.allocator);
                 try self.load_commands.append(self.base.allocator, .{ .Dylib = dylib_cmd });
                 self.next_dylib_ordinal += 1;
-                try referenced.putNoClobber(dylib, {});
+                try referenced.putNoClobber(@intCast(u16, id), {});
             }
 
             const resolv = self.symbol_resolver.getPtr(sym.n_strx) orelse unreachable;
@@ -2448,7 +2454,7 @@ fn resolveSymbols(self: *MachO) !void {
         const resolv = self.symbol_resolver.get(sym.n_strx) orelse unreachable;
 
         log.err("undefined reference to symbol '{s}'", .{sym_name});
-        log.err("  first referenced in '{s}'", .{self.objects.items[resolv.file].name.?});
+        log.err("  first referenced in '{s}'", .{self.objects.items[resolv.file].name});
         has_undefined = true;
     }
 
@@ -2456,8 +2462,8 @@ fn resolveSymbols(self: *MachO) !void {
 }
 
 fn parseTextBlocks(self: *MachO) !void {
-    for (self.objects.items) |object| {
-        try object.parseTextBlocks(self);
+    for (self.objects.items) |*object, object_id| {
+        try object.parseTextBlocks(self.base.allocator, @intCast(u16, object_id), self);
     }
 }
 
@@ -3121,8 +3127,8 @@ fn writeLazyBindInfoTableZld(self: *MachO) !void {
 }
 
 fn writeExportInfoZld(self: *MachO) !void {
-    var trie = Trie.init(self.base.allocator);
-    defer trie.deinit();
+    var trie: Trie = .{};
+    defer trie.deinit(self.base.allocator);
 
     const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
     const base_address = text_segment.inner.vmaddr;
@@ -3134,14 +3140,14 @@ fn writeExportInfoZld(self: *MachO) !void {
         const sym_name = self.getString(sym.n_strx);
         log.debug("  | putting '{s}' defined at 0x{x}", .{ sym_name, sym.n_value });
 
-        try trie.put(.{
+        try trie.put(self.base.allocator, .{
             .name = sym_name,
             .vmaddr_offset = sym.n_value - base_address,
             .export_flags = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR,
         });
     }
 
-    try trie.finalize();
+    try trie.finalize(self.base.allocator);
 
     var buffer = try self.base.allocator.alloc(u8, @intCast(usize, trie.size));
     defer self.base.allocator.free(buffer);
@@ -3190,7 +3196,7 @@ fn writeSymbolTable(self: *MachO) !void {
                 .n_value = 0,
             });
             locals.appendAssumeCapacity(.{
-                .n_strx = try self.makeString(object.name.?),
+                .n_strx = try self.makeString(object.name),
                 .n_type = macho.N_OSO,
                 .n_sect = 0,
                 .n_desc = 1,
@@ -3333,21 +3339,18 @@ pub fn deinit(self: *MachO) void {
     self.locals_free_list.deinit(self.base.allocator);
     self.symbol_resolver.deinit(self.base.allocator);
 
-    for (self.objects.items) |object| {
-        object.deinit();
-        self.base.allocator.destroy(object);
+    for (self.objects.items) |*object| {
+        object.deinit(self.base.allocator);
     }
     self.objects.deinit(self.base.allocator);
 
-    for (self.archives.items) |archive| {
-        archive.deinit();
-        self.base.allocator.destroy(archive);
+    for (self.archives.items) |*archive| {
+        archive.deinit(self.base.allocator);
     }
     self.archives.deinit(self.base.allocator);
 
-    for (self.dylibs.items) |dylib| {
-        dylib.deinit();
-        self.base.allocator.destroy(dylib);
+    for (self.dylibs.items) |*dylib| {
+        dylib.deinit(self.base.allocator);
     }
     self.dylibs.deinit(self.base.allocator);
 
@@ -3372,10 +3375,13 @@ pub fn deinit(self: *MachO) void {
 
 pub fn closeFiles(self: MachO) void {
     for (self.objects.items) |object| {
-        object.closeFile();
+        object.file.close();
     }
     for (self.archives.items) |archive| {
-        archive.closeFile();
+        archive.file.close();
+    }
+    for (self.dylibs.items) |dylib| {
+        dylib.file.close();
     }
 }
 
@@ -5234,14 +5240,17 @@ fn writeCodeSignature(self: *MachO) !void {
     const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
     const code_sig_cmd = self.load_commands.items[self.code_signature_cmd_index.?].LinkeditData;
 
-    var code_sig = CodeSignature.init(self.base.allocator, self.page_size);
-    defer code_sig.deinit();
+    var code_sig: CodeSignature = .{};
+    defer code_sig.deinit(self.base.allocator);
+
     try code_sig.calcAdhocSignature(
+        self.base.allocator,
         self.base.file.?,
         self.base.options.emit.?.sub_path,
         text_segment.inner,
         code_sig_cmd,
         self.base.options.output_mode,
+        self.page_size,
     );
 
     var buffer = try self.base.allocator.alloc(u8, code_sig.size());
@@ -5261,8 +5270,8 @@ fn writeExportInfo(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    var trie = Trie.init(self.base.allocator);
-    defer trie.deinit();
+    var trie: Trie = .{};
+    defer trie.deinit(self.base.allocator);
 
     const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
     const base_address = text_segment.inner.vmaddr;
@@ -5274,14 +5283,14 @@ fn writeExportInfo(self: *MachO) !void {
         const sym_name = self.getString(sym.n_strx);
         log.debug("  | putting '{s}' defined at 0x{x}", .{ sym_name, sym.n_value });
 
-        try trie.put(.{
+        try trie.put(self.base.allocator, .{
             .name = sym_name,
             .vmaddr_offset = sym.n_value - base_address,
             .export_flags = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR,
         });
     }
+    try trie.finalize(self.base.allocator);
 
-    try trie.finalize();
     var buffer = try self.base.allocator.alloc(u8, @intCast(usize, trie.size));
     defer self.base.allocator.free(buffer);
     var stream = std.io.fixedBufferStream(buffer);
@@ -5913,7 +5922,7 @@ fn printSymtabAndTextBlock(self: *MachO) void {
 
     log.debug("mappings", .{});
     for (self.objects.items) |object| {
-        log.debug("  in object {s}", .{object.name.?});
+        log.debug("  in object {s}", .{object.name});
         for (object.symtab.items) |sym, sym_id| {
             if (object.symbol_mapping.get(@intCast(u32, sym_id))) |local_id| {
                 log.debug("    | {d} => {d}", .{ sym_id, local_id });

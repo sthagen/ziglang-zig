@@ -100,11 +100,13 @@ pub const Value = extern union {
         function,
         extern_fn,
         variable,
-        /// Represents a comptime variables storage.
-        comptime_alloc,
-        /// Represents a pointer to a decl, not the value of the decl.
+        /// Represents a pointer to a Decl.
         /// When machine codegen backend sees this, it must set the Decl's `alive` field to true.
         decl_ref,
+        /// Pointer to a Decl, but allows comptime code to mutate the Decl's Value.
+        /// This Tag will never be seen by machine codegen backends. It is changed into a
+        /// `decl_ref` when a comptime variable goes out of scope.
+        decl_ref_mut,
         elem_ptr,
         field_ptr,
         /// A slice of u8 whose memory is managed externally.
@@ -134,6 +136,9 @@ pub const Value = extern union {
         /// This is a special value that tracks a set of types that have been stored
         /// to an inferred allocation. It does not support any of the normal value queries.
         inferred_alloc,
+        /// Used to coordinate alloc_inferred, store_to_inferred_ptr, and resolve_inferred_alloc
+        /// instructions for comptime code.
+        inferred_alloc_comptime,
 
         pub const last_no_payload_tag = Tag.empty_array;
         pub const no_payload_count = @enumToInt(last_no_payload_tag) + 1;
@@ -213,6 +218,7 @@ pub const Value = extern union {
 
                 .extern_fn,
                 .decl_ref,
+                .inferred_alloc_comptime,
                 => Payload.Decl,
 
                 .repeated,
@@ -235,7 +241,7 @@ pub const Value = extern union {
                 .int_i64 => Payload.I64,
                 .function => Payload.Function,
                 .variable => Payload.Variable,
-                .comptime_alloc => Payload.ComptimeAlloc,
+                .decl_ref_mut => Payload.DeclRefMut,
                 .elem_ptr => Payload.ElemPtr,
                 .field_ptr => Payload.FieldPtr,
                 .float_16 => Payload.Float_16,
@@ -408,8 +414,8 @@ pub const Value = extern union {
             .function => return self.copyPayloadShallow(allocator, Payload.Function),
             .extern_fn => return self.copyPayloadShallow(allocator, Payload.Decl),
             .variable => return self.copyPayloadShallow(allocator, Payload.Variable),
-            .comptime_alloc => return self.copyPayloadShallow(allocator, Payload.ComptimeAlloc),
             .decl_ref => return self.copyPayloadShallow(allocator, Payload.Decl),
+            .decl_ref_mut => return self.copyPayloadShallow(allocator, Payload.DeclRefMut),
             .elem_ptr => {
                 const payload = self.castTag(.elem_ptr).?;
                 const new_payload = try allocator.create(Payload.ElemPtr);
@@ -485,6 +491,7 @@ pub const Value = extern union {
             .@"union" => @panic("TODO can't copy union value without knowing the type"),
 
             .inferred_alloc => unreachable,
+            .inferred_alloc_comptime => unreachable,
         }
     }
 
@@ -592,10 +599,9 @@ pub const Value = extern union {
             .function => return out_stream.print("(function '{s}')", .{val.castTag(.function).?.data.owner_decl.name}),
             .extern_fn => return out_stream.writeAll("(extern function)"),
             .variable => return out_stream.writeAll("(variable)"),
-            .comptime_alloc => {
-                const ref_val = val.castTag(.comptime_alloc).?.data.val;
-                try out_stream.writeAll("&");
-                val = ref_val;
+            .decl_ref_mut => {
+                const decl = val.castTag(.decl_ref_mut).?.data.decl;
+                return out_stream.print("(decl_ref_mut '{s}')", .{decl.name});
             },
             .decl_ref => return out_stream.writeAll("(decl ref)"),
             .elem_ptr => {
@@ -626,6 +632,7 @@ pub const Value = extern union {
             // TODO to print this it should be error{ Set, Items }!T(val), but we need the type for that
             .error_union => return out_stream.print("error_union_val({})", .{val.castTag(.error_union).?.data}),
             .inferred_alloc => return out_stream.writeAll("(inferred allocation value)"),
+            .inferred_alloc_comptime => return out_stream.writeAll("(inferred comptime allocation value)"),
             .eu_payload_ptr => {
                 try out_stream.writeAll("(eu_payload_ptr)");
                 val = val.castTag(.eu_payload_ptr).?.data;
@@ -741,8 +748,8 @@ pub const Value = extern union {
             .function,
             .extern_fn,
             .variable,
-            .comptime_alloc,
             .decl_ref,
+            .decl_ref_mut,
             .elem_ptr,
             .field_ptr,
             .bytes,
@@ -761,6 +768,7 @@ pub const Value = extern union {
             .@"struct",
             .@"union",
             .inferred_alloc,
+            .inferred_alloc_comptime,
             .abi_align_default,
             .eu_payload_ptr,
             => unreachable,
@@ -1234,7 +1242,13 @@ pub const Value = extern union {
         allocator: *Allocator,
     ) error{ AnalysisFail, OutOfMemory }!?Value {
         const sub_val: Value = switch (self.tag()) {
-            .comptime_alloc => self.castTag(.comptime_alloc).?.data.val,
+            .decl_ref_mut => val: {
+                // The decl whose value we are obtaining here may be overwritten with
+                // a different value, which would invalidate this memory. So we must
+                // copy here.
+                const val = try self.castTag(.decl_ref_mut).?.data.decl.value();
+                break :val try val.copy(allocator);
+            },
             .decl_ref => try self.castTag(.decl_ref).?.data.value(),
             .elem_ptr => blk: {
                 const elem_ptr = self.castTag(.elem_ptr).?.data;
@@ -1351,6 +1365,7 @@ pub const Value = extern union {
             .undef => unreachable,
             .unreachable_value => unreachable,
             .inferred_alloc => unreachable,
+            .inferred_alloc_comptime => unreachable,
             .null_value => true,
 
             else => false,
@@ -1371,6 +1386,7 @@ pub const Value = extern union {
             .undef => unreachable,
             .unreachable_value => unreachable,
             .inferred_alloc => unreachable,
+            .inferred_alloc_comptime => unreachable,
 
             else => null,
         };
@@ -1380,6 +1396,7 @@ pub const Value = extern union {
         return switch (self.tag()) {
             .undef => unreachable,
             .inferred_alloc => unreachable,
+            .inferred_alloc_comptime => unreachable,
 
             .float_16,
             .float_32,
@@ -1388,6 +1405,244 @@ pub const Value = extern union {
             => true,
             else => false,
         };
+    }
+
+    pub fn intAdd(lhs: Value, rhs: Value, allocator: *Allocator) !Value {
+        // TODO is this a performance issue? maybe we should try the operation without
+        // resorting to BigInt first.
+        var lhs_space: Value.BigIntSpace = undefined;
+        var rhs_space: Value.BigIntSpace = undefined;
+        const lhs_bigint = lhs.toBigInt(&lhs_space);
+        const rhs_bigint = rhs.toBigInt(&rhs_space);
+        const limbs = try allocator.alloc(
+            std.math.big.Limb,
+            std.math.max(lhs_bigint.limbs.len, rhs_bigint.limbs.len) + 1,
+        );
+        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        result_bigint.add(lhs_bigint, rhs_bigint);
+        const result_limbs = result_bigint.limbs[0..result_bigint.len];
+
+        if (result_bigint.positive) {
+            return Value.Tag.int_big_positive.create(allocator, result_limbs);
+        } else {
+            return Value.Tag.int_big_negative.create(allocator, result_limbs);
+        }
+    }
+
+    pub fn intSub(lhs: Value, rhs: Value, allocator: *Allocator) !Value {
+        // TODO is this a performance issue? maybe we should try the operation without
+        // resorting to BigInt first.
+        var lhs_space: Value.BigIntSpace = undefined;
+        var rhs_space: Value.BigIntSpace = undefined;
+        const lhs_bigint = lhs.toBigInt(&lhs_space);
+        const rhs_bigint = rhs.toBigInt(&rhs_space);
+        const limbs = try allocator.alloc(
+            std.math.big.Limb,
+            std.math.max(lhs_bigint.limbs.len, rhs_bigint.limbs.len) + 1,
+        );
+        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        result_bigint.sub(lhs_bigint, rhs_bigint);
+        const result_limbs = result_bigint.limbs[0..result_bigint.len];
+
+        if (result_bigint.positive) {
+            return Value.Tag.int_big_positive.create(allocator, result_limbs);
+        } else {
+            return Value.Tag.int_big_negative.create(allocator, result_limbs);
+        }
+    }
+
+    pub fn intDiv(lhs: Value, rhs: Value, allocator: *Allocator) !Value {
+        // TODO is this a performance issue? maybe we should try the operation without
+        // resorting to BigInt first.
+        var lhs_space: Value.BigIntSpace = undefined;
+        var rhs_space: Value.BigIntSpace = undefined;
+        const lhs_bigint = lhs.toBigInt(&lhs_space);
+        const rhs_bigint = rhs.toBigInt(&rhs_space);
+        const limbs_q = try allocator.alloc(
+            std.math.big.Limb,
+            lhs_bigint.limbs.len + rhs_bigint.limbs.len + 1,
+        );
+        const limbs_r = try allocator.alloc(
+            std.math.big.Limb,
+            lhs_bigint.limbs.len,
+        );
+        const limbs_buffer = try allocator.alloc(
+            std.math.big.Limb,
+            std.math.big.int.calcDivLimbsBufferLen(lhs_bigint.limbs.len, rhs_bigint.limbs.len),
+        );
+        var result_q = BigIntMutable{ .limbs = limbs_q, .positive = undefined, .len = undefined };
+        var result_r = BigIntMutable{ .limbs = limbs_r, .positive = undefined, .len = undefined };
+        result_q.divTrunc(&result_r, lhs_bigint, rhs_bigint, limbs_buffer, null);
+        const result_limbs = result_q.limbs[0..result_q.len];
+
+        if (result_q.positive) {
+            return Value.Tag.int_big_positive.create(allocator, result_limbs);
+        } else {
+            return Value.Tag.int_big_negative.create(allocator, result_limbs);
+        }
+    }
+
+    pub fn intMul(lhs: Value, rhs: Value, allocator: *Allocator) !Value {
+        // TODO is this a performance issue? maybe we should try the operation without
+        // resorting to BigInt first.
+        var lhs_space: Value.BigIntSpace = undefined;
+        var rhs_space: Value.BigIntSpace = undefined;
+        const lhs_bigint = lhs.toBigInt(&lhs_space);
+        const rhs_bigint = rhs.toBigInt(&rhs_space);
+        const limbs = try allocator.alloc(
+            std.math.big.Limb,
+            lhs_bigint.limbs.len + rhs_bigint.limbs.len + 1,
+        );
+        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        var limbs_buffer = try allocator.alloc(
+            std.math.big.Limb,
+            std.math.big.int.calcMulLimbsBufferLen(lhs_bigint.limbs.len, rhs_bigint.limbs.len, 1),
+        );
+        defer allocator.free(limbs_buffer);
+        result_bigint.mul(lhs_bigint, rhs_bigint, limbs_buffer, allocator);
+        const result_limbs = result_bigint.limbs[0..result_bigint.len];
+
+        if (result_bigint.positive) {
+            return Value.Tag.int_big_positive.create(allocator, result_limbs);
+        } else {
+            return Value.Tag.int_big_negative.create(allocator, result_limbs);
+        }
+    }
+
+    pub fn intTrunc(val: Value, arena: *Allocator, bits: u16) !Value {
+        const x = val.toUnsignedInt(); // TODO: implement comptime truncate on big ints
+        if (bits == 64) return val;
+        const mask = (@as(u64, 1) << @intCast(u6, bits)) - 1;
+        const truncated = x & mask;
+        return Tag.int_u64.create(arena, truncated);
+    }
+
+    pub fn floatAdd(
+        lhs: Value,
+        rhs: Value,
+        float_type: Type,
+        arena: *Allocator,
+    ) !Value {
+        switch (float_type.tag()) {
+            .f16 => {
+                @panic("TODO add __trunctfhf2 to compiler-rt");
+                //const lhs_val = lhs.toFloat(f16);
+                //const rhs_val = rhs.toFloat(f16);
+                //return Value.Tag.float_16.create(arena, lhs_val + rhs_val);
+            },
+            .f32 => {
+                const lhs_val = lhs.toFloat(f32);
+                const rhs_val = rhs.toFloat(f32);
+                return Value.Tag.float_32.create(arena, lhs_val + rhs_val);
+            },
+            .f64 => {
+                const lhs_val = lhs.toFloat(f64);
+                const rhs_val = rhs.toFloat(f64);
+                return Value.Tag.float_64.create(arena, lhs_val + rhs_val);
+            },
+            .f128, .comptime_float, .c_longdouble => {
+                const lhs_val = lhs.toFloat(f128);
+                const rhs_val = rhs.toFloat(f128);
+                return Value.Tag.float_128.create(arena, lhs_val + rhs_val);
+            },
+            else => unreachable,
+        }
+    }
+
+    pub fn floatSub(
+        lhs: Value,
+        rhs: Value,
+        float_type: Type,
+        arena: *Allocator,
+    ) !Value {
+        switch (float_type.tag()) {
+            .f16 => {
+                @panic("TODO add __trunctfhf2 to compiler-rt");
+                //const lhs_val = lhs.toFloat(f16);
+                //const rhs_val = rhs.toFloat(f16);
+                //return Value.Tag.float_16.create(arena, lhs_val - rhs_val);
+            },
+            .f32 => {
+                const lhs_val = lhs.toFloat(f32);
+                const rhs_val = rhs.toFloat(f32);
+                return Value.Tag.float_32.create(arena, lhs_val - rhs_val);
+            },
+            .f64 => {
+                const lhs_val = lhs.toFloat(f64);
+                const rhs_val = rhs.toFloat(f64);
+                return Value.Tag.float_64.create(arena, lhs_val - rhs_val);
+            },
+            .f128, .comptime_float, .c_longdouble => {
+                const lhs_val = lhs.toFloat(f128);
+                const rhs_val = rhs.toFloat(f128);
+                return Value.Tag.float_128.create(arena, lhs_val - rhs_val);
+            },
+            else => unreachable,
+        }
+    }
+
+    pub fn floatDiv(
+        lhs: Value,
+        rhs: Value,
+        float_type: Type,
+        arena: *Allocator,
+    ) !Value {
+        switch (float_type.tag()) {
+            .f16 => {
+                @panic("TODO add __trunctfhf2 to compiler-rt");
+                //const lhs_val = lhs.toFloat(f16);
+                //const rhs_val = rhs.toFloat(f16);
+                //return Value.Tag.float_16.create(arena, lhs_val / rhs_val);
+            },
+            .f32 => {
+                const lhs_val = lhs.toFloat(f32);
+                const rhs_val = rhs.toFloat(f32);
+                return Value.Tag.float_32.create(arena, lhs_val / rhs_val);
+            },
+            .f64 => {
+                const lhs_val = lhs.toFloat(f64);
+                const rhs_val = rhs.toFloat(f64);
+                return Value.Tag.float_64.create(arena, lhs_val / rhs_val);
+            },
+            .f128, .comptime_float, .c_longdouble => {
+                const lhs_val = lhs.toFloat(f128);
+                const rhs_val = rhs.toFloat(f128);
+                return Value.Tag.float_128.create(arena, lhs_val / rhs_val);
+            },
+            else => unreachable,
+        }
+    }
+
+    pub fn floatMul(
+        lhs: Value,
+        rhs: Value,
+        float_type: Type,
+        arena: *Allocator,
+    ) !Value {
+        switch (float_type.tag()) {
+            .f16 => {
+                @panic("TODO add __trunctfhf2 to compiler-rt");
+                //const lhs_val = lhs.toFloat(f16);
+                //const rhs_val = rhs.toFloat(f16);
+                //return Value.Tag.float_16.create(arena, lhs_val * rhs_val);
+            },
+            .f32 => {
+                const lhs_val = lhs.toFloat(f32);
+                const rhs_val = rhs.toFloat(f32);
+                return Value.Tag.float_32.create(arena, lhs_val * rhs_val);
+            },
+            .f64 => {
+                const lhs_val = lhs.toFloat(f64);
+                const rhs_val = rhs.toFloat(f64);
+                return Value.Tag.float_64.create(arena, lhs_val * rhs_val);
+            },
+            .f128, .comptime_float, .c_longdouble => {
+                const lhs_val = lhs.toFloat(f128);
+                const rhs_val = rhs.toFloat(f128);
+                return Value.Tag.float_128.create(arena, lhs_val * rhs_val);
+            },
+            else => unreachable,
+        }
     }
 
     /// This type is not copyable since it may contain pointers to its inner data.
@@ -1443,12 +1698,12 @@ pub const Value = extern union {
             data: Value,
         };
 
-        pub const ComptimeAlloc = struct {
-            pub const base_tag = Tag.comptime_alloc;
+        pub const DeclRefMut = struct {
+            pub const base_tag = Tag.decl_ref_mut;
 
             base: Payload = Payload{ .tag = base_tag },
             data: struct {
-                val: Value,
+                decl: *Module.Decl,
                 runtime_index: u32,
             },
         };
