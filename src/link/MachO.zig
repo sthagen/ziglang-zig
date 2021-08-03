@@ -63,9 +63,9 @@ entry_addr: ?u64 = null,
 
 objects: std.ArrayListUnmanaged(Object) = .{},
 archives: std.ArrayListUnmanaged(Archive) = .{},
-dylibs: std.ArrayListUnmanaged(Dylib) = .{},
 
-next_dylib_ordinal: u16 = 1,
+dylibs: std.ArrayListUnmanaged(Dylib) = .{},
+referenced_dylibs: std.AutoArrayHashMapUnmanaged(u16, void) = .{},
 
 load_commands: std.ArrayListUnmanaged(LoadCommand) = .{},
 
@@ -168,8 +168,7 @@ strtab_needs_relocation: bool = false,
 has_dices: bool = false,
 has_stabs: bool = false,
 
-section_ordinals: std.ArrayListUnmanaged(MatchingSection) = .{},
-section_to_ordinal: std.AutoHashMapUnmanaged(MatchingSection, u8) = .{},
+section_ordinals: std.AutoArrayHashMapUnmanaged(MatchingSection, void) = .{},
 
 pending_updates: std.ArrayListUnmanaged(struct {
     kind: enum {
@@ -929,12 +928,16 @@ fn linkWithZld(self: *MachO, comp: *Compilation) !void {
             else => unreachable,
         };
 
-        // Initialize section ordinals with null ordinal pointing at
-        // PAGEZERO segment.
-        try self.section_ordinals.append(self.base.allocator, .{
-            .seg = 0,
-            .sect = 0,
+        // TODO mimicking insertion of null symbol from incremental linker.
+        // This will need to moved.
+        try self.locals.append(self.base.allocator, .{
+            .n_strx = 0,
+            .n_type = macho.N_UNDF,
+            .n_sect = 0,
+            .n_desc = 0,
+            .n_value = 0,
         });
+        try self.strtab.append(self.base.allocator, 0);
 
         try self.populateMetadata();
         try self.parseInputFiles(positionals.items, self.base.options.sysroot);
@@ -958,7 +961,8 @@ fn linkWithZld(self: *MachO, comp: *Compilation) !void {
         }
 
         try self.sortSections();
-        try self.addRpaths(rpaths.items);
+        try self.addRpathLCs(rpaths.items);
+        try self.addLoadDylibLCs();
         try self.addDataInCodeLC();
         try self.addCodeSignatureLC();
         try self.allocateTextSegment();
@@ -966,7 +970,6 @@ fn linkWithZld(self: *MachO, comp: *Compilation) !void {
         try self.allocateDataSegment();
         self.allocateLinkeditSegment();
         try self.allocateTextBlocks();
-        self.printSymtabAndTextBlock();
         try self.flushZld();
     }
 
@@ -1442,7 +1445,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
     };
 
     if (res) |match| {
-        try self.createSectionOrdinal(match);
+        _ = try self.section_ordinals.getOrPut(self.base.allocator, match);
     }
 
     return res;
@@ -1574,32 +1577,29 @@ fn sortSections(self: *MachO) !void {
     {
         // Create new section ordinals.
         self.section_ordinals.clearRetainingCapacity();
-        self.section_to_ordinal.clearRetainingCapacity();
-        // First ordinal is always null
-        self.section_ordinals.appendAssumeCapacity(.{
-            .seg = 0,
-            .sect = 0,
-        });
         const text_seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
         for (text_seg.sections.items) |_, sect_id| {
-            try self.createSectionOrdinal(.{
+            const res = self.section_ordinals.getOrPutAssumeCapacity(.{
                 .seg = self.text_segment_cmd_index.?,
                 .sect = @intCast(u16, sect_id),
             });
+            assert(!res.found_existing);
         }
         const data_const_seg = self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
         for (data_const_seg.sections.items) |_, sect_id| {
-            try self.createSectionOrdinal(.{
+            const res = self.section_ordinals.getOrPutAssumeCapacity(.{
                 .seg = self.data_const_segment_cmd_index.?,
                 .sect = @intCast(u16, sect_id),
             });
+            assert(!res.found_existing);
         }
         const data_seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
         for (data_seg.sections.items) |_, sect_id| {
-            try self.createSectionOrdinal(.{
+            const res = self.section_ordinals.getOrPutAssumeCapacity(.{
                 .seg = self.data_segment_cmd_index.?,
                 .sect = @intCast(u16, sect_id),
             });
+            assert(!res.found_existing);
         }
     }
 }
@@ -1728,7 +1728,7 @@ fn allocateTextBlocks(self: *MachO) !void {
         const sect = seg.sections.items[match.sect];
 
         var base_addr: u64 = sect.addr;
-        const n_sect = self.section_to_ordinal.get(match) orelse unreachable;
+        const n_sect = @intCast(u8, self.section_ordinals.getIndex(match).? + 1);
 
         log.debug("  within section {s},{s}", .{ commands.segmentName(sect), commands.sectionName(sect) });
         log.debug("    {}", .{sect});
@@ -2196,17 +2196,6 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
 }
 
 fn resolveSymbols(self: *MachO) !void {
-    // TODO mimicking insertion of null symbol from incremental linker.
-    // This will need to moved.
-    try self.locals.append(self.base.allocator, .{
-        .n_strx = 0,
-        .n_type = macho.N_UNDF,
-        .n_sect = 0,
-        .n_desc = 0,
-        .n_value = 0,
-    });
-    try self.strtab.append(self.base.allocator, 0);
-
     // First pass, resolve symbols in provided objects.
     for (self.objects.items) |_, object_id| {
         try self.resolveSymbolsInObject(@intCast(u16, object_id));
@@ -2261,7 +2250,7 @@ fn resolveSymbols(self: *MachO) !void {
                 .sect = self.common_section_index.?,
             };
         };
-        try self.createSectionOrdinal(match);
+        _ = try self.section_ordinals.getOrPut(self.base.allocator, match);
 
         const size = sym.n_value;
         const code = try self.base.allocator.alloc(u8, size);
@@ -2274,7 +2263,7 @@ fn resolveSymbols(self: *MachO) !void {
         var nlist = macho.nlist_64{
             .n_strx = sym.n_strx,
             .n_type = macho.N_SECT,
-            .n_sect = self.section_to_ordinal.get(match) orelse unreachable,
+            .n_sect = @intCast(u8, self.section_ordinals.getIndex(match).? + 1),
             .n_desc = 0,
             .n_value = 0,
         };
@@ -2335,9 +2324,6 @@ fn resolveSymbols(self: *MachO) !void {
         });
     }
 
-    var referenced = std.AutoHashMap(u16, void).init(self.base.allocator);
-    defer referenced.deinit();
-
     loop: for (self.undefs.items) |sym| {
         if (symbolIsNull(sym)) continue;
 
@@ -2345,23 +2331,12 @@ fn resolveSymbols(self: *MachO) !void {
         for (self.dylibs.items) |*dylib, id| {
             if (!dylib.symbols.contains(sym_name)) continue;
 
-            if (!referenced.contains(@intCast(u16, id))) {
-                // Add LC_LOAD_DYLIB load command for each referenced dylib/stub.
-                dylib.ordinal = self.next_dylib_ordinal;
-                const dylib_id = dylib.id orelse unreachable;
-                var dylib_cmd = try commands.createLoadDylibCommand(
-                    self.base.allocator,
-                    dylib_id.name,
-                    dylib_id.timestamp,
-                    dylib_id.current_version,
-                    dylib_id.compatibility_version,
-                );
-                errdefer dylib_cmd.deinit(self.base.allocator);
-                try self.load_commands.append(self.base.allocator, .{ .Dylib = dylib_cmd });
-                self.next_dylib_ordinal += 1;
-                try referenced.putNoClobber(@intCast(u16, id), {});
+            const dylib_id = @intCast(u16, id);
+            if (!self.referenced_dylibs.contains(dylib_id)) {
+                try self.referenced_dylibs.putNoClobber(self.base.allocator, dylib_id, {});
             }
 
+            const ordinal = self.referenced_dylibs.getIndex(dylib_id) orelse unreachable;
             const resolv = self.symbol_resolver.getPtr(sym.n_strx) orelse unreachable;
             const undef = &self.undefs.items[resolv.where_index];
             const import_sym_index = @intCast(u32, self.imports.items.len);
@@ -2369,7 +2344,7 @@ fn resolveSymbols(self: *MachO) !void {
                 .n_strx = undef.n_strx,
                 .n_type = macho.N_UNDF | macho.N_EXT,
                 .n_sect = 0,
-                .n_desc = packDylibOrdinal(dylib.ordinal.?),
+                .n_desc = @intCast(u16, ordinal + 1) * macho.N_SYMBOL_RESOLVER,
                 .n_value = 0,
             });
             resolv.* = .{
@@ -2404,7 +2379,7 @@ fn resolveSymbols(self: *MachO) !void {
         var nlist = macho.nlist_64{
             .n_strx = undef.n_strx,
             .n_type = macho.N_SECT,
-            .n_sect = self.section_to_ordinal.get(match) orelse unreachable,
+            .n_sect = @intCast(u8, self.section_ordinals.getIndex(match).? + 1),
             .n_desc = 0,
             .n_value = 0,
         };
@@ -2500,7 +2475,7 @@ fn populateMetadata(self: *MachO) !void {
             .@"align" = alignment,
             .flags = macho.S_REGULAR | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
         });
-        try self.createSectionOrdinal(.{
+        _ = try self.section_ordinals.getOrPut(self.base.allocator, .{
             .seg = self.text_segment_cmd_index.?,
             .sect = self.text_section_index.?,
         });
@@ -2524,7 +2499,7 @@ fn populateMetadata(self: *MachO) !void {
             .flags = macho.S_SYMBOL_STUBS | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
             .reserved2 = stub_size,
         });
-        try self.createSectionOrdinal(.{
+        _ = try self.section_ordinals.getOrPut(self.base.allocator, .{
             .seg = self.text_segment_cmd_index.?,
             .sect = self.stubs_section_index.?,
         });
@@ -2548,7 +2523,7 @@ fn populateMetadata(self: *MachO) !void {
             .@"align" = alignment,
             .flags = macho.S_REGULAR | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
         });
-        try self.createSectionOrdinal(.{
+        _ = try self.section_ordinals.getOrPut(self.base.allocator, .{
             .seg = self.text_segment_cmd_index.?,
             .sect = self.stub_helper_section_index.?,
         });
@@ -2571,7 +2546,7 @@ fn populateMetadata(self: *MachO) !void {
             .@"align" = 3, // 2^3 = @sizeOf(u64)
             .flags = macho.S_NON_LAZY_SYMBOL_POINTERS,
         });
-        try self.createSectionOrdinal(.{
+        _ = try self.section_ordinals.getOrPut(self.base.allocator, .{
             .seg = self.data_const_segment_cmd_index.?,
             .sect = self.got_section_index.?,
         });
@@ -2594,7 +2569,7 @@ fn populateMetadata(self: *MachO) !void {
             .@"align" = 3, // 2^3 = @sizeOf(u64)
             .flags = macho.S_LAZY_SYMBOL_POINTERS,
         });
-        try self.createSectionOrdinal(.{
+        _ = try self.section_ordinals.getOrPut(self.base.allocator, .{
             .seg = self.data_segment_cmd_index.?,
             .sect = self.la_symbol_ptr_section_index.?,
         });
@@ -2606,7 +2581,7 @@ fn populateMetadata(self: *MachO) !void {
         try data_seg.addSection(self.base.allocator, "__data", .{
             .@"align" = 3, // 2^3 = @sizeOf(u64)
         });
-        try self.createSectionOrdinal(.{
+        _ = try self.section_ordinals.getOrPut(self.base.allocator, .{
             .seg = self.data_segment_cmd_index.?,
             .sect = self.data_section_index.?,
         });
@@ -2804,7 +2779,7 @@ fn addCodeSignatureLC(self: *MachO) !void {
     }
 }
 
-fn addRpaths(self: *MachO, rpaths: []const []const u8) !void {
+fn addRpathLCs(self: *MachO, rpaths: []const []const u8) !void {
     for (rpaths) |rpath| {
         const cmdsize = @intCast(u32, mem.alignForwardGeneric(
             u64,
@@ -2820,6 +2795,22 @@ fn addRpaths(self: *MachO, rpaths: []const []const u8) !void {
         mem.set(u8, rpath_cmd.data, 0);
         mem.copy(u8, rpath_cmd.data, rpath);
         try self.load_commands.append(self.base.allocator, .{ .Rpath = rpath_cmd });
+    }
+}
+
+fn addLoadDylibLCs(self: *MachO) !void {
+    for (self.referenced_dylibs.keys()) |id| {
+        const dylib = self.dylibs.items[id];
+        const dylib_id = dylib.id orelse unreachable;
+        var dylib_cmd = try commands.createLoadDylibCommand(
+            self.base.allocator,
+            dylib_id.name,
+            dylib_id.timestamp,
+            dylib_id.current_version,
+            dylib_id.compatibility_version,
+        );
+        errdefer dylib_cmd.deinit(self.base.allocator);
+        try self.load_commands.append(self.base.allocator, .{ .Dylib = dylib_cmd });
     }
 }
 
@@ -3029,7 +3020,7 @@ fn writeBindInfoTableZld(self: *MachO) !void {
             try pointers.append(.{
                 .offset = base_offset + i * @sizeOf(u64),
                 .segment_id = segment_id,
-                .dylib_ordinal = unpackDylibOrdinal(sym.n_desc),
+                .dylib_ordinal = @divExact(sym.n_desc, macho.N_SYMBOL_RESOLVER),
                 .name = self.getString(sym.n_strx),
             });
         }
@@ -3054,7 +3045,7 @@ fn writeBindInfoTableZld(self: *MachO) !void {
                     try pointers.append(.{
                         .offset = binding.offset + base_offset,
                         .segment_id = match.seg,
-                        .dylib_ordinal = unpackDylibOrdinal(bind_sym.n_desc),
+                        .dylib_ordinal = @divExact(bind_sym.n_desc, macho.N_SYMBOL_RESOLVER),
                         .name = self.getString(bind_sym.n_strx),
                     });
                 }
@@ -3101,7 +3092,7 @@ fn writeLazyBindInfoTableZld(self: *MachO) !void {
             pointers.appendAssumeCapacity(.{
                 .offset = base_offset + i * @sizeOf(u64),
                 .segment_id = segment_id,
-                .dylib_ordinal = unpackDylibOrdinal(sym.n_desc),
+                .dylib_ordinal = @divExact(sym.n_desc, macho.N_SYMBOL_RESOLVER),
                 .name = self.getString(sym.n_strx),
             });
         }
@@ -3321,7 +3312,6 @@ pub fn deinit(self: *MachO) void {
     }
 
     self.section_ordinals.deinit(self.base.allocator);
-    self.section_to_ordinal.deinit(self.base.allocator);
     self.pending_updates.deinit(self.base.allocator);
     self.got_entries.deinit(self.base.allocator);
     self.got_entries_map.deinit(self.base.allocator);
@@ -3353,6 +3343,7 @@ pub fn deinit(self: *MachO) void {
         dylib.deinit(self.base.allocator);
     }
     self.dylibs.deinit(self.base.allocator);
+    self.referenced_dylibs.deinit(self.base.allocator);
 
     for (self.load_commands.items) |*lc| {
         lc.deinit(self.base.allocator);
@@ -4403,7 +4394,7 @@ pub fn populateMissingMetadata(self: *MachO) !void {
             .n_strx = n_strx,
             .n_type = macho.N_UNDF | macho.N_EXT,
             .n_sect = 0,
-            .n_desc = packDylibOrdinal(1),
+            .n_desc = @intCast(u8, 1) * macho.N_SYMBOL_RESOLVER,
             .n_value = 0,
         });
         try self.symbol_resolver.putNoClobber(self.base.allocator, n_strx, .{
@@ -4549,7 +4540,7 @@ pub fn addExternFn(self: *MachO, name: []const u8) !u32 {
         .n_strx = n_strx,
         .n_type = macho.N_UNDF | macho.N_EXT,
         .n_sect = 0,
-        .n_desc = packDylibOrdinal(1),
+        .n_desc = @intCast(u8, 1) * macho.N_SYMBOL_RESOLVER,
         .n_value = 0,
     });
     try self.symbol_resolver.putNoClobber(self.base.allocator, n_strx, .{
@@ -5431,7 +5422,7 @@ fn writeBindInfoTable(self: *MachO) !void {
             try pointers.append(.{
                 .offset = base_offset + i * @sizeOf(u64),
                 .segment_id = segment_id,
-                .dylib_ordinal = unpackDylibOrdinal(sym.n_desc),
+                .dylib_ordinal = @divExact(sym.n_desc, macho.N_SYMBOL_RESOLVER),
                 .name = self.getString(sym.n_strx),
             });
         }
@@ -5456,7 +5447,7 @@ fn writeBindInfoTable(self: *MachO) !void {
                     try pointers.append(.{
                         .offset = binding.offset + base_offset,
                         .segment_id = match.seg,
-                        .dylib_ordinal = unpackDylibOrdinal(bind_sym.n_desc),
+                        .dylib_ordinal = @divExact(bind_sym.n_desc, macho.N_SYMBOL_RESOLVER),
                         .name = self.getString(bind_sym.n_strx),
                     });
                 }
@@ -5515,7 +5506,7 @@ fn writeLazyBindInfoTable(self: *MachO) !void {
             pointers.appendAssumeCapacity(.{
                 .offset = base_offset + i * @sizeOf(u64),
                 .segment_id = segment_id,
-                .dylib_ordinal = unpackDylibOrdinal(sym.n_desc),
+                .dylib_ordinal = @divExact(sym.n_desc, macho.N_SYMBOL_RESOLVER),
                 .name = self.getString(sym.n_strx),
             });
         }
@@ -5857,14 +5848,6 @@ pub fn symbolIsTemp(sym: macho.nlist_64, sym_name: []const u8) bool {
     return mem.startsWith(u8, sym_name, "l") or mem.startsWith(u8, sym_name, "L");
 }
 
-fn packDylibOrdinal(ordinal: u16) u16 {
-    return ordinal * macho.N_SYMBOL_RESOLVER;
-}
-
-fn unpackDylibOrdinal(pack: u16) u16 {
-    return @divExact(pack, macho.N_SYMBOL_RESOLVER);
-}
-
 pub fn findFirst(comptime T: type, haystack: []T, start: usize, predicate: anytype) usize {
     if (!@hasDecl(@TypeOf(predicate), "predicate"))
         @compileError("Predicate is required to define fn predicate(@This(), T) bool");
@@ -5876,78 +5859,4 @@ pub fn findFirst(comptime T: type, haystack: []T, start: usize, predicate: anyty
         if (predicate.predicate(haystack[i])) break;
     }
     return i;
-}
-
-fn createSectionOrdinal(self: *MachO, match: MatchingSection) !void {
-    if (self.section_to_ordinal.contains(match)) return;
-    const ordinal = @intCast(u8, self.section_ordinals.items.len);
-    try self.section_ordinals.append(self.base.allocator, match);
-    try self.section_to_ordinal.putNoClobber(self.base.allocator, match, ordinal);
-}
-
-fn printSymtabAndTextBlock(self: *MachO) void {
-    log.debug("locals", .{});
-    for (self.locals.items) |sym, id| {
-        log.debug("  {d}: {s}, {}", .{ id, self.getString(sym.n_strx), sym });
-    }
-
-    log.debug("globals", .{});
-    for (self.globals.items) |sym, id| {
-        log.debug("  {d}: {s}, {}", .{ id, self.getString(sym.n_strx), sym });
-    }
-
-    log.debug("tentatives", .{});
-    for (self.tentatives.items) |sym, id| {
-        log.debug("  {d}: {s}, {}", .{ id, self.getString(sym.n_strx), sym });
-    }
-
-    log.debug("undefines", .{});
-    for (self.undefs.items) |sym, id| {
-        log.debug("  {d}: {s}, {}", .{ id, self.getString(sym.n_strx), sym });
-    }
-
-    log.debug("imports", .{});
-    for (self.imports.items) |sym, id| {
-        log.debug("  {d}: {s}, {}", .{ id, self.getString(sym.n_strx), sym });
-    }
-
-    {
-        log.debug("symbol resolver", .{});
-        var it = self.symbol_resolver.keyIterator();
-        while (it.next()) |key_ptr| {
-            const sym_name = self.getString(key_ptr.*);
-            log.debug("  {s} => {}", .{ sym_name, self.symbol_resolver.get(key_ptr.*).? });
-        }
-    }
-
-    log.debug("mappings", .{});
-    for (self.objects.items) |object| {
-        log.debug("  in object {s}", .{object.name});
-        for (object.symtab.items) |sym, sym_id| {
-            if (object.symbol_mapping.get(@intCast(u32, sym_id))) |local_id| {
-                log.debug("    | {d} => {d}", .{ sym_id, local_id });
-            } else {
-                log.debug("    | {d} no local mapping for {s}", .{ sym_id, object.getString(sym.n_strx) });
-            }
-        }
-    }
-
-    {
-        var it = self.blocks.iterator();
-        while (it.next()) |entry| {
-            const seg = self.load_commands.items[entry.key_ptr.seg].Segment;
-            const sect = seg.sections.items[entry.key_ptr.sect];
-
-            var block: *TextBlock = entry.value_ptr.*;
-
-            log.debug("\n\n{s},{s} contents:", .{ commands.segmentName(sect), commands.sectionName(sect) });
-            log.debug("{}", .{sect});
-            log.debug("{}", .{block});
-
-            while (block.prev) |prev| {
-                block = prev;
-                log.debug("{}", .{block});
-            }
-        }
-    }
 }
