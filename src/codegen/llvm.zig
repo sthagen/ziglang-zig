@@ -575,6 +575,14 @@ pub const DeclGen = struct {
                 const info = t.intInfo(self.module.getTarget());
                 return self.context.intType(info.bits);
             },
+            .Float => switch (t.floatBits(self.module.getTarget())) {
+                16 => return self.context.halfType(),
+                32 => return self.context.floatType(),
+                64 => return self.context.doubleType(),
+                80 => return self.context.x86FP80Type(),
+                128 => return self.context.fp128Type(),
+                else => unreachable,
+            },
             .Bool => return self.context.intType(1),
             .Pointer => {
                 if (t.isSlice()) {
@@ -585,7 +593,7 @@ pub const DeclGen = struct {
                         try self.llvmType(ptr_type),
                         try self.llvmType(Type.initTag(.usize)),
                     };
-                    return self.context.structType(&fields, 2, .False);
+                    return self.context.structType(&fields, fields.len, .False);
                 } else {
                     const elem_type = try self.llvmType(t.elemType());
                     return elem_type.pointerType(0);
@@ -613,10 +621,14 @@ pub const DeclGen = struct {
             .ErrorUnion => {
                 const error_type = t.errorUnionSet();
                 const payload_type = t.errorUnionPayload();
+                const llvm_error_type = try self.llvmType(error_type);
                 if (!payload_type.hasCodeGenBits()) {
-                    return self.llvmType(error_type);
+                    return llvm_error_type;
                 }
-                return self.todo("implement llvmType for error unions", .{});
+                const llvm_payload_type = try self.llvmType(payload_type);
+
+                const fields: [2]*const llvm.Type = .{ llvm_error_type, llvm_payload_type };
+                return self.context.structType(&fields, fields.len, .False);
             },
             .ErrorSet => {
                 return self.context.intType(16);
@@ -661,7 +673,6 @@ pub const DeclGen = struct {
 
             .BoundFn => @panic("TODO remove BoundFn from the language"),
 
-            .Float,
             .Enum,
             .Union,
             .Opaque,
@@ -699,13 +710,40 @@ pub const DeclGen = struct {
                 }
                 return llvm_int;
             },
+            .Float => {
+                if (tv.ty.floatBits(self.module.getTarget()) <= 64) {
+                    const llvm_ty = try self.llvmType(tv.ty);
+                    return llvm_ty.constReal(tv.val.toFloat(f64));
+                }
+                return self.todo("bitcast to f128 from an integer", .{});
+            },
             .Pointer => switch (tv.val.tag()) {
                 .decl_ref => {
-                    const decl = tv.val.castTag(.decl_ref).?.data;
-                    decl.alive = true;
-                    const val = try self.resolveGlobalDecl(decl);
-                    const llvm_type = try self.llvmType(tv.ty);
-                    return val.constBitCast(llvm_type);
+                    if (tv.ty.isSlice()) {
+                        var buf: Type.Payload.ElemType = undefined;
+                        const ptr_ty = tv.ty.slicePtrFieldType(&buf);
+                        var slice_len: Value.Payload.U64 = .{
+                            .base = .{ .tag = .int_u64 },
+                            .data = tv.val.sliceLen(),
+                        };
+                        const fields: [2]*const llvm.Value = .{
+                            try self.genTypedValue(.{
+                                .ty = ptr_ty,
+                                .val = tv.val,
+                            }),
+                            try self.genTypedValue(.{
+                                .ty = Type.initTag(.usize),
+                                .val = Value.initPayload(&slice_len.base),
+                            }),
+                        };
+                        return self.context.constStruct(&fields, fields.len, .False);
+                    } else {
+                        const decl = tv.val.castTag(.decl_ref).?.data;
+                        decl.alive = true;
+                        const val = try self.resolveGlobalDecl(decl);
+                        const llvm_type = try self.llvmType(tv.ty);
+                        return val.constBitCast(llvm_type);
+                    }
                 },
                 .variable => {
                     const decl = tv.val.castTag(.variable).?.data.owner_decl;
@@ -812,14 +850,25 @@ pub const DeclGen = struct {
             .ErrorUnion => {
                 const error_type = tv.ty.errorUnionSet();
                 const payload_type = tv.ty.errorUnionPayload();
-                const sub_val = tv.val.castTag(.error_union).?.data;
+                const is_pl = tv.val.errorUnionIsPayload();
 
                 if (!payload_type.hasCodeGenBits()) {
                     // We use the error type directly as the type.
-                    return self.genTypedValue(.{ .ty = error_type, .val = sub_val });
+                    const err_val = if (!is_pl) tv.val else Value.initTag(.zero);
+                    return self.genTypedValue(.{ .ty = error_type, .val = err_val });
                 }
 
-                return self.todo("implement error union const of type '{}'", .{tv.ty});
+                const fields: [2]*const llvm.Value = .{
+                    try self.genTypedValue(.{
+                        .ty = error_type,
+                        .val = if (is_pl) Value.initTag(.zero) else tv.val,
+                    }),
+                    try self.genTypedValue(.{
+                        .ty = payload_type,
+                        .val = if (tv.val.castTag(.eu_payload)) |pl| pl.data else Value.initTag(.undef),
+                    }),
+                };
+                return self.context.constStruct(&fields, fields.len, .False);
             },
             .Struct => {
                 const fields_len = tv.ty.structFieldCount();
@@ -839,6 +888,10 @@ pub const DeclGen = struct {
                     .False,
                 );
             },
+            .ComptimeInt => unreachable,
+            .ComptimeFloat => unreachable,
+            .Type => unreachable,
+            .EnumLiteral => unreachable,
             else => return self.todo("implement const of type '{}'", .{tv.ty}),
         }
     }
@@ -928,6 +981,8 @@ pub const FuncGen = struct {
                 .mul     => try self.airMul(inst, false),
                 .mulwrap => try self.airMul(inst, true),
                 .div     => try self.airDiv(inst),
+                .ptr_add => try self.airPtrAdd(inst),
+                .ptr_sub => try self.airPtrSub(inst),
 
                 .bit_and, .bool_and => try self.airAnd(inst),
                 .bit_or, .bool_or   => try self.airOr(inst),
@@ -944,10 +999,10 @@ pub const FuncGen = struct {
                 .is_non_null_ptr => try self.airIsNonNull(inst, true),
                 .is_null         => try self.airIsNull(inst, false),
                 .is_null_ptr     => try self.airIsNull(inst, true),
-                .is_non_err      => try self.airIsErr(inst, true, false),
-                .is_non_err_ptr  => try self.airIsErr(inst, true, true),
-                .is_err          => try self.airIsErr(inst, false, false),
-                .is_err_ptr      => try self.airIsErr(inst, false, true),
+                .is_non_err      => try self.airIsErr(inst, .EQ, false),
+                .is_non_err_ptr  => try self.airIsErr(inst, .EQ, true),
+                .is_err          => try self.airIsErr(inst, .NE, false),
+                .is_err_ptr      => try self.airIsErr(inst, .NE, true),
 
                 .alloc      => try self.airAlloc(inst),
                 .arg        => try self.airArg(inst),
@@ -977,6 +1032,8 @@ pub const FuncGen = struct {
 
                 .slice_elem_val     => try self.airSliceElemVal(inst),
                 .ptr_slice_elem_val => try self.airPtrSliceElemVal(inst),
+                .ptr_elem_val       => try self.airPtrElemVal(inst),
+                .ptr_ptr_elem_val   => try self.airPtrPtrElemVal(inst),
 
                 .optional_payload     => try self.airOptionalPayload(inst, false),
                 .optional_payload_ptr => try self.airOptionalPayload(inst, true),
@@ -1055,21 +1112,32 @@ pub const FuncGen = struct {
         const rhs = try self.resolveInst(bin_op.rhs);
         const inst_ty = self.air.typeOfIndex(inst);
 
-        if (!inst_ty.isInt())
-            if (inst_ty.tag() != .bool)
-                return self.todo("implement 'airCmp' for type {}", .{inst_ty});
-
-        const is_signed = inst_ty.isSignedInt();
-        const operation = switch (op) {
-            .eq => .EQ,
-            .neq => .NE,
-            .lt => @as(llvm.IntPredicate, if (is_signed) .SLT else .ULT),
-            .lte => @as(llvm.IntPredicate, if (is_signed) .SLE else .ULE),
-            .gt => @as(llvm.IntPredicate, if (is_signed) .SGT else .UGT),
-            .gte => @as(llvm.IntPredicate, if (is_signed) .SGE else .UGE),
-        };
-
-        return self.builder.buildICmp(operation, lhs, rhs, "");
+        switch (self.air.typeOf(bin_op.lhs).zigTypeTag()) {
+            .Int, .Bool, .Pointer, .ErrorSet => {
+                const is_signed = inst_ty.isSignedInt();
+                const operation = switch (op) {
+                    .eq => .EQ,
+                    .neq => .NE,
+                    .lt => @as(llvm.IntPredicate, if (is_signed) .SLT else .ULT),
+                    .lte => @as(llvm.IntPredicate, if (is_signed) .SLE else .ULE),
+                    .gt => @as(llvm.IntPredicate, if (is_signed) .SGT else .UGT),
+                    .gte => @as(llvm.IntPredicate, if (is_signed) .SGE else .UGE),
+                };
+                return self.builder.buildICmp(operation, lhs, rhs, "");
+            },
+            .Float => {
+                const operation: llvm.RealPredicate = switch (op) {
+                    .eq => .OEQ,
+                    .neq => .UNE,
+                    .lt => .OLT,
+                    .lte => .OLE,
+                    .gt => .OGT,
+                    .gte => .OGE,
+                };
+                return self.builder.buildFCmp(operation, lhs, rhs, "");
+            },
+            else => unreachable,
+        }
     }
 
     fn airBlock(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
@@ -1180,7 +1248,8 @@ pub const FuncGen = struct {
     }
 
     fn airSliceElemVal(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
-        if (self.liveness.isUnused(inst))
+        const is_volatile = false; // TODO
+        if (!is_volatile and self.liveness.isUnused(inst))
             return null;
 
         const bin_op = self.air.instructions.items(.data)[inst].bin_op;
@@ -1193,7 +1262,8 @@ pub const FuncGen = struct {
     }
 
     fn airPtrSliceElemVal(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
-        if (self.liveness.isUnused(inst))
+        const is_volatile = false; // TODO
+        if (!is_volatile and self.liveness.isUnused(inst))
             return null;
 
         const bin_op = self.air.instructions.items(.data)[inst].bin_op;
@@ -1201,15 +1271,37 @@ pub const FuncGen = struct {
         const rhs = try self.resolveInst(bin_op.rhs);
 
         const base_ptr = ptr: {
-            const index_type = self.context.intType(32);
-            const indices: [2]*const llvm.Value = .{
-                index_type.constNull(),
-                index_type.constInt(0, .False),
-            };
-            const ptr_field_ptr = self.builder.buildInBoundsGEP(lhs, &indices, 2, "");
+            const ptr_field_ptr = self.builder.buildStructGEP(lhs, 0, "");
             break :ptr self.builder.buildLoad(ptr_field_ptr, "");
         };
 
+        const indices: [1]*const llvm.Value = .{rhs};
+        const ptr = self.builder.buildInBoundsGEP(base_ptr, &indices, indices.len, "");
+        return self.builder.buildLoad(ptr, "");
+    }
+
+    fn airPtrElemVal(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        const is_volatile = false; // TODO
+        if (!is_volatile and self.liveness.isUnused(inst))
+            return null;
+
+        const bin_op = self.air.instructions.items(.data)[inst].bin_op;
+        const base_ptr = try self.resolveInst(bin_op.lhs);
+        const rhs = try self.resolveInst(bin_op.rhs);
+        const indices: [1]*const llvm.Value = .{rhs};
+        const ptr = self.builder.buildInBoundsGEP(base_ptr, &indices, indices.len, "");
+        return self.builder.buildLoad(ptr, "");
+    }
+
+    fn airPtrPtrElemVal(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        const is_volatile = false; // TODO
+        if (!is_volatile and self.liveness.isUnused(inst))
+            return null;
+
+        const bin_op = self.air.instructions.items(.data)[inst].bin_op;
+        const lhs = try self.resolveInst(bin_op.lhs);
+        const rhs = try self.resolveInst(bin_op.rhs);
+        const base_ptr = self.builder.buildLoad(lhs, "");
         const indices: [1]*const llvm.Value = .{rhs};
         const ptr = self.builder.buildInBoundsGEP(base_ptr, &indices, indices.len, "");
         return self.builder.buildLoad(ptr, "");
@@ -1390,7 +1482,7 @@ pub const FuncGen = struct {
                 index_type.constInt(1, .False),
             };
 
-            return self.builder.buildLoad(self.builder.buildInBoundsGEP(operand, &indices, 2, ""), "");
+            return self.builder.buildLoad(self.builder.buildInBoundsGEP(operand, &indices, indices.len, ""), "");
         } else {
             return self.builder.buildExtractValue(operand, 1, "");
         }
@@ -1406,7 +1498,7 @@ pub const FuncGen = struct {
     fn airIsErr(
         self: *FuncGen,
         inst: Air.Inst.Index,
-        invert_logic: bool,
+        op: llvm.IntPredicate,
         operand_is_ptr: bool,
     ) !?*const llvm.Value {
         if (self.liveness.isUnused(inst))
@@ -1416,16 +1508,22 @@ pub const FuncGen = struct {
         const operand = try self.resolveInst(un_op);
         const err_union_ty = self.air.typeOf(un_op);
         const payload_ty = err_union_ty.errorUnionPayload();
+        const err_set_ty = try self.dg.llvmType(Type.initTag(.anyerror));
+        const zero = err_set_ty.constNull();
 
         if (!payload_ty.hasCodeGenBits()) {
             const loaded = if (operand_is_ptr) self.builder.buildLoad(operand, "") else operand;
-            const op: llvm.IntPredicate = if (invert_logic) .EQ else .NE;
-            const err_set_ty = try self.dg.llvmType(Type.initTag(.anyerror));
-            const zero = err_set_ty.constNull();
             return self.builder.buildICmp(op, loaded, zero, "");
         }
 
-        return self.todo("implement 'airIsErr' for error unions with nonzero payload", .{});
+        if (operand_is_ptr) {
+            const err_field_ptr = self.builder.buildStructGEP(operand, 0, "");
+            const loaded = self.builder.buildLoad(err_field_ptr, "");
+            return self.builder.buildICmp(op, loaded, zero, "");
+        }
+
+        const loaded = self.builder.buildExtractValue(operand, 0, "");
+        return self.builder.buildICmp(op, loaded, zero, "");
     }
 
     fn airOptionalPayload(
@@ -1470,9 +1568,11 @@ pub const FuncGen = struct {
             return null;
         }
 
-        _ = operand;
-        _ = operand_is_ptr;
-        return self.todo("implement llvm codegen for 'airErrUnionPayload' for type {}", .{self.air.typeOf(ty_op.operand)});
+        if (operand_is_ptr) {
+            return self.builder.buildStructGEP(operand, 1, "");
+        }
+
+        return self.builder.buildExtractValue(operand, 1, "");
     }
 
     fn airErrUnionErr(
@@ -1492,7 +1592,13 @@ pub const FuncGen = struct {
             if (!operand_is_ptr) return operand;
             return self.builder.buildLoad(operand, "");
         }
-        return self.todo("implement llvm codegen for 'airErrUnionErr'", .{});
+
+        if (operand_is_ptr) {
+            const err_field_ptr = self.builder.buildStructGEP(operand, 0, "");
+            return self.builder.buildLoad(err_field_ptr, "");
+        }
+
+        return self.builder.buildExtractValue(operand, 0, "");
     }
 
     fn airWrapOptional(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
@@ -1573,6 +1679,29 @@ pub const FuncGen = struct {
         if (inst_ty.isFloat()) return self.builder.buildFDiv(lhs, rhs, "");
         if (inst_ty.isSignedInt()) return self.builder.buildSDiv(lhs, rhs, "");
         return self.builder.buildUDiv(lhs, rhs, "");
+    }
+
+    fn airPtrAdd(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        if (self.liveness.isUnused(inst))
+            return null;
+
+        const bin_op = self.air.instructions.items(.data)[inst].bin_op;
+        const base_ptr = try self.resolveInst(bin_op.lhs);
+        const offset = try self.resolveInst(bin_op.rhs);
+        const indices: [1]*const llvm.Value = .{offset};
+        return self.builder.buildInBoundsGEP(base_ptr, &indices, indices.len, "");
+    }
+
+    fn airPtrSub(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        if (self.liveness.isUnused(inst))
+            return null;
+
+        const bin_op = self.air.instructions.items(.data)[inst].bin_op;
+        const base_ptr = try self.resolveInst(bin_op.lhs);
+        const offset = try self.resolveInst(bin_op.rhs);
+        const negative_offset = self.builder.buildNeg(offset, "");
+        const indices: [1]*const llvm.Value = .{negative_offset};
+        return self.builder.buildInBoundsGEP(base_ptr, &indices, indices.len, "");
     }
 
     fn airAnd(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {

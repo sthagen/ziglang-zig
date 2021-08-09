@@ -31,6 +31,21 @@ pub const Context = opaque {
     pub const intType = LLVMIntTypeInContext;
     extern fn LLVMIntTypeInContext(C: *const Context, NumBits: c_uint) *const Type;
 
+    pub const halfType = LLVMHalfTypeInContext;
+    extern fn LLVMHalfTypeInContext(C: *const Context) *const Type;
+
+    pub const floatType = LLVMFloatTypeInContext;
+    extern fn LLVMFloatTypeInContext(C: *const Context) *const Type;
+
+    pub const doubleType = LLVMDoubleTypeInContext;
+    extern fn LLVMDoubleTypeInContext(C: *const Context) *const Type;
+
+    pub const x86FP80Type = LLVMX86FP80TypeInContext;
+    extern fn LLVMX86FP80TypeInContext(C: *const Context) *const Type;
+
+    pub const fp128Type = LLVMFP128TypeInContext;
+    extern fn LLVMFP128TypeInContext(C: *const Context) *const Type;
+
     pub const voidType = LLVMVoidTypeInContext;
     extern fn LLVMVoidTypeInContext(C: *const Context) *const Type;
 
@@ -126,6 +141,9 @@ pub const Type = opaque {
 
     pub const constInt = LLVMConstInt;
     extern fn LLVMConstInt(IntTy: *const Type, N: c_ulonglong, SignExtend: Bool) *const Value;
+
+    pub const constReal = LLVMConstReal;
+    extern fn LLVMConstReal(RealTy: *const Type, N: f64) *const Value;
 
     pub const constArray = LLVMConstArray;
     extern fn LLVMConstArray(ElementTy: *const Type, ConstantVals: [*]*const Value, Length: c_uint) *const Value;
@@ -306,6 +324,9 @@ pub const Builder = opaque {
     pub const buildLoad = LLVMBuildLoad;
     extern fn LLVMBuildLoad(*const Builder, PointerVal: *const Value, Name: [*:0]const u8) *const Value;
 
+    pub const buildNeg = LLVMBuildNeg;
+    extern fn LLVMBuildNeg(*const Builder, V: *const Value, Name: [*:0]const u8) *const Value;
+
     pub const buildNot = LLVMBuildNot;
     extern fn LLVMBuildNot(*const Builder, V: *const Value, Name: [*:0]const u8) *const Value;
 
@@ -391,6 +412,9 @@ pub const Builder = opaque {
     pub const buildICmp = LLVMBuildICmp;
     extern fn LLVMBuildICmp(*const Builder, Op: IntPredicate, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
 
+    pub const buildFCmp = LLVMBuildFCmp;
+    extern fn LLVMBuildFCmp(*const Builder, Op: RealPredicate, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
     pub const buildBr = LLVMBuildBr;
     extern fn LLVMBuildBr(*const Builder, Dest: *const BasicBlock) *const Value;
 
@@ -433,7 +457,7 @@ pub const Builder = opaque {
     ) *const Value;
 };
 
-pub const IntPredicate = enum(c_int) {
+pub const IntPredicate = enum(c_uint) {
     EQ = 32,
     NE = 33,
     UGT = 34,
@@ -444,6 +468,23 @@ pub const IntPredicate = enum(c_int) {
     SGE = 39,
     SLT = 40,
     SLE = 41,
+};
+
+pub const RealPredicate = enum(c_uint) {
+    OEQ = 1,
+    OGT = 2,
+    OGE = 3,
+    OLT = 4,
+    OLE = 5,
+    ONE = 6,
+    ORD = 7,
+    UNO = 8,
+    UEQ = 9,
+    UGT = 10,
+    UGE = 11,
+    ULT = 12,
+    ULE = 13,
+    UNE = 14,
 };
 
 pub const BasicBlock = opaque {

@@ -4,6 +4,10 @@ test {
     // Tests that pass for both.
     _ = @import("behavior/bool.zig");
     _ = @import("behavior/basic.zig");
+    _ = @import("behavior/generics.zig");
+    _ = @import("behavior/eval.zig");
+    _ = @import("behavior/pointers.zig");
+    _ = @import("behavior/if.zig");
 
     if (!builtin.zig_is_stage2) {
         // Tests that only pass for stage1.
@@ -87,17 +91,17 @@ test {
         _ = @import("behavior/enum.zig");
         _ = @import("behavior/enum_with_members.zig");
         _ = @import("behavior/error.zig");
-        _ = @import("behavior/eval.zig");
+        _ = @import("behavior/eval_stage1.zig");
         _ = @import("behavior/field_parent_ptr.zig");
         _ = @import("behavior/floatop.zig");
         _ = @import("behavior/fn.zig");
         _ = @import("behavior/fn_in_struct_in_comptime.zig");
         _ = @import("behavior/fn_delegation.zig");
         _ = @import("behavior/for.zig");
-        _ = @import("behavior/generics.zig");
+        _ = @import("behavior/generics_stage1.zig");
         _ = @import("behavior/hasdecl.zig");
         _ = @import("behavior/hasfield.zig");
-        _ = @import("behavior/if.zig");
+        _ = @import("behavior/if_stage1.zig");
         _ = @import("behavior/import.zig");
         _ = @import("behavior/incomplete_struct_param_tld.zig");
         _ = @import("behavior/inttoptr.zig");
@@ -110,7 +114,7 @@ test {
         _ = @import("behavior/namespace_depends_on_compile_var.zig");
         _ = @import("behavior/null.zig");
         _ = @import("behavior/optional.zig");
-        _ = @import("behavior/pointers.zig");
+        _ = @import("behavior/pointers_stage1.zig");
         _ = @import("behavior/popcount.zig");
         _ = @import("behavior/ptrcast.zig");
         _ = @import("behavior/pub_enum.zig");

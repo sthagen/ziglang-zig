@@ -802,13 +802,13 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
 
                 switch (air_tags[inst]) {
                     // zig fmt: off
-                    .add     => try self.airAdd(inst),
-                    .addwrap => try self.airAddWrap(inst),
-                    .sub     => try self.airSub(inst),
-                    .subwrap => try self.airSubWrap(inst),
-                    .mul     => try self.airMul(inst),
-                    .mulwrap => try self.airMulWrap(inst),
-                    .div     => try self.airDiv(inst),
+                    .add, .ptr_add => try self.airAdd(inst),
+                    .addwrap       => try self.airAddWrap(inst),
+                    .sub, .ptr_sub => try self.airSub(inst),
+                    .subwrap       => try self.airSubWrap(inst),
+                    .mul           => try self.airMul(inst),
+                    .mulwrap       => try self.airMulWrap(inst),
+                    .div           => try self.airDiv(inst),
 
                     .cmp_lt  => try self.airCmp(inst, .lt),
                     .cmp_lte => try self.airCmp(inst, .lte),
@@ -859,6 +859,8 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
 
                     .slice_elem_val      => try self.airSliceElemVal(inst),
                     .ptr_slice_elem_val  => try self.airPtrSliceElemVal(inst),
+                    .ptr_elem_val        => try self.airPtrElemVal(inst),
+                    .ptr_ptr_elem_val    => try self.airPtrPtrElemVal(inst),
 
                     .constant => unreachable, // excluded from function bodies
                     .const_ty => unreachable, // excluded from function bodies
@@ -1369,17 +1371,37 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         }
 
         fn airSliceElemVal(self: *Self, inst: Air.Inst.Index) !void {
+            const is_volatile = false; // TODO
             const bin_op = self.air.instructions.items(.data)[inst].bin_op;
-            const result: MCValue = if (self.liveness.isUnused(inst)) .dead else switch (arch) {
+            const result: MCValue = if (!is_volatile and self.liveness.isUnused(inst)) .dead else switch (arch) {
                 else => return self.fail("TODO implement slice_elem_val for {}", .{self.target.cpu.arch}),
             };
             return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
         }
 
         fn airPtrSliceElemVal(self: *Self, inst: Air.Inst.Index) !void {
+            const is_volatile = false; // TODO
             const bin_op = self.air.instructions.items(.data)[inst].bin_op;
-            const result: MCValue = if (self.liveness.isUnused(inst)) .dead else switch (arch) {
+            const result: MCValue = if (!is_volatile and self.liveness.isUnused(inst)) .dead else switch (arch) {
                 else => return self.fail("TODO implement ptr_slice_elem_val for {}", .{self.target.cpu.arch}),
+            };
+            return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
+        }
+
+        fn airPtrElemVal(self: *Self, inst: Air.Inst.Index) !void {
+            const is_volatile = false; // TODO
+            const bin_op = self.air.instructions.items(.data)[inst].bin_op;
+            const result: MCValue = if (!is_volatile and self.liveness.isUnused(inst)) .dead else switch (arch) {
+                else => return self.fail("TODO implement ptr_elem_val for {}", .{self.target.cpu.arch}),
+            };
+            return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
+        }
+
+        fn airPtrPtrElemVal(self: *Self, inst: Air.Inst.Index) !void {
+            const is_volatile = false; // TODO
+            const bin_op = self.air.instructions.items(.data)[inst].bin_op;
+            const result: MCValue = if (!is_volatile and self.liveness.isUnused(inst)) .dead else switch (arch) {
+                else => return self.fail("TODO implement ptr_ptr_elem_val for {}", .{self.target.cpu.arch}),
             };
             return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
         }
@@ -3656,7 +3678,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     }
 
                     {
-                        var iter = std.mem.tokenize(asm_source, "\n\r");
+                        var iter = std.mem.tokenize(u8, asm_source, "\n\r");
                         while (iter.next()) |ins| {
                             if (mem.eql(u8, ins, "syscall")) {
                                 try self.code.appendSlice(&[_]u8{ 0x0f, 0x05 });
@@ -4793,7 +4815,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 .ErrorUnion => {
                     const error_type = typed_value.ty.errorUnionSet();
                     const payload_type = typed_value.ty.errorUnionPayload();
-                    const sub_val = typed_value.val.castTag(.error_union).?.data;
+                    const sub_val = typed_value.val.castTag(.eu_payload).?.data;
 
                     if (!payload_type.hasCodeGenBits()) {
                         // We use the error type directly as the type.

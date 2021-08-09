@@ -109,6 +109,8 @@ const Writer = struct {
             .mul,
             .mulwrap,
             .div,
+            .ptr_add,
+            .ptr_sub,
             .bit_and,
             .bit_or,
             .xor,
@@ -123,6 +125,8 @@ const Writer = struct {
             .store,
             .slice_elem_val,
             .ptr_slice_elem_val,
+            .ptr_elem_val,
+            .ptr_ptr_elem_val,
             => try w.writeBinOp(s, inst),
 
             .is_null,
@@ -222,7 +226,7 @@ const Writer = struct {
         const extra = w.air.extraData(Air.Block, ty_pl.payload);
         const body = w.air.extra[extra.end..][0..extra.data.body_len];
 
-        try s.writeAll("{\n");
+        try s.print("{}, {{\n", .{w.air.getRefType(ty_pl.ty)});
         const old_indent = w.indent;
         w.indent += 2;
         try w.writeBody(s, body);
