@@ -26,7 +26,7 @@ pub fn addCases(ctx: *TestContext) !void {
         var case = ctx.exe("hello world with updates", linux_x64);
 
         case.addError("", &[_][]const u8{
-            ":93:9: error: struct 'tmp.tmp' has no member named 'main'",
+            ":95:9: error: struct 'tmp.tmp' has no member named 'main'",
         });
 
         // Incorrect return type
@@ -288,7 +288,11 @@ pub fn addCases(ctx: *TestContext) !void {
             \\pub fn main() void {
             \\    _ = @TypeOf(true, 1);
             \\}
-        , &[_][]const u8{":2:9: error: incompatible types: 'bool' and 'comptime_int'"});
+        , &[_][]const u8{
+            ":2:9: error: incompatible types: 'bool' and 'comptime_int'",
+            ":2:17: note: type 'bool' here",
+            ":2:23: note: type 'comptime_int' here",
+        });
     }
 
     {
@@ -1729,7 +1733,11 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    const b = false;
             \\    _ = a & &b;
             \\}
-        , &[_][]const u8{":4:11: error: incompatible types: 'bool' and '*const bool'"});
+        , &[_][]const u8{
+            ":4:11: error: incompatible types: 'bool' and '*const bool'",
+            ":4:9: note: type 'bool' here",
+            ":4:13: note: type '*const bool' here",
+        });
 
         case.addCompareOutput(
             \\pub fn main() void {
