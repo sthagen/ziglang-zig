@@ -6313,7 +6313,7 @@ fn zirTypeInfo(sema: *Sema, block: *Scope.Block, inst: Zir.Inst.Index) CompileEr
                         sema.arena,
                         @enumToInt(@typeInfo(std.builtin.TypeInfo).Union.tag_type.?.Fn),
                     ),
-                    .val = try Value.Tag.@"struct".create(sema.arena, field_values.ptr),
+                    .val = try Value.Tag.@"struct".create(sema.arena, field_values),
                 }),
             );
         },
@@ -6335,7 +6335,7 @@ fn zirTypeInfo(sema: *Sema, block: *Scope.Block, inst: Zir.Inst.Index) CompileEr
                         sema.arena,
                         @enumToInt(@typeInfo(std.builtin.TypeInfo).Union.tag_type.?.Int),
                     ),
-                    .val = try Value.Tag.@"struct".create(sema.arena, field_values.ptr),
+                    .val = try Value.Tag.@"struct".create(sema.arena, field_values),
                 }),
             );
         },
@@ -6943,7 +6943,7 @@ fn zirStructInit(sema: *Sema, block: *Scope.Block, inst: Zir.Inst.Index, is_ref:
             for (field_inits) |field_init, i| {
                 values[i] = (sema.resolveMaybeUndefVal(block, src, field_init) catch unreachable).?;
             }
-            return sema.addConstant(resolved_ty, try Value.Tag.@"struct".create(sema.arena, values.ptr));
+            return sema.addConstant(resolved_ty, try Value.Tag.@"struct".create(sema.arena, values));
         }
 
         return mod.fail(&block.base, src, "TODO: Sema.zirStructInit for runtime-known struct values", .{});
@@ -8952,7 +8952,8 @@ fn coerceArrayPtrToSlice(
         // The comptime Value representation is compatible with both types.
         return sema.addConstant(dest_type, val);
     }
-    return sema.mod.fail(&block.base, inst_src, "TODO implement coerceArrayPtrToSlice runtime instruction", .{});
+    try sema.requireRuntimeBlock(block, inst_src);
+    return block.addTyOp(.array_to_slice, dest_type, inst);
 }
 
 fn coerceArrayPtrToMany(
@@ -9701,7 +9702,7 @@ fn resolveTypeFields(sema: *Sema, block: *Scope.Block, src: LazySrcLoc, ty: Type
         .type_info => return sema.resolveBuiltinTypeFields(block, src, "TypeInfo"),
         .extern_options => return sema.resolveBuiltinTypeFields(block, src, "ExternOptions"),
         .export_options => return sema.resolveBuiltinTypeFields(block, src, "ExportOptions"),
-        .atomic_ordering => return sema.resolveBuiltinTypeFields(block, src, "AtomicOrdering"),
+        .atomic_order => return sema.resolveBuiltinTypeFields(block, src, "AtomicOrder"),
         .atomic_rmw_op => return sema.resolveBuiltinTypeFields(block, src, "AtomicRmwOp"),
         .calling_convention => return sema.resolveBuiltinTypeFields(block, src, "CallingConvention"),
         .float_mode => return sema.resolveBuiltinTypeFields(block, src, "FloatMode"),
@@ -10095,7 +10096,7 @@ fn typeHasOnePossibleValue(
         .var_args_param,
         .manyptr_u8,
         .manyptr_const_u8,
-        .atomic_ordering,
+        .atomic_order,
         .atomic_rmw_op,
         .calling_convention,
         .float_mode,
@@ -10280,7 +10281,7 @@ pub fn addType(sema: *Sema, ty: Type) !Air.Inst.Ref {
         .@"null" => return .null_type,
         .@"undefined" => return .undefined_type,
         .enum_literal => return .enum_literal_type,
-        .atomic_ordering => return .atomic_ordering_type,
+        .atomic_order => return .atomic_order_type,
         .atomic_rmw_op => return .atomic_rmw_op_type,
         .calling_convention => return .calling_convention_type,
         .float_mode => return .float_mode_type,
