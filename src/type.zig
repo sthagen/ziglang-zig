@@ -1583,7 +1583,11 @@ pub const Type = extern union {
 
             .int_signed, .int_unsigned => {
                 const bits: u16 = self.cast(Payload.Bits).?.data;
-                return std.math.ceilPowerOfTwoPromote(u16, (bits + 7) / 8);
+                if (bits <= 8) return 1;
+                if (bits <= 16) return 2;
+                if (bits <= 32) return 4;
+                if (bits <= 64) return 8;
+                return 16;
             },
 
             .optional => {
@@ -2191,6 +2195,44 @@ pub const Type = extern union {
         };
     }
 
+    pub fn isPtrAtRuntime(self: Type) bool {
+        switch (self.tag()) {
+            .c_const_pointer,
+            .c_mut_pointer,
+            .many_const_pointer,
+            .many_mut_pointer,
+            .manyptr_const_u8,
+            .manyptr_u8,
+            .optional_single_const_pointer,
+            .optional_single_mut_pointer,
+            .single_const_pointer,
+            .single_const_pointer_to_comptime_int,
+            .single_mut_pointer,
+            => return true,
+
+            .pointer => switch (self.castTag(.pointer).?.data.size) {
+                .Slice => return false,
+                .One, .Many, .C => return true,
+            },
+
+            .optional => {
+                var buf: Payload.ElemType = undefined;
+                const child_type = self.optionalChild(&buf);
+                // optionals of zero sized pointers behave like bools
+                if (!child_type.hasCodeGenBits()) return false;
+                if (child_type.zigTypeTag() != .Pointer) return false;
+
+                const info = child_type.ptrInfo().data;
+                switch (info.size) {
+                    .Slice, .C => return false,
+                    .Many, .One => return !info.@"allowzero",
+                }
+            },
+
+            else => return false,
+        }
+    }
+
     /// Asserts that the type is an optional
     pub fn isPtrLikeOptional(self: Type) bool {
         switch (self.tag()) {
@@ -2203,8 +2245,13 @@ pub const Type = extern union {
                 const child_type = self.optionalChild(&buf);
                 // optionals of zero sized pointers behave like bools
                 if (!child_type.hasCodeGenBits()) return false;
+                if (child_type.zigTypeTag() != .Pointer) return false;
 
-                return child_type.zigTypeTag() == .Pointer and !child_type.isCPtr();
+                const info = child_type.ptrInfo().data;
+                switch (info.size) {
+                    .Slice, .C => return false,
+                    .Many, .One => return !info.@"allowzero",
+                }
             },
             else => unreachable,
         }

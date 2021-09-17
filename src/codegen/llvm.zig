@@ -355,6 +355,20 @@ pub const Object = struct {
 
         const llvm_func = try dg.resolveLlvmFunction(decl);
 
+        if (module.align_stack_fns.get(func)) |align_info| {
+            dg.addFnAttrInt(llvm_func, "alignstack", align_info.alignment);
+            dg.addFnAttr(llvm_func, "noinline");
+        } else {
+            DeclGen.removeFnAttr(llvm_func, "alignstack");
+            if (!func.is_noinline) DeclGen.removeFnAttr(llvm_func, "noinline");
+        }
+
+        if (func.is_cold) {
+            dg.addFnAttr(llvm_func, "cold");
+        } else {
+            DeclGen.removeFnAttr(llvm_func, "cold");
+        }
+
         // This gets the LLVM values from the function and stores them in `dg.args`.
         const fn_param_len = decl.ty.fnParamLen();
         var args = try dg.gpa.alloc(*const llvm.Value, fn_param_len);
@@ -512,7 +526,9 @@ pub const DeclGen = struct {
         }
     }
 
-    /// If the llvm function does not exist, create it
+    /// If the llvm function does not exist, create it.
+    /// Note that this can be called before the function's semantic analysis has
+    /// completed, so if any attributes rely on that, they must be done in updateFunc, not here.
     fn resolveLlvmFunction(self: *DeclGen, decl: *Module.Decl) !*const llvm.Value {
         if (self.llvmModule().getNamedFunction(decl.name)) |llvm_fn| return llvm_fn;
 
@@ -572,6 +588,12 @@ pub const DeclGen = struct {
                 const info = t.intInfo(self.module.getTarget());
                 return self.context.intType(info.bits);
             },
+            .Enum => {
+                var buffer: Type.Payload.Bits = undefined;
+                const int_ty = t.enumTagType(&buffer);
+                const bit_count = int_ty.intInfo(self.module.getTarget()).bits;
+                return self.context.intType(bit_count);
+            },
             .Float => switch (t.floatBits(self.module.getTarget())) {
                 16 => return self.context.halfType(),
                 32 => return self.context.floatType(),
@@ -602,18 +624,18 @@ pub const DeclGen = struct {
                 return elem_type.arrayType(@intCast(c_uint, total_len));
             },
             .Optional => {
-                if (!t.isPtrLikeOptional()) {
-                    var buf: Type.Payload.ElemType = undefined;
-                    const child_type = t.optionalChild(&buf);
+                var buf: Type.Payload.ElemType = undefined;
+                const child_type = t.optionalChild(&buf);
+                const payload_llvm_ty = try self.llvmType(child_type);
 
-                    const optional_types: [2]*const llvm.Type = .{
-                        try self.llvmType(child_type),
-                        self.context.intType(1),
-                    };
-                    return self.context.structType(&optional_types, 2, .False);
-                } else {
-                    return self.todo("implement optional pointers as actual pointers", .{});
+                if (t.isPtrLikeOptional()) {
+                    return payload_llvm_ty;
                 }
+
+                const fields: [2]*const llvm.Type = .{
+                    payload_llvm_ty, self.context.intType(1),
+                };
+                return self.context.structType(&fields, fields.len, .False);
             },
             .ErrorUnion => {
                 const error_type = t.errorUnionSet();
@@ -670,7 +692,6 @@ pub const DeclGen = struct {
 
             .BoundFn => @panic("TODO remove BoundFn from the language"),
 
-            .Enum,
             .Union,
             .Opaque,
             .Frame,
@@ -705,6 +726,17 @@ pub const DeclGen = struct {
                 if (!bigint.positive) {
                     return llvm.constNeg(llvm_int);
                 }
+                return llvm_int;
+            },
+            .Enum => {
+                const llvm_type = try self.llvmType(tv.ty);
+                const uint: u64 = uint: {
+                    if (tv.val.castTag(.enum_field_index)) |payload| {
+                        break :uint payload.data;
+                    }
+                    break :uint tv.val.toUnsignedInt();
+                };
+                const llvm_int = llvm_type.constInt(uint, .False);
                 return llvm_int;
             },
             .Float => {
@@ -891,21 +923,54 @@ pub const DeclGen = struct {
             .ComptimeFloat => unreachable,
             .Type => unreachable,
             .EnumLiteral => unreachable,
-            else => return self.todo("implement const of type '{}'", .{tv.ty}),
+            .Void => unreachable,
+            .NoReturn => unreachable,
+            .Undefined => unreachable,
+            .Null => unreachable,
+            .BoundFn => unreachable,
+            .Opaque => unreachable,
+
+            .Union,
+            .Frame,
+            .AnyFrame,
+            .Vector,
+            => return self.todo("implement const of type '{}'", .{tv.ty}),
         }
     }
 
-    // Helper functions
-    fn addAttr(self: *DeclGen, val: *const llvm.Value, index: llvm.AttributeIndex, name: []const u8) void {
+    fn addAttr(dg: *DeclGen, val: *const llvm.Value, index: llvm.AttributeIndex, name: []const u8) void {
+        return dg.addAttrInt(val, index, name, 0);
+    }
+
+    fn removeAttr(val: *const llvm.Value, index: llvm.AttributeIndex, name: []const u8) void {
         const kind_id = llvm.getEnumAttributeKindForName(name.ptr, name.len);
         assert(kind_id != 0);
-        const llvm_attr = self.context.createEnumAttribute(kind_id, 0);
+        val.removeEnumAttributeAtIndex(index, kind_id);
+    }
+
+    fn addAttrInt(
+        dg: *DeclGen,
+        val: *const llvm.Value,
+        index: llvm.AttributeIndex,
+        name: []const u8,
+        int: u64,
+    ) void {
+        const kind_id = llvm.getEnumAttributeKindForName(name.ptr, name.len);
+        assert(kind_id != 0);
+        const llvm_attr = dg.context.createEnumAttribute(kind_id, int);
         val.addAttributeAtIndex(index, llvm_attr);
     }
 
-    fn addFnAttr(self: *DeclGen, val: *const llvm.Value, attr_name: []const u8) void {
-        // TODO: improve this API, `addAttr(-1, attr_name)`
-        self.addAttr(val, std.math.maxInt(llvm.AttributeIndex), attr_name);
+    fn addFnAttr(dg: *DeclGen, val: *const llvm.Value, name: []const u8) void {
+        dg.addAttr(val, std.math.maxInt(llvm.AttributeIndex), name);
+    }
+
+    fn removeFnAttr(fn_val: *const llvm.Value, name: []const u8) void {
+        removeAttr(fn_val, std.math.maxInt(llvm.AttributeIndex), name);
+    }
+
+    fn addFnAttrInt(dg: *DeclGen, fn_val: *const llvm.Value, name: []const u8, int: u64) void {
+        return dg.addAttrInt(fn_val, std.math.maxInt(llvm.AttributeIndex), name, int);
     }
 
     /// If the operand type of an atomic operation is not byte sized we need to
@@ -1059,6 +1124,14 @@ pub const FuncGen = struct {
                 .array_to_slice => try self.airArrayToSlice(inst),
                 .cmpxchg_weak   => try self.airCmpxchg(inst, true),
                 .cmpxchg_strong => try self.airCmpxchg(inst, false),
+                .fence          => try self.airFence(inst),
+                .atomic_rmw     => try self.airAtomicRmw(inst),
+                .atomic_load    => try self.airAtomicLoad(inst),
+
+                .atomic_store_unordered => try self.airAtomicStore(inst, .Unordered),
+                .atomic_store_monotonic => try self.airAtomicStore(inst, .Monotonic),
+                .atomic_store_release   => try self.airAtomicStore(inst, .Release),
+                .atomic_store_seq_cst   => try self.airAtomicStore(inst, .SequentiallyConsistent),
 
                 .struct_field_ptr => try self.airStructFieldPtr(inst),
                 .struct_field_val => try self.airStructFieldVal(inst),
@@ -1149,21 +1222,15 @@ pub const FuncGen = struct {
         const bin_op = self.air.instructions.items(.data)[inst].bin_op;
         const lhs = try self.resolveInst(bin_op.lhs);
         const rhs = try self.resolveInst(bin_op.rhs);
-        const inst_ty = self.air.typeOfIndex(inst);
+        const operand_ty = self.air.typeOf(bin_op.lhs);
 
-        switch (self.air.typeOf(bin_op.lhs).zigTypeTag()) {
-            .Int, .Bool, .Pointer, .ErrorSet => {
-                const is_signed = inst_ty.isSignedInt();
-                const operation = switch (op) {
-                    .eq => .EQ,
-                    .neq => .NE,
-                    .lt => @as(llvm.IntPredicate, if (is_signed) .SLT else .ULT),
-                    .lte => @as(llvm.IntPredicate, if (is_signed) .SLE else .ULE),
-                    .gt => @as(llvm.IntPredicate, if (is_signed) .SGT else .UGT),
-                    .gte => @as(llvm.IntPredicate, if (is_signed) .SGE else .UGE),
-                };
-                return self.builder.buildICmp(operation, lhs, rhs, "");
+        const int_ty = switch (operand_ty.zigTypeTag()) {
+            .Enum => blk: {
+                var buffer: Type.Payload.Bits = undefined;
+                const int_ty = operand_ty.enumTagType(&buffer);
+                break :blk int_ty;
             },
+            .Int, .Bool, .Pointer, .ErrorSet => operand_ty,
             .Float => {
                 const operation: llvm.RealPredicate = switch (op) {
                     .eq => .OEQ,
@@ -1176,7 +1243,17 @@ pub const FuncGen = struct {
                 return self.builder.buildFCmp(operation, lhs, rhs, "");
             },
             else => unreachable,
-        }
+        };
+        const is_signed = int_ty.isSignedInt();
+        const operation = switch (op) {
+            .eq => .EQ,
+            .neq => .NE,
+            .lt => @as(llvm.IntPredicate, if (is_signed) .SLT else .ULT),
+            .lte => @as(llvm.IntPredicate, if (is_signed) .SLE else .ULE),
+            .gt => @as(llvm.IntPredicate, if (is_signed) .SGT else .UGT),
+            .gte => @as(llvm.IntPredicate, if (is_signed) .SGE else .UGE),
+        };
+        return self.builder.buildICmp(operation, lhs, rhs, "");
     }
 
     fn airBlock(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
@@ -1565,6 +1642,13 @@ pub const FuncGen = struct {
         const operand = try self.resolveInst(un_op);
 
         if (operand_is_ptr) {
+            const operand_ty = self.air.typeOf(un_op).elemType();
+            if (operand_ty.isPtrLikeOptional()) {
+                const operand_llvm_ty = try self.dg.llvmType(operand_ty);
+                const loaded = self.builder.buildLoad(operand, "");
+                return self.builder.buildICmp(.NE, loaded, operand_llvm_ty.constNull(), "");
+            }
+
             const index_type = self.context.intType(32);
 
             var indices: [2]*const llvm.Value = .{
@@ -1573,9 +1657,15 @@ pub const FuncGen = struct {
             };
 
             return self.builder.buildLoad(self.builder.buildInBoundsGEP(operand, &indices, indices.len, ""), "");
-        } else {
-            return self.builder.buildExtractValue(operand, 1, "");
         }
+
+        const operand_ty = self.air.typeOf(un_op);
+        if (operand_ty.isPtrLikeOptional()) {
+            const operand_llvm_ty = try self.dg.llvmType(operand_ty);
+            return self.builder.buildICmp(.NE, operand, operand_llvm_ty.constNull(), "");
+        }
+
+        return self.builder.buildExtractValue(operand, 1, "");
     }
 
     fn airIsNull(self: *FuncGen, inst: Air.Inst.Index, operand_is_ptr: bool) !?*const llvm.Value {
@@ -1628,17 +1718,24 @@ pub const FuncGen = struct {
         const operand = try self.resolveInst(ty_op.operand);
 
         if (operand_is_ptr) {
+            const operand_ty = self.air.typeOf(ty_op.operand).elemType();
+            if (operand_ty.isPtrLikeOptional()) {
+                return self.builder.buildLoad(operand, "");
+            }
+
             const index_type = self.context.intType(32);
-
             var indices: [2]*const llvm.Value = .{
-                index_type.constNull(),
-                index_type.constNull(),
+                index_type.constNull(), index_type.constNull(),
             };
-
             return self.builder.buildInBoundsGEP(operand, &indices, 2, "");
-        } else {
-            return self.builder.buildExtractValue(operand, 0, "");
         }
+
+        const operand_ty = self.air.typeOf(ty_op.operand);
+        if (operand_ty.isPtrLikeOptional()) {
+            return operand;
+        }
+
+        return self.builder.buildExtractValue(operand, 0, "");
     }
 
     fn airErrUnionPayload(
@@ -1947,12 +2044,13 @@ pub const FuncGen = struct {
             return null;
         // buildAlloca expects the pointee type, not the pointer type, so assert that
         // a Payload.PointerSimple is passed to the alloc instruction.
-        const inst_ty = self.air.typeOfIndex(inst);
-        const pointee_type = inst_ty.castPointer().?.data;
-
-        // TODO: figure out a way to get the name of the var decl.
-        // TODO: set alignment and volatile
-        return self.buildAlloca(try self.dg.llvmType(pointee_type));
+        const ptr_ty = self.air.typeOfIndex(inst);
+        const pointee_type = ptr_ty.elemType();
+        const pointee_llvm_ty = try self.dg.llvmType(pointee_type);
+        const target = self.dg.module.getTarget();
+        const alloca_inst = self.buildAlloca(pointee_llvm_ty);
+        alloca_inst.setAlignment(ptr_ty.ptrAlignment(target));
+        return alloca_inst;
     }
 
     /// Use this instead of builder.buildAlloca, because this function makes sure to
@@ -1982,26 +2080,33 @@ pub const FuncGen = struct {
     fn airStore(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
         const bin_op = self.air.instructions.items(.data)[inst].bin_op;
         const dest_ptr = try self.resolveInst(bin_op.lhs);
+        const ptr_ty = self.air.typeOf(bin_op.lhs);
         const src_operand = try self.resolveInst(bin_op.rhs);
-        // TODO set volatile on this store properly
-        _ = self.builder.buildStore(src_operand, dest_ptr);
+        _ = self.store(dest_ptr, ptr_ty, src_operand);
         return null;
     }
 
     fn airLoad(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
         const ty_op = self.air.instructions.items(.data)[inst].ty_op;
-        const is_volatile = self.air.typeOf(ty_op.operand).isVolatilePtr();
-        if (!is_volatile and self.liveness.isUnused(inst))
+        const ptr_ty = self.air.typeOf(ty_op.operand);
+        if (!ptr_ty.isVolatilePtr() and self.liveness.isUnused(inst))
             return null;
         const ptr = try self.resolveInst(ty_op.operand);
-        // TODO set volatile on this load properly
-        return self.builder.buildLoad(ptr, "");
+        return self.load(ptr, ptr_ty);
     }
 
     fn airBreakpoint(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
         _ = inst;
         const llvm_fn = self.getIntrinsic("llvm.debugtrap");
         _ = self.builder.buildCall(llvm_fn, undefined, 0, "");
+        return null;
+    }
+
+    fn airFence(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        const atomic_order = self.air.instructions.items(.data)[inst].fence;
+        const llvm_memory_order = toLlvmAtomicOrdering(atomic_order);
+        const single_threaded = llvm.Bool.fromBool(self.single_threaded);
+        _ = self.builder.buildFence(llvm_memory_order, single_threaded, "");
         return null;
     }
 
@@ -2024,21 +2129,17 @@ pub const FuncGen = struct {
                 new_value = self.builder.buildZExt(new_value, abi_ty, "");
             }
         }
-        const success_order = toLlvmAtomicOrdering(extra.successOrder());
-        const failure_order = toLlvmAtomicOrdering(extra.failureOrder());
         const result = self.builder.buildCmpXchg(
             ptr,
             expected_value,
             new_value,
-            success_order,
-            failure_order,
+            toLlvmAtomicOrdering(extra.successOrder()),
+            toLlvmAtomicOrdering(extra.failureOrder()),
             is_weak,
             self.single_threaded,
         );
 
         const optional_ty = self.air.typeOfIndex(inst);
-        var buffer: Type.Payload.ElemType = undefined;
-        const child_ty = optional_ty.optionalChild(&buffer);
 
         var payload = self.builder.buildExtractValue(result, 0, "");
         if (opt_abi_ty != null) {
@@ -2047,14 +2148,116 @@ pub const FuncGen = struct {
         const success_bit = self.builder.buildExtractValue(result, 1, "");
 
         if (optional_ty.isPtrLikeOptional()) {
-            const child_llvm_ty = try self.dg.llvmType(child_ty);
-            return self.builder.buildSelect(success_bit, child_llvm_ty.constNull(), payload, "");
+            return self.builder.buildSelect(success_bit, payload.typeOf().constNull(), payload, "");
         }
 
         const optional_llvm_ty = try self.dg.llvmType(optional_ty);
         const non_null_bit = self.builder.buildNot(success_bit, "");
         const partial = self.builder.buildInsertValue(optional_llvm_ty.getUndef(), payload, 0, "");
         return self.builder.buildInsertValue(partial, non_null_bit, 1, "");
+    }
+
+    fn airAtomicRmw(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        const pl_op = self.air.instructions.items(.data)[inst].pl_op;
+        const extra = self.air.extraData(Air.AtomicRmw, pl_op.payload).data;
+        const ptr = try self.resolveInst(pl_op.operand);
+        const ptr_ty = self.air.typeOf(pl_op.operand);
+        const operand_ty = ptr_ty.elemType();
+        const operand = try self.resolveInst(extra.operand);
+        const is_signed_int = operand_ty.isSignedInt();
+        const is_float = operand_ty.isFloat();
+        const op = toLlvmAtomicRmwBinOp(extra.op(), is_signed_int, is_float);
+        const ordering = toLlvmAtomicOrdering(extra.ordering());
+        const single_threaded = llvm.Bool.fromBool(self.single_threaded);
+        const opt_abi_ty = self.dg.getAtomicAbiType(operand_ty, op == .Xchg);
+        if (opt_abi_ty) |abi_ty| {
+            // operand needs widening and truncating or bitcasting.
+            const casted_ptr = self.builder.buildBitCast(ptr, abi_ty.pointerType(0), "");
+            const casted_operand = if (is_float)
+                self.builder.buildBitCast(operand, abi_ty, "")
+            else if (is_signed_int)
+                self.builder.buildSExt(operand, abi_ty, "")
+            else
+                self.builder.buildZExt(operand, abi_ty, "");
+
+            const uncasted_result = self.builder.buildAtomicRmw(
+                op,
+                casted_ptr,
+                casted_operand,
+                ordering,
+                single_threaded,
+            );
+            const operand_llvm_ty = try self.dg.llvmType(operand_ty);
+            if (is_float) {
+                return self.builder.buildBitCast(uncasted_result, operand_llvm_ty, "");
+            } else {
+                return self.builder.buildTrunc(uncasted_result, operand_llvm_ty, "");
+            }
+        }
+
+        if (operand.typeOf().getTypeKind() != .Pointer) {
+            return self.builder.buildAtomicRmw(op, ptr, operand, ordering, single_threaded);
+        }
+
+        // It's a pointer but we need to treat it as an int.
+        const usize_llvm_ty = try self.dg.llvmType(Type.initTag(.usize));
+        const casted_ptr = self.builder.buildBitCast(ptr, usize_llvm_ty.pointerType(0), "");
+        const casted_operand = self.builder.buildPtrToInt(operand, usize_llvm_ty, "");
+        const uncasted_result = self.builder.buildAtomicRmw(
+            op,
+            casted_ptr,
+            casted_operand,
+            ordering,
+            single_threaded,
+        );
+        const operand_llvm_ty = try self.dg.llvmType(operand_ty);
+        return self.builder.buildIntToPtr(uncasted_result, operand_llvm_ty, "");
+    }
+
+    fn airAtomicLoad(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        const atomic_load = self.air.instructions.items(.data)[inst].atomic_load;
+        const ptr = try self.resolveInst(atomic_load.ptr);
+        const ptr_ty = self.air.typeOf(atomic_load.ptr);
+        const ordering = toLlvmAtomicOrdering(atomic_load.order);
+        const operand_ty = ptr_ty.elemType();
+        const opt_abi_ty = self.dg.getAtomicAbiType(operand_ty, false);
+
+        if (opt_abi_ty) |abi_ty| {
+            // operand needs widening and truncating
+            const casted_ptr = self.builder.buildBitCast(ptr, abi_ty.pointerType(0), "");
+            const load_inst = self.load(casted_ptr, ptr_ty);
+            load_inst.setOrdering(ordering);
+            return self.builder.buildTrunc(load_inst, try self.dg.llvmType(operand_ty), "");
+        }
+        const load_inst = self.load(ptr, ptr_ty);
+        load_inst.setOrdering(ordering);
+        return load_inst;
+    }
+
+    fn airAtomicStore(
+        self: *FuncGen,
+        inst: Air.Inst.Index,
+        ordering: llvm.AtomicOrdering,
+    ) !?*const llvm.Value {
+        const bin_op = self.air.instructions.items(.data)[inst].bin_op;
+        var ptr = try self.resolveInst(bin_op.lhs);
+        const ptr_ty = self.air.typeOf(bin_op.lhs);
+        var element = try self.resolveInst(bin_op.rhs);
+        const operand_ty = ptr_ty.elemType();
+        const opt_abi_ty = self.dg.getAtomicAbiType(operand_ty, false);
+
+        if (opt_abi_ty) |abi_ty| {
+            // operand needs widening
+            ptr = self.builder.buildBitCast(ptr, abi_ty.pointerType(0), "");
+            if (operand_ty.isSignedInt()) {
+                element = self.builder.buildSExt(element, abi_ty, "");
+            } else {
+                element = self.builder.buildZExt(element, abi_ty, "");
+            }
+        }
+        const store_inst = self.store(ptr, ptr_ty, element);
+        store_inst.setOrdering(ordering);
+        return null;
     }
 
     fn getIntrinsic(self: *FuncGen, name: []const u8) *const llvm.Value {
@@ -2064,6 +2267,27 @@ pub const FuncGen = struct {
         //       to `lookupIntrinsicID` and then passing the correct types to
         //       `getIntrinsicDeclaration`
         return self.llvmModule().getIntrinsicDeclaration(id, null, 0);
+    }
+
+    fn load(self: *FuncGen, ptr: *const llvm.Value, ptr_ty: Type) *const llvm.Value {
+        const llvm_inst = self.builder.buildLoad(ptr, "");
+        const target = self.dg.module.getTarget();
+        llvm_inst.setAlignment(ptr_ty.ptrAlignment(target));
+        llvm_inst.setVolatile(llvm.Bool.fromBool(ptr_ty.isVolatilePtr()));
+        return llvm_inst;
+    }
+
+    fn store(
+        self: *FuncGen,
+        ptr: *const llvm.Value,
+        ptr_ty: Type,
+        elem: *const llvm.Value,
+    ) *const llvm.Value {
+        const llvm_inst = self.builder.buildStore(elem, ptr);
+        const target = self.dg.module.getTarget();
+        llvm_inst.setAlignment(ptr_ty.ptrAlignment(target));
+        llvm_inst.setVolatile(llvm.Bool.fromBool(ptr_ty.isVolatilePtr()));
+        return llvm_inst;
     }
 };
 
@@ -2216,5 +2440,23 @@ fn toLlvmAtomicOrdering(atomic_order: std.builtin.AtomicOrder) llvm.AtomicOrderi
         .Release => .Release,
         .AcqRel => .AcquireRelease,
         .SeqCst => .SequentiallyConsistent,
+    };
+}
+
+fn toLlvmAtomicRmwBinOp(
+    op: std.builtin.AtomicRmwOp,
+    is_signed: bool,
+    is_float: bool,
+) llvm.AtomicRMWBinOp {
+    return switch (op) {
+        .Xchg => .Xchg,
+        .Add => if (is_float) llvm.AtomicRMWBinOp.FAdd else return .Add,
+        .Sub => if (is_float) llvm.AtomicRMWBinOp.FSub else return .Sub,
+        .And => .And,
+        .Nand => .Nand,
+        .Or => .Or,
+        .Xor => .Xor,
+        .Max => if (is_signed) llvm.AtomicRMWBinOp.Max else return .UMax,
+        .Min => if (is_signed) llvm.AtomicRMWBinOp.Min else return .UMin,
     };
 }

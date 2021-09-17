@@ -131,6 +131,7 @@ pub const Inst = struct {
         /// Result type is the return type of the function being called.
         /// Uses the `pl_op` field with the `Call` payload. operand is the callee.
         call,
+
         /// `<`. Result type is always bool.
         /// Uses the `bin_op` field.
         cmp_lt,
@@ -149,6 +150,7 @@ pub const Inst = struct {
         /// `!=`. Result type is always bool.
         /// Uses the `bin_op` field.
         cmp_neq,
+
         /// Conditional branch.
         /// Result type is always noreturn; no instructions in a block follow this one.
         /// Uses the `pl_op` field. Operand is the condition. Payload is `CondBr`.
@@ -309,10 +311,33 @@ pub const Inst = struct {
         /// Given a pointer to an array, return a slice.
         /// Uses the `ty_op` field.
         array_to_slice,
+
         /// Uses the `ty_pl` field with payload `Cmpxchg`.
         cmpxchg_weak,
         /// Uses the `ty_pl` field with payload `Cmpxchg`.
         cmpxchg_strong,
+        /// Lowers to a memory fence instruction.
+        /// Result type is always void.
+        /// Uses the `fence` field.
+        fence,
+        /// Atomically load from a pointer.
+        /// Result type is the element type of the pointer.
+        /// Uses the `atomic_load` field.
+        atomic_load,
+        /// Atomically store through a pointer.
+        /// Result type is always `void`.
+        /// Uses the `bin_op` field. LHS is pointer, RHS is element.
+        atomic_store_unordered,
+        /// Same as `atomic_store_unordered` but with `AtomicOrder.Monotonic`.
+        atomic_store_monotonic,
+        /// Same as `atomic_store_unordered` but with `AtomicOrder.Release`.
+        atomic_store_release,
+        /// Same as `atomic_store_unordered` but with `AtomicOrder.SeqCst`.
+        atomic_store_seq_cst,
+        /// Atomically read-modify-write via a pointer.
+        /// Result type is the element type of the pointer.
+        /// Uses the `pl_op` field with payload `AtomicRmw`. Operand is `ptr`.
+        atomic_rmw,
 
         pub fn fromCmpOp(op: std.math.CompareOperator) Tag {
             return switch (op) {
@@ -379,6 +404,11 @@ pub const Inst = struct {
         dbg_stmt: struct {
             line: u32,
             column: u32,
+        },
+        fence: std.builtin.AtomicOrder,
+        atomic_load: struct {
+            ptr: Ref,
+            order: std.builtin.AtomicOrder,
         },
 
         // Make sure we don't accidentally add a field to make this union
@@ -461,6 +491,21 @@ pub const Cmpxchg = struct {
 
     pub fn failureOrder(self: Cmpxchg) std.builtin.AtomicOrder {
         return @intToEnum(std.builtin.AtomicOrder, @truncate(u3, self.flags >> 3));
+    }
+};
+
+pub const AtomicRmw = struct {
+    operand: Inst.Ref,
+    /// 0b00000000000000000000000000000XXX - ordering
+    /// 0b0000000000000000000000000XXXX000 - op
+    flags: u32,
+
+    pub fn ordering(self: AtomicRmw) std.builtin.AtomicOrder {
+        return @intToEnum(std.builtin.AtomicOrder, @truncate(u3, self.flags));
+    }
+
+    pub fn op(self: AtomicRmw) std.builtin.AtomicRmwOp {
+        return @intToEnum(std.builtin.AtomicRmwOp, @truncate(u4, self.flags >> 3));
     }
 };
 
@@ -566,6 +611,11 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .breakpoint,
         .dbg_stmt,
         .store,
+        .fence,
+        .atomic_store_unordered,
+        .atomic_store_monotonic,
+        .atomic_store_release,
+        .atomic_store_seq_cst,
         => return Type.initTag(.void),
 
         .ptrtoint,
@@ -587,6 +637,14 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
             const outer_ptr_ty = air.typeOf(datas[inst].bin_op.lhs);
             const inner_ptr_ty = outer_ptr_ty.elemType();
             return inner_ptr_ty.elemType();
+        },
+        .atomic_load => {
+            const ptr_ty = air.typeOf(datas[inst].atomic_load.ptr);
+            return ptr_ty.elemType();
+        },
+        .atomic_rmw => {
+            const ptr_ty = air.typeOf(datas[inst].pl_op.operand);
+            return ptr_ty.elemType();
         },
     }
 }

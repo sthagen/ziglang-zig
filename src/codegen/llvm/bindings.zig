@@ -85,6 +85,9 @@ pub const Value = opaque {
     pub const addAttributeAtIndex = LLVMAddAttributeAtIndex;
     extern fn LLVMAddAttributeAtIndex(*const Value, Idx: AttributeIndex, A: *const Attribute) void;
 
+    pub const removeEnumAttributeAtIndex = LLVMRemoveEnumAttributeAtIndex;
+    extern fn LLVMRemoveEnumAttributeAtIndex(F: *const Value, Idx: AttributeIndex, KindID: c_uint) void;
+
     pub const getFirstBasicBlock = LLVMGetFirstBasicBlock;
     extern fn LLVMGetFirstBasicBlock(Fn: *const Value) ?*const BasicBlock;
 
@@ -133,6 +136,15 @@ pub const Value = opaque {
 
     pub const constIntToPtr = LLVMConstIntToPtr;
     extern fn LLVMConstIntToPtr(ConstantVal: *const Value, ToType: *const Type) *const Value;
+
+    pub const setOrdering = LLVMSetOrdering;
+    extern fn LLVMSetOrdering(MemoryAccessInst: *const Value, Ordering: AtomicOrdering) void;
+
+    pub const setVolatile = LLVMSetVolatile;
+    extern fn LLVMSetVolatile(MemoryAccessInst: *const Value, IsVolatile: Bool) void;
+
+    pub const setAlignment = LLVMSetAlignment;
+    extern fn LLVMSetAlignment(V: *const Value, Bytes: c_uint) void;
 };
 
 pub const Type = opaque {
@@ -167,6 +179,9 @@ pub const Type = opaque {
         ElementCount: c_uint,
         Packed: Bool,
     ) void;
+
+    pub const getTypeKind = LLVMGetTypeKind;
+    extern fn LLVMGetTypeKind(Ty: *const Type) TypeKind;
 };
 
 pub const Module = opaque {
@@ -477,6 +492,14 @@ pub const Builder = opaque {
         Name: [*:0]const u8,
     ) *const Value;
 
+    pub const buildIntToPtr = LLVMBuildIntToPtr;
+    extern fn LLVMBuildIntToPtr(
+        *const Builder,
+        Val: *const Value,
+        DestTy: *const Type,
+        Name: [*:0]const u8,
+    ) *const Value;
+
     pub const buildStructGEP = LLVMBuildStructGEP;
     extern fn LLVMBuildStructGEP(
         B: *const Builder,
@@ -521,6 +544,24 @@ pub const Builder = opaque {
         Then: *const Value,
         Else: *const Value,
         Name: [*:0]const u8,
+    ) *const Value;
+
+    pub const buildFence = LLVMBuildFence;
+    extern fn LLVMBuildFence(
+        B: *const Builder,
+        ordering: AtomicOrdering,
+        singleThread: Bool,
+        Name: [*:0]const u8,
+    ) *const Value;
+
+    pub const buildAtomicRmw = LLVMBuildAtomicRMW;
+    extern fn LLVMBuildAtomicRMW(
+        B: *const Builder,
+        op: AtomicRMWBinOp,
+        PTR: *const Value,
+        Val: *const Value,
+        ordering: AtomicOrdering,
+        singleThread: Bool,
     ) *const Value;
 };
 
@@ -892,4 +933,43 @@ pub const AtomicOrdering = enum(c_uint) {
     Release = 5,
     AcquireRelease = 6,
     SequentiallyConsistent = 7,
+};
+
+pub const AtomicRMWBinOp = enum(c_int) {
+    Xchg,
+    Add,
+    Sub,
+    And,
+    Nand,
+    Or,
+    Xor,
+    Max,
+    Min,
+    UMax,
+    UMin,
+    FAdd,
+    FSub,
+};
+
+pub const TypeKind = enum(c_int) {
+    Void,
+    Half,
+    Float,
+    Double,
+    X86_FP80,
+    FP128,
+    PPC_FP128,
+    Label,
+    Integer,
+    Function,
+    Struct,
+    Array,
+    Pointer,
+    Vector,
+    Metadata,
+    X86_MMX,
+    Token,
+    ScalableVector,
+    BFloat,
+    X86_AMX,
 };

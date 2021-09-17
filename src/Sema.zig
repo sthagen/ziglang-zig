@@ -377,7 +377,9 @@ pub fn analyzeBody(
             // We also know that they cannot be referenced later, so we avoid
             // putting them into the map.
             .breakpoint => {
-                try sema.zirBreakpoint(block, inst);
+                if (!block.is_comptime) {
+                    _ = try block.addNoOp(.breakpoint);
+                }
                 i += 1;
                 continue;
             },
@@ -831,6 +833,7 @@ fn failWithUseOfUndef(sema: *Sema, block: *Scope.Block, src: LazySrcLoc) Compile
 /// Appropriate to call when the coercion has already been done by result
 /// location semantics. Asserts the value fits in the provided `Int` type.
 /// Only supports `Int` types 64 bits or less.
+/// TODO don't ever call this since we're migrating towards ResultLoc.coerced_ty.
 fn resolveAlreadyCoercedInt(
     sema: *Sema,
     block: *Scope.Block,
@@ -845,6 +848,23 @@ fn resolveAlreadyCoercedInt(
         .signed => return @intCast(Int, val.toSignedInt()),
         .unsigned => return @intCast(Int, val.toUnsignedInt()),
     }
+}
+
+fn resolveAlign(
+    sema: *Sema,
+    block: *Scope.Block,
+    src: LazySrcLoc,
+    zir_ref: Zir.Inst.Ref,
+) !u16 {
+    const alignment_big = try sema.resolveInt(block, src, zir_ref, Type.initTag(.u16));
+    const alignment = @intCast(u16, alignment_big); // We coerce to u16 in the prev line.
+    if (alignment == 0) return sema.mod.fail(&block.base, src, "alignment must be >= 1", .{});
+    if (!std.math.isPowerOfTwo(alignment)) {
+        return sema.mod.fail(&block.base, src, "alignment value {d} is not a power of two", .{
+            alignment,
+        });
+    }
+    return alignment;
 }
 
 fn resolveInt(
@@ -2283,9 +2303,36 @@ fn zirExport(sema: *Sema, block: *Scope.Block, inst: Zir.Inst.Index) CompileErro
 }
 
 fn zirSetAlignStack(sema: *Sema, block: *Scope.Block, inst: Zir.Inst.Index) CompileError!void {
+    const mod = sema.mod;
     const inst_data = sema.code.instructions.items(.data)[inst].un_node;
+    const operand_src: LazySrcLoc = .{ .node_offset_builtin_call_arg0 = inst_data.src_node };
     const src: LazySrcLoc = inst_data.src();
-    return sema.mod.fail(&block.base, src, "TODO: implement Sema.zirSetAlignStack", .{});
+    const alignment = try sema.resolveAlign(block, operand_src, inst_data.operand);
+    if (alignment > 256) {
+        return mod.fail(&block.base, src, "attempt to @setAlignStack({d}); maximum is 256", .{
+            alignment,
+        });
+    }
+    const func = sema.owner_func orelse
+        return mod.fail(&block.base, src, "@setAlignStack outside function body", .{});
+
+    switch (func.owner_decl.ty.fnCallingConvention()) {
+        .Naked => return mod.fail(&block.base, src, "@setAlignStack in naked function", .{}),
+        .Inline => return mod.fail(&block.base, src, "@setAlignStack in inline function", .{}),
+        else => {},
+    }
+
+    const gop = try mod.align_stack_fns.getOrPut(mod.gpa, func);
+    if (gop.found_existing) {
+        const msg = msg: {
+            const msg = try mod.errMsg(&block.base, src, "multiple @setAlignStack in the same function body", .{});
+            errdefer msg.destroy(mod.gpa);
+            try mod.errNote(&block.base, src, msg, "other instance here", .{});
+            break :msg msg;
+        };
+        return mod.failWithOwnedErrorMsg(&block.base, msg);
+    }
+    gop.value_ptr.* = .{ .alignment = alignment, .src = src };
 }
 
 fn zirSetCold(sema: *Sema, block: *Scope.Block, inst: Zir.Inst.Index) CompileError!void {
@@ -2308,20 +2355,21 @@ fn zirSetRuntimeSafety(sema: *Sema, block: *Scope.Block, inst: Zir.Inst.Index) C
     block.want_safety = try sema.resolveConstBool(block, operand_src, inst_data.operand);
 }
 
-fn zirBreakpoint(sema: *Sema, block: *Scope.Block, inst: Zir.Inst.Index) CompileError!void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    const src_node = sema.code.instructions.items(.data)[inst].node;
-    const src: LazySrcLoc = .{ .node_offset = src_node };
-    try sema.requireRuntimeBlock(block, src);
-    _ = try block.addNoOp(.breakpoint);
-}
-
 fn zirFence(sema: *Sema, block: *Scope.Block, inst: Zir.Inst.Index) CompileError!void {
-    const src_node = sema.code.instructions.items(.data)[inst].node;
-    const src: LazySrcLoc = .{ .node_offset = src_node };
-    return sema.mod.fail(&block.base, src, "TODO: implement Sema.zirFence", .{});
+    if (block.is_comptime) return;
+
+    const inst_data = sema.code.instructions.items(.data)[inst].un_node;
+    const order_src: LazySrcLoc = .{ .node_offset_builtin_call_arg0 = inst_data.src_node };
+    const order = try sema.resolveAtomicOrder(block, order_src, inst_data.operand);
+
+    if (@enumToInt(order) < @enumToInt(std.builtin.AtomicOrder.Acquire)) {
+        return sema.mod.fail(&block.base, order_src, "atomic ordering must be Acquire or stricter", .{});
+    }
+
+    _ = try block.addInst(.{
+        .tag = .fence,
+        .data = .{ .fence = order },
+    });
 }
 
 fn zirBreak(sema: *Sema, start_block: *Scope.Block, inst: Zir.Inst.Index) CompileError!Zir.Inst.Index {
@@ -7515,12 +7563,16 @@ fn checkAtomicOperandType(
             return;
         },
         .Bool => return, // Will be treated as `u8`.
-        else => return sema.mod.fail(
-            &block.base,
-            ty_src,
-            "expected bool, integer, float, enum, or pointer type; found {}",
-            .{ty},
-        ),
+        else => {
+            if (ty.isPtrAtRuntime()) return;
+
+            return sema.mod.fail(
+                &block.base,
+                ty_src,
+                "expected bool, integer, float, enum, or pointer type; found {}",
+                .{ty},
+            );
+        },
     };
     const bit_count = int_ty.intInfo(target).bits;
     if (bit_count > max_atomic_bits) {
@@ -7544,6 +7596,19 @@ fn resolveAtomicOrder(
     const coerced = try sema.coerce(block, atomic_order_ty, air_ref, src);
     const val = try sema.resolveConstValue(block, src, coerced);
     return val.toEnum(std.builtin.AtomicOrder);
+}
+
+fn resolveAtomicRmwOp(
+    sema: *Sema,
+    block: *Scope.Block,
+    src: LazySrcLoc,
+    zir_ref: Zir.Inst.Ref,
+) CompileError!std.builtin.AtomicRmwOp {
+    const atomic_rmw_op_ty = try sema.getBuiltinType(block, src, "AtomicRmwOp");
+    const air_ref = sema.resolveInst(zir_ref);
+    const coerced = try sema.coerce(block, atomic_rmw_op_ty, air_ref, src);
+    const val = try sema.resolveConstValue(block, src, coerced);
+    return val.toEnum(std.builtin.AtomicRmwOp);
 }
 
 fn zirCmpxchg(
@@ -7661,14 +7726,108 @@ fn zirSelect(sema: *Sema, block: *Scope.Block, inst: Zir.Inst.Index) CompileErro
 
 fn zirAtomicLoad(sema: *Sema, block: *Scope.Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
     const inst_data = sema.code.instructions.items(.data)[inst].pl_node;
-    const src = inst_data.src();
-    return sema.mod.fail(&block.base, src, "TODO: Sema.zirAtomicLoad", .{});
+    const extra = sema.code.extraData(Zir.Inst.Bin, inst_data.payload_index).data;
+    // zig fmt: off
+    const elem_ty_src: LazySrcLoc = .{ .node_offset_builtin_call_arg0 = inst_data.src_node };
+    const ptr_src    : LazySrcLoc = .{ .node_offset_builtin_call_arg1 = inst_data.src_node };
+    const order_src  : LazySrcLoc = .{ .node_offset_builtin_call_arg2 = inst_data.src_node };
+    // zig fmt: on
+    const ptr = sema.resolveInst(extra.lhs);
+    const elem_ty = sema.typeOf(ptr).elemType();
+    try sema.checkAtomicOperandType(block, elem_ty_src, elem_ty);
+    const order = try sema.resolveAtomicOrder(block, order_src, extra.rhs);
+
+    switch (order) {
+        .Release, .AcqRel => {
+            return sema.mod.fail(
+                &block.base,
+                order_src,
+                "@atomicLoad atomic ordering must not be Release or AcqRel",
+                .{},
+            );
+        },
+        else => {},
+    }
+
+    if (try sema.resolveDefinedValue(block, ptr_src, ptr)) |ptr_val| {
+        if (try ptr_val.pointerDeref(sema.arena)) |elem_val| {
+            return sema.addConstant(elem_ty, elem_val);
+        }
+    }
+
+    try sema.requireRuntimeBlock(block, ptr_src);
+    return block.addInst(.{
+        .tag = .atomic_load,
+        .data = .{ .atomic_load = .{
+            .ptr = ptr,
+            .order = order,
+        } },
+    });
 }
 
 fn zirAtomicRmw(sema: *Sema, block: *Scope.Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
+    const mod = sema.mod;
     const inst_data = sema.code.instructions.items(.data)[inst].pl_node;
+    const extra = sema.code.extraData(Zir.Inst.AtomicRmw, inst_data.payload_index).data;
     const src = inst_data.src();
-    return sema.mod.fail(&block.base, src, "TODO: Sema.zirAtomicRmw", .{});
+    // zig fmt: off
+    const operand_ty_src: LazySrcLoc = .{ .node_offset_builtin_call_arg0 = inst_data.src_node };
+    const ptr_src       : LazySrcLoc = .{ .node_offset_builtin_call_arg1 = inst_data.src_node };
+    const op_src        : LazySrcLoc = .{ .node_offset_builtin_call_arg2 = inst_data.src_node };
+    const operand_src   : LazySrcLoc = .{ .node_offset_builtin_call_arg3 = inst_data.src_node };
+    const order_src     : LazySrcLoc = .{ .node_offset_builtin_call_arg4 = inst_data.src_node };
+    // zig fmt: on
+    const ptr = sema.resolveInst(extra.ptr);
+    const operand_ty = sema.typeOf(ptr).elemType();
+    try sema.checkAtomicOperandType(block, operand_ty_src, operand_ty);
+    const op = try sema.resolveAtomicRmwOp(block, op_src, extra.operation);
+
+    switch (operand_ty.zigTypeTag()) {
+        .Enum => if (op != .Xchg) {
+            return mod.fail(&block.base, op_src, "@atomicRmw with enum only allowed with .Xchg", .{});
+        },
+        .Bool => if (op != .Xchg) {
+            return mod.fail(&block.base, op_src, "@atomicRmw with bool only allowed with .Xchg", .{});
+        },
+        .Float => switch (op) {
+            .Xchg, .Add, .Sub => {},
+            else => return mod.fail(&block.base, op_src, "@atomicRmw with float only allowed with .Xchg, .Add, and .Sub", .{}),
+        },
+        else => {},
+    }
+    const operand = try sema.coerce(block, operand_ty, sema.resolveInst(extra.operand), operand_src);
+    const order = try sema.resolveAtomicOrder(block, order_src, extra.ordering);
+
+    if (order == .Unordered) {
+        return mod.fail(&block.base, order_src, "@atomicRmw atomic ordering must not be Unordered", .{});
+    }
+
+    // special case zero bit types
+    if (try sema.typeHasOnePossibleValue(block, operand_ty_src, operand_ty)) |val| {
+        return sema.addConstant(operand_ty, val);
+    }
+
+    const runtime_src = if (try sema.resolveDefinedValue(block, ptr_src, ptr)) |ptr_val| rs: {
+        if (try sema.resolveMaybeUndefVal(block, operand_src, operand)) |operand_val| {
+            _ = ptr_val;
+            _ = operand_val;
+            return mod.fail(&block.base, src, "TODO implement Sema for @atomicRmw at comptime", .{});
+        } else break :rs operand_src;
+    } else ptr_src;
+
+    const flags: u32 = @as(u32, @enumToInt(order)) | (@as(u32, @enumToInt(op)) << 3);
+
+    try sema.requireRuntimeBlock(block, runtime_src);
+    return block.addInst(.{
+        .tag = .atomic_rmw,
+        .data = .{ .pl_op = .{
+            .operand = ptr,
+            .payload = try sema.addExtra(Air.AtomicRmw{
+                .operand = operand,
+                .flags = flags,
+            }),
+        } },
+    });
 }
 
 fn zirAtomicStore(sema: *Sema, block: *Scope.Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
@@ -7761,7 +7920,6 @@ fn zirVarExtended(
     const mut_src: LazySrcLoc = src; // TODO add a LazySrcLoc that points at mut token
     const init_src: LazySrcLoc = src; // TODO add a LazySrcLoc that points at init expr
     const small = @bitCast(Zir.Inst.ExtendedVar.Small, extended.small);
-    const var_ty = try sema.resolveType(block, ty_src, extra.data.var_type);
 
     var extra_index: usize = extra.end;
 
@@ -7781,11 +7939,25 @@ fn zirVarExtended(
     //    break :blk align_tv.val;
     //} else Value.initTag(.null_value);
 
-    const init_val: Value = if (small.has_init) blk: {
+    const uncasted_init: Air.Inst.Ref = if (small.has_init) blk: {
         const init_ref = @intToEnum(Zir.Inst.Ref, sema.code.extra[extra_index]);
         extra_index += 1;
-        const init_air_inst = sema.resolveInst(init_ref);
-        break :blk (try sema.resolveMaybeUndefVal(block, init_src, init_air_inst)) orelse
+        break :blk sema.resolveInst(init_ref);
+    } else .none;
+
+    const have_ty = extra.data.var_type != .none;
+    const var_ty = if (have_ty)
+        try sema.resolveType(block, ty_src, extra.data.var_type)
+    else
+        sema.typeOf(uncasted_init);
+
+    const init_val = if (uncasted_init != .none) blk: {
+        const init = if (have_ty)
+            try sema.coerce(block, var_ty, uncasted_init, init_src)
+        else
+            uncasted_init;
+
+        break :blk (try sema.resolveMaybeUndefVal(block, init_src, init)) orelse
             return sema.failWithNeededComptime(block, init_src);
     } else Value.initTag(.unreachable_value);
 
@@ -8845,7 +9017,7 @@ fn coerce(
     if (dest_type.eql(inst_ty))
         return inst;
 
-    const in_memory_result = coerceInMemoryAllowed(dest_type, inst_ty);
+    const in_memory_result = coerceInMemoryAllowed(dest_type, inst_ty, false);
     if (in_memory_result == .ok) {
         return sema.bitcast(block, dest_type, inst, inst_src);
     }
@@ -8887,11 +9059,12 @@ fn coerce(
                 const array_type = inst_ty.elemType();
                 if (array_type.zigTypeTag() != .Array) break :src_array_ptr;
                 const array_elem_type = array_type.elemType();
-                if (inst_ty.isConstPtr() and !dest_type.isConstPtr()) break :src_array_ptr;
+                const dest_is_mut = !dest_type.isConstPtr();
+                if (inst_ty.isConstPtr() and dest_is_mut) break :src_array_ptr;
                 if (inst_ty.isVolatilePtr() and !dest_type.isVolatilePtr()) break :src_array_ptr;
 
                 const dst_elem_type = dest_type.elemType();
-                switch (coerceInMemoryAllowed(dst_elem_type, array_elem_type)) {
+                switch (coerceInMemoryAllowed(dst_elem_type, array_elem_type, dest_is_mut)) {
                     .ok => {},
                     .no_match => break :src_array_ptr,
                 }
@@ -8998,9 +9171,79 @@ const InMemoryCoercionResult = enum {
     no_match,
 };
 
-fn coerceInMemoryAllowed(dest_type: Type, src_type: Type) InMemoryCoercionResult {
+/// If pointers have the same representation in runtime memory, a bitcast AIR instruction
+/// may be used for the coercion.
+/// * `const` attribute can be gained
+/// * `volatile` attribute can be gained
+/// * `allowzero` attribute can be gained (whether from explicit attribute, C pointer, or optional pointer) but only if !dest_is_mut
+/// * alignment can be decreased
+/// * bit offset attributes must match exactly
+/// * `*`/`[*]` must match exactly, but `[*c]` matches either one
+/// * sentinel-terminated pointers can coerce into `[*]`
+/// TODO improve this function to report recursive compile errors like it does in stage1.
+/// look at the function types_match_const_cast_only
+fn coerceInMemoryAllowed(dest_type: Type, src_type: Type, dest_is_mut: bool) InMemoryCoercionResult {
     if (dest_type.eql(src_type))
         return .ok;
+
+    if (dest_type.zigTypeTag() == .Pointer and
+        src_type.zigTypeTag() == .Pointer)
+    {
+        const dest_info = dest_type.ptrInfo().data;
+        const src_info = src_type.ptrInfo().data;
+
+        const child = coerceInMemoryAllowed(dest_info.pointee_type, src_info.pointee_type, dest_info.mutable);
+        if (child == .no_match) {
+            return child;
+        }
+
+        const ok_sent = dest_info.sentinel == null or src_info.size == .C or
+            (src_info.sentinel != null and
+            dest_info.sentinel.?.eql(src_info.sentinel.?, dest_info.pointee_type));
+        if (!ok_sent) {
+            return .no_match;
+        }
+
+        const ok_ptr_size = src_info.size == dest_info.size or
+            src_info.size == .C or dest_info.size == .C;
+        if (!ok_ptr_size) {
+            return .no_match;
+        }
+
+        const ok_cv_qualifiers =
+            (src_info.mutable or !dest_info.mutable) and
+            (!src_info.@"volatile" or dest_info.@"volatile");
+
+        if (!ok_cv_qualifiers) {
+            return .no_match;
+        }
+
+        const ok_allows_zero = (dest_info.@"allowzero" and
+            (src_info.@"allowzero" or !dest_is_mut)) or
+            (!dest_info.@"allowzero" and !src_info.@"allowzero");
+        if (!ok_allows_zero) {
+            return .no_match;
+        }
+
+        if (dest_type.hasCodeGenBits() != src_type.hasCodeGenBits()) {
+            return .no_match;
+        }
+
+        if (src_info.host_size != dest_info.host_size or
+            src_info.bit_offset != dest_info.bit_offset)
+        {
+            return .no_match;
+        }
+
+        assert(src_info.@"align" != 0);
+        assert(dest_info.@"align" != 0);
+
+        if (dest_info.@"align" > src_info.@"align") {
+            return .no_match;
+        }
+
+        return .ok;
+    }
 
     // TODO: implement more of this function
 

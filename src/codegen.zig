@@ -833,6 +833,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     .block           => try self.airBlock(inst),
                     .br              => try self.airBr(inst),
                     .breakpoint      => try self.airBreakpoint(),
+                    .fence           => try self.airFence(),
                     .call            => try self.airCall(inst),
                     .cond_br         => try self.airCondBr(inst),
                     .dbg_stmt        => try self.airDbgStmt(inst),
@@ -859,6 +860,13 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     .array_to_slice  => try self.airArrayToSlice(inst),
                     .cmpxchg_strong  => try self.airCmpxchg(inst),
                     .cmpxchg_weak    => try self.airCmpxchg(inst),
+                    .atomic_rmw      => try self.airAtomicRmw(inst),
+                    .atomic_load     => try self.airAtomicLoad(inst),
+
+                    .atomic_store_unordered => try self.airAtomicStore(inst, .Unordered),
+                    .atomic_store_monotonic => try self.airAtomicStore(inst, .Monotonic),
+                    .atomic_store_release   => try self.airAtomicStore(inst, .Release),
+                    .atomic_store_seq_cst   => try self.airAtomicStore(inst, .SeqCst),
 
                     .struct_field_ptr_index_0 => try self.airStructFieldPtrIndex(inst, 0),
                     .struct_field_ptr_index_1 => try self.airStructFieldPtrIndex(inst, 1),
@@ -2549,6 +2557,11 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             return self.finishAirBookkeeping();
         }
 
+        fn airFence(self: *Self) !void {
+            return self.fail("TODO implement fence() for {}", .{self.target.cpu.arch});
+            //return self.finishAirBookkeeping();
+        }
+
         fn airCall(self: *Self, inst: Air.Inst.Index) !void {
             const pl_op = self.air.instructions.items(.data)[inst].pl_op;
             const fn_ty = self.air.typeOf(pl_op.operand);
@@ -2840,7 +2853,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         }
                     } else if (func_value.castTag(.extern_fn)) |func_payload| {
                         const decl = func_payload.data;
-                        const where_index = try macho_file.addExternFn(mem.spanZ(decl.name));
+                        const resolv = try macho_file.addExternFn(mem.spanZ(decl.name));
                         const offset = blk: {
                             switch (arch) {
                                 .x86_64 => {
@@ -2861,8 +2874,11 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         // Add relocation to the decl.
                         try macho_file.active_decl.?.link.macho.relocs.append(self.bin_file.allocator, .{
                             .offset = offset,
-                            .where = .undef,
-                            .where_index = where_index,
+                            .where = switch (resolv.where) {
+                                .local => .local,
+                                .undef => .undef,
+                            },
+                            .where_index = resolv.where_index,
                             .payload = .{ .branch = .{
                                 .arch = arch,
                             } },
@@ -4762,6 +4778,22 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 }),
             };
             return self.finishAir(inst, result, .{ extra.ptr, extra.expected_value, extra.new_value });
+        }
+
+        fn airAtomicRmw(self: *Self, inst: Air.Inst.Index) !void {
+            _ = inst;
+            return self.fail("TODO implement airCmpxchg for {}", .{self.target.cpu.arch});
+        }
+
+        fn airAtomicLoad(self: *Self, inst: Air.Inst.Index) !void {
+            _ = inst;
+            return self.fail("TODO implement airAtomicLoad for {}", .{self.target.cpu.arch});
+        }
+
+        fn airAtomicStore(self: *Self, inst: Air.Inst.Index, order: std.builtin.AtomicOrder) !void {
+            _ = inst;
+            _ = order;
+            return self.fail("TODO implement airAtomicStore for {}", .{self.target.cpu.arch});
         }
 
         fn resolveInst(self: *Self, inst: Air.Inst.Ref) InnerError!MCValue {
