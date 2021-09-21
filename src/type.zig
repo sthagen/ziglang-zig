@@ -127,6 +127,7 @@ pub const Type = extern union {
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
+            .address_space,
             .float_mode,
             .reduce_op,
             => return .Enum,
@@ -288,6 +289,7 @@ pub const Type = extern union {
                 .pointee_type = Type.initTag(.comptime_int),
                 .sentinel = null,
                 .@"align" = 0,
+                .@"addrspace" = .generic,
                 .bit_offset = 0,
                 .host_size = 0,
                 .@"allowzero" = false,
@@ -299,6 +301,7 @@ pub const Type = extern union {
                 .pointee_type = Type.initTag(.u8),
                 .sentinel = null,
                 .@"align" = 0,
+                .@"addrspace" = .generic,
                 .bit_offset = 0,
                 .host_size = 0,
                 .@"allowzero" = false,
@@ -310,6 +313,7 @@ pub const Type = extern union {
                 .pointee_type = self.castPointer().?.data,
                 .sentinel = null,
                 .@"align" = 0,
+                .@"addrspace" = .generic,
                 .bit_offset = 0,
                 .host_size = 0,
                 .@"allowzero" = false,
@@ -321,6 +325,7 @@ pub const Type = extern union {
                 .pointee_type = self.castPointer().?.data,
                 .sentinel = null,
                 .@"align" = 0,
+                .@"addrspace" = .generic,
                 .bit_offset = 0,
                 .host_size = 0,
                 .@"allowzero" = false,
@@ -332,6 +337,7 @@ pub const Type = extern union {
                 .pointee_type = self.castPointer().?.data,
                 .sentinel = null,
                 .@"align" = 0,
+                .@"addrspace" = .generic,
                 .bit_offset = 0,
                 .host_size = 0,
                 .@"allowzero" = false,
@@ -343,6 +349,7 @@ pub const Type = extern union {
                 .pointee_type = Type.initTag(.u8),
                 .sentinel = null,
                 .@"align" = 0,
+                .@"addrspace" = .generic,
                 .bit_offset = 0,
                 .host_size = 0,
                 .@"allowzero" = false,
@@ -354,6 +361,7 @@ pub const Type = extern union {
                 .pointee_type = self.castPointer().?.data,
                 .sentinel = null,
                 .@"align" = 0,
+                .@"addrspace" = .generic,
                 .bit_offset = 0,
                 .host_size = 0,
                 .@"allowzero" = false,
@@ -365,6 +373,7 @@ pub const Type = extern union {
                 .pointee_type = Type.initTag(.u8),
                 .sentinel = null,
                 .@"align" = 0,
+                .@"addrspace" = .generic,
                 .bit_offset = 0,
                 .host_size = 0,
                 .@"allowzero" = false,
@@ -376,6 +385,7 @@ pub const Type = extern union {
                 .pointee_type = self.castPointer().?.data,
                 .sentinel = null,
                 .@"align" = 0,
+                .@"addrspace" = .generic,
                 .bit_offset = 0,
                 .host_size = 0,
                 .@"allowzero" = false,
@@ -387,6 +397,7 @@ pub const Type = extern union {
                 .pointee_type = self.castPointer().?.data,
                 .sentinel = null,
                 .@"align" = 0,
+                .@"addrspace" = .generic,
                 .bit_offset = 0,
                 .host_size = 0,
                 .@"allowzero" = false,
@@ -398,6 +409,7 @@ pub const Type = extern union {
                 .pointee_type = self.castPointer().?.data,
                 .sentinel = null,
                 .@"align" = 0,
+                .@"addrspace" = .generic,
                 .bit_offset = 0,
                 .host_size = 0,
                 .@"allowzero" = false,
@@ -409,6 +421,7 @@ pub const Type = extern union {
                 .pointee_type = self.castPointer().?.data,
                 .sentinel = null,
                 .@"align" = 0,
+                .@"addrspace" = .generic,
                 .bit_offset = 0,
                 .host_size = 0,
                 .@"allowzero" = false,
@@ -460,6 +473,8 @@ pub const Type = extern union {
                 if (info_a.bit_offset != info_b.bit_offset)
                     return false;
                 if (info_a.host_size != info_b.host_size)
+                    return false;
+                if (info_a.@"addrspace" != info_b.@"addrspace")
                     return false;
 
                 const sentinel_a = info_a.sentinel;
@@ -587,8 +602,8 @@ pub const Type = extern union {
                 }
                 return false;
             },
+            .Float => return a.tag() == b.tag(),
             .Opaque,
-            .Float,
             .BoundFn,
             .Frame,
             => std.debug.panic("TODO implement Type equality comparison of {} and {}", .{ a, b }),
@@ -746,6 +761,7 @@ pub const Type = extern union {
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
+            .address_space,
             .float_mode,
             .reduce_op,
             .call_options,
@@ -835,6 +851,7 @@ pub const Type = extern union {
                     .pointee_type = try payload.pointee_type.copy(allocator),
                     .sentinel = sent,
                     .@"align" = payload.@"align",
+                    .@"addrspace" = payload.@"addrspace",
                     .bit_offset = payload.bit_offset,
                     .host_size = payload.host_size,
                     .@"allowzero" = payload.@"allowzero",
@@ -958,6 +975,7 @@ pub const Type = extern union {
                 .atomic_order => return writer.writeAll("std.builtin.AtomicOrder"),
                 .atomic_rmw_op => return writer.writeAll("std.builtin.AtomicRmwOp"),
                 .calling_convention => return writer.writeAll("std.builtin.CallingConvention"),
+                .address_space => return writer.writeAll("std.builtin.AddressSpace"),
                 .float_mode => return writer.writeAll("std.builtin.FloatMode"),
                 .reduce_op => return writer.writeAll("std.builtin.ReduceOp"),
                 .call_options => return writer.writeAll("std.builtin.CallOptions"),
@@ -1111,6 +1129,9 @@ pub const Type = extern union {
                         }
                         try writer.writeAll(") ");
                     }
+                    if (payload.@"addrspace" != .generic) {
+                        try writer.print("addrspace(.{s}) ", .{@tagName(payload.@"addrspace")});
+                    }
                     if (!payload.mutable) try writer.writeAll("const ");
                     if (payload.@"volatile") try writer.writeAll("volatile ");
                     if (payload.@"allowzero") try writer.writeAll("allowzero ");
@@ -1186,6 +1207,7 @@ pub const Type = extern union {
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
+            .address_space,
             .float_mode,
             .reduce_op,
             .call_options,
@@ -1301,6 +1323,7 @@ pub const Type = extern union {
             .atomic_order => return Value.initTag(.atomic_order_type),
             .atomic_rmw_op => return Value.initTag(.atomic_rmw_op_type),
             .calling_convention => return Value.initTag(.calling_convention_type),
+            .address_space => return Value.initTag(.address_space_type),
             .float_mode => return Value.initTag(.float_mode_type),
             .reduce_op => return Value.initTag(.reduce_op_type),
             .call_options => return Value.initTag(.call_options_type),
@@ -1362,6 +1385,7 @@ pub const Type = extern union {
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
+            .address_space,
             .float_mode,
             .reduce_op,
             .call_options,
@@ -1496,6 +1520,30 @@ pub const Type = extern union {
         }
     }
 
+    pub fn ptrAddressSpace(self: Type) std.builtin.AddressSpace {
+        return switch (self.tag()) {
+            .single_const_pointer_to_comptime_int,
+            .const_slice_u8,
+            .single_const_pointer,
+            .single_mut_pointer,
+            .many_const_pointer,
+            .many_mut_pointer,
+            .c_const_pointer,
+            .c_mut_pointer,
+            .const_slice,
+            .mut_slice,
+            .inferred_alloc_const,
+            .inferred_alloc_mut,
+            .manyptr_u8,
+            .manyptr_const_u8,
+            => .generic,
+
+            .pointer => self.castTag(.pointer).?.data.@"addrspace",
+
+            else => unreachable,
+        };
+    }
+
     /// Asserts that hasCodeGenBits() is true.
     pub fn abiAlignment(self: Type, target: Target) u32 {
         return switch (self.tag()) {
@@ -1508,6 +1556,7 @@ pub const Type = extern union {
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
+            .address_space,
             .float_mode,
             .reduce_op,
             .call_options,
@@ -1734,6 +1783,7 @@ pub const Type = extern union {
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
+            .address_space,
             .float_mode,
             .reduce_op,
             .call_options,
@@ -1822,6 +1872,7 @@ pub const Type = extern union {
 
             .int_signed, .int_unsigned => {
                 const bits: u16 = self.cast(Payload.Bits).?.data;
+                if (bits == 0) return 0;
                 return std.math.ceilPowerOfTwoPromote(u16, (bits + 7) / 8);
             },
 
@@ -2018,6 +2069,7 @@ pub const Type = extern union {
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
+            .address_space,
             .float_mode,
             .reduce_op,
             .call_options,
@@ -2104,42 +2156,82 @@ pub const Type = extern union {
         };
     }
 
-    pub fn slicePtrFieldType(self: Type, buffer: *Payload.ElemType) Type {
+    pub const SlicePtrFieldTypeBuffer = union {
+        elem_type: Payload.ElemType,
+        pointer: Payload.Pointer,
+    };
+
+    pub fn slicePtrFieldType(self: Type, buffer: *SlicePtrFieldTypeBuffer) Type {
         switch (self.tag()) {
             .const_slice_u8 => return Type.initTag(.manyptr_const_u8),
 
             .const_slice => {
                 const elem_type = self.castTag(.const_slice).?.data;
                 buffer.* = .{
-                    .base = .{ .tag = .many_const_pointer },
-                    .data = elem_type,
+                    .elem_type = .{
+                        .base = .{ .tag = .many_const_pointer },
+                        .data = elem_type,
+                    },
                 };
-                return Type.initPayload(&buffer.base);
+                return Type.initPayload(&buffer.elem_type.base);
             },
             .mut_slice => {
                 const elem_type = self.castTag(.mut_slice).?.data;
                 buffer.* = .{
-                    .base = .{ .tag = .many_mut_pointer },
-                    .data = elem_type,
+                    .elem_type = .{
+                        .base = .{ .tag = .many_mut_pointer },
+                        .data = elem_type,
+                    },
                 };
-                return Type.initPayload(&buffer.base);
+                return Type.initPayload(&buffer.elem_type.base);
             },
 
             .pointer => {
                 const payload = self.castTag(.pointer).?.data;
                 assert(payload.size == .Slice);
-                if (payload.mutable) {
+
+                if (payload.sentinel != null or
+                    payload.@"align" != 0 or
+                    payload.@"addrspace" != .generic or
+                    payload.bit_offset != 0 or
+                    payload.host_size != 0 or
+                    payload.@"allowzero" or
+                    payload.@"volatile")
+                {
                     buffer.* = .{
-                        .base = .{ .tag = .many_mut_pointer },
-                        .data = payload.pointee_type,
+                        .pointer = .{
+                            .data = .{
+                                .pointee_type = payload.pointee_type,
+                                .sentinel = payload.sentinel,
+                                .@"align" = payload.@"align",
+                                .@"addrspace" = payload.@"addrspace",
+                                .bit_offset = payload.bit_offset,
+                                .host_size = payload.host_size,
+                                .@"allowzero" = payload.@"allowzero",
+                                .mutable = payload.mutable,
+                                .@"volatile" = payload.@"volatile",
+                                .size = .Many,
+                            },
+                        },
                     };
+                    return Type.initPayload(&buffer.pointer.base);
+                } else if (payload.mutable) {
+                    buffer.* = .{
+                        .elem_type = .{
+                            .base = .{ .tag = .many_mut_pointer },
+                            .data = payload.pointee_type,
+                        },
+                    };
+                    return Type.initPayload(&buffer.elem_type.base);
                 } else {
                     buffer.* = .{
-                        .base = .{ .tag = .many_const_pointer },
-                        .data = payload.pointee_type,
+                        .elem_type = .{
+                            .base = .{ .tag = .many_const_pointer },
+                            .data = payload.pointee_type,
+                        },
                     };
+                    return Type.initPayload(&buffer.elem_type.base);
                 }
-                return Type.initPayload(&buffer.base);
             },
 
             else => unreachable,
@@ -2523,7 +2615,8 @@ pub const Type = extern union {
         };
     }
 
-    pub fn isFloat(self: Type) bool {
+    /// Returns `false` for `comptime_float`.
+    pub fn isRuntimeFloat(self: Type) bool {
         return switch (self.tag()) {
             .f16,
             .f32,
@@ -2536,13 +2629,29 @@ pub const Type = extern union {
         };
     }
 
-    /// Asserts the type is a fixed-size float.
+    /// Returns `true` for `comptime_float`.
+    pub fn isAnyFloat(self: Type) bool {
+        return switch (self.tag()) {
+            .f16,
+            .f32,
+            .f64,
+            .f128,
+            .c_longdouble,
+            .comptime_float,
+            => true,
+
+            else => false,
+        };
+    }
+
+    /// Asserts the type is a fixed-size float or comptime_float.
+    /// Returns 128 for comptime_float types.
     pub fn floatBits(self: Type, target: Target) u16 {
         return switch (self.tag()) {
             .f16 => 16,
             .f32 => 32,
             .f64 => 64,
-            .f128 => 128,
+            .f128, .comptime_float => 128,
             .c_longdouble => CType.longdouble.sizeInBits(target),
 
             else => unreachable,
@@ -2775,6 +2884,7 @@ pub const Type = extern union {
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
+            .address_space,
             .float_mode,
             .reduce_op,
             .call_options,
@@ -2879,7 +2989,7 @@ pub const Type = extern union {
     }
 
     /// Asserts that self.zigTypeTag() == .Int.
-    pub fn minInt(self: Type, arena: *std.heap.ArenaAllocator, target: Target) !Value {
+    pub fn minInt(self: Type, arena: *Allocator, target: Target) !Value {
         assert(self.zigTypeTag() == .Int);
         const info = self.intInfo(target);
 
@@ -2889,35 +2999,35 @@ pub const Type = extern union {
 
         if ((info.bits - 1) <= std.math.maxInt(u6)) {
             const n: i64 = -(@as(i64, 1) << @truncate(u6, info.bits - 1));
-            return Value.Tag.int_i64.create(&arena.allocator, n);
+            return Value.Tag.int_i64.create(arena, n);
         }
 
-        var res = try std.math.big.int.Managed.initSet(&arena.allocator, 1);
+        var res = try std.math.big.int.Managed.initSet(arena, 1);
         try res.shiftLeft(res, info.bits - 1);
         res.negate();
 
         const res_const = res.toConst();
         if (res_const.positive) {
-            return Value.Tag.int_big_positive.create(&arena.allocator, res_const.limbs);
+            return Value.Tag.int_big_positive.create(arena, res_const.limbs);
         } else {
-            return Value.Tag.int_big_negative.create(&arena.allocator, res_const.limbs);
+            return Value.Tag.int_big_negative.create(arena, res_const.limbs);
         }
     }
 
     /// Asserts that self.zigTypeTag() == .Int.
-    pub fn maxInt(self: Type, arena: *std.heap.ArenaAllocator, target: Target) !Value {
+    pub fn maxInt(self: Type, arena: *Allocator, target: Target) !Value {
         assert(self.zigTypeTag() == .Int);
         const info = self.intInfo(target);
 
         if (info.signedness == .signed and (info.bits - 1) <= std.math.maxInt(u6)) {
             const n: i64 = (@as(i64, 1) << @truncate(u6, info.bits - 1)) - 1;
-            return Value.Tag.int_i64.create(&arena.allocator, n);
+            return Value.Tag.int_i64.create(arena, n);
         } else if (info.signedness == .signed and info.bits <= std.math.maxInt(u6)) {
             const n: u64 = (@as(u64, 1) << @truncate(u6, info.bits)) - 1;
-            return Value.Tag.int_u64.create(&arena.allocator, n);
+            return Value.Tag.int_u64.create(arena, n);
         }
 
-        var res = try std.math.big.int.Managed.initSet(&arena.allocator, 1);
+        var res = try std.math.big.int.Managed.initSet(arena, 1);
         try res.shiftLeft(res, info.bits - @boolToInt(info.signedness == .signed));
         const one = std.math.big.int.Const{
             .limbs = &[_]std.math.big.Limb{1},
@@ -2927,9 +3037,9 @@ pub const Type = extern union {
 
         const res_const = res.toConst();
         if (res_const.positive) {
-            return Value.Tag.int_big_positive.create(&arena.allocator, res_const.limbs);
+            return Value.Tag.int_big_positive.create(arena, res_const.limbs);
         } else {
-            return Value.Tag.int_big_negative.create(&arena.allocator, res_const.limbs);
+            return Value.Tag.int_big_negative.create(arena, res_const.limbs);
         }
     }
 
@@ -2982,6 +3092,7 @@ pub const Type = extern union {
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
+            .address_space,
             .float_mode,
             .reduce_op,
             .call_options,
@@ -3006,6 +3117,7 @@ pub const Type = extern union {
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
+            .address_space,
             .float_mode,
             .reduce_op,
             .call_options,
@@ -3029,6 +3141,7 @@ pub const Type = extern union {
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
+            .address_space,
             .float_mode,
             .reduce_op,
             .call_options,
@@ -3082,6 +3195,7 @@ pub const Type = extern union {
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
+            .address_space,
             .float_mode,
             .reduce_op,
             .call_options,
@@ -3137,6 +3251,7 @@ pub const Type = extern union {
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
+            .address_space,
             .float_mode,
             .reduce_op,
             .call_options,
@@ -3174,6 +3289,7 @@ pub const Type = extern union {
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
+            .address_space,
             .float_mode,
             .reduce_op,
             .call_options,
@@ -3224,6 +3340,7 @@ pub const Type = extern union {
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
+            .address_space,
             .float_mode,
             .reduce_op,
             .call_options,
@@ -3284,6 +3401,7 @@ pub const Type = extern union {
         atomic_order,
         atomic_rmw_op,
         calling_convention,
+        address_space,
         float_mode,
         reduce_op,
         call_options,
@@ -3407,6 +3525,7 @@ pub const Type = extern union {
                 .atomic_order,
                 .atomic_rmw_op,
                 .calling_convention,
+                .address_space,
                 .float_mode,
                 .reduce_op,
                 .call_options,
@@ -3562,6 +3681,7 @@ pub const Type = extern union {
                 sentinel: ?Value,
                 /// If zero use pointee_type.AbiAlign()
                 @"align": u32,
+                @"addrspace": std.builtin.AddressSpace,
                 bit_offset: u16,
                 host_size: u16,
                 @"allowzero": bool,

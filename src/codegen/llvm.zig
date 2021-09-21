@@ -541,20 +541,25 @@ pub const DeclGen = struct {
         defer self.gpa.free(fn_param_types);
         zig_fn_type.fnParamTypes(fn_param_types);
 
-        const llvm_param = try self.gpa.alloc(*const llvm.Type, fn_param_len);
-        defer self.gpa.free(llvm_param);
+        const llvm_param_buffer = try self.gpa.alloc(*const llvm.Type, fn_param_len);
+        defer self.gpa.free(llvm_param_buffer);
 
-        for (fn_param_types) |fn_param, i| {
-            llvm_param[i] = try self.llvmType(fn_param);
+        var llvm_params_len: c_uint = 0;
+        for (fn_param_types) |fn_param| {
+            if (fn_param.hasCodeGenBits()) {
+                llvm_param_buffer[llvm_params_len] = try self.llvmType(fn_param);
+                llvm_params_len += 1;
+            }
         }
 
         const fn_type = llvm.functionType(
             try self.llvmType(return_type),
-            llvm_param.ptr,
-            @intCast(c_uint, fn_param_len),
+            llvm_param_buffer.ptr,
+            llvm_params_len,
             .False,
         );
-        const llvm_fn = self.llvmModule().addFunction(decl.name, fn_type);
+        const llvm_addrspace = self.llvmAddressSpace(decl.@"addrspace");
+        const llvm_fn = self.llvmModule().addFunctionInAddressSpace(decl.name, fn_type, llvm_addrspace);
 
         const is_extern = decl.val.tag() == .extern_fn;
         if (!is_extern) {
@@ -576,7 +581,24 @@ pub const DeclGen = struct {
         if (llvm_module.getNamedGlobal(decl.name)) |val| return val;
         // TODO: remove this redundant `llvmType`, it is also called in `genTypedValue`.
         const llvm_type = try self.llvmType(decl.ty);
-        return llvm_module.addGlobal(llvm_type, decl.name);
+        const llvm_addrspace = self.llvmAddressSpace(decl.@"addrspace");
+        return llvm_module.addGlobalInAddressSpace(llvm_type, decl.name, llvm_addrspace);
+    }
+
+    fn llvmAddressSpace(self: DeclGen, address_space: std.builtin.AddressSpace) c_uint {
+        const target = self.module.getTarget();
+        return switch (target.cpu.arch) {
+            .i386, .x86_64 => switch (address_space) {
+                .generic => llvm.address_space.default,
+                .gs => llvm.address_space.x86.gs,
+                .fs => llvm.address_space.x86.fs,
+                .ss => llvm.address_space.x86.ss,
+            },
+            else => switch (address_space) {
+                .generic => llvm.address_space.default,
+                else => unreachable,
+            },
+        };
     }
 
     fn llvmType(self: *DeclGen, t: Type) error{ OutOfMemory, CodegenFail }!*const llvm.Type {
@@ -605,7 +627,7 @@ pub const DeclGen = struct {
             .Bool => return self.context.intType(1),
             .Pointer => {
                 if (t.isSlice()) {
-                    var buf: Type.Payload.ElemType = undefined;
+                    var buf: Type.SlicePtrFieldTypeBuffer = undefined;
                     const ptr_type = t.slicePtrFieldType(&buf);
 
                     const fields: [2]*const llvm.Type = .{
@@ -615,7 +637,8 @@ pub const DeclGen = struct {
                     return self.context.structType(&fields, fields.len, .False);
                 } else {
                     const elem_type = try self.llvmType(t.elemType());
-                    return elem_type.pointerType(0);
+                    const llvm_addrspace = self.llvmAddressSpace(t.ptrAddressSpace());
+                    return elem_type.pointerType(llvm_addrspace);
                 }
             },
             .Array => {
@@ -681,7 +704,9 @@ pub const DeclGen = struct {
                     @intCast(c_uint, llvm_params.len),
                     llvm.Bool.fromBool(is_var_args),
                 );
-                return llvm_fn_ty.pointerType(0);
+                // TODO make .Fn not both a pointer type and a prototype
+                const llvm_addrspace = self.llvmAddressSpace(.generic);
+                return llvm_fn_ty.pointerType(llvm_addrspace);
             },
             .ComptimeInt => unreachable,
             .ComptimeFloat => unreachable,
@@ -749,7 +774,7 @@ pub const DeclGen = struct {
             .Pointer => switch (tv.val.tag()) {
                 .decl_ref => {
                     if (tv.ty.isSlice()) {
-                        var buf: Type.Payload.ElemType = undefined;
+                        var buf: Type.SlicePtrFieldTypeBuffer = undefined;
                         const ptr_ty = tv.ty.slicePtrFieldType(&buf);
                         var slice_len: Value.Payload.U64 = .{
                             .base = .{ .tag = .int_u64 },
@@ -779,12 +804,13 @@ pub const DeclGen = struct {
                     decl.alive = true;
                     const val = try self.resolveGlobalDecl(decl);
                     const llvm_var_type = try self.llvmType(tv.ty);
-                    const llvm_type = llvm_var_type.pointerType(0);
+                    const llvm_addrspace = self.llvmAddressSpace(decl.@"addrspace");
+                    const llvm_type = llvm_var_type.pointerType(llvm_addrspace);
                     return val.constBitCast(llvm_type);
                 },
                 .slice => {
                     const slice = tv.val.castTag(.slice).?.data;
-                    var buf: Type.Payload.ElemType = undefined;
+                    var buf: Type.SlicePtrFieldTypeBuffer = undefined;
                     const fields: [2]*const llvm.Value = .{
                         try self.genTypedValue(.{
                             .ty = tv.ty.slicePtrFieldType(&buf),
@@ -1122,6 +1148,8 @@ pub const FuncGen = struct {
                 .slice_ptr      => try self.airSliceField(inst, 0),
                 .slice_len      => try self.airSliceField(inst, 1),
                 .array_to_slice => try self.airArrayToSlice(inst),
+                .float_to_int   => try self.airFloatToInt(inst),
+                .int_to_float   => try self.airIntToFloat(inst),
                 .cmpxchg_weak   => try self.airCmpxchg(inst, true),
                 .cmpxchg_strong => try self.airCmpxchg(inst, false),
                 .fence          => try self.airFence(inst),
@@ -1370,6 +1398,40 @@ pub const FuncGen = struct {
         const ptr = self.builder.buildInBoundsGEP(operand, &indices, indices.len, "");
         const partial = self.builder.buildInsertValue(slice_llvm_ty.getUndef(), ptr, 0, "");
         return self.builder.buildInsertValue(partial, len, 1, "");
+    }
+
+    fn airIntToFloat(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        if (self.liveness.isUnused(inst))
+            return null;
+
+        const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+        const operand = try self.resolveInst(ty_op.operand);
+        const dest_ty = self.air.typeOfIndex(inst);
+        const dest_llvm_ty = try self.dg.llvmType(dest_ty);
+
+        if (dest_ty.isSignedInt()) {
+            return self.builder.buildSIToFP(operand, dest_llvm_ty, "");
+        } else {
+            return self.builder.buildUIToFP(operand, dest_llvm_ty, "");
+        }
+    }
+
+    fn airFloatToInt(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        if (self.liveness.isUnused(inst))
+            return null;
+
+        const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+        const operand = try self.resolveInst(ty_op.operand);
+        const dest_ty = self.air.typeOfIndex(inst);
+        const dest_llvm_ty = try self.dg.llvmType(dest_ty);
+
+        // TODO set fast math flag
+
+        if (dest_ty.isSignedInt()) {
+            return self.builder.buildFPToSI(operand, dest_llvm_ty, "");
+        } else {
+            return self.builder.buildFPToUI(operand, dest_llvm_ty, "");
+        }
     }
 
     fn airSliceField(self: *FuncGen, inst: Air.Inst.Index, index: c_uint) !?*const llvm.Value {
@@ -1818,7 +1880,7 @@ pub const FuncGen = struct {
         const rhs = try self.resolveInst(bin_op.rhs);
         const inst_ty = self.air.typeOfIndex(inst);
 
-        if (inst_ty.isFloat()) return self.builder.buildFAdd(lhs, rhs, "");
+        if (inst_ty.isRuntimeFloat()) return self.builder.buildFAdd(lhs, rhs, "");
         if (wrap) return self.builder.buildAdd(lhs, rhs, "");
         if (inst_ty.isSignedInt()) return self.builder.buildNSWAdd(lhs, rhs, "");
         return self.builder.buildNUWAdd(lhs, rhs, "");
@@ -1833,7 +1895,7 @@ pub const FuncGen = struct {
         const rhs = try self.resolveInst(bin_op.rhs);
         const inst_ty = self.air.typeOfIndex(inst);
 
-        if (inst_ty.isFloat()) return self.builder.buildFSub(lhs, rhs, "");
+        if (inst_ty.isRuntimeFloat()) return self.builder.buildFSub(lhs, rhs, "");
         if (wrap) return self.builder.buildSub(lhs, rhs, "");
         if (inst_ty.isSignedInt()) return self.builder.buildNSWSub(lhs, rhs, "");
         return self.builder.buildNUWSub(lhs, rhs, "");
@@ -1848,7 +1910,7 @@ pub const FuncGen = struct {
         const rhs = try self.resolveInst(bin_op.rhs);
         const inst_ty = self.air.typeOfIndex(inst);
 
-        if (inst_ty.isFloat()) return self.builder.buildFMul(lhs, rhs, "");
+        if (inst_ty.isRuntimeFloat()) return self.builder.buildFMul(lhs, rhs, "");
         if (wrap) return self.builder.buildMul(lhs, rhs, "");
         if (inst_ty.isSignedInt()) return self.builder.buildNSWMul(lhs, rhs, "");
         return self.builder.buildNUWMul(lhs, rhs, "");
@@ -1863,7 +1925,7 @@ pub const FuncGen = struct {
         const rhs = try self.resolveInst(bin_op.rhs);
         const inst_ty = self.air.typeOfIndex(inst);
 
-        if (inst_ty.isFloat()) return self.builder.buildFDiv(lhs, rhs, "");
+        if (inst_ty.isRuntimeFloat()) return self.builder.buildFDiv(lhs, rhs, "");
         if (inst_ty.isSignedInt()) return self.builder.buildSDiv(lhs, rhs, "");
         return self.builder.buildUDiv(lhs, rhs, "");
     }
@@ -1876,7 +1938,7 @@ pub const FuncGen = struct {
         const rhs = try self.resolveInst(bin_op.rhs);
         const inst_ty = self.air.typeOfIndex(inst);
 
-        if (inst_ty.isFloat()) return self.builder.buildFRem(lhs, rhs, "");
+        if (inst_ty.isRuntimeFloat()) return self.builder.buildFRem(lhs, rhs, "");
         if (inst_ty.isSignedInt()) return self.builder.buildSRem(lhs, rhs, "");
         return self.builder.buildURem(lhs, rhs, "");
     }
@@ -2165,7 +2227,7 @@ pub const FuncGen = struct {
         const operand_ty = ptr_ty.elemType();
         const operand = try self.resolveInst(extra.operand);
         const is_signed_int = operand_ty.isSignedInt();
-        const is_float = operand_ty.isFloat();
+        const is_float = operand_ty.isRuntimeFloat();
         const op = toLlvmAtomicRmwBinOp(extra.op(), is_signed_int, is_float);
         const ordering = toLlvmAtomicOrdering(extra.ordering());
         const single_threaded = llvm.Bool.fromBool(self.single_threaded);

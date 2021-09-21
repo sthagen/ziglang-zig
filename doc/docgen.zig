@@ -901,6 +901,7 @@ fn tokenizeAndPrintRaw(
         switch (token.tag) {
             .eof => break,
 
+            .keyword_addrspace,
             .keyword_align,
             .keyword_and,
             .keyword_asm,
@@ -1222,9 +1223,7 @@ fn genHtml(
 
                 try printSourceBlock(allocator, tokenizer, out, syntax_block);
 
-                // TODO: remove code.just_check_syntax after updating code samples
-                // that have stopped working due to a change in the compiler.
-                if (!do_code_tests or code.just_check_syntax) {
+                if (!do_code_tests) {
                     continue;
                 }
 
