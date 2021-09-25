@@ -235,7 +235,7 @@ pub fn openPath(allocator: *Allocator, sub_path: []const u8, options: link.Optio
         const self = try createEmpty(allocator, options);
         errdefer self.base.destroy();
 
-        self.llvm_object = try LlvmObject.create(allocator, options);
+        self.llvm_object = try LlvmObject.create(allocator, sub_path, options);
         return self;
     }
 
@@ -1254,11 +1254,8 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
     // If there is no Zig code to compile, then we should skip flushing the output file because it
     // will not be part of the linker line anyway.
     const module_obj_path: ?[]const u8 = if (self.base.options.module) |module| blk: {
-        // Both stage1 and stage2 LLVM backend put the object file in the cache directory.
-        if (self.base.options.use_llvm) {
-            // Stage2 has to call flushModule since that outputs the LLVM object file.
-            if (!build_options.is_stage1 or !self.base.options.use_stage1) try self.flushModule(comp);
-
+        // stage1 puts the object file in the cache directory.
+        if (self.base.options.use_stage1) {
             const obj_basename = try std.zig.binNameAlloc(arena, .{
                 .root_name = self.base.options.root_name,
                 .target = self.base.options.target,
@@ -1621,14 +1618,13 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         }
 
         // libc
-        // TODO: enable when stage2 can build c.zig
         if (is_exe_or_dyn_lib and
             !self.base.options.skip_linker_dependencies and
-            !self.base.options.link_libc and
-            build_options.is_stage1 and
-            self.base.options.use_stage1)
+            !self.base.options.link_libc)
         {
-            try argv.append(comp.libc_static_lib.?.full_object_path);
+            if (comp.libc_static_lib) |lib| {
+                try argv.append(lib.full_object_path);
+            }
         }
 
         // compiler-rt
@@ -2147,7 +2143,9 @@ pub fn allocateDeclIndexes(self: *Elf, decl: *Module.Decl) !void {
 }
 
 pub fn freeDecl(self: *Elf, decl: *Module.Decl) void {
-    if (self.llvm_object) |_| return;
+    if (build_options.have_llvm) {
+        if (self.llvm_object) |llvm_object| return llvm_object.freeDecl(decl);
+    }
 
     // Appending to free lists is allowed to fail because the free lists are heuristics based anyway.
     self.freeTextBlock(&decl.link.elf);
@@ -3446,6 +3444,15 @@ const CsuObjects = struct {
                     .dynamic_pie => result.set( "start_dyn.o", "crti.o", "crtbeginS.o", "crtendS.o", "crtn.o" ),
                     .static_exe  => result.set( "start_dyn.o", "crti.o", "crtbegin.o",  "crtend.o",  "crtn.o" ),
                     .static_pie  => result.set( "start_dyn.o", "crti.o", "crtbeginS.o", "crtendS.o", "crtn.o" ),
+                    // zig fmt: on
+                },
+                .solaris => switch (mode) {
+                    // zig fmt: off
+                    .dynamic_lib => result.set( null,     "crti.o", null, null, "crtn.o" ),
+                    .dynamic_exe,
+                    .dynamic_pie => result.set( "crt1.o", "crti.o", null, null, "crtn.o" ),
+                    .static_exe,
+                    .static_pie  => result.set( null,     null,     null, null, null     ),
                     // zig fmt: on
                 },
                 else => {},

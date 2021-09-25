@@ -812,7 +812,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
 
     const needs_c_symbols = !options.skip_linker_dependencies and is_exe_or_dyn_lib;
 
-    // WASI-only. Resolve the optinal exec-model option, defaults to command.
+    // WASI-only. Resolve the optional exec-model option, defaults to command.
     const wasi_exec_model = if (options.target.os.tag != .wasi) undefined else options.wasi_exec_model orelse .command;
 
     const comp: *Compilation = comp: {
@@ -1574,25 +1574,29 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
         // also test the use case of `build-obj -fcompiler-rt` with the self-hosted compiler
         // and make sure the compiler-rt symbols are emitted. Currently this is hooked up for
         // stage1 but not stage2.
-        if (comp.bin_file.options.use_stage1) {
-            if (comp.bin_file.options.include_compiler_rt) {
-                if (is_exe_or_dyn_lib) {
-                    try comp.work_queue.writeItem(.{ .compiler_rt_lib = {} });
-                } else if (options.output_mode != .Obj) {
-                    // If build-obj with -fcompiler-rt is requested, that is handled specially
-                    // elsewhere. In this case we are making a static library, so we ask
-                    // for a compiler-rt object to put in it.
-                    try comp.work_queue.writeItem(.{ .compiler_rt_obj = {} });
-                }
+        const capable_of_building_compiler_rt = comp.bin_file.options.use_stage1;
+        const capable_of_building_ssp = comp.bin_file.options.use_stage1;
+        const capable_of_building_zig_libc = comp.bin_file.options.use_stage1 or
+            comp.bin_file.options.use_llvm;
+
+        if (comp.bin_file.options.include_compiler_rt and capable_of_building_compiler_rt) {
+            if (is_exe_or_dyn_lib) {
+                try comp.work_queue.writeItem(.{ .compiler_rt_lib = {} });
+            } else if (options.output_mode != .Obj) {
+                // If build-obj with -fcompiler-rt is requested, that is handled specially
+                // elsewhere. In this case we are making a static library, so we ask
+                // for a compiler-rt object to put in it.
+                try comp.work_queue.writeItem(.{ .compiler_rt_obj = {} });
             }
-            if (needs_c_symbols) {
-                // MinGW provides no libssp, use our own implementation.
-                if (comp.getTarget().isMinGW()) {
-                    try comp.work_queue.writeItem(.{ .libssp = {} });
-                }
-                if (!comp.bin_file.options.link_libc) {
-                    try comp.work_queue.writeItem(.{ .zig_libc = {} });
-                }
+        }
+        if (needs_c_symbols) {
+            // MinGW provides no libssp, use our own implementation.
+            if (comp.getTarget().isMinGW() and capable_of_building_ssp) {
+                try comp.work_queue.writeItem(.{ .libssp = {} });
+            }
+
+            if (!comp.bin_file.options.link_libc and capable_of_building_zig_libc) {
+                try comp.work_queue.writeItem(.{ .zig_libc = {} });
             }
         }
     }
@@ -2145,7 +2149,11 @@ pub fn performAllTheWork(self: *Compilation) error{ TimerUnsupported, OutOfMemor
                 const module = self.bin_file.options.module.?;
                 const decl = func.owner_decl;
 
-                var air = module.analyzeFnBody(decl, func) catch |err| switch (err) {
+                var tmp_arena = std.heap.ArenaAllocator.init(gpa);
+                defer tmp_arena.deinit();
+                const sema_arena = &tmp_arena.allocator;
+
+                var air = module.analyzeFnBody(decl, func, sema_arena) catch |err| switch (err) {
                     error.AnalysisFail => {
                         assert(func.state != .in_progress);
                         continue;
@@ -2207,16 +2215,20 @@ pub fn performAllTheWork(self: *Compilation) error{ TimerUnsupported, OutOfMemor
                 const decl_emit_h = decl.getEmitH(module);
                 const fwd_decl = &decl_emit_h.fwd_decl;
                 fwd_decl.shrinkRetainingCapacity(0);
+                var typedefs_arena = std.heap.ArenaAllocator.init(gpa);
+                defer typedefs_arena.deinit();
 
                 var dg: c_codegen.DeclGen = .{
+                    .gpa = gpa,
                     .module = module,
                     .error_msg = null,
                     .decl = decl,
                     .fwd_decl = fwd_decl.toManaged(gpa),
-                    // we don't want to emit optionals and error unions to headers since they have no ABI
-                    .typedefs = undefined,
+                    .typedefs = c_codegen.TypedefMap.init(gpa),
+                    .typedefs_arena = &typedefs_arena.allocator,
                 };
                 defer dg.fwd_decl.deinit();
+                defer dg.typedefs.deinit();
 
                 c_codegen.genHeader(&dg) catch |err| switch (err) {
                     error.AnalysisFail => {
@@ -2753,16 +2765,12 @@ fn reportRetryableAstGenError(
         try Module.ErrorMsg.create(
             gpa,
             src_loc,
-            "unable to load '{'}" ++ std.fs.path.sep_str ++ "{'}': {s}",
-            .{
-                std.zig.fmtEscapes(dir_path),
-                std.zig.fmtEscapes(file.sub_file_path),
-                @errorName(err),
-            },
+            "unable to load '{s}" ++ std.fs.path.sep_str ++ "{s}': {s}",
+            .{ dir_path, file.sub_file_path, @errorName(err) },
         )
     else
-        try Module.ErrorMsg.create(gpa, src_loc, "unable to load '{'}': {s}", .{
-            std.zig.fmtEscapes(file.sub_file_path), @errorName(err),
+        try Module.ErrorMsg.create(gpa, src_loc, "unable to load '{s}': {s}", .{
+            file.sub_file_path, @errorName(err),
         });
     errdefer err_msg.destroy(gpa);
 

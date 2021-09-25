@@ -227,9 +227,12 @@ pub const Inst = struct {
         /// Indicates the program counter will never get to this instruction.
         /// Result type is always noreturn; no instructions in a block follow this one.
         unreach,
-        /// Convert from one float type to another.
+        /// Convert from a float type to a smaller one.
         /// Uses the `ty_op` field.
-        floatcast,
+        fptrunc,
+        /// Convert from a float type to a wider one.
+        /// Uses the `ty_op` field.
+        fpext,
         /// Returns an integer with a different type than the operand. The new type may have
         /// fewer, the same, or more bits than the operand type. However, the instruction
         /// guarantees that the same integer value fits in both types.
@@ -317,6 +320,19 @@ pub const Inst = struct {
         /// Given an integer operand, return the float with the closest mathematical meaning.
         /// Uses the `ty_op` field.
         int_to_float,
+
+        /// Given dest ptr, value, and len, set all elements at dest to value.
+        /// Result type is always void.
+        /// Uses the `pl_op` field. Operand is the dest ptr. Payload is `Bin`. `lhs` is the
+        /// value, `rhs` is the length.
+        /// The element type may be any type, not just u8.
+        memset,
+        /// Given dest ptr, src ptr, and len, copy len elements from src to dest.
+        /// Result type is always void.
+        /// Uses the `pl_op` field. Operand is the dest ptr. Payload is `Bin`. `lhs` is the
+        /// src ptr, `rhs` is the length.
+        /// The element type may be any type, not just u8.
+        memcpy,
 
         /// Uses the `ty_pl` field with payload `Cmpxchg`.
         cmpxchg_weak,
@@ -586,7 +602,8 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .not,
         .bitcast,
         .load,
-        .floatcast,
+        .fpext,
+        .fptrunc,
         .intcast,
         .trunc,
         .optional_payload,
@@ -624,6 +641,8 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .atomic_store_monotonic,
         .atomic_store_release,
         .atomic_store_seq_cst,
+        .memset,
+        .memcpy,
         => return Type.initTag(.void),
 
         .ptrtoint,

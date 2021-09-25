@@ -155,15 +155,26 @@ pub const Object = struct {
     llvm_module: *const llvm.Module,
     context: *const llvm.Context,
     target_machine: *const llvm.TargetMachine,
+    /// Ideally we would use `llvm_module.getNamedFunction` to go from *Decl to LLVM function,
+    /// but that has some downsides:
+    /// * we have to compute the fully qualified name every time we want to do the lookup
+    /// * for externally linked functions, the name is not fully qualified, but when
+    ///   a Decl goes from exported to not exported and vice-versa, we would use the wrong
+    ///   version of the name and incorrectly get function not found in the llvm module.
+    /// * it works for functions not all globals.
+    /// Therefore, this table keeps track of the mapping.
+    decl_map: std.AutoHashMapUnmanaged(*const Module.Decl, *const llvm.Value),
+    /// Where to put the output object file, relative to bin_file.options.emit directory.
+    sub_path: []const u8,
 
-    pub fn create(gpa: *Allocator, options: link.Options) !*Object {
+    pub fn create(gpa: *Allocator, sub_path: []const u8, options: link.Options) !*Object {
         const obj = try gpa.create(Object);
         errdefer gpa.destroy(obj);
-        obj.* = try Object.init(gpa, options);
+        obj.* = try Object.init(gpa, sub_path, options);
         return obj;
     }
 
-    pub fn init(gpa: *Allocator, options: link.Options) !Object {
+    pub fn init(gpa: *Allocator, sub_path: []const u8, options: link.Options) !Object {
         const context = llvm.Context.create();
         errdefer context.dispose();
 
@@ -241,18 +252,21 @@ pub const Object = struct {
             .llvm_module = llvm_module,
             .context = context,
             .target_machine = target_machine,
+            .decl_map = .{},
+            .sub_path = sub_path,
         };
     }
 
-    pub fn deinit(self: *Object) void {
+    pub fn deinit(self: *Object, gpa: *Allocator) void {
         self.target_machine.dispose();
         self.llvm_module.dispose();
         self.context.dispose();
+        self.decl_map.deinit(gpa);
         self.* = undefined;
     }
 
     pub fn destroy(self: *Object, gpa: *Allocator) void {
-        self.deinit();
+        self.deinit(gpa);
         gpa.destroy(self);
     }
 
@@ -290,22 +304,17 @@ pub const Object = struct {
         const mod = comp.bin_file.options.module.?;
         const cache_dir = mod.zig_cache_artifact_directory;
 
-        const emit_bin_path: ?[*:0]const u8 = if (comp.bin_file.options.emit != null) blk: {
-            const obj_basename = try std.zig.binNameAlloc(arena, .{
-                .root_name = comp.bin_file.options.root_name,
-                .target = comp.bin_file.options.target,
-                .output_mode = .Obj,
-            });
-            if (cache_dir.joinZ(arena, &[_][]const u8{obj_basename})) |p| {
-                break :blk p.ptr;
-            } else |err| {
-                return err;
-            }
-        } else null;
+        const emit_bin_path: ?[*:0]const u8 = if (comp.bin_file.options.emit) |emit|
+            try emit.directory.joinZ(arena, &[_][]const u8{self.sub_path})
+        else
+            null;
 
         const emit_asm_path = try locPath(arena, comp.emit_asm, cache_dir);
         const emit_llvm_ir_path = try locPath(arena, comp.emit_llvm_ir, cache_dir);
         const emit_llvm_bc_path = try locPath(arena, comp.emit_llvm_bc, cache_dir);
+
+        const debug_emit_path = emit_bin_path orelse "(none)";
+        log.debug("emit LLVM object to {s}", .{debug_emit_path});
 
         var error_message: [*:0]const u8 = undefined;
         if (self.target_machine.emitToFile(
@@ -370,17 +379,16 @@ pub const Object = struct {
         }
 
         // This gets the LLVM values from the function and stores them in `dg.args`.
-        const fn_param_len = decl.ty.fnParamLen();
-        var args = try dg.gpa.alloc(*const llvm.Value, fn_param_len);
+        const fn_info = decl.ty.fnInfo();
+        var args = try dg.gpa.alloc(*const llvm.Value, fn_info.param_types.len);
 
         for (args) |*arg, i| {
             arg.* = llvm.getParam(llvm_func, @intCast(c_uint, i));
         }
 
-        // We remove all the basic blocks of a function to support incremental
-        // compilation!
-        // TODO: remove all basic blocks if functions can have more than one
-        if (llvm_func.getFirstBasicBlock()) |bb| {
+        // Remove all the basic blocks of a function in order to start over, generating
+        // LLVM IR from an empty function body.
+        while (llvm_func.getFirstBasicBlock()) |bb| {
             bb.deleteBasicBlock();
         }
 
@@ -451,30 +459,62 @@ pub const Object = struct {
     ) !void {
         // If the module does not already have the function, we ignore this function call
         // because we call `updateDeclExports` at the end of `updateFunc` and `updateDecl`.
-        const llvm_fn = self.llvm_module.getNamedFunction(decl.name) orelse return;
+        const llvm_fn = self.decl_map.get(decl) orelse return;
         const is_extern = decl.val.tag() == .extern_fn;
-        if (is_extern or exports.len != 0) {
-            llvm_fn.setLinkage(.External);
+        if (is_extern) {
+            llvm_fn.setValueName(decl.name);
             llvm_fn.setUnnamedAddr(.False);
+            llvm_fn.setLinkage(.External);
+        } else if (exports.len != 0) {
+            const exp_name = exports[0].options.name;
+            llvm_fn.setValueName2(exp_name.ptr, exp_name.len);
+            llvm_fn.setUnnamedAddr(.False);
+            switch (exports[0].options.linkage) {
+                .Internal => unreachable,
+                .Strong => llvm_fn.setLinkage(.External),
+                .Weak => llvm_fn.setLinkage(.WeakODR),
+                .LinkOnce => llvm_fn.setLinkage(.LinkOnceODR),
+            }
+            // If a Decl is exported more than one time (which is rare),
+            // we add aliases for all but the first export.
+            // TODO LLVM C API does not support deleting aliases. We need to
+            // patch it to support this or figure out how to wrap the C++ API ourselves.
+            // Until then we iterate over existing aliases and make them point
+            // to the correct decl, or otherwise add a new alias. Old aliases are leaked.
+            for (exports[1..]) |exp| {
+                const exp_name_z = try module.gpa.dupeZ(u8, exp.options.name);
+                defer module.gpa.free(exp_name_z);
+
+                if (self.llvm_module.getNamedGlobalAlias(exp_name_z.ptr, exp_name_z.len)) |alias| {
+                    alias.setAliasee(llvm_fn);
+                } else {
+                    const alias = self.llvm_module.addAlias(llvm_fn.typeOf(), llvm_fn, exp_name_z);
+                    switch (exp.options.linkage) {
+                        .Internal => alias.setLinkage(.Internal),
+                        .Strong => alias.setLinkage(.External),
+                        .Weak => {
+                            if (is_extern) {
+                                alias.setLinkage(.ExternalWeak);
+                            } else {
+                                alias.setLinkage(.WeakODR);
+                            }
+                        },
+                        .LinkOnce => alias.setLinkage(.LinkOnceODR),
+                    }
+                }
+            }
         } else {
+            const fqn = try decl.getFullyQualifiedName(module.gpa);
+            defer module.gpa.free(fqn);
+            llvm_fn.setValueName2(fqn.ptr, fqn.len);
             llvm_fn.setLinkage(.Internal);
             llvm_fn.setUnnamedAddr(.True);
         }
-        // TODO LLVM C API does not support deleting aliases. We need to
-        // patch it to support this or figure out how to wrap the C++ API ourselves.
-        // Until then we iterate over existing aliases and make them point
-        // to the correct decl, or otherwise add a new alias. Old aliases are leaked.
-        for (exports) |exp| {
-            const exp_name_z = try module.gpa.dupeZ(u8, exp.options.name);
-            defer module.gpa.free(exp_name_z);
+    }
 
-            if (self.llvm_module.getNamedGlobalAlias(exp_name_z.ptr, exp_name_z.len)) |alias| {
-                alias.setAliasee(llvm_fn);
-            } else {
-                const alias = self.llvm_module.addAlias(llvm_fn.typeOf(), llvm_fn, exp_name_z);
-                _ = alias;
-            }
-        }
+    pub fn freeDecl(self: *Object, decl: *Module.Decl) void {
+        const llvm_value = self.decl_map.get(decl) orelse return;
+        llvm_value.deleteGlobal();
     }
 };
 
@@ -483,9 +523,8 @@ pub const DeclGen = struct {
     object: *Object,
     module: *Module,
     decl: *Module.Decl,
-    err_msg: ?*Module.ErrorMsg,
-
     gpa: *Allocator,
+    err_msg: ?*Module.ErrorMsg,
 
     fn todo(self: *DeclGen, comptime format: []const u8, args: anytype) error{ OutOfMemory, CodegenFail } {
         @setCold(true);
@@ -530,36 +569,43 @@ pub const DeclGen = struct {
     /// Note that this can be called before the function's semantic analysis has
     /// completed, so if any attributes rely on that, they must be done in updateFunc, not here.
     fn resolveLlvmFunction(self: *DeclGen, decl: *Module.Decl) !*const llvm.Value {
-        if (self.llvmModule().getNamedFunction(decl.name)) |llvm_fn| return llvm_fn;
+        const gop = try self.object.decl_map.getOrPut(self.gpa, decl);
+        if (gop.found_existing) return gop.value_ptr.*;
 
         assert(decl.has_tv);
         const zig_fn_type = decl.ty;
-        const return_type = zig_fn_type.fnReturnType();
-        const fn_param_len = zig_fn_type.fnParamLen();
+        const fn_info = zig_fn_type.fnInfo();
+        const return_type = fn_info.return_type;
 
-        const fn_param_types = try self.gpa.alloc(Type, fn_param_len);
-        defer self.gpa.free(fn_param_types);
-        zig_fn_type.fnParamTypes(fn_param_types);
-
-        const llvm_param_buffer = try self.gpa.alloc(*const llvm.Type, fn_param_len);
+        const llvm_param_buffer = try self.gpa.alloc(*const llvm.Type, fn_info.param_types.len);
         defer self.gpa.free(llvm_param_buffer);
 
         var llvm_params_len: c_uint = 0;
-        for (fn_param_types) |fn_param| {
-            if (fn_param.hasCodeGenBits()) {
-                llvm_param_buffer[llvm_params_len] = try self.llvmType(fn_param);
+        for (fn_info.param_types) |param_ty| {
+            if (param_ty.hasCodeGenBits()) {
+                llvm_param_buffer[llvm_params_len] = try self.llvmType(param_ty);
                 llvm_params_len += 1;
             }
         }
 
+        const llvm_ret_ty = if (!return_type.hasCodeGenBits())
+            self.context.voidType()
+        else
+            try self.llvmType(return_type);
+
         const fn_type = llvm.functionType(
-            try self.llvmType(return_type),
+            llvm_ret_ty,
             llvm_param_buffer.ptr,
             llvm_params_len,
             .False,
         );
         const llvm_addrspace = self.llvmAddressSpace(decl.@"addrspace");
-        const llvm_fn = self.llvmModule().addFunctionInAddressSpace(decl.name, fn_type, llvm_addrspace);
+
+        const fqn = try decl.getFullyQualifiedName(self.gpa);
+        defer self.gpa.free(fqn);
+
+        const llvm_fn = self.llvmModule().addFunctionInAddressSpace(fqn, fn_type, llvm_addrspace);
+        gop.value_ptr.* = llvm_fn;
 
         const is_extern = decl.val.tag() == .extern_fn;
         if (!is_extern) {
@@ -567,8 +613,85 @@ pub const DeclGen = struct {
             llvm_fn.setUnnamedAddr(.True);
         }
 
-        // TODO: calling convention, linkage, tsan, etc. see codegen.cpp `make_fn_llvm_value`.
+        // TODO: more attributes. see codegen.cpp `make_fn_llvm_value`.
+        const target = self.module.getTarget();
+        switch (fn_info.cc) {
+            .Unspecified, .Inline, .Async => {
+                llvm_fn.setFunctionCallConv(.Fast);
+            },
+            .C => {
+                llvm_fn.setFunctionCallConv(.C);
+            },
+            .Naked => {
+                self.addFnAttr(llvm_fn, "naked");
+            },
+            .Stdcall => {
+                llvm_fn.setFunctionCallConv(.X86_StdCall);
+            },
+            .Fastcall => {
+                llvm_fn.setFunctionCallConv(.X86_FastCall);
+            },
+            .Vectorcall => {
+                switch (target.cpu.arch) {
+                    .i386, .x86_64 => {
+                        llvm_fn.setFunctionCallConv(.X86_VectorCall);
+                    },
+                    .aarch64, .aarch64_be, .aarch64_32 => {
+                        llvm_fn.setFunctionCallConv(.AArch64_VectorCall);
+                    },
+                    else => unreachable,
+                }
+            },
+            .Thiscall => {
+                llvm_fn.setFunctionCallConv(.X86_ThisCall);
+            },
+            .APCS => {
+                llvm_fn.setFunctionCallConv(.ARM_APCS);
+            },
+            .AAPCS => {
+                llvm_fn.setFunctionCallConv(.ARM_AAPCS);
+            },
+            .AAPCSVFP => {
+                llvm_fn.setFunctionCallConv(.ARM_AAPCS_VFP);
+            },
+            .Interrupt => {
+                switch (target.cpu.arch) {
+                    .i386, .x86_64 => {
+                        llvm_fn.setFunctionCallConv(.X86_INTR);
+                    },
+                    .avr => {
+                        llvm_fn.setFunctionCallConv(.AVR_INTR);
+                    },
+                    .msp430 => {
+                        llvm_fn.setFunctionCallConv(.MSP430_INTR);
+                    },
+                    else => unreachable,
+                }
+            },
+            .Signal => {
+                llvm_fn.setFunctionCallConv(.AVR_SIGNAL);
+            },
+            .SysV => {
+                llvm_fn.setFunctionCallConv(.X86_64_SysV);
+            },
+        }
 
+        // Function attributes that are independent of analysis results of the function body.
+        if (!self.module.comp.bin_file.options.red_zone) {
+            self.addFnAttr(llvm_fn, "noredzone");
+        }
+        self.addFnAttr(llvm_fn, "nounwind");
+        if (self.module.comp.unwind_tables) {
+            self.addFnAttr(llvm_fn, "uwtable");
+        }
+        if (self.module.comp.bin_file.options.optimize_mode == .ReleaseSmall) {
+            self.addFnAttr(llvm_fn, "minsize");
+            self.addFnAttr(llvm_fn, "optsize");
+        }
+        if (self.module.comp.bin_file.options.tsan) {
+            self.addFnAttr(llvm_fn, "sanitize_thread");
+        }
+        // TODO add target-cpu and target-features fn attributes
         if (return_type.isNoReturn()) {
             self.addFnAttr(llvm_fn, "noreturn");
         }
@@ -1038,7 +1161,7 @@ pub const FuncGen = struct {
     /// in other instructions. This table is cleared before every function is generated.
     func_inst_table: std.AutoHashMapUnmanaged(Air.Inst.Index, *const llvm.Value),
 
-    /// These fields are used to refer to the LLVM value of the function paramaters
+    /// These fields are used to refer to the LLVM value of the function parameters
     /// in an Arg instruction.
     args: []*const llvm.Value,
     arg_index: usize,
@@ -1137,7 +1260,8 @@ pub const FuncGen = struct {
                 .cond_br        => try self.airCondBr(inst),
                 .intcast        => try self.airIntCast(inst),
                 .trunc          => try self.airTrunc(inst),
-                .floatcast      => try self.airFloatCast(inst),
+                .fptrunc        => try self.airFptrunc(inst),
+                .fpext          => try self.airFpext(inst),
                 .ptrtoint       => try self.airPtrToInt(inst),
                 .load           => try self.airLoad(inst),
                 .loop           => try self.airLoop(inst),
@@ -1155,6 +1279,8 @@ pub const FuncGen = struct {
                 .fence          => try self.airFence(inst),
                 .atomic_rmw     => try self.airAtomicRmw(inst),
                 .atomic_load    => try self.airAtomicLoad(inst),
+                .memset         => try self.airMemset(inst),
+                .memcpy         => try self.airMemcpy(inst),
 
                 .atomic_store_unordered => try self.airAtomicStore(inst, .Unordered),
                 .atomic_store_monotonic => try self.airAtomicStore(inst, .Monotonic),
@@ -2032,14 +2158,22 @@ pub const FuncGen = struct {
         if (self.liveness.isUnused(inst))
             return null;
 
+        const target = self.dg.module.getTarget();
         const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+        const dest_ty = self.air.typeOfIndex(inst);
+        const dest_info = dest_ty.intInfo(target);
+        const dest_llvm_ty = try self.dg.llvmType(dest_ty);
         const operand = try self.resolveInst(ty_op.operand);
-        const inst_ty = self.air.typeOfIndex(inst);
+        const operand_ty = self.air.typeOf(ty_op.operand);
+        const operand_info = operand_ty.intInfo(target);
 
-        const signed = inst_ty.isSignedInt();
-        // TODO: Should we use intcast here or just a simple bitcast?
-        //       LLVM does truncation vs bitcast (+signed extension) in the intcast depending on the sizes
-        return self.builder.buildIntCast2(operand, try self.dg.llvmType(inst_ty), llvm.Bool.fromBool(signed), "");
+        if (operand_info.bits < dest_info.bits) {
+            switch (operand_info.signedness) {
+                .signed => return self.builder.buildSExt(operand, dest_llvm_ty, ""),
+                .unsigned => return self.builder.buildZExt(operand, dest_llvm_ty, ""),
+            }
+        }
+        return self.builder.buildTrunc(operand, dest_llvm_ty, "");
     }
 
     fn airTrunc(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
@@ -2052,12 +2186,26 @@ pub const FuncGen = struct {
         return self.builder.buildTrunc(operand, dest_llvm_ty, "");
     }
 
-    fn airFloatCast(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+    fn airFptrunc(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
         if (self.liveness.isUnused(inst))
             return null;
 
-        // TODO split floatcast AIR into float_widen and float_shorten
-        return self.todo("implement 'airFloatCast'", .{});
+        const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+        const operand = try self.resolveInst(ty_op.operand);
+        const dest_llvm_ty = try self.dg.llvmType(self.air.typeOfIndex(inst));
+
+        return self.builder.buildFPTrunc(operand, dest_llvm_ty, "");
+    }
+
+    fn airFpext(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        if (self.liveness.isUnused(inst))
+            return null;
+
+        const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+        const operand = try self.resolveInst(ty_op.operand);
+        const dest_llvm_ty = try self.dg.llvmType(self.air.typeOfIndex(inst));
+
+        return self.builder.buildFPExt(operand, dest_llvm_ty, "");
     }
 
     fn airPtrToInt(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
@@ -2280,6 +2428,8 @@ pub const FuncGen = struct {
         const atomic_load = self.air.instructions.items(.data)[inst].atomic_load;
         const ptr = try self.resolveInst(atomic_load.ptr);
         const ptr_ty = self.air.typeOf(atomic_load.ptr);
+        if (!ptr_ty.isVolatilePtr() and self.liveness.isUnused(inst))
+            return null;
         const ordering = toLlvmAtomicOrdering(atomic_load.order);
         const operand_ty = ptr_ty.elemType();
         const opt_abi_ty = self.dg.getAtomicAbiType(operand_ty, false);
@@ -2319,6 +2469,55 @@ pub const FuncGen = struct {
         }
         const store_inst = self.store(ptr, ptr_ty, element);
         store_inst.setOrdering(ordering);
+        return null;
+    }
+
+    fn airMemset(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        const pl_op = self.air.instructions.items(.data)[inst].pl_op;
+        const extra = self.air.extraData(Air.Bin, pl_op.payload).data;
+        const dest_ptr = try self.resolveInst(pl_op.operand);
+        const ptr_ty = self.air.typeOf(pl_op.operand);
+        const value = try self.resolveInst(extra.lhs);
+        const val_is_undef = if (self.air.value(extra.lhs)) |val| val.isUndef() else false;
+        const len = try self.resolveInst(extra.rhs);
+        const u8_llvm_ty = self.context.intType(8);
+        const ptr_u8_llvm_ty = u8_llvm_ty.pointerType(0);
+        const dest_ptr_u8 = self.builder.buildBitCast(dest_ptr, ptr_u8_llvm_ty, "");
+        const fill_char = if (val_is_undef) u8_llvm_ty.constInt(0xaa, .False) else value;
+        const target = self.dg.module.getTarget();
+        const dest_ptr_align = ptr_ty.ptrAlignment(target);
+        const memset = self.builder.buildMemSet(dest_ptr_u8, fill_char, len, dest_ptr_align);
+        memset.setVolatile(llvm.Bool.fromBool(ptr_ty.isVolatilePtr()));
+
+        if (val_is_undef and self.dg.module.comp.bin_file.options.valgrind) {
+            // TODO generate valgrind client request to mark byte range as undefined
+            // see gen_valgrind_undef() in codegen.cpp
+        }
+        return null;
+    }
+
+    fn airMemcpy(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        const pl_op = self.air.instructions.items(.data)[inst].pl_op;
+        const extra = self.air.extraData(Air.Bin, pl_op.payload).data;
+        const dest_ptr = try self.resolveInst(pl_op.operand);
+        const dest_ptr_ty = self.air.typeOf(pl_op.operand);
+        const src_ptr = try self.resolveInst(extra.lhs);
+        const src_ptr_ty = self.air.typeOf(extra.lhs);
+        const len = try self.resolveInst(extra.rhs);
+        const u8_llvm_ty = self.context.intType(8);
+        const ptr_u8_llvm_ty = u8_llvm_ty.pointerType(0);
+        const dest_ptr_u8 = self.builder.buildBitCast(dest_ptr, ptr_u8_llvm_ty, "");
+        const src_ptr_u8 = self.builder.buildBitCast(src_ptr, ptr_u8_llvm_ty, "");
+        const is_volatile = src_ptr_ty.isVolatilePtr() or dest_ptr_ty.isVolatilePtr();
+        const target = self.dg.module.getTarget();
+        const memcpy = self.builder.buildMemCpy(
+            dest_ptr_u8,
+            dest_ptr_ty.ptrAlignment(target),
+            src_ptr_u8,
+            src_ptr_ty.ptrAlignment(target),
+            len,
+        );
+        memcpy.setVolatile(llvm.Bool.fromBool(is_volatile));
         return null;
     }
 

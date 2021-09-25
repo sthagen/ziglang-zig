@@ -30,7 +30,7 @@ tomb_bits: []usize,
 ///    The main tomb bits are still used and the extra ones are starting with the lsb of the
 ///    value here.
 special: std.AutoHashMapUnmanaged(Air.Inst.Index, u32),
-/// Auxilliary data. The way this data is interpreted is determined contextually.
+/// Auxiliary data. The way this data is interpreted is determined contextually.
 extra: []const u32,
 
 /// Trailing is the set of instructions whose lifetimes end at the start of the then branch,
@@ -274,7 +274,8 @@ fn analyzeInst(
         .not,
         .bitcast,
         .load,
-        .floatcast,
+        .fpext,
+        .fptrunc,
         .intcast,
         .trunc,
         .optional_payload,
@@ -359,6 +360,11 @@ fn analyzeInst(
             const pl_op = inst_datas[inst].pl_op;
             const extra = a.air.extraData(Air.AtomicRmw, pl_op.payload).data;
             return trackOperands(a, new_set, inst, main_tomb, .{ pl_op.operand, extra.operand, .none });
+        },
+        .memset, .memcpy => {
+            const pl_op = inst_datas[inst].pl_op;
+            const extra = a.air.extraData(Air.Bin, pl_op.payload).data;
+            return trackOperands(a, new_set, inst, main_tomb, .{ pl_op.operand, extra.lhs, extra.rhs });
         },
         .br => {
             const br = inst_datas[inst].br;

@@ -1,18 +1,23 @@
 const builtin = @import("builtin");
 
 test {
-    _ = @import("behavior/bool.zig");
-    _ = @import("behavior/basic.zig");
-    _ = @import("behavior/generics.zig");
-    _ = @import("behavior/eval.zig");
-    _ = @import("behavior/pointers.zig");
-    _ = @import("behavior/if.zig");
-    _ = @import("behavior/cast.zig");
+    // Tests that pass for both.
     _ = @import("behavior/array.zig");
-    _ = @import("behavior/usingnamespace.zig");
     _ = @import("behavior/atomics.zig");
+    _ = @import("behavior/basic.zig");
+    _ = @import("behavior/bool.zig");
+    _ = @import("behavior/cast.zig");
+    _ = @import("behavior/eval.zig");
+    _ = @import("behavior/generics.zig");
+    _ = @import("behavior/if.zig");
+    _ = @import("behavior/pointers.zig");
     _ = @import("behavior/sizeof_and_typeof.zig");
+    _ = @import("behavior/struct.zig");
+    _ = @import("behavior/this.zig");
     _ = @import("behavior/translate_c_macros.zig");
+    _ = @import("behavior/union.zig");
+    _ = @import("behavior/usingnamespace.zig");
+    _ = @import("behavior/widening.zig");
 
     if (builtin.zig_is_stage2) {
         // When all comptime_memory.zig tests pass, #9646 can be closed.
@@ -133,13 +138,12 @@ test {
         _ = @import("behavior/sizeof_and_typeof_stage1.zig");
         _ = @import("behavior/slice.zig");
         _ = @import("behavior/slice_sentinel_comptime.zig");
-        _ = @import("behavior/struct.zig");
+        _ = @import("behavior/struct_stage1.zig");
         _ = @import("behavior/struct_contains_null_ptr_itself.zig");
         _ = @import("behavior/struct_contains_slice_of_itself.zig");
         _ = @import("behavior/switch.zig");
         _ = @import("behavior/switch_prong_err_enum.zig");
         _ = @import("behavior/switch_prong_implicit_cast.zig");
-        _ = @import("behavior/this.zig");
         _ = @import("behavior/truncate.zig");
         _ = @import("behavior/try.zig");
         _ = @import("behavior/tuple.zig");
@@ -148,7 +152,7 @@ test {
         _ = @import("behavior/typename.zig");
         _ = @import("behavior/undefined.zig");
         _ = @import("behavior/underscore.zig");
-        _ = @import("behavior/union.zig");
+        _ = @import("behavior/union_stage1.zig");
         _ = @import("behavior/usingnamespace_stage1.zig");
         _ = @import("behavior/var_args.zig");
         _ = @import("behavior/vector.zig");
@@ -157,7 +161,6 @@ test {
             _ = @import("behavior/wasm.zig");
         }
         _ = @import("behavior/while.zig");
-        _ = @import("behavior/widening.zig");
         _ = @import("behavior/src.zig");
         _ = @import("behavior/translate_c_macros_stage1.zig");
     }

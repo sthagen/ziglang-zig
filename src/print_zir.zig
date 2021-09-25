@@ -26,7 +26,7 @@ pub fn renderAsTextToFile(
         .parent_decl_node = 0,
     };
 
-    const main_struct_inst = scope_file.zir.getMainStruct();
+    const main_struct_inst = Zir.main_struct_inst;
     try fs_file.writer().print("%{d} ", .{main_struct_inst});
     try writer.writeInstToStream(fs_file.writer(), main_struct_inst);
     try fs_file.writeAll("\n");
@@ -171,6 +171,7 @@ const Writer = struct {
             .ref,
             .ret_coerce,
             .ensure_err_payload_void,
+            .closure_capture,
             => try self.writeUnTok(stream, inst),
 
             .bool_br_and,
@@ -209,8 +210,6 @@ const Writer = struct {
             .mul_add,
             .builtin_call,
             .field_parent_ptr,
-            .memcpy,
-            .memset,
             .builtin_async_call,
             => try self.writePlNode(stream, inst),
 
@@ -221,6 +220,8 @@ const Writer = struct {
             .cmpxchg_strong, .cmpxchg_weak => try self.writeCmpxchg(stream, inst),
             .atomic_store => try self.writeAtomicStore(stream, inst),
             .atomic_rmw => try self.writeAtomicRmw(stream, inst),
+            .memcpy => try self.writeMemcpy(stream, inst),
+            .memset => try self.writeMemset(stream, inst),
 
             .struct_init_anon,
             .struct_init_anon_ref,
@@ -285,6 +286,7 @@ const Writer = struct {
             => try self.writePlNodeBin(stream, inst),
 
             .@"export" => try self.writePlNodeExport(stream, inst),
+            .export_value => try self.writePlNodeExportValue(stream, inst),
 
             .call,
             .call_chkused,
@@ -305,10 +307,6 @@ const Writer = struct {
             .condbr,
             .condbr_inline,
             => try self.writePlNodeCondBr(stream, inst),
-
-            .opaque_decl => try self.writeOpaqueDecl(stream, inst, .parent),
-            .opaque_decl_anon => try self.writeOpaqueDecl(stream, inst, .anon),
-            .opaque_decl_func => try self.writeOpaqueDecl(stream, inst, .func),
 
             .error_set_decl => try self.writeErrorSetDecl(stream, inst, .parent),
             .error_set_decl_anon => try self.writeErrorSetDecl(stream, inst, .anon),
@@ -370,6 +368,8 @@ const Writer = struct {
 
             .dbg_stmt => try self.writeDbgStmt(stream, inst),
 
+            .closure_get => try self.writeInstNode(stream, inst),
+
             .extended => try self.writeExtended(stream, inst),
         }
     }
@@ -411,6 +411,7 @@ const Writer = struct {
             .struct_decl => try self.writeStructDecl(stream, extended),
             .union_decl => try self.writeUnionDecl(stream, extended),
             .enum_decl => try self.writeEnumDecl(stream, extended),
+            .opaque_decl => try self.writeOpaqueDecl(stream, extended),
 
             .c_undef, .c_include => {
                 const inst_data = self.code.extraData(Zir.Inst.UnNode, extended.operand).data;
@@ -611,6 +612,17 @@ const Writer = struct {
         try self.writeSrc(stream, inst_data.src());
     }
 
+    fn writePlNodeExportValue(self: *Writer, stream: anytype, inst: Zir.Inst.Index) !void {
+        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
+        const extra = self.code.extraData(Zir.Inst.ExportValue, inst_data.payload_index).data;
+
+        try self.writeInstRef(stream, extra.operand);
+        try stream.writeAll(", ");
+        try self.writeInstRef(stream, extra.options);
+        try stream.writeAll(") ");
+        try self.writeSrc(stream, inst_data.src());
+    }
+
     fn writeStructInit(self: *Writer, stream: anytype, inst: Zir.Inst.Index) !void {
         const inst_data = self.code.instructions.items(.data)[inst].pl_node;
         const extra = self.code.extraData(Zir.Inst.StructInit, inst_data.payload_index);
@@ -680,6 +692,32 @@ const Writer = struct {
         try self.writeSrc(stream, inst_data.src());
     }
 
+    fn writeMemcpy(self: *Writer, stream: anytype, inst: Zir.Inst.Index) !void {
+        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
+        const extra = self.code.extraData(Zir.Inst.Memcpy, inst_data.payload_index).data;
+
+        try self.writeInstRef(stream, extra.dest);
+        try stream.writeAll(", ");
+        try self.writeInstRef(stream, extra.source);
+        try stream.writeAll(", ");
+        try self.writeInstRef(stream, extra.byte_count);
+        try stream.writeAll(") ");
+        try self.writeSrc(stream, inst_data.src());
+    }
+
+    fn writeMemset(self: *Writer, stream: anytype, inst: Zir.Inst.Index) !void {
+        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
+        const extra = self.code.extraData(Zir.Inst.Memset, inst_data.payload_index).data;
+
+        try self.writeInstRef(stream, extra.dest);
+        try stream.writeAll(", ");
+        try self.writeInstRef(stream, extra.byte);
+        try stream.writeAll(", ");
+        try self.writeInstRef(stream, extra.byte_count);
+        try stream.writeAll(") ");
+        try self.writeSrc(stream, inst_data.src());
+    }
+
     fn writeStructInitAnon(self: *Writer, stream: anytype, inst: Zir.Inst.Index) !void {
         const inst_data = self.code.instructions.items(.data)[inst].pl_node;
         const extra = self.code.extraData(Zir.Inst.StructInitAnon, inst_data.payload_index);
@@ -731,6 +769,17 @@ const Writer = struct {
         }
         try stream.writeAll(")) ");
         try self.writeSrc(stream, src);
+    }
+
+    fn writeInstNode(
+        self: *Writer,
+        stream: anytype,
+        inst: Zir.Inst.Index,
+    ) (@TypeOf(stream).Error || error{OutOfMemory})!void {
+        const inst_data = self.code.instructions.items(.data)[inst].inst_node;
+        try self.writeInstIndex(stream, inst_data.inst);
+        try stream.writeAll(") ");
+        try self.writeSrc(stream, inst_data.src());
     }
 
     fn writeAsm(self: *Writer, stream: anytype, extended: Zir.Inst.Extended.InstData) !void {
@@ -1353,26 +1402,36 @@ const Writer = struct {
     fn writeOpaqueDecl(
         self: *Writer,
         stream: anytype,
-        inst: Zir.Inst.Index,
-        name_strategy: Zir.Inst.NameStrategy,
+        extended: Zir.Inst.Extended.InstData,
     ) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Zir.Inst.OpaqueDecl, inst_data.payload_index);
-        const decls_len = extra.data.decls_len;
+        const small = @bitCast(Zir.Inst.OpaqueDecl.Small, extended.small);
+        var extra_index: usize = extended.operand;
 
-        try stream.print("{s}, ", .{@tagName(name_strategy)});
+        const src_node: ?i32 = if (small.has_src_node) blk: {
+            const src_node = @bitCast(i32, self.code.extra[extra_index]);
+            extra_index += 1;
+            break :blk src_node;
+        } else null;
+
+        const decls_len = if (small.has_decls_len) blk: {
+            const decls_len = self.code.extra[extra_index];
+            extra_index += 1;
+            break :blk decls_len;
+        } else 0;
+
+        try stream.print("{s}, ", .{@tagName(small.name_strategy)});
 
         if (decls_len == 0) {
-            try stream.writeAll("}) ");
+            try stream.writeAll("{})");
         } else {
-            try stream.writeAll("\n");
+            try stream.writeAll("{\n");
             self.indent += 2;
-            _ = try self.writeDecls(stream, decls_len, extra.end);
+            _ = try self.writeDecls(stream, decls_len, extra_index);
             self.indent -= 2;
             try stream.writeByteNTimes(' ', self.indent);
-            try stream.writeAll("}) ");
+            try stream.writeAll("})");
         }
-        try self.writeSrc(stream, inst_data.src());
+        try self.writeSrcNode(stream, src_node);
     }
 
     fn writeErrorSetDecl(

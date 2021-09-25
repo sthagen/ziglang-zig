@@ -21,7 +21,7 @@ const log = std.log.scoped(.codegen);
 const build_options = @import("build_options");
 const RegisterManager = @import("register_manager.zig").RegisterManager;
 
-const X8664Encoder = @import("codegen/x86_64.zig").Encoder;
+const X8664Encoder = @import("arch/x86_64/bits.zig").Encoder;
 
 pub const FnResult = union(enum) {
     /// The `code` parameter passed to `generateSymbol` has the value appended.
@@ -47,6 +47,28 @@ pub const DebugInfoOutput = union(enum) {
         dbg_line: *std.ArrayList(u8),
         dbg_info: *std.ArrayList(u8),
         dbg_info_type_relocs: *link.File.DbgInfoTypeRelocsTable,
+    },
+    /// the plan9 debuginfo output is a bytecode with 4 opcodes
+    /// assume all numbers/variables are bytes
+    /// 0 w x y z -> interpret w x y z as a big-endian i32, and add it to the line offset
+    /// x when x < 65 -> add x to line offset
+    /// x when x < 129 -> subtract 64 from x and subtract it from the line offset
+    /// x -> subtract 129 from x, multiply it by the quanta of the instruction size
+    /// (1 on x86_64), and add it to the pc
+    /// after every opcode, add the quanta of the instruction size to the pc
+    plan9: struct {
+        /// the actual opcodes
+        dbg_line: *std.ArrayList(u8),
+        /// what line the debuginfo starts on
+        /// this helps because the linker might have to insert some opcodes to make sure that the line count starts at the right amount for the next decl
+        start_line: *?u32,
+        /// what the line count ends on after codegen
+        /// this helps because the linker might have to insert some opcodes to make sure that the line count starts at the right amount for the next decl
+        end_line: *u32,
+        /// the last pc change op
+        /// This is very useful for adding quanta
+        /// to it if its not actually the last one.
+        pcop_change_index: *?u32,
     },
     none,
 };
@@ -448,7 +470,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             /// A branch in the ARM instruction set
             arm_branch: struct {
                 pos: usize,
-                cond: @import("codegen/arm.zig").Condition,
+                cond: @import("arch/arm/bits.zig").Condition,
             },
         };
 
@@ -837,7 +859,8 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     .call            => try self.airCall(inst),
                     .cond_br         => try self.airCondBr(inst),
                     .dbg_stmt        => try self.airDbgStmt(inst),
-                    .floatcast       => try self.airFloatCast(inst),
+                    .fptrunc         => try self.airFptrunc(inst),
+                    .fpext           => try self.airFpext(inst),
                     .intcast         => try self.airIntCast(inst),
                     .trunc           => try self.airTrunc(inst),
                     .bool_to_int     => try self.airBoolToInt(inst),
@@ -864,6 +887,8 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     .cmpxchg_weak    => try self.airCmpxchg(inst),
                     .atomic_rmw      => try self.airAtomicRmw(inst),
                     .atomic_load     => try self.airAtomicLoad(inst),
+                    .memcpy          => try self.airMemcpy(inst),
+                    .memset          => try self.airMemset(inst),
 
                     .atomic_store_unordered => try self.airAtomicStore(inst, .Unordered),
                     .atomic_store_monotonic => try self.airAtomicStore(inst, .Monotonic),
@@ -915,6 +940,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     try dbg_out.dbg_line.append(DW.LNS.set_prologue_end);
                     try self.dbgAdvancePCAndLine(self.prev_di_line, self.prev_di_column);
                 },
+                .plan9 => {},
                 .none => {},
             }
         }
@@ -925,15 +951,16 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     try dbg_out.dbg_line.append(DW.LNS.set_epilogue_begin);
                     try self.dbgAdvancePCAndLine(self.prev_di_line, self.prev_di_column);
                 },
+                .plan9 => {},
                 .none => {},
             }
         }
 
         fn dbgAdvancePCAndLine(self: *Self, line: u32, column: u32) InnerError!void {
+            const delta_line = @intCast(i32, line) - @intCast(i32, self.prev_di_line);
+            const delta_pc: usize = self.code.items.len - self.prev_di_pc;
             switch (self.debug_output) {
                 .dwarf => |dbg_out| {
-                    const delta_line = @intCast(i32, line) - @intCast(i32, self.prev_di_line);
-                    const delta_pc = self.code.items.len - self.prev_di_pc;
                     // TODO Look into using the DWARF special opcodes to compress this data.
                     // It lets you emit single-byte opcodes that add different numbers to
                     // both the PC and the line number at the same time.
@@ -945,12 +972,39 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         leb128.writeILEB128(dbg_out.dbg_line.writer(), delta_line) catch unreachable;
                     }
                     dbg_out.dbg_line.appendAssumeCapacity(DW.LNS.copy);
+                    self.prev_di_pc = self.code.items.len;
+                    self.prev_di_line = line;
+                    self.prev_di_column = column;
+                    self.prev_di_pc = self.code.items.len;
+                },
+                .plan9 => |dbg_out| {
+                    if (delta_pc <= 0) return; // only do this when the pc changes
+                    // we have already checked the target in the linker to make sure it is compatable
+                    const quant = @import("link/Plan9/aout.zig").getPCQuant(self.target.cpu.arch) catch unreachable;
+
+                    // increasing the line number
+                    try @import("link/Plan9.zig").changeLine(dbg_out.dbg_line, delta_line);
+                    // increasing the pc
+                    const d_pc_p9 = @intCast(i64, delta_pc) - quant;
+                    if (d_pc_p9 > 0) {
+                        // minus one because if its the last one, we want to leave space to change the line which is one quanta
+                        try dbg_out.dbg_line.append(@intCast(u8, @divExact(d_pc_p9, quant) + 128) - quant);
+                        if (dbg_out.pcop_change_index.*) |pci|
+                            dbg_out.dbg_line.items[pci] += 1;
+                        dbg_out.pcop_change_index.* = @intCast(u32, dbg_out.dbg_line.items.len - 1);
+                    } else if (d_pc_p9 == 0) {
+                        // we don't need to do anything, because adding the quant does it for us
+                    } else unreachable;
+                    if (dbg_out.start_line.* == null)
+                        dbg_out.start_line.* = self.prev_di_line;
+                    dbg_out.end_line.* = line;
+                    // only do this if the pc changed
+                    self.prev_di_line = line;
+                    self.prev_di_column = column;
+                    self.prev_di_pc = self.code.items.len;
                 },
                 .none => {},
             }
-            self.prev_di_line = line;
-            self.prev_di_column = column;
-            self.prev_di_pc = self.code.items.len;
         }
 
         /// Asserts there is already capacity to insert into top branch inst_table.
@@ -1034,6 +1088,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     }
                     try gop.value_ptr.relocs.append(self.gpa, @intCast(u32, index));
                 },
+                .plan9 => {},
                 .none => {},
             }
         }
@@ -1120,10 +1175,18 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             return self.finishAir(inst, .{ .ptr_stack_offset = stack_offset }, .{ .none, .none, .none });
         }
 
-        fn airFloatCast(self: *Self, inst: Air.Inst.Index) !void {
+        fn airFptrunc(self: *Self, inst: Air.Inst.Index) !void {
             const ty_op = self.air.instructions.items(.data)[inst].ty_op;
             const result: MCValue = if (self.liveness.isUnused(inst)) .dead else switch (arch) {
-                else => return self.fail("TODO implement floatCast for {}", .{self.target.cpu.arch}),
+                else => return self.fail("TODO implement airFptrunc for {}", .{self.target.cpu.arch}),
+            };
+            return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
+        }
+
+        fn airFpext(self: *Self, inst: Air.Inst.Index) !void {
+            const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+            const result: MCValue = if (self.liveness.isUnused(inst)) .dead else switch (arch) {
+                else => return self.fail("TODO implement airFpext for {}", .{self.target.cpu.arch}),
             };
             return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
         }
@@ -1858,15 +1921,15 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 },
                 .shl => {
                     assert(!swap_lhs_and_rhs);
-                    const shift_amout = switch (operand) {
+                    const shift_amount = switch (operand) {
                         .Register => |reg_op| Instruction.ShiftAmount.reg(@intToEnum(Register, reg_op.rm)),
                         .Immediate => |imm_op| Instruction.ShiftAmount.imm(@intCast(u5, imm_op.imm)),
                     };
-                    writeInt(u32, try self.code.addManyAsArray(4), Instruction.lsl(.al, dst_reg, op1, shift_amout).toU32());
+                    writeInt(u32, try self.code.addManyAsArray(4), Instruction.lsl(.al, dst_reg, op1, shift_amount).toU32());
                 },
                 .shr => {
                     assert(!swap_lhs_and_rhs);
-                    const shift_amout = switch (operand) {
+                    const shift_amount = switch (operand) {
                         .Register => |reg_op| Instruction.ShiftAmount.reg(@intToEnum(Register, reg_op.rm)),
                         .Immediate => |imm_op| Instruction.ShiftAmount.imm(@intCast(u5, imm_op.imm)),
                     };
@@ -1875,7 +1938,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         .signed => Instruction.asr,
                         .unsigned => Instruction.lsr,
                     };
-                    writeInt(u32, try self.code.addManyAsArray(4), shr(.al, dst_reg, op1, shift_amout).toU32());
+                    writeInt(u32, try self.code.addManyAsArray(4), shr(.al, dst_reg, op1, shift_amount).toU32());
                 },
                 else => unreachable, // not a binary instruction
             }
@@ -2459,6 +2522,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             try self.addDbgInfoTypeReloc(ty); // DW.AT.type,  DW.FORM.ref4
                             dbg_out.dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT.name, DW.FORM.string
                         },
+                        .plan9 => {},
                         .none => {},
                     }
                 },
@@ -2493,6 +2557,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                                 else => {},
                             }
                         },
+                        .plan9 => {},
                         .none => {},
                     }
                 },
@@ -2929,6 +2994,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         }
                         if (self.air.value(callee)) |func_value| {
                             if (func_value.castTag(.function)) |func_payload| {
+                                try p9.seeDecl(func_payload.data.owner_decl);
                                 const ptr_bits = self.target.cpu.arch.ptrBitWidth();
                                 const ptr_bytes: u64 = @divExact(ptr_bits, 8);
                                 const got_addr = p9.bases.data;
@@ -2976,6 +3042,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         }
                         if (self.air.value(callee)) |func_value| {
                             if (func_value.castTag(.function)) |func_payload| {
+                                try p9.seeDecl(func_payload.data.owner_decl);
                                 const ptr_bits = self.target.cpu.arch.ptrBitWidth();
                                 const ptr_bytes: u64 = @divExact(ptr_bits, 8);
                                 const got_addr = p9.bases.data;
@@ -3553,7 +3620,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             try self.blocks.putNoClobber(self.gpa, inst, .{
                 // A block is a setup to be able to jump to the end.
                 .relocs = .{},
-                // It also acts as a receptical for break operands.
+                // It also acts as a receptacle for break operands.
                 // Here we use `MCValue.none` to represent a null value so that the first
                 // break instruction will choose a MCValue for the block result and overwrite
                 // this field. Following break instructions will use that MCValue to put their
@@ -3607,7 +3674,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                                 return self.fail("TODO: enable larger branch offset", .{});
                             }
                         },
-                        else => unreachable, // attempting to perfrom an ARM relocation on a non-ARM target arch
+                        else => unreachable, // attempting to perform an ARM relocation on a non-ARM target arch
                     }
                 },
             }
@@ -4818,6 +4885,16 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             return self.fail("TODO implement airAtomicStore for {}", .{self.target.cpu.arch});
         }
 
+        fn airMemset(self: *Self, inst: Air.Inst.Index) !void {
+            _ = inst;
+            return self.fail("TODO implement airMemset for {}", .{self.target.cpu.arch});
+        }
+
+        fn airMemcpy(self: *Self, inst: Air.Inst.Index) !void {
+            _ = inst;
+            return self.fail("TODO implement airMemcpy for {}", .{self.target.cpu.arch});
+        }
+
         fn resolveInst(self: *Self, inst: Air.Inst.Ref) InnerError!MCValue {
             // First section of indexes correspond to a set number of constant values.
             const ref_int = @enumToInt(inst);
@@ -4923,6 +5000,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                                 const got_addr = coff_file.offset_table_virtual_address + decl.link.coff.offset_table_index * ptr_bytes;
                                 return MCValue{ .memory = got_addr };
                             } else if (self.bin_file.cast(link.File.Plan9)) |p9| {
+                                try p9.seeDecl(decl);
                                 const got_addr = p9.bases.data + decl.link.plan9.got_index.? * ptr_bytes;
                                 return MCValue{ .memory = got_addr };
                             } else {
@@ -5270,11 +5348,11 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         }
 
         const Register = switch (arch) {
-            .i386 => @import("codegen/x86.zig").Register,
-            .x86_64 => @import("codegen/x86_64.zig").Register,
-            .riscv64 => @import("codegen/riscv64.zig").Register,
-            .arm, .armeb => @import("codegen/arm.zig").Register,
-            .aarch64, .aarch64_be, .aarch64_32 => @import("codegen/aarch64.zig").Register,
+            .i386 => @import("arch/x86/bits.zig").Register,
+            .x86_64 => @import("arch/x86_64/bits.zig").Register,
+            .riscv64 => @import("arch/riscv64/bits.zig").Register,
+            .arm, .armeb => @import("arch/arm/bits.zig").Register,
+            .aarch64, .aarch64_be, .aarch64_32 => @import("arch/aarch64/bits.zig").Register,
             else => enum {
                 dummy,
 
@@ -5286,39 +5364,39 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         };
 
         const Instruction = switch (arch) {
-            .riscv64 => @import("codegen/riscv64.zig").Instruction,
-            .arm, .armeb => @import("codegen/arm.zig").Instruction,
-            .aarch64, .aarch64_be, .aarch64_32 => @import("codegen/aarch64.zig").Instruction,
+            .riscv64 => @import("arch/riscv64/bits.zig").Instruction,
+            .arm, .armeb => @import("arch/arm/bits.zig").Instruction,
+            .aarch64, .aarch64_be, .aarch64_32 => @import("arch/aarch64/bits.zig").Instruction,
             else => void,
         };
 
         const Condition = switch (arch) {
-            .arm, .armeb => @import("codegen/arm.zig").Condition,
+            .arm, .armeb => @import("arch/arm/bits.zig").Condition,
             else => void,
         };
 
         const callee_preserved_regs = switch (arch) {
-            .i386 => @import("codegen/x86.zig").callee_preserved_regs,
-            .x86_64 => @import("codegen/x86_64.zig").callee_preserved_regs,
-            .riscv64 => @import("codegen/riscv64.zig").callee_preserved_regs,
-            .arm, .armeb => @import("codegen/arm.zig").callee_preserved_regs,
-            .aarch64, .aarch64_be, .aarch64_32 => @import("codegen/aarch64.zig").callee_preserved_regs,
+            .i386 => @import("arch/x86/bits.zig").callee_preserved_regs,
+            .x86_64 => @import("arch/x86_64/bits.zig").callee_preserved_regs,
+            .riscv64 => @import("arch/riscv64/bits.zig").callee_preserved_regs,
+            .arm, .armeb => @import("arch/arm/bits.zig").callee_preserved_regs,
+            .aarch64, .aarch64_be, .aarch64_32 => @import("arch/aarch64/bits.zig").callee_preserved_regs,
             else => [_]Register{},
         };
 
         const c_abi_int_param_regs = switch (arch) {
-            .i386 => @import("codegen/x86.zig").c_abi_int_param_regs,
-            .x86_64 => @import("codegen/x86_64.zig").c_abi_int_param_regs,
-            .arm, .armeb => @import("codegen/arm.zig").c_abi_int_param_regs,
-            .aarch64, .aarch64_be, .aarch64_32 => @import("codegen/aarch64.zig").c_abi_int_param_regs,
+            .i386 => @import("arch/x86/bits.zig").c_abi_int_param_regs,
+            .x86_64 => @import("arch/x86_64/bits.zig").c_abi_int_param_regs,
+            .arm, .armeb => @import("arch/arm/bits.zig").c_abi_int_param_regs,
+            .aarch64, .aarch64_be, .aarch64_32 => @import("arch/aarch64/bits.zig").c_abi_int_param_regs,
             else => [_]Register{},
         };
 
         const c_abi_int_return_regs = switch (arch) {
-            .i386 => @import("codegen/x86.zig").c_abi_int_return_regs,
-            .x86_64 => @import("codegen/x86_64.zig").c_abi_int_return_regs,
-            .arm, .armeb => @import("codegen/arm.zig").c_abi_int_return_regs,
-            .aarch64, .aarch64_be, .aarch64_32 => @import("codegen/aarch64.zig").c_abi_int_return_regs,
+            .i386 => @import("arch/x86/bits.zig").c_abi_int_return_regs,
+            .x86_64 => @import("arch/x86_64/bits.zig").c_abi_int_return_regs,
+            .arm, .armeb => @import("arch/arm/bits.zig").c_abi_int_return_regs,
+            .aarch64, .aarch64_be, .aarch64_32 => @import("arch/aarch64/bits.zig").c_abi_int_return_regs,
             else => [_]Register{},
         };
 

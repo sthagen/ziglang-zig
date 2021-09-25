@@ -1336,6 +1336,8 @@ pub const Type = extern union {
         }
     }
 
+    /// For structs and unions, if the type does not have their fields resolved
+    /// this will return `false`.
     pub fn hasCodeGenBits(self: Type) bool {
         return switch (self.tag()) {
             .u1,
@@ -1366,10 +1368,6 @@ pub const Type = extern union {
             .f128,
             .bool,
             .anyerror,
-            .fn_noreturn_no_args,
-            .fn_void_no_args,
-            .fn_naked_noreturn_no_args,
-            .fn_ccc_void_no_args,
             .single_const_pointer_to_comptime_int,
             .const_slice_u8,
             .array_u8_sentinel_0,
@@ -1397,15 +1395,17 @@ pub const Type = extern union {
 
             .function => !self.castTag(.function).?.data.is_generic,
 
+            .fn_noreturn_no_args,
+            .fn_void_no_args,
+            .fn_naked_noreturn_no_args,
+            .fn_ccc_void_no_args,
+            => true,
+
             .@"struct" => {
-                // TODO introduce lazy value mechanism
                 const struct_obj = self.castTag(.@"struct").?.data;
                 if (struct_obj.known_has_bits) {
                     return true;
                 }
-                assert(struct_obj.status == .have_field_types or
-                    struct_obj.status == .layout_wip or
-                    struct_obj.status == .have_layout);
                 for (struct_obj.fields.values()) |value| {
                     if (value.ty.hasCodeGenBits())
                         return true;
@@ -2391,12 +2391,11 @@ pub const Type = extern union {
         };
     }
 
-    /// Asserts the type is a pointer or array type.
-    pub fn elemType(self: Type) Type {
-        return switch (self.tag()) {
-            .vector => self.castTag(.vector).?.data.elem_type,
-            .array => self.castTag(.array).?.data.elem_type,
-            .array_sentinel => self.castTag(.array_sentinel).?.data.elem_type,
+    pub fn childType(ty: Type) Type {
+        return switch (ty.tag()) {
+            .vector => ty.castTag(.vector).?.data.elem_type,
+            .array => ty.castTag(.array).?.data.elem_type,
+            .array_sentinel => ty.castTag(.array_sentinel).?.data.elem_type,
             .single_const_pointer,
             .single_mut_pointer,
             .many_const_pointer,
@@ -2405,7 +2404,7 @@ pub const Type = extern union {
             .c_mut_pointer,
             .const_slice,
             .mut_slice,
-            => self.castPointer().?.data,
+            => ty.castPointer().?.data,
 
             .array_u8,
             .array_u8_sentinel_0,
@@ -2415,9 +2414,67 @@ pub const Type = extern union {
             => Type.initTag(.u8),
 
             .single_const_pointer_to_comptime_int => Type.initTag(.comptime_int),
-            .pointer => self.castTag(.pointer).?.data.pointee_type,
+            .pointer => ty.castTag(.pointer).?.data.pointee_type,
 
             else => unreachable,
+        };
+    }
+
+    /// Asserts the type is a pointer or array type.
+    /// TODO this is deprecated in favor of `childType`.
+    pub const elemType = childType;
+
+    /// For *[N]T,  returns T.
+    /// For ?*T,    returns T.
+    /// For ?*[N]T, returns T.
+    /// For ?[*]T,  returns T.
+    /// For *T,     returns T.
+    /// For [*]T,   returns T.
+    pub fn elemType2(ty: Type) Type {
+        return switch (ty.tag()) {
+            .vector => ty.castTag(.vector).?.data.elem_type,
+            .array => ty.castTag(.array).?.data.elem_type,
+            .array_sentinel => ty.castTag(.array_sentinel).?.data.elem_type,
+            .many_const_pointer,
+            .many_mut_pointer,
+            .c_const_pointer,
+            .c_mut_pointer,
+            .const_slice,
+            .mut_slice,
+            => ty.castPointer().?.data,
+
+            .single_const_pointer,
+            .single_mut_pointer,
+            => ty.castPointer().?.data.shallowElemType(),
+
+            .array_u8,
+            .array_u8_sentinel_0,
+            .const_slice_u8,
+            .manyptr_u8,
+            .manyptr_const_u8,
+            => Type.initTag(.u8),
+
+            .single_const_pointer_to_comptime_int => Type.initTag(.comptime_int),
+            .pointer => {
+                const info = ty.castTag(.pointer).?.data;
+                const child_ty = info.pointee_type;
+                if (info.size == .One) {
+                    return child_ty.shallowElemType();
+                } else {
+                    return child_ty;
+                }
+            },
+
+            // TODO handle optionals
+
+            else => unreachable,
+        };
+    }
+
+    fn shallowElemType(child_ty: Type) Type {
+        return switch (child_ty.zigTypeTag()) {
+            .Array, .Vector => child_ty.childType(),
+            else => child_ty,
         };
     }
 
@@ -3419,7 +3476,7 @@ pub const Type = extern union {
         anyerror_void_error_union,
         generic_poison,
         /// This is a special type for variadic parameters of a function call.
-        /// Casts to it will validate that the type can be passed to a c calling convetion function.
+        /// Casts to it will validate that the type can be passed to a c calling convention function.
         var_args_param,
         /// Same as `empty_struct` except it has an empty namespace.
         empty_struct_literal,
@@ -3800,6 +3857,7 @@ pub const CType = enum {
             .wasi,
             .emscripten,
             .plan9,
+            .solaris,
             => switch (self) {
                 .short,
                 .ushort,
@@ -3851,7 +3909,6 @@ pub const CType = enum {
             .fuchsia,
             .kfreebsd,
             .lv2,
-            .solaris,
             .zos,
             .haiku,
             .minix,

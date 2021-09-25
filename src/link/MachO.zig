@@ -12,7 +12,7 @@ const math = std.math;
 const mem = std.mem;
 const meta = std.meta;
 
-const aarch64 = @import("../codegen/aarch64.zig");
+const aarch64 = @import("../arch/aarch64/bits.zig");
 const bind = @import("MachO/bind.zig");
 const codegen = @import("../codegen.zig");
 const commands = @import("MachO/commands.zig");
@@ -200,7 +200,7 @@ atoms: std.AutoHashMapUnmanaged(MatchingSection, *Atom) = .{},
 
 /// List of atoms that are owned directly by the linker.
 /// Currently these are only atoms that are the result of linking
-/// object files. Atoms which take part in incremental linking are 
+/// object files. Atoms which take part in incremental linking are
 /// at present owned by Module.Decl.
 /// TODO consolidate this.
 managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
@@ -213,7 +213,7 @@ decls: std.AutoArrayHashMapUnmanaged(*Module.Decl, void) = .{},
 
 /// Currently active Module.Decl.
 /// TODO this might not be necessary if we figure out how to pass Module.Decl instance
-/// to codegen.genSetReg() or alterntively move PIE displacement for MCValue{ .memory = x }
+/// to codegen.genSetReg() or alternatively move PIE displacement for MCValue{ .memory = x }
 /// somewhere else in the codegen.
 active_decl: ?*Module.Decl = null,
 
@@ -290,7 +290,7 @@ pub fn openPath(allocator: *Allocator, sub_path: []const u8, options: link.Optio
         const self = try createEmpty(allocator, options);
         errdefer self.base.destroy();
 
-        self.llvm_object = try LlvmObject.create(allocator, options);
+        self.llvm_object = try LlvmObject.create(allocator, sub_path, options);
         return self;
     }
 
@@ -512,7 +512,7 @@ pub fn flush(self: *MachO, comp: *Compilation) !void {
     const full_out_path = try directory.join(arena, &[_][]const u8{self.base.options.emit.?.sub_path});
 
     if (self.base.options.output_mode == .Obj) {
-        // LLD's MachO driver does not support the equvialent of `-r` so we do a simple file copy
+        // LLD's MachO driver does not support the equivalent of `-r` so we do a simple file copy
         // here. TODO: think carefully about how we can avoid this redundant operation when doing
         // build-obj. See also the corresponding TODO in linkAsArchive.
         const the_object_path = blk: {
@@ -1869,7 +1869,7 @@ fn writeAtoms(self: *MachO) !void {
 pub fn createGotAtom(self: *MachO, key: GotIndirectionKey) !*Atom {
     const local_sym_index = @intCast(u32, self.locals.items.len);
     try self.locals.append(self.base.allocator, .{
-        .n_strx = try self.makeString("l_zld_got_entry"),
+        .n_strx = 0,
         .n_type = macho.N_SECT,
         .n_sect = 0,
         .n_desc = 0,
@@ -1907,7 +1907,7 @@ fn createDyldPrivateAtom(self: *MachO) !void {
     const local_sym_index = @intCast(u32, self.locals.items.len);
     const sym = try self.locals.addOne(self.base.allocator);
     sym.* = .{
-        .n_strx = try self.makeString("l_zld_dyld_private"),
+        .n_strx = 0,
         .n_type = macho.N_SECT,
         .n_sect = 0,
         .n_desc = 0,
@@ -1941,7 +1941,7 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
     const local_sym_index = @intCast(u32, self.locals.items.len);
     const sym = try self.locals.addOne(self.base.allocator);
     sym.* = .{
-        .n_strx = try self.makeString("l_zld_stub_preamble"),
+        .n_strx = 0,
         .n_type = macho.N_SECT,
         .n_sect = 0,
         .n_desc = 0,
@@ -2083,7 +2083,7 @@ pub fn createStubHelperAtom(self: *MachO) !*Atom {
     };
     const local_sym_index = @intCast(u32, self.locals.items.len);
     try self.locals.append(self.base.allocator, .{
-        .n_strx = try self.makeString("l_zld_stub_in_stub_helper"),
+        .n_strx = 0,
         .n_type = macho.N_SECT,
         .n_sect = 0,
         .n_desc = 0,
@@ -2138,7 +2138,7 @@ pub fn createStubHelperAtom(self: *MachO) !*Atom {
 pub fn createLazyPointerAtom(self: *MachO, stub_sym_index: u32, lazy_binding_sym_index: u32) !*Atom {
     const local_sym_index = @intCast(u32, self.locals.items.len);
     try self.locals.append(self.base.allocator, .{
-        .n_strx = try self.makeString("l_zld_lazy_ptr"),
+        .n_strx = 0,
         .n_type = macho.N_SECT,
         .n_sect = 0,
         .n_desc = 0,
@@ -2179,7 +2179,7 @@ pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !*Atom {
     };
     const local_sym_index = @intCast(u32, self.locals.items.len);
     try self.locals.append(self.base.allocator, .{
-        .n_strx = try self.makeString("l_zld_stub"),
+        .n_strx = 0,
         .n_type = macho.N_SECT,
         .n_sect = 0,
         .n_desc = 0,
@@ -2245,7 +2245,7 @@ pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !*Atom {
 fn createTentativeDefAtoms(self: *MachO) !void {
     if (self.tentatives.count() == 0) return;
     // Convert any tentative definition into a regular symbol and allocate
-    // text blocks for each tentative defintion.
+    // text blocks for each tentative definition.
     while (self.tentatives.popOrNull()) |entry| {
         const match = MatchingSection{
             .seg = self.data_segment_cmd_index.?,
@@ -3501,6 +3501,9 @@ pub fn deleteExport(self: *MachO, exp: Export) void {
 }
 
 pub fn freeDecl(self: *MachO, decl: *Module.Decl) void {
+    if (build_options.have_llvm) {
+        if (self.llvm_object) |llvm_object| return llvm_object.freeDecl(decl);
+    }
     log.debug("freeDecl {*}", .{decl});
     _ = self.decls.swapRemove(decl);
     // Appending to free lists is allowed to fail because the free lists are heuristics based anyway.
@@ -4085,6 +4088,70 @@ fn findFreeSpace(self: MachO, segment_id: u16, alignment: u64, start: ?u64) u64 
     return mem.alignForwardGeneric(u64, final_off, alignment);
 }
 
+fn growSegment(self: *MachO, seg_id: u16, new_size: u64) !void {
+    const seg = &self.load_commands.items[seg_id].Segment;
+    const new_seg_size = mem.alignForwardGeneric(u64, new_size, self.page_size);
+    assert(new_seg_size > seg.inner.filesize);
+    const offset_amt = new_seg_size - seg.inner.filesize;
+    log.debug("growing segment {s} from 0x{x} to 0x{x}", .{ seg.inner.segname, seg.inner.filesize, new_seg_size });
+    seg.inner.filesize = new_seg_size;
+    seg.inner.vmsize = new_seg_size;
+
+    log.debug("  (new segment file offsets from 0x{x} to 0x{x} (in memory 0x{x} to 0x{x}))", .{
+        seg.inner.fileoff,
+        seg.inner.fileoff + seg.inner.filesize,
+        seg.inner.vmaddr,
+        seg.inner.vmaddr + seg.inner.vmsize,
+    });
+
+    // TODO We should probably nop the expanded by distance, or put 0s.
+
+    // TODO copyRangeAll doesn't automatically extend the file on macOS.
+    const ledit_seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
+    const new_filesize = offset_amt + ledit_seg.inner.fileoff + ledit_seg.inner.filesize;
+    try self.base.file.?.pwriteAll(&[_]u8{0}, new_filesize - 1);
+
+    var next: usize = seg_id + 1;
+    while (next < self.linkedit_segment_cmd_index.? + 1) : (next += 1) {
+        const next_seg = &self.load_commands.items[next].Segment;
+        _ = try self.base.file.?.copyRangeAll(
+            next_seg.inner.fileoff,
+            self.base.file.?,
+            next_seg.inner.fileoff + offset_amt,
+            next_seg.inner.filesize,
+        );
+        next_seg.inner.fileoff += offset_amt;
+        next_seg.inner.vmaddr += offset_amt;
+
+        log.debug("  (new {s} segment file offsets from 0x{x} to 0x{x} (in memory 0x{x} to 0x{x}))", .{
+            next_seg.inner.segname,
+            next_seg.inner.fileoff,
+            next_seg.inner.fileoff + next_seg.inner.filesize,
+            next_seg.inner.vmaddr,
+            next_seg.inner.vmaddr + next_seg.inner.vmsize,
+        });
+
+        for (next_seg.sections.items) |*moved_sect, moved_sect_id| {
+            moved_sect.offset += @intCast(u32, offset_amt);
+            moved_sect.addr += offset_amt;
+
+            log.debug("  (new {s},{s} file offsets from 0x{x} to 0x{x} (in memory 0x{x} to 0x{x}))", .{
+                commands.segmentName(moved_sect.*),
+                commands.sectionName(moved_sect.*),
+                moved_sect.offset,
+                moved_sect.offset + moved_sect.size,
+                moved_sect.addr,
+                moved_sect.addr + moved_sect.size,
+            });
+
+            try self.allocateLocalSymbols(.{
+                .seg = @intCast(u16, next),
+                .sect = @intCast(u16, moved_sect_id),
+            }, @intCast(i64, offset_amt));
+        }
+    }
+}
+
 fn growSection(self: *MachO, match: MatchingSection, new_size: u32) !void {
     const tracy = trace(@src());
     defer tracy.end();
@@ -4098,7 +4165,14 @@ fn growSection(self: *MachO, match: MatchingSection, new_size: u32) !void {
     const needed_size = mem.alignForwardGeneric(u32, ideal_size, alignment);
 
     if (needed_size > max_size) blk: {
-        log.debug("  (need to grow!)", .{});
+        log.debug("  (need to grow! needed 0x{x}, max 0x{x})", .{ needed_size, max_size });
+
+        if (match.sect == seg.sections.items.len - 1) {
+            // Last section, just grow segments
+            try self.growSegment(match.seg, seg.inner.filesize + needed_size - max_size);
+            break :blk;
+        }
+
         // Need to move all sections below in file and address spaces.
         const offset_amt = offset: {
             const max_alignment = try self.getSectionMaxAlignment(match.seg, match.sect + 1);
@@ -4114,69 +4188,9 @@ fn growSection(self: *MachO, match: MatchingSection, new_size: u32) !void {
 
         if (last_sect_off + offset_amt > seg_off) {
             // Need to grow segment first.
-            log.debug("  (need to grow segment first)", .{});
             const spill_size = (last_sect_off + offset_amt) - seg_off;
-            const seg_offset_amt = mem.alignForwardGeneric(u64, spill_size, self.page_size);
-            seg.inner.filesize += seg_offset_amt;
-            seg.inner.vmsize += seg_offset_amt;
-
-            log.debug("  (new {s} segment file offsets from 0x{x} to 0x{x} (in memory 0x{x} to 0x{x}))", .{
-                seg.inner.segname,
-                seg.inner.fileoff,
-                seg.inner.fileoff + seg.inner.filesize,
-                seg.inner.vmaddr,
-                seg.inner.vmaddr + seg.inner.vmsize,
-            });
-
-            // TODO We should probably nop the expanded by distance, or put 0s.
-
-            // TODO copyRangeAll doesn't automatically extend the file on macOS.
-            const ledit_seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
-            const new_filesize = seg_offset_amt + ledit_seg.inner.fileoff + ledit_seg.inner.filesize;
-            try self.base.file.?.pwriteAll(&[_]u8{0}, new_filesize - 1);
-
-            var next: usize = match.seg + 1;
-            while (next < self.linkedit_segment_cmd_index.? + 1) : (next += 1) {
-                const next_seg = &self.load_commands.items[next].Segment;
-                _ = try self.base.file.?.copyRangeAll(
-                    next_seg.inner.fileoff,
-                    self.base.file.?,
-                    next_seg.inner.fileoff + seg_offset_amt,
-                    next_seg.inner.filesize,
-                );
-                next_seg.inner.fileoff += seg_offset_amt;
-                next_seg.inner.vmaddr += seg_offset_amt;
-
-                log.debug("  (new {s} segment file offsets from 0x{x} to 0x{x} (in memory 0x{x} to 0x{x}))", .{
-                    next_seg.inner.segname,
-                    next_seg.inner.fileoff,
-                    next_seg.inner.fileoff + next_seg.inner.filesize,
-                    next_seg.inner.vmaddr,
-                    next_seg.inner.vmaddr + next_seg.inner.vmsize,
-                });
-
-                for (next_seg.sections.items) |*moved_sect, moved_sect_id| {
-                    moved_sect.offset += @intCast(u32, seg_offset_amt);
-                    moved_sect.addr += seg_offset_amt;
-
-                    log.debug("  (new {s},{s} file offsets from 0x{x} to 0x{x} (in memory 0x{x} to 0x{x}))", .{
-                        commands.segmentName(moved_sect.*),
-                        commands.sectionName(moved_sect.*),
-                        moved_sect.offset,
-                        moved_sect.offset + moved_sect.size,
-                        moved_sect.addr,
-                        moved_sect.addr + moved_sect.size,
-                    });
-
-                    try self.allocateLocalSymbols(.{
-                        .seg = @intCast(u16, next),
-                        .sect = @intCast(u16, moved_sect_id),
-                    }, @intCast(i64, seg_offset_amt));
-                }
-            }
+            try self.growSegment(match.seg, seg.inner.filesize + spill_size);
         }
-
-        if (match.sect + 1 >= seg.sections.items.len) break :blk;
 
         // We have enough space to expand within the segment, so move all sections by
         // the required amount and update their header offsets.
@@ -4595,7 +4609,7 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
 
     // Because we insert lazy binding opcodes in reverse order (from last to the first atom),
     // we need reverse the order of atom traversal here as well.
-    // TODO figure out a less error prone mechanims for this!
+    // TODO figure out a less error prone mechanisms for this!
     var atom = last_atom;
     while (atom.prev) |prev| {
         atom = prev;
@@ -4741,7 +4755,12 @@ fn writeSymbolTable(self: *MachO) !void {
 
     var locals = std.ArrayList(macho.nlist_64).init(self.base.allocator);
     defer locals.deinit();
-    try locals.appendSlice(self.locals.items);
+
+    for (self.locals.items) |sym| {
+        if (sym.n_strx == 0) continue;
+        if (symbolIsTemp(sym, self.getString(sym.n_strx))) continue;
+        try locals.append(sym);
+    }
 
     if (self.has_stabs) {
         for (self.objects.items) |object| {

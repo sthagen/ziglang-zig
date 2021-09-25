@@ -487,9 +487,7 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
             if (mangled_symbol_buf) buf_destroy(mangled_symbol_buf);
         }
     } else {
-        if (llvm_fn == nullptr) {
-            llvm_fn = LLVMAddFunction(g->module, symbol_name, fn_llvm_type);
-        }
+        llvm_fn = LLVMAddFunction(g->module, symbol_name, fn_llvm_type);
 
         for (size_t i = 1; i < fn->export_list.length; i += 1) {
             GlobalExport *fn_export = &fn->export_list.items[i];
@@ -9325,6 +9323,7 @@ Buf *codegen_generate_builtin_source(CodeGen *g) {
     buf_appendf(contents, "pub const single_threaded = %s;\n", bool_to_str(g->is_single_threaded));
     buf_appendf(contents, "pub const abi = std.Target.Abi.%s;\n", cur_abi);
     buf_appendf(contents, "pub const cpu = std.Target.Cpu.baseline(.%s);\n", cur_arch);
+    buf_appendf(contents, "pub const stage2_arch: std.Target.Cpu.Arch = .%s;\n", cur_arch);
     buf_appendf(contents, "pub const os = std.Target.Os.Tag.defaultVersionRange(.%s);\n", cur_os);
     buf_appendf(contents,
         "pub const target = std.Target{\n"

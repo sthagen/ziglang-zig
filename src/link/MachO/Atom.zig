@@ -2,7 +2,7 @@ const Atom = @This();
 
 const std = @import("std");
 const build_options = @import("build_options");
-const aarch64 = @import("../../codegen/aarch64.zig");
+const aarch64 = @import("../../arch/aarch64/bits.zig");
 const assert = std.debug.assert;
 const commands = @import("commands.zig");
 const log = std.log.scoped(.text_block);
@@ -41,7 +41,7 @@ code: std.ArrayListUnmanaged(u8) = .{},
 size: u64,
 
 /// Alignment of this atom as a power of 2.
-/// For instance, aligmment of 0 should be read as 2^0 = 1 byte aligned.
+/// For instance, alignment of 0 should be read as 2^0 = 1 byte aligned.
 alignment: u32,
 
 /// List of relocations belonging to this atom.
@@ -663,15 +663,8 @@ fn initRelocFromObject(rel: macho.relocation_info, context: RelocContext) !Reloc
             const sect = seg.sections.items[sect_id];
             const match = (try context.macho_file.getMatchingSection(sect)) orelse unreachable;
             const local_sym_index = @intCast(u32, context.macho_file.locals.items.len);
-            const sym_name = try std.fmt.allocPrint(context.allocator, "l_{s}_{s}_{s}", .{
-                context.object.name,
-                commands.segmentName(sect),
-                commands.sectionName(sect),
-            });
-            defer context.allocator.free(sym_name);
-
             try context.macho_file.locals.append(context.allocator, .{
-                .n_strx = try context.macho_file.makeString(sym_name),
+                .n_strx = 0,
                 .n_type = macho.N_SECT,
                 .n_sect = @intCast(u8, context.macho_file.section_ordinals.getIndex(match).? + 1),
                 .n_desc = 0,
