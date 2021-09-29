@@ -226,12 +226,16 @@ fn analyzeInst(
     switch (inst_tags[inst]) {
         .add,
         .addwrap,
+        .add_sat,
         .sub,
         .subwrap,
+        .sub_sat,
         .mul,
         .mulwrap,
+        .mul_sat,
         .div,
         .rem,
+        .mod,
         .ptr_add,
         .ptr_sub,
         .bit_and,
@@ -251,11 +255,14 @@ fn analyzeInst(
         .ptr_elem_val,
         .ptr_ptr_elem_val,
         .shl,
+        .shl_exact,
+        .shl_sat,
         .shr,
         .atomic_store_unordered,
         .atomic_store_monotonic,
         .atomic_store_release,
         .atomic_store_seq_cst,
+        .set_union_tag,
         => {
             const o = inst_datas[inst].bin_op;
             return trackOperands(a, new_set, inst, main_tomb, .{ o.lhs, o.rhs, .none });
@@ -296,6 +303,9 @@ fn analyzeInst(
         .array_to_slice,
         .float_to_int,
         .int_to_float,
+        .get_union_tag,
+        .clz,
+        .ctz,
         => {
             const o = inst_datas[inst].ty_op;
             return trackOperands(a, new_set, inst, main_tomb, .{ o.operand, .none, .none });

@@ -159,6 +159,10 @@ pub const Value = extern union {
         /// Used to coordinate alloc_inferred, store_to_inferred_ptr, and resolve_inferred_alloc
         /// instructions for comptime code.
         inferred_alloc_comptime,
+        /// Used sometimes as the result of field_call_bind.  This value is always temporary,
+        /// and refers directly to the air.  It will never be referenced by the air itself.
+        /// TODO: This is probably a bad encoding, maybe put temp data in the sema instead.
+        bound_fn,
 
         pub const last_no_payload_tag = Tag.empty_array;
         pub const no_payload_count = @enumToInt(last_no_payload_tag) + 1;
@@ -279,6 +283,7 @@ pub const Value = extern union {
                 .inferred_alloc => Payload.InferredAlloc,
                 .@"struct" => Payload.Struct,
                 .@"union" => Payload.Union,
+                .bound_fn => Payload.BoundFn,
             };
         }
 
@@ -422,6 +427,7 @@ pub const Value = extern union {
             .extern_options_type,
             .type_info_type,
             .generic_poison,
+            .bound_fn,
             => unreachable,
 
             .ty => {
@@ -716,6 +722,10 @@ pub const Value = extern union {
                 try out_stream.writeAll("(opt_payload_ptr)");
                 val = val.castTag(.opt_payload_ptr).?.data;
             },
+            .bound_fn => {
+                const bound_func = val.castTag(.bound_fn).?.data;
+                return out_stream.print("(bound_fn %{}(%{})", .{ bound_func.func_inst, bound_func.arg0_inst });
+            },
         };
     }
 
@@ -950,6 +960,45 @@ pub const Value = extern union {
             .int_big_positive, .int_big_negative => @panic("big int to f128"),
             else => unreachable,
         };
+    }
+
+    pub fn clz(val: Value, ty: Type, target: Target) u64 {
+        const ty_bits = ty.intInfo(target).bits;
+        switch (val.tag()) {
+            .zero, .bool_false => return ty_bits,
+            .one, .bool_true => return ty_bits - 1,
+
+            .int_u64 => {
+                const big = @clz(u64, val.castTag(.int_u64).?.data);
+                return big + ty_bits - 64;
+            },
+            .int_i64 => {
+                @panic("TODO implement i64 Value clz");
+            },
+            .int_big_positive => {
+                // TODO: move this code into std lib big ints
+                const bigint = val.castTag(.int_big_positive).?.asBigInt();
+                // Limbs are stored in little-endian order but we need
+                // to iterate big-endian.
+                var total_limb_lz: u64 = 0;
+                var i: usize = bigint.limbs.len;
+                const bits_per_limb = @sizeOf(std.math.big.Limb) * 8;
+                while (i != 0) {
+                    i -= 1;
+                    const limb = bigint.limbs[i];
+                    const this_limb_lz = @clz(std.math.big.Limb, limb);
+                    total_limb_lz += this_limb_lz;
+                    if (this_limb_lz != bits_per_limb) break;
+                }
+                const total_limb_bits = bigint.limbs.len * bits_per_limb;
+                return total_limb_lz + ty_bits - total_limb_bits;
+            },
+            .int_big_negative => {
+                @panic("TODO implement int_big_negative Value clz");
+            },
+
+            else => unreachable,
+        }
     }
 
     /// Asserts the value is an integer and not undefined.
@@ -1275,7 +1324,12 @@ pub const Value = extern union {
                 }
             },
             .Union => {
-                @panic("TODO implement hashing union values");
+                const union_obj = val.castTag(.@"union").?.data;
+                if (ty.unionTagType()) |tag_ty| {
+                    union_obj.tag.hash(tag_ty, hasher);
+                }
+                const active_field_ty = ty.unionFieldType(union_obj.tag);
+                union_obj.val.hash(active_field_ty, hasher);
             },
             .Fn => {
                 @panic("TODO implement hashing function values");
@@ -1431,6 +1485,14 @@ pub const Value = extern union {
         }
     }
 
+    pub fn unionTag(val: Value) Value {
+        switch (val.tag()) {
+            .undef => return val,
+            .@"union" => return val.castTag(.@"union").?.data.tag,
+            else => unreachable,
+        }
+    }
+
     /// Returns a pointer to the element value at the index.
     pub fn elemPtr(self: Value, allocator: *Allocator, index: usize) !Value {
         if (self.castTag(.elem_ptr)) |elem_ptr| {
@@ -1565,6 +1627,32 @@ pub const Value = extern union {
         return result;
     }
 
+    /// Supports integers only; asserts neither operand is undefined.
+    pub fn intAddSat(
+        lhs: Value,
+        rhs: Value,
+        ty: Type,
+        arena: *Allocator,
+        target: Target,
+    ) !Value {
+        assert(!lhs.isUndef());
+        assert(!rhs.isUndef());
+
+        const result = try intAdd(lhs, rhs, arena);
+
+        const max = try ty.maxInt(arena, target);
+        if (compare(result, .gt, max, ty)) {
+            return max;
+        }
+
+        const min = try ty.minInt(arena, target);
+        if (compare(result, .lt, min, ty)) {
+            return min;
+        }
+
+        return result;
+    }
+
     /// Supports both floats and ints; handles undefined.
     pub fn numberSubWrap(
         lhs: Value,
@@ -1588,6 +1676,86 @@ pub const Value = extern union {
         const min = try ty.minInt(arena, target);
         if (compare(result, .lt, min, ty)) {
             @panic("TODO comptime wrapping integer subtraction");
+        }
+
+        return result;
+    }
+
+    /// Supports integers only; asserts neither operand is undefined.
+    pub fn intSubSat(
+        lhs: Value,
+        rhs: Value,
+        ty: Type,
+        arena: *Allocator,
+        target: Target,
+    ) !Value {
+        assert(!lhs.isUndef());
+        assert(!rhs.isUndef());
+
+        const result = try intSub(lhs, rhs, arena);
+
+        const max = try ty.maxInt(arena, target);
+        if (compare(result, .gt, max, ty)) {
+            return max;
+        }
+
+        const min = try ty.minInt(arena, target);
+        if (compare(result, .lt, min, ty)) {
+            return min;
+        }
+
+        return result;
+    }
+
+    /// Supports both floats and ints; handles undefined.
+    pub fn numberMulWrap(
+        lhs: Value,
+        rhs: Value,
+        ty: Type,
+        arena: *Allocator,
+        target: Target,
+    ) !Value {
+        if (lhs.isUndef() or rhs.isUndef()) return Value.initTag(.undef);
+
+        if (ty.isAnyFloat()) {
+            return floatMul(lhs, rhs, ty, arena);
+        }
+        const result = try intMul(lhs, rhs, arena);
+
+        const max = try ty.maxInt(arena, target);
+        if (compare(result, .gt, max, ty)) {
+            @panic("TODO comptime wrapping integer multiplication");
+        }
+
+        const min = try ty.minInt(arena, target);
+        if (compare(result, .lt, min, ty)) {
+            @panic("TODO comptime wrapping integer multiplication");
+        }
+
+        return result;
+    }
+
+    /// Supports integers only; asserts neither operand is undefined.
+    pub fn intMulSat(
+        lhs: Value,
+        rhs: Value,
+        ty: Type,
+        arena: *Allocator,
+        target: Target,
+    ) !Value {
+        assert(!lhs.isUndef());
+        assert(!rhs.isUndef());
+
+        const result = try intMul(lhs, rhs, arena);
+
+        const max = try ty.maxInt(arena, target);
+        if (compare(result, .gt, max, ty)) {
+            return max;
+        }
+
+        const min = try ty.minInt(arena, target);
+        if (compare(result, .lt, min, ty)) {
+            return min;
         }
 
         return result;
@@ -1817,6 +1985,82 @@ pub const Value = extern union {
         }
     }
 
+    pub fn intRem(lhs: Value, rhs: Value, allocator: *Allocator) !Value {
+        // TODO is this a performance issue? maybe we should try the operation without
+        // resorting to BigInt first.
+        var lhs_space: Value.BigIntSpace = undefined;
+        var rhs_space: Value.BigIntSpace = undefined;
+        const lhs_bigint = lhs.toBigInt(&lhs_space);
+        const rhs_bigint = rhs.toBigInt(&rhs_space);
+        const limbs_q = try allocator.alloc(
+            std.math.big.Limb,
+            lhs_bigint.limbs.len + rhs_bigint.limbs.len + 1,
+        );
+        const limbs_r = try allocator.alloc(
+            std.math.big.Limb,
+            lhs_bigint.limbs.len,
+        );
+        const limbs_buffer = try allocator.alloc(
+            std.math.big.Limb,
+            std.math.big.int.calcDivLimbsBufferLen(lhs_bigint.limbs.len, rhs_bigint.limbs.len),
+        );
+        var result_q = BigIntMutable{ .limbs = limbs_q, .positive = undefined, .len = undefined };
+        var result_r = BigIntMutable{ .limbs = limbs_r, .positive = undefined, .len = undefined };
+        result_q.divTrunc(&result_r, lhs_bigint, rhs_bigint, limbs_buffer, null);
+        const result_limbs = result_r.limbs[0..result_r.len];
+
+        if (result_r.positive) {
+            return Value.Tag.int_big_positive.create(allocator, result_limbs);
+        } else {
+            return Value.Tag.int_big_negative.create(allocator, result_limbs);
+        }
+    }
+
+    pub fn intMod(lhs: Value, rhs: Value, allocator: *Allocator) !Value {
+        // TODO is this a performance issue? maybe we should try the operation without
+        // resorting to BigInt first.
+        var lhs_space: Value.BigIntSpace = undefined;
+        var rhs_space: Value.BigIntSpace = undefined;
+        const lhs_bigint = lhs.toBigInt(&lhs_space);
+        const rhs_bigint = rhs.toBigInt(&rhs_space);
+        const limbs_q = try allocator.alloc(
+            std.math.big.Limb,
+            lhs_bigint.limbs.len + rhs_bigint.limbs.len + 1,
+        );
+        const limbs_r = try allocator.alloc(
+            std.math.big.Limb,
+            lhs_bigint.limbs.len,
+        );
+        const limbs_buffer = try allocator.alloc(
+            std.math.big.Limb,
+            std.math.big.int.calcDivLimbsBufferLen(lhs_bigint.limbs.len, rhs_bigint.limbs.len),
+        );
+        var result_q = BigIntMutable{ .limbs = limbs_q, .positive = undefined, .len = undefined };
+        var result_r = BigIntMutable{ .limbs = limbs_r, .positive = undefined, .len = undefined };
+        result_q.divFloor(&result_r, lhs_bigint, rhs_bigint, limbs_buffer, null);
+        const result_limbs = result_r.limbs[0..result_r.len];
+
+        if (result_r.positive) {
+            return Value.Tag.int_big_positive.create(allocator, result_limbs);
+        } else {
+            return Value.Tag.int_big_negative.create(allocator, result_limbs);
+        }
+    }
+
+    pub fn floatRem(lhs: Value, rhs: Value, allocator: *Allocator) !Value {
+        _ = lhs;
+        _ = rhs;
+        _ = allocator;
+        @panic("TODO implement Value.floatRem");
+    }
+
+    pub fn floatMod(lhs: Value, rhs: Value, allocator: *Allocator) !Value {
+        _ = lhs;
+        _ = rhs;
+        _ = allocator;
+        @panic("TODO implement Value.floatMod");
+    }
+
     pub fn intMul(lhs: Value, rhs: Value, allocator: *Allocator) !Value {
         // TODO is this a performance issue? maybe we should try the operation without
         // resorting to BigInt first.
@@ -1850,6 +2094,31 @@ pub const Value = extern union {
         const mask = (@as(u64, 1) << @intCast(u6, bits)) - 1;
         const truncated = x & mask;
         return Tag.int_u64.create(arena, truncated);
+    }
+
+    pub fn shl(lhs: Value, rhs: Value, allocator: *Allocator) !Value {
+        // TODO is this a performance issue? maybe we should try the operation without
+        // resorting to BigInt first.
+        var lhs_space: Value.BigIntSpace = undefined;
+        const lhs_bigint = lhs.toBigInt(&lhs_space);
+        const shift = rhs.toUnsignedInt();
+        const limbs = try allocator.alloc(
+            std.math.big.Limb,
+            lhs_bigint.limbs.len + (shift / (@sizeOf(std.math.big.Limb) * 8)) + 1,
+        );
+        var result_bigint = BigIntMutable{
+            .limbs = limbs,
+            .positive = undefined,
+            .len = undefined,
+        };
+        result_bigint.shiftLeft(lhs_bigint, shift);
+        const result_limbs = result_bigint.limbs[0..result_bigint.len];
+
+        if (result_bigint.positive) {
+            return Value.Tag.int_big_positive.create(allocator, result_limbs);
+        } else {
+            return Value.Tag.int_big_negative.create(allocator, result_limbs);
+        }
     }
 
     pub fn shr(lhs: Value, rhs: Value, allocator: *Allocator) !Value {
@@ -2186,6 +2455,16 @@ pub const Value = extern union {
                 val: Value,
             },
         };
+
+        pub const BoundFn = struct {
+            pub const base_tag = Tag.bound_fn;
+
+            base: Payload = Payload{ .tag = base_tag },
+            data: struct {
+                func_inst: Air.Inst.Ref,
+                arg0_inst: Air.Inst.Ref,
+            },
+        };
     };
 
     /// Big enough to fit any non-BigInt value
@@ -2194,4 +2473,13 @@ pub const Value = extern union {
         /// are possible without using an allocator.
         limbs: [(@sizeOf(u64) / @sizeOf(std.math.big.Limb)) + 1]std.math.big.Limb,
     };
+
+    pub const zero = initTag(.zero);
+    pub const one = initTag(.one);
+    pub const negative_one: Value = .{ .ptr_otherwise = &negative_one_payload.base };
+};
+
+var negative_one_payload: Value.Payload.I64 = .{
+    .base = .{ .tag = .int_i64 },
+    .data = -1,
 };

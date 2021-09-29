@@ -70,6 +70,7 @@ pub fn extraData(code: Zir, comptime T: type, index: usize) struct { data: T, en
             u32 => code.extra[i],
             Inst.Ref => @intToEnum(Inst.Ref, code.extra[i]),
             i32 => @bitCast(i32, code.extra[i]),
+            Inst.Call.Flags => @bitCast(Inst.Call.Flags, code.extra[i]),
             else => @compileError("bad field type"),
         };
         i += 1;
@@ -125,6 +126,64 @@ pub const Inst = struct {
         /// Twos complement wrapping integer addition.
         /// Uses the `pl_node` union field. Payload is `Bin`.
         addwrap,
+        /// Saturating addition.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        add_sat,
+        /// Arithmetic subtraction. Asserts no integer overflow.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        sub,
+        /// Twos complement wrapping integer subtraction.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        subwrap,
+        /// Saturating subtraction.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        sub_sat,
+        /// Arithmetic multiplication. Asserts no integer overflow.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        mul,
+        /// Twos complement wrapping integer multiplication.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        mulwrap,
+        /// Saturating multiplication.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        mul_sat,
+        /// Implements the `@divExact` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`.
+        div_exact,
+        /// Implements the `@divFloor` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`.
+        div_floor,
+        /// Implements the `@divTrunc` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`.
+        div_trunc,
+        /// Implements the `@mod` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`.
+        mod,
+        /// Implements the `@rem` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`.
+        rem,
+        /// Ambiguously remainder division or modulus. If the computation would possibly have
+        /// a different value depending on whether the operation is remainder division or modulus,
+        /// a compile error is emitted. Otherwise the computation is performed.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        mod_rem,
+        /// Integer shift-left. Zeroes are shifted in from the right hand side.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        shl,
+        /// Implements the `@shlExact` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`.
+        shl_exact,
+        /// Saturating shift-left.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        shl_sat,
+        /// Integer shift-right. Arithmetic or logical depending on the signedness of
+        /// the integer type.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        shr,
+        /// Implements the `@shrExact` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`.
+        shr_exact,
+
         /// Declares a parameter of the current function. Used for:
         /// * debug info
         /// * checking shadowing against declarations in the current namespace
@@ -222,17 +281,9 @@ pub const Inst = struct {
         break_inline,
         /// Uses the `node` union field.
         breakpoint,
-        /// Function call with modifier `.auto`.
+        /// Function call.
         /// Uses `pl_node`. AST node is the function call. Payload is `Call`.
         call,
-        /// Same as `call` but it also does `ensure_result_used` on the return value.
-        call_chkused,
-        /// Same as `call` but with modifier `.compile_time`.
-        call_compile_time,
-        /// Same as `call` but with modifier `.no_suspend`.
-        call_nosuspend,
-        /// Same as `call` but with modifier `.async_kw`.
-        call_async,
         /// `<`
         /// Uses the `pl_node` union field. Payload is `Bin`.
         cmp_lt,
@@ -327,6 +378,15 @@ pub const Inst = struct {
         /// This instruction also accepts a pointer.
         /// Uses `pl_node` field. The AST node is the a.b syntax. Payload is Field.
         field_val,
+        /// Given a pointer to a struct or object that contains virtual fields, returns the
+        /// named field.  If there is no named field, searches in the type for a decl that
+        /// matches the field name.  The decl is resolved and we ensure that it's a function
+        /// which can accept the object as the first parameter, with one pointer fixup.  If
+        /// all of that works, this instruction produces a special "bound function" value
+        /// which contains both the function and the saved first parameter value.
+        /// Bound functions may only be used as the function parameter to a `call` or
+        /// `builtin_call` instruction.  Any other use is invalid zir and may crash the compiler.
+        field_call_bind,
         /// Given a pointer to a struct or object that contains virtual fields, returns a pointer
         /// to the named field. The field name is a comptime instruction. Used by @field.
         /// Uses `pl_node` field. The AST node is the builtin call. Payload is FieldNamed.
@@ -335,6 +395,15 @@ pub const Inst = struct {
         /// The field name is a comptime instruction. Used by @field.
         /// Uses `pl_node` field. The AST node is the builtin call. Payload is FieldNamed.
         field_val_named,
+        /// Given a pointer to a struct or object that contains virtual fields, returns the
+        /// named field.  If there is no named field, searches in the type for a decl that
+        /// matches the field name.  The decl is resolved and we ensure that it's a function
+        /// which can accept the object as the first parameter, with one pointer fixup.  If
+        /// all of that works, this instruction produces a special "bound function" value
+        /// which contains both the function and the saved first parameter value.
+        /// Bound functions may only be used as the function parameter to a `call` or
+        /// `builtin_call` instruction.  Any other use is invalid zir and may crash the compiler.
+        field_call_bind_named,
         /// Returns a function type, or a function instance, depending on whether
         /// the body_len is 0. Calling convention is auto.
         /// Uses the `pl_node` union field. `payload_index` points to a `Func`.
@@ -384,25 +453,6 @@ pub const Inst = struct {
         /// Merge two error sets into one, `E1 || E2`.
         /// Uses the `pl_node` field with payload `Bin`.
         merge_error_sets,
-        /// Ambiguously remainder division or modulus. If the computation would possibly have
-        /// a different value depending on whether the operation is remainder division or modulus,
-        /// a compile error is emitted. Otherwise the computation is performed.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
-        mod_rem,
-        /// Arithmetic multiplication. Asserts no integer overflow.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
-        mul,
-        /// Twos complement wrapping integer multiplication.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
-        mulwrap,
-        /// Given a reference to a function and a parameter index, returns the
-        /// type of the parameter. The only usage of this instruction is for the
-        /// result location of parameters of function calls. In the case of a function's
-        /// parameter type being `anytype`, it is the type coercion's job to detect this
-        /// scenario and skip the coercion, so that semantic analysis of this instruction
-        /// is not in a position where it must create an invalid type.
-        /// Uses the `param_type` union field.
-        param_type,
         /// Turns an R-Value into a const L-Value. In other words, it takes a value,
         /// stores it in a memory location, and returns a const pointer to it. If the value
         /// is `comptime`, the memory location is global static constant data. Otherwise,
@@ -479,12 +529,6 @@ pub const Inst = struct {
         /// String Literal. Makes an anonymous Decl and then takes a pointer to it.
         /// Uses the `str` union field.
         str,
-        /// Arithmetic subtraction. Asserts no integer overflow.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
-        sub,
-        /// Twos complement wrapping integer subtraction.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
-        subwrap,
         /// Arithmetic negation. Asserts no integer overflow.
         /// Same as sub with a lhs of 0, split into a separate instruction to save memory.
         /// Uses `un_node`.
@@ -810,35 +854,6 @@ pub const Inst = struct {
         /// Implements the `@bitReverse` builtin. Uses the `un_node` union field.
         bit_reverse,
 
-        /// Implements the `@divExact` builtin.
-        /// Uses the `pl_node` union field with payload `Bin`.
-        div_exact,
-        /// Implements the `@divFloor` builtin.
-        /// Uses the `pl_node` union field with payload `Bin`.
-        div_floor,
-        /// Implements the `@divTrunc` builtin.
-        /// Uses the `pl_node` union field with payload `Bin`.
-        div_trunc,
-        /// Implements the `@mod` builtin.
-        /// Uses the `pl_node` union field with payload `Bin`.
-        mod,
-        /// Implements the `@rem` builtin.
-        /// Uses the `pl_node` union field with payload `Bin`.
-        rem,
-
-        /// Integer shift-left. Zeroes are shifted in from the right hand side.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
-        shl,
-        /// Implements the `@shlExact` builtin.
-        /// Uses the `pl_node` union field with payload `Bin`.
-        shl_exact,
-        /// Integer shift-right. Arithmetic or logical depending on the signedness of the integer type.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
-        shr,
-        /// Implements the `@shrExact` builtin.
-        /// Uses the `pl_node` union field with payload `Bin`.
-        shr_exact,
-
         /// Implements the `@bitOffsetOf` builtin.
         /// Uses the `pl_node` union field with payload `Bin`.
         bit_offset_of,
@@ -958,6 +973,7 @@ pub const Inst = struct {
                 .param_anytype_comptime,
                 .add,
                 .addwrap,
+                .add_sat,
                 .alloc,
                 .alloc_mut,
                 .alloc_comptime,
@@ -988,10 +1004,6 @@ pub const Inst = struct {
                 .breakpoint,
                 .fence,
                 .call,
-                .call_chkused,
-                .call_compile_time,
-                .call_nosuspend,
-                .call_async,
                 .cmp_lt,
                 .cmp_lte,
                 .cmp_eq,
@@ -1017,8 +1029,10 @@ pub const Inst = struct {
                 .export_value,
                 .field_ptr,
                 .field_val,
+                .field_call_bind,
                 .field_ptr_named,
                 .field_val_named,
+                .field_call_bind_named,
                 .func,
                 .func_inferred,
                 .has_decl,
@@ -1034,9 +1048,10 @@ pub const Inst = struct {
                 .mod_rem,
                 .mul,
                 .mulwrap,
-                .param_type,
+                .mul_sat,
                 .ref,
                 .shl,
+                .shl_sat,
                 .shr,
                 .store,
                 .store_node,
@@ -1045,6 +1060,7 @@ pub const Inst = struct {
                 .str,
                 .sub,
                 .subwrap,
+                .sub_sat,
                 .negate,
                 .negate_wrap,
                 .typeof,
@@ -1218,6 +1234,14 @@ pub const Inst = struct {
             break :list std.enums.directEnumArray(Tag, Data.FieldEnum, 0, .{
                 .add = .pl_node,
                 .addwrap = .pl_node,
+                .add_sat = .pl_node,
+                .sub = .pl_node,
+                .subwrap = .pl_node,
+                .sub_sat = .pl_node,
+                .mul = .pl_node,
+                .mulwrap = .pl_node,
+                .mul_sat = .pl_node,
+
                 .param = .pl_tok,
                 .param_comptime = .pl_tok,
                 .param_anytype = .str_tok,
@@ -1247,10 +1271,6 @@ pub const Inst = struct {
                 .break_inline = .@"break",
                 .breakpoint = .node,
                 .call = .pl_node,
-                .call_chkused = .pl_node,
-                .call_compile_time = .pl_node,
-                .call_nosuspend = .pl_node,
-                .call_async = .pl_node,
                 .cmp_lt = .pl_node,
                 .cmp_lte = .pl_node,
                 .cmp_eq = .pl_node,
@@ -1282,6 +1302,8 @@ pub const Inst = struct {
                 .field_val = .pl_node,
                 .field_ptr_named = .pl_node,
                 .field_val_named = .pl_node,
+                .field_call_bind = .pl_node,
+                .field_call_bind_named = .pl_node,
                 .func = .pl_node,
                 .func_inferred = .pl_node,
                 .import = .str_tok,
@@ -1299,9 +1321,6 @@ pub const Inst = struct {
                 .repeat_inline = .node,
                 .merge_error_sets = .pl_node,
                 .mod_rem = .pl_node,
-                .mul = .pl_node,
-                .mulwrap = .pl_node,
-                .param_type = .param_type,
                 .ref = .un_tok,
                 .ret_node = .un_node,
                 .ret_load = .un_node,
@@ -1318,8 +1337,6 @@ pub const Inst = struct {
                 .store_to_block_ptr = .bin,
                 .store_to_inferred_ptr = .bin,
                 .str = .str,
-                .sub = .pl_node,
-                .subwrap = .pl_node,
                 .negate = .un_node,
                 .negate_wrap = .un_node,
                 .typeof = .un_node,
@@ -1440,6 +1457,7 @@ pub const Inst = struct {
 
                 .shl = .pl_node,
                 .shl_exact = .pl_node,
+                .shl_sat = .pl_node,
                 .shr = .pl_node,
                 .shr_exact = .pl_node,
 
@@ -1596,22 +1614,6 @@ pub const Inst = struct {
         wasm_memory_size,
         /// `operand` is payload index to `BinNode`.
         wasm_memory_grow,
-        /// Implements the `@addWithSaturation` builtin.
-        /// `operand` is payload index to `SaturatingArithmetic`.
-        /// `small` is unused.
-        add_with_saturation,
-        /// Implements the `@subWithSaturation` builtin.
-        /// `operand` is payload index to `SaturatingArithmetic`.
-        /// `small` is unused.
-        sub_with_saturation,
-        /// Implements the `@mulWithSaturation` builtin.
-        /// `operand` is payload index to `SaturatingArithmetic`.
-        /// `small` is unused.
-        mul_with_saturation,
-        /// Implements the `@shlWithSaturation` builtin.
-        /// `operand` is payload index to `SaturatingArithmetic`.
-        /// `small` is unused.
-        shl_with_saturation,
 
         pub const InstData = struct {
             opcode: Extended,
@@ -2170,10 +2172,6 @@ pub const Inst = struct {
             /// Points to a `Block`.
             payload_index: u32,
         },
-        param_type: struct {
-            callee: Ref,
-            param_index: u32,
-        },
         @"unreachable": struct {
             /// Offset from Decl AST node index.
             /// `Tag` determines which kind of AST node this points to.
@@ -2244,7 +2242,6 @@ pub const Inst = struct {
             ptr_type,
             int_type,
             bool_br,
-            param_type,
             @"unreachable",
             @"break",
             switch_capture,
@@ -2372,8 +2369,27 @@ pub const Inst = struct {
     /// Stored inside extra, with trailing arguments according to `args_len`.
     /// Each argument is a `Ref`.
     pub const Call = struct {
+        // Note: Flags *must* come first so that unusedResultExpr
+        // can find it when it goes to modify them.
+        flags: Flags,
         callee: Ref,
-        args_len: u32,
+
+        pub const Flags = packed struct {
+            /// std.builtin.CallOptions.Modifier in packed form
+            pub const PackedModifier = u3;
+            pub const PackedArgsLen = u28;
+
+            packed_modifier: PackedModifier,
+            ensure_result_used: bool = false,
+            args_len: PackedArgsLen,
+
+            comptime {
+                if (@sizeOf(Flags) != 4 or @bitSizeOf(Flags) != 32)
+                    @compileError("Layout of Call.Flags needs to be updated!");
+                if (@bitSizeOf(std.builtin.CallOptions.Modifier) != @bitSizeOf(PackedModifier))
+                    @compileError("Call.Flags.PackedModifier needs to be updated!");
+            }
+        };
     };
 
     pub const BuiltinCall = struct {
@@ -2777,12 +2793,6 @@ pub const Inst = struct {
         ptr: Ref,
     };
 
-    pub const SaturatingArithmetic = struct {
-        node: i32,
-        lhs: Ref,
-        rhs: Ref,
-    };
-
     pub const Cmpxchg = struct {
         ptr: Ref,
         expected_value: Ref,
@@ -2868,6 +2878,14 @@ pub const Inst = struct {
     /// 1. align_inst: Ref, // if small 0b00X0 is set
     pub const AllocExtended = struct {
         src_node: i32,
+
+        pub const Small = packed struct {
+            has_type: bool,
+            has_align: bool,
+            is_const: bool,
+            is_comptime: bool,
+            _: u12 = undefined,
+        };
     };
 
     pub const Export = struct {

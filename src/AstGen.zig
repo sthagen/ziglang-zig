@@ -56,6 +56,7 @@ fn addExtraAssumeCapacity(astgen: *AstGen, extra: anytype) u32 {
             u32 => @field(extra, field.name),
             Zir.Inst.Ref => @enumToInt(@field(extra, field.name)),
             i32 => @bitCast(u32, @field(extra, field.name)),
+            Zir.Inst.Call.Flags => @bitCast(u32, @field(extra, field.name)),
             else => @compileError("bad field type"),
         });
     }
@@ -316,29 +317,37 @@ fn lvalExpr(gz: *GenZir, scope: *Scope, node: Ast.Node.Index) InnerError!Zir.Ins
         .assign,
         .assign_bit_and,
         .assign_bit_or,
-        .assign_bit_shift_left,
-        .assign_bit_shift_right,
+        .assign_shl,
+        .assign_shl_sat,
+        .assign_shr,
         .assign_bit_xor,
         .assign_div,
         .assign_sub,
         .assign_sub_wrap,
+        .assign_sub_sat,
         .assign_mod,
         .assign_add,
         .assign_add_wrap,
+        .assign_add_sat,
         .assign_mul,
         .assign_mul_wrap,
+        .assign_mul_sat,
         .add,
         .add_wrap,
+        .add_sat,
         .sub,
         .sub_wrap,
+        .sub_sat,
         .mul,
         .mul_wrap,
+        .mul_sat,
         .div,
         .mod,
         .bit_and,
         .bit_or,
-        .bit_shift_left,
-        .bit_shift_right,
+        .shl,
+        .shl_sat,
+        .shr,
         .bit_xor,
         .bang_equal,
         .equal_equal,
@@ -521,11 +530,15 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) InnerEr
             return rvalue(gz, rl, .void_value, node);
         },
 
-        .assign_bit_shift_left => {
+        .assign_shl => {
             try assignShift(gz, scope, node, .shl);
             return rvalue(gz, rl, .void_value, node);
         },
-        .assign_bit_shift_right => {
+        .assign_shl_sat => {
+            try assignShiftSat(gz, scope, node);
+            return rvalue(gz, rl, .void_value, node);
+        },
+        .assign_shr => {
             try assignShift(gz, scope, node, .shr);
             return rvalue(gz, rl, .void_value, node);
         },
@@ -554,6 +567,10 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) InnerEr
             try assignOp(gz, scope, node, .subwrap);
             return rvalue(gz, rl, .void_value, node);
         },
+        .assign_sub_sat => {
+            try assignOp(gz, scope, node, .sub_sat);
+            return rvalue(gz, rl, .void_value, node);
+        },
         .assign_mod => {
             try assignOp(gz, scope, node, .mod_rem);
             return rvalue(gz, rl, .void_value, node);
@@ -566,6 +583,10 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) InnerEr
             try assignOp(gz, scope, node, .addwrap);
             return rvalue(gz, rl, .void_value, node);
         },
+        .assign_add_sat => {
+            try assignOp(gz, scope, node, .add_sat);
+            return rvalue(gz, rl, .void_value, node);
+        },
         .assign_mul => {
             try assignOp(gz, scope, node, .mul);
             return rvalue(gz, rl, .void_value, node);
@@ -574,19 +595,28 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) InnerEr
             try assignOp(gz, scope, node, .mulwrap);
             return rvalue(gz, rl, .void_value, node);
         },
+        .assign_mul_sat => {
+            try assignOp(gz, scope, node, .mul_sat);
+            return rvalue(gz, rl, .void_value, node);
+        },
 
         // zig fmt: off
-        .bit_shift_left  => return shiftOp(gz, scope, rl, node, node_datas[node].lhs, node_datas[node].rhs, .shl),
-        .bit_shift_right => return shiftOp(gz, scope, rl, node, node_datas[node].lhs, node_datas[node].rhs, .shr),
+        .shl => return shiftOp(gz, scope, rl, node, node_datas[node].lhs, node_datas[node].rhs, .shl),
+        .shr => return shiftOp(gz, scope, rl, node, node_datas[node].lhs, node_datas[node].rhs, .shr),
 
         .add      => return simpleBinOp(gz, scope, rl, node, .add),
         .add_wrap => return simpleBinOp(gz, scope, rl, node, .addwrap),
+        .add_sat  => return simpleBinOp(gz, scope, rl, node, .add_sat),
         .sub      => return simpleBinOp(gz, scope, rl, node, .sub),
         .sub_wrap => return simpleBinOp(gz, scope, rl, node, .subwrap),
+        .sub_sat  => return simpleBinOp(gz, scope, rl, node, .sub_sat),
         .mul      => return simpleBinOp(gz, scope, rl, node, .mul),
         .mul_wrap => return simpleBinOp(gz, scope, rl, node, .mulwrap),
+        .mul_sat  => return simpleBinOp(gz, scope, rl, node, .mul_sat),
         .div      => return simpleBinOp(gz, scope, rl, node, .div),
         .mod      => return simpleBinOp(gz, scope, rl, node, .mod_rem),
+        .shl_sat  => return simpleBinOp(gz, scope, rl, node, .shl_sat),
+
         .bit_and  => {
             const current_ampersand_token = main_tokens[node];
             if (token_tags[current_ampersand_token + 1] == .ampersand) {
@@ -1897,8 +1927,8 @@ fn blockExprStmts(gz: *GenZir, parent_scope: *Scope, statements: []const Ast.Nod
 
             .assign => try assign(gz, scope, statement),
 
-            .assign_bit_shift_left  => try assignShift(gz, scope, statement, .shl),
-            .assign_bit_shift_right => try assignShift(gz, scope, statement, .shr),
+            .assign_shl => try assignShift(gz, scope, statement, .shl),
+            .assign_shr => try assignShift(gz, scope, statement, .shr),
 
             .assign_bit_and  => try assignOp(gz, scope, statement, .bit_and),
             .assign_bit_or   => try assignOp(gz, scope, statement, .bit_or),
@@ -1934,17 +1964,21 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
         // in the above while loop.
         const zir_tags = gz.astgen.instructions.items(.tag);
         switch (zir_tags[inst]) {
-            // For some instructions, swap in a slightly different ZIR tag
+            // For some instructions, modify the zir data
             // so we can avoid a separate ensure_result_used instruction.
-            .call_chkused => unreachable,
             .call => {
-                zir_tags[inst] = .call_chkused;
+                const extra_index = gz.astgen.instructions.items(.data)[inst].pl_node.payload_index;
+                const slot = &gz.astgen.extra.items[extra_index];
+                var flags = @bitCast(Zir.Inst.Call.Flags, slot.*);
+                flags.ensure_result_used = true;
+                slot.* = @bitCast(u32, flags);
                 break :b true;
             },
 
             // ZIR instructions that might be a type other than `noreturn` or `void`.
             .add,
             .addwrap,
+            .add_sat,
             .param,
             .param_comptime,
             .param_anytype,
@@ -1976,9 +2010,6 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
             .bool_br_and,
             .bool_br_or,
             .bool_not,
-            .call_compile_time,
-            .call_nosuspend,
-            .call_async,
             .cmp_lt,
             .cmp_lte,
             .cmp_eq,
@@ -1996,8 +2027,10 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
             .elem_val_node,
             .field_ptr,
             .field_val,
+            .field_call_bind,
             .field_ptr_named,
             .field_val_named,
+            .field_call_bind_named,
             .func,
             .func_inferred,
             .int,
@@ -2012,13 +2045,15 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
             .mod_rem,
             .mul,
             .mulwrap,
-            .param_type,
+            .mul_sat,
             .ref,
             .shl,
+            .shl_sat,
             .shr,
             .str,
             .sub,
             .subwrap,
+            .sub_sat,
             .negate,
             .negate_wrap,
             .typeof,
@@ -2532,7 +2567,11 @@ fn varDecl(
             for (init_scope.instructions.items) |src_inst| {
                 if (zir_tags[src_inst] == .store_to_block_ptr) {
                     if (zir_datas[src_inst].bin.lhs == init_scope.rl_ptr) {
-                        zir_tags[src_inst] = .store_to_inferred_ptr;
+                        if (var_decl.ast.type_node != 0) {
+                            zir_tags[src_inst] = .store;
+                        } else {
+                            zir_tags[src_inst] = .store_to_inferred_ptr;
+                        }
                     }
                 }
                 parent_zir.appendAssumeCapacity(src_inst);
@@ -2700,6 +2739,24 @@ fn assignShift(
     const rhs = try expr(gz, scope, .{ .ty = rhs_type }, node_datas[infix_node].rhs);
 
     const result = try gz.addPlNode(op_inst_tag, infix_node, Zir.Inst.Bin{
+        .lhs = lhs,
+        .rhs = rhs,
+    });
+    _ = try gz.addBin(.store, lhs_ptr, result);
+}
+
+fn assignShiftSat(gz: *GenZir, scope: *Scope, infix_node: Ast.Node.Index) InnerError!void {
+    try emitDbgNode(gz, infix_node);
+    const astgen = gz.astgen;
+    const tree = astgen.tree;
+    const node_datas = tree.nodes.items(.data);
+
+    const lhs_ptr = try lvalExpr(gz, scope, node_datas[infix_node].lhs);
+    const lhs = try gz.addUnNode(.load, lhs_ptr, infix_node);
+    // Saturating shift-left allows any integer type for both the LHS and RHS.
+    const rhs = try expr(gz, scope, .none, node_datas[infix_node].rhs);
+
+    const result = try gz.addPlNode(.shl_sat, infix_node, Zir.Inst.Bin{
         .lhs = lhs,
         .rhs = rhs,
     });
@@ -4969,6 +5026,21 @@ fn fieldAccess(
     rl: ResultLoc,
     node: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
+    if (rl == .ref) {
+        return addFieldAccess(.field_ptr, gz, scope, .ref, node);
+    } else {
+        const access = try addFieldAccess(.field_val, gz, scope, .none_or_ref, node);
+        return rvalue(gz, rl, access, node);
+    }
+}
+
+fn addFieldAccess(
+    tag: Zir.Inst.Tag,
+    gz: *GenZir,
+    scope: *Scope,
+    lhs_rl: ResultLoc,
+    node: Ast.Node.Index,
+) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
     const main_tokens = tree.nodes.items(.main_token);
@@ -4978,16 +5050,11 @@ fn fieldAccess(
     const dot_token = main_tokens[node];
     const field_ident = dot_token + 1;
     const str_index = try astgen.identAsString(field_ident);
-    switch (rl) {
-        .ref => return gz.addPlNode(.field_ptr, node, Zir.Inst.Field{
-            .lhs = try expr(gz, scope, .ref, object_node),
-            .field_name_start = str_index,
-        }),
-        else => return rvalue(gz, rl, try gz.addPlNode(.field_val, node, Zir.Inst.Field{
-            .lhs = try expr(gz, scope, .none_or_ref, object_node),
-            .field_name_start = str_index,
-        }), node),
-    }
+
+    return gz.addPlNode(tag, node, Zir.Inst.Field{
+        .lhs = try expr(gz, scope, lhs_rl, object_node),
+        .field_name_start = str_index,
+    });
 }
 
 fn arrayAccess(
@@ -7169,16 +7236,15 @@ fn builtinCall(
             return rvalue(gz, rl, result, node);
         },
         .field => {
-            const field_name = try comptimeExpr(gz, scope, .{ .ty = .const_slice_u8_type }, params[1]);
             if (rl == .ref) {
                 return gz.addPlNode(.field_ptr_named, node, Zir.Inst.FieldNamed{
                     .lhs = try expr(gz, scope, .ref, params[0]),
-                    .field_name = field_name,
+                    .field_name = try comptimeExpr(gz, scope, .{ .ty = .const_slice_u8_type }, params[1]),
                 });
             }
             const result = try gz.addPlNode(.field_val_named, node, Zir.Inst.FieldNamed{
                 .lhs = try expr(gz, scope, .none, params[0]),
-                .field_name = field_name,
+                .field_name = try comptimeExpr(gz, scope, .{ .ty = .const_slice_u8_type }, params[1]),
             });
             return rvalue(gz, rl, result, node);
         },
@@ -7472,11 +7538,6 @@ fn builtinCall(
             return rvalue(gz, rl, result, node);
         },
 
-        .add_with_saturation => return saturatingArithmetic(gz, scope, rl, node, params, .add_with_saturation),
-        .sub_with_saturation => return saturatingArithmetic(gz, scope, rl, node, params, .sub_with_saturation),
-        .mul_with_saturation => return saturatingArithmetic(gz, scope, rl, node, params, .mul_with_saturation),
-        .shl_with_saturation => return saturatingArithmetic(gz, scope, rl, node, params, .shl_with_saturation),
-        
         .atomic_load => {
             const int_type = try typeExpr(gz, scope, params[0]);
             // TODO allow this pointer type to be volatile
@@ -7554,7 +7615,7 @@ fn builtinCall(
         },
         .call => {
             const options = try comptimeExpr(gz, scope, .{ .ty = .call_options_type }, params[0]);
-            const callee = try expr(gz, scope, .none, params[1]);
+            const callee = try calleeExpr(gz, scope, params[1]);
             const args = try expr(gz, scope, .none, params[2]);
             const result = try gz.addPlNode(.builtin_call, node, Zir.Inst.BuiltinCall{
                 .options = options,
@@ -7871,24 +7932,6 @@ fn overflowArithmetic(
     return rvalue(gz, rl, result, node);
 }
 
-fn saturatingArithmetic(
-    gz: *GenZir,
-    scope: *Scope,
-    rl: ResultLoc,
-    node: Ast.Node.Index,
-    params: []const Ast.Node.Index,
-    tag: Zir.Inst.Extended,
-) InnerError!Zir.Inst.Ref {
-    const lhs = try expr(gz, scope, .none, params[0]);
-    const rhs = try expr(gz, scope, .none, params[1]);
-    const result = try gz.addExtendedPayload(tag, Zir.Inst.SaturatingArithmetic{
-        .node = gz.nodeIndexToRelative(node),
-        .lhs = lhs,
-        .rhs = rhs,
-    });
-    return rvalue(gz, rl, result, node);
-}
-
 fn callExpr(
     gz: *GenZir,
     scope: *Scope,
@@ -7897,20 +7940,16 @@ fn callExpr(
     call: Ast.full.Call,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
-    const lhs = try expr(gz, scope, .none, call.ast.fn_expr);
+
+    const callee = try calleeExpr(gz, scope, call.ast.fn_expr);
 
     const args = try astgen.gpa.alloc(Zir.Inst.Ref, call.ast.params.len);
     defer astgen.gpa.free(args);
 
     for (call.ast.params) |param_node, i| {
-        const param_type = try gz.add(.{
-            .tag = .param_type,
-            .data = .{ .param_type = .{
-                .callee = lhs,
-                .param_index = @intCast(u32, i),
-            } },
-        });
-        args[i] = try expr(gz, scope, .{ .coerced_ty = param_type }, param_node);
+        // Parameters are always temporary values, they have no
+        // meaningful result location.  Sema will coerce them.
+        args[i] = try expr(gz, scope, .none, param_node);
     }
 
     const modifier: std.builtin.CallOptions.Modifier = blk: {
@@ -7925,20 +7964,72 @@ fn callExpr(
         }
         break :blk .auto;
     };
-    const result: Zir.Inst.Ref = res: {
-        const tag: Zir.Inst.Tag = switch (modifier) {
-            .auto => .call,
-            .async_kw => .call_async,
-            .never_tail => unreachable,
-            .never_inline => unreachable,
-            .no_async => .call_nosuspend,
-            .always_tail => unreachable,
-            .always_inline => unreachable,
-            .compile_time => .call_compile_time,
-        };
-        break :res try gz.addCall(tag, lhs, args, node);
-    };
-    return rvalue(gz, rl, result, node); // TODO function call with result location
+    const call_inst = try gz.addCall(modifier, callee, args, node);
+    return rvalue(gz, rl, call_inst, node); // TODO function call with result location
+}
+
+/// calleeExpr generates the function part of a call expression (f in f(x)), or the
+/// callee argument to the @call() builtin. If the lhs is a field access or the
+/// @field() builtin, we need to generate a special field_call_bind instruction
+/// instead of the normal field_val or field_ptr.  If this is a inst.func() call,
+/// this instruction will capture the value of the first argument before evaluating
+/// the other arguments. We need to use .ref here to guarantee we will be able to
+/// promote an lvalue to an address if the first parameter requires it.  This
+/// unfortunately also means we need to take a reference to any types on the lhs.
+fn calleeExpr(
+    gz: *GenZir,
+    scope: *Scope,
+    node: Ast.Node.Index,
+) InnerError!Zir.Inst.Ref {
+    const astgen = gz.astgen;
+    const tree = astgen.tree;
+
+    const tag = tree.nodes.items(.tag)[node];
+    switch (tag) {
+        .field_access => return addFieldAccess(.field_call_bind, gz, scope, .ref, node),
+
+        .builtin_call_two,
+        .builtin_call_two_comma,
+        .builtin_call,
+        .builtin_call_comma,
+        => {
+            const node_datas = tree.nodes.items(.data);
+            const main_tokens = tree.nodes.items(.main_token);
+            const builtin_token = main_tokens[node];
+            const builtin_name = tree.tokenSlice(builtin_token);
+
+            var inline_params: [2]Ast.Node.Index = undefined;
+            var params: []Ast.Node.Index = switch (tag) {
+                .builtin_call,
+                .builtin_call_comma,
+                => tree.extra_data[node_datas[node].lhs..node_datas[node].rhs],
+
+                .builtin_call_two,
+                .builtin_call_two_comma,
+                => blk: {
+                    inline_params = .{ node_datas[node].lhs, node_datas[node].rhs };
+                    const len: usize = if (inline_params[0] == 0) @as(usize, 0) else if (inline_params[1] == 0) @as(usize, 1) else @as(usize, 2);
+                    break :blk inline_params[0..len];
+                },
+
+                else => unreachable,
+            };
+
+            // If anything is wrong, fall back to builtinCall.
+            // It will emit any necessary compile errors and notes.
+            if (std.mem.eql(u8, builtin_name, "@field") and params.len == 2) {
+                const lhs = try expr(gz, scope, .ref, params[0]);
+                const field_name = try comptimeExpr(gz, scope, .{ .ty = .const_slice_u8_type }, params[1]);
+                return gz.addPlNode(.field_call_bind_named, node, Zir.Inst.FieldNamed{
+                    .lhs = lhs,
+                    .field_name = field_name,
+                });
+            }
+
+            return builtinCall(gz, scope, .none, node, params);
+        },
+        else => return expr(gz, scope, .none, node),
+    }
 }
 
 pub const simple_types = std.ComptimeStringMap(Zir.Inst.Ref, .{
@@ -8060,27 +8151,33 @@ fn nodeMayNeedMemoryLocation(tree: *const Ast, start_node: Ast.Node.Index) bool 
             .asm_simple,
             .add,
             .add_wrap,
+            .add_sat,
             .array_cat,
             .array_mult,
             .assign,
             .assign_bit_and,
             .assign_bit_or,
-            .assign_bit_shift_left,
-            .assign_bit_shift_right,
+            .assign_shl,
+            .assign_shl_sat,
+            .assign_shr,
             .assign_bit_xor,
             .assign_div,
             .assign_sub,
             .assign_sub_wrap,
+            .assign_sub_sat,
             .assign_mod,
             .assign_add,
             .assign_add_wrap,
+            .assign_add_sat,
             .assign_mul,
             .assign_mul_wrap,
+            .assign_mul_sat,
             .bang_equal,
             .bit_and,
             .bit_or,
-            .bit_shift_left,
-            .bit_shift_right,
+            .shl,
+            .shl_sat,
+            .shr,
             .bit_xor,
             .bool_and,
             .bool_or,
@@ -8095,10 +8192,12 @@ fn nodeMayNeedMemoryLocation(tree: *const Ast, start_node: Ast.Node.Index) bool 
             .mod,
             .mul,
             .mul_wrap,
+            .mul_sat,
             .switch_range,
             .field_access,
             .sub,
             .sub_wrap,
+            .sub_sat,
             .slice,
             .slice_open,
             .slice_sentinel,
@@ -8176,17 +8275,31 @@ fn nodeMayNeedMemoryLocation(tree: *const Ast, start_node: Ast.Node.Index) bool 
                 }
             },
 
-            .builtin_call,
-            .builtin_call_comma,
-            .builtin_call_two,
-            .builtin_call_two_comma,
-            => {
+            .builtin_call_two, .builtin_call_two_comma => {
                 const builtin_token = main_tokens[node];
                 const builtin_name = tree.tokenSlice(builtin_token);
                 // If the builtin is an invalid name, we don't cause an error here; instead
                 // let it pass, and the error will be "invalid builtin function" later.
                 const builtin_info = BuiltinFn.list.get(builtin_name) orelse return false;
-                return builtin_info.needs_mem_loc;
+                switch (builtin_info.needs_mem_loc) {
+                    .never => return false,
+                    .always => return true,
+                    .forward1 => node = node_datas[node].rhs,
+                }
+            },
+
+            .builtin_call, .builtin_call_comma => {
+                const params = tree.extra_data[node_datas[node].lhs..node_datas[node].rhs];
+                const builtin_token = main_tokens[node];
+                const builtin_name = tree.tokenSlice(builtin_token);
+                // If the builtin is an invalid name, we don't cause an error here; instead
+                // let it pass, and the error will be "invalid builtin function" later.
+                const builtin_info = BuiltinFn.list.get(builtin_name) orelse return false;
+                switch (builtin_info.needs_mem_loc) {
+                    .never => return false,
+                    .always => return true,
+                    .forward1 => node = params[1],
+                }
             },
         }
     }
@@ -8293,27 +8406,33 @@ fn nodeMayEvalToError(tree: *const Ast, start_node: Ast.Node.Index) enum { never
             .tagged_union_enum_tag_trailing,
             .add,
             .add_wrap,
+            .add_sat,
             .array_cat,
             .array_mult,
             .assign,
             .assign_bit_and,
             .assign_bit_or,
-            .assign_bit_shift_left,
-            .assign_bit_shift_right,
+            .assign_shl,
+            .assign_shl_sat,
+            .assign_shr,
             .assign_bit_xor,
             .assign_div,
             .assign_sub,
             .assign_sub_wrap,
+            .assign_sub_sat,
             .assign_mod,
             .assign_add,
             .assign_add_wrap,
+            .assign_add_sat,
             .assign_mul,
             .assign_mul_wrap,
+            .assign_mul_sat,
             .bang_equal,
             .bit_and,
             .bit_or,
-            .bit_shift_left,
-            .bit_shift_right,
+            .shl,
+            .shl_sat,
+            .shr,
             .bit_xor,
             .bool_and,
             .bool_or,
@@ -8328,9 +8447,11 @@ fn nodeMayEvalToError(tree: *const Ast, start_node: Ast.Node.Index) enum { never
             .mod,
             .mul,
             .mul_wrap,
+            .mul_sat,
             .switch_range,
             .sub,
             .sub_wrap,
+            .sub_sat,
             .slice,
             .slice_open,
             .slice_sentinel,
@@ -8465,27 +8586,33 @@ fn nodeImpliesRuntimeBits(tree: *const Ast, start_node: Ast.Node.Index) bool {
             .asm_simple,
             .add,
             .add_wrap,
+            .add_sat,
             .array_cat,
             .array_mult,
             .assign,
             .assign_bit_and,
             .assign_bit_or,
-            .assign_bit_shift_left,
-            .assign_bit_shift_right,
+            .assign_shl,
+            .assign_shl_sat,
+            .assign_shr,
             .assign_bit_xor,
             .assign_div,
             .assign_sub,
             .assign_sub_wrap,
+            .assign_sub_sat,
             .assign_mod,
             .assign_add,
             .assign_add_wrap,
+            .assign_add_sat,
             .assign_mul,
             .assign_mul_wrap,
+            .assign_mul_sat,
             .bang_equal,
             .bit_and,
             .bit_or,
-            .bit_shift_left,
-            .bit_shift_right,
+            .shl,
+            .shl_sat,
+            .shr,
             .bit_xor,
             .bool_and,
             .bool_or,
@@ -8500,10 +8627,12 @@ fn nodeImpliesRuntimeBits(tree: *const Ast, start_node: Ast.Node.Index) bool {
             .mod,
             .mul,
             .mul_wrap,
+            .mul_sat,
             .switch_range,
             .field_access,
             .sub,
             .sub_wrap,
+            .sub_sat,
             .slice,
             .slice_open,
             .slice_sentinel,
@@ -9607,7 +9736,7 @@ const GenZir = struct {
 
     fn addCall(
         gz: *GenZir,
-        tag: Zir.Inst.Tag,
+        modifier: std.builtin.CallOptions.Modifier,
         callee: Zir.Inst.Ref,
         args: []const Zir.Inst.Ref,
         /// Absolute node index. This function does the conversion to offset from Decl.
@@ -9616,20 +9745,24 @@ const GenZir = struct {
         assert(callee != .none);
         assert(src_node != 0);
         const gpa = gz.astgen.gpa;
+        const Call = Zir.Inst.Call;
         try gz.instructions.ensureUnusedCapacity(gpa, 1);
         try gz.astgen.instructions.ensureUnusedCapacity(gpa, 1);
-        try gz.astgen.extra.ensureUnusedCapacity(gpa, @typeInfo(Zir.Inst.Call).Struct.fields.len +
+        try gz.astgen.extra.ensureUnusedCapacity(gpa, @typeInfo(Call).Struct.fields.len +
             args.len);
 
-        const payload_index = gz.astgen.addExtraAssumeCapacity(Zir.Inst.Call{
+        const payload_index = gz.astgen.addExtraAssumeCapacity(Call{
             .callee = callee,
-            .args_len = @intCast(u32, args.len),
+            .flags = .{
+                .packed_modifier = @intCast(Call.Flags.PackedModifier, @enumToInt(modifier)),
+                .args_len = @intCast(Call.Flags.PackedArgsLen, args.len),
+            },
         });
         gz.astgen.appendRefsAssumeCapacity(args);
 
         const new_index = @intCast(Zir.Inst.Index, gz.astgen.instructions.len);
         gz.astgen.instructions.appendAssumeCapacity(.{
-            .tag = tag,
+            .tag = .call,
             .data = .{ .pl_node = .{
                 .src_node = gz.nodeIndexToRelative(src_node),
                 .payload_index = payload_index,

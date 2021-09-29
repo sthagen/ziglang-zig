@@ -179,7 +179,6 @@ const Writer = struct {
             => try self.writeBoolBr(stream, inst),
 
             .array_type_sentinel => try self.writeArrayTypeSentinel(stream, inst),
-            .param_type => try self.writeParamType(stream, inst),
             .ptr_type_simple => try self.writePtrTypeSimple(stream, inst),
             .ptr_type => try self.writePtrType(stream, inst),
             .int => try self.writeInt(stream, inst),
@@ -195,8 +194,6 @@ const Writer = struct {
 
             .elem_ptr_node,
             .elem_val_node,
-            .field_ptr_named,
-            .field_val_named,
             .slice_start,
             .slice_end,
             .slice_sentinel,
@@ -232,12 +229,15 @@ const Writer = struct {
 
             .add,
             .addwrap,
+            .add_sat,
             .array_cat,
             .array_mul,
             .mul,
             .mulwrap,
+            .mul_sat,
             .sub,
             .subwrap,
+            .sub_sat,
             .cmp_lt,
             .cmp_lte,
             .cmp_eq,
@@ -250,6 +250,7 @@ const Writer = struct {
             .mod_rem,
             .shl,
             .shl_exact,
+            .shl_sat,
             .shr,
             .shr_exact,
             .xor,
@@ -288,12 +289,7 @@ const Writer = struct {
             .@"export" => try self.writePlNodeExport(stream, inst),
             .export_value => try self.writePlNodeExportValue(stream, inst),
 
-            .call,
-            .call_chkused,
-            .call_compile_time,
-            .call_nosuspend,
-            .call_async,
-            => try self.writePlNodeCall(stream, inst),
+            .call => try self.writePlNodeCall(stream, inst),
 
             .block,
             .block_inline,
@@ -328,7 +324,13 @@ const Writer = struct {
 
             .field_ptr,
             .field_val,
+            .field_call_bind,
             => try self.writePlNodeField(stream, inst),
+
+            .field_ptr_named,
+            .field_val_named,
+            .field_call_bind_named,
+            => try self.writePlNodeFieldNamed(stream, inst),
 
             .as_node => try self.writeAs(stream, inst),
 
@@ -391,6 +393,7 @@ const Writer = struct {
             .@"asm" => try self.writeAsm(stream, extended),
             .func => try self.writeFuncExtended(stream, extended),
             .variable => try self.writeVarExtended(stream, extended),
+            .alloc => try self.writeAllocExtended(stream, extended),
 
             .compile_log,
             .typeof_peer,
@@ -401,12 +404,6 @@ const Writer = struct {
             .mul_with_overflow,
             .shl_with_overflow,
             => try self.writeOverflowArithmetic(stream, extended),
-
-            .add_with_saturation,
-            .sub_with_saturation,
-            .mul_with_saturation,
-            .shl_with_saturation,
-            => try self.writeSaturatingArithmetic(stream, extended),
 
             .struct_decl => try self.writeStructDecl(stream, extended),
             .union_decl => try self.writeUnionDecl(stream, extended),
@@ -427,7 +424,6 @@ const Writer = struct {
                 try stream.writeByte(')');
             },
 
-            .alloc,
             .builtin_extern,
             .wasm_memory_size,
             .wasm_memory_grow,
@@ -479,16 +475,6 @@ const Writer = struct {
         const inst_data = self.code.instructions.items(.data)[inst].array_type_sentinel;
         _ = inst_data;
         try stream.writeAll("TODO)");
-    }
-
-    fn writeParamType(
-        self: *Writer,
-        stream: anytype,
-        inst: Zir.Inst.Index,
-    ) (@TypeOf(stream).Error || error{OutOfMemory})!void {
-        const inst_data = self.code.instructions.items(.data)[inst].param_type;
-        try self.writeInstRef(stream, inst_data.callee);
-        try stream.print(", {d})", .{inst_data.param_index});
     }
 
     fn writePtrTypeSimple(
@@ -866,23 +852,15 @@ const Writer = struct {
         try self.writeSrc(stream, src);
     }
 
-    fn writeSaturatingArithmetic(self: *Writer, stream: anytype, extended: Zir.Inst.Extended.InstData) !void {
-        const extra = self.code.extraData(Zir.Inst.SaturatingArithmetic, extended.operand).data;
-        const src: LazySrcLoc = .{ .node_offset = extra.node };
-
-        try self.writeInstRef(stream, extra.lhs);
-        try stream.writeAll(", ");
-        try self.writeInstRef(stream, extra.rhs);
-        try stream.writeAll(", ");
-        try stream.writeAll(") ");
-        try self.writeSrc(stream, src);
-    }
-
     fn writePlNodeCall(self: *Writer, stream: anytype, inst: Zir.Inst.Index) !void {
         const inst_data = self.code.instructions.items(.data)[inst].pl_node;
         const extra = self.code.extraData(Zir.Inst.Call, inst_data.payload_index);
-        const args = self.code.refSlice(extra.end, extra.data.args_len);
+        const args = self.code.refSlice(extra.end, extra.data.flags.args_len);
 
+        if (extra.data.flags.ensure_result_used) {
+            try stream.writeAll("nodiscard ");
+        }
+        try stream.print(".{s}, ", .{@tagName(@intToEnum(std.builtin.CallOptions.Modifier, extra.data.flags.packed_modifier))});
         try self.writeInstRef(stream, extra.data.callee);
         try stream.writeAll(", [");
         for (args) |arg, i| {
@@ -1637,6 +1615,16 @@ const Writer = struct {
         try self.writeSrc(stream, inst_data.src());
     }
 
+    fn writePlNodeFieldNamed(self: *Writer, stream: anytype, inst: Zir.Inst.Index) !void {
+        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
+        const extra = self.code.extraData(Zir.Inst.FieldNamed, inst_data.payload_index).data;
+        try self.writeInstRef(stream, extra.lhs);
+        try stream.writeAll(", ");
+        try self.writeInstRef(stream, extra.field_name);
+        try stream.writeAll(") ");
+        try self.writeSrc(stream, inst_data.src());
+    }
+
     fn writeAs(self: *Writer, stream: anytype, inst: Zir.Inst.Index) !void {
         const inst_data = self.code.instructions.items(.data)[inst].pl_node;
         const extra = self.code.extraData(Zir.Inst.As, inst_data.payload_index).data;
@@ -1777,6 +1765,30 @@ const Writer = struct {
         try self.writeOptionalInstRef(stream, ", align=", align_inst);
         try self.writeOptionalInstRef(stream, ", init=", init_inst);
         try stream.writeAll("))");
+    }
+
+    fn writeAllocExtended(self: *Writer, stream: anytype, extended: Zir.Inst.Extended.InstData) !void {
+        const extra = self.code.extraData(Zir.Inst.AllocExtended, extended.operand);
+        const small = @bitCast(Zir.Inst.AllocExtended.Small, extended.small);
+        const src: LazySrcLoc = .{ .node_offset = extra.data.src_node };
+
+        var extra_index: usize = extra.end;
+        const type_inst: Zir.Inst.Ref = if (!small.has_type) .none else blk: {
+            const type_inst = @intToEnum(Zir.Inst.Ref, self.code.extra[extra_index]);
+            extra_index += 1;
+            break :blk type_inst;
+        };
+        const align_inst: Zir.Inst.Ref = if (!small.has_align) .none else blk: {
+            const align_inst = @intToEnum(Zir.Inst.Ref, self.code.extra[extra_index]);
+            extra_index += 1;
+            break :blk align_inst;
+        };
+        try self.writeFlag(stream, ",is_const", small.is_const);
+        try self.writeFlag(stream, ",is_comptime", small.is_comptime);
+        try self.writeOptionalInstRef(stream, ",ty=", type_inst);
+        try self.writeOptionalInstRef(stream, ",align=", align_inst);
+        try stream.writeAll(")) ");
+        try self.writeSrc(stream, src);
     }
 
     fn writeBoolBr(self: *Writer, stream: anytype, inst: Zir.Inst.Index) !void {
