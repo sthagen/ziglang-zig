@@ -7,6 +7,7 @@ const link = @import("../link.zig");
 const log = std.log.scoped(.codegen);
 const math = std.math;
 
+const build_options = @import("build_options");
 const Module = @import("../Module.zig");
 const TypedValue = @import("../TypedValue.zig");
 const Zir = @import("../Zir.zig");
@@ -31,6 +32,7 @@ pub fn targetTriple(allocator: *Allocator, target: std.Target) ![:0]u8 {
         .bpfeb => "bpfeb",
         .csky => "csky",
         .hexagon => "hexagon",
+        .m68k => "m68k",
         .mips => "mips",
         .mipsel => "mipsel",
         .mips64 => "mips64",
@@ -140,6 +142,7 @@ pub fn targetTriple(allocator: *Allocator, target: std.Target) ![:0]u8 {
         .musl => "musl",
         .musleabi => "musleabi",
         .musleabihf => "musleabihf",
+        .muslx32 => "muslx32",
         .msvc => "msvc",
         .itanium => "itanium",
         .cygnus => "cygnus",
@@ -554,7 +557,7 @@ pub const DeclGen = struct {
     fn todo(self: *DeclGen, comptime format: []const u8, args: anytype) error{ OutOfMemory, CodegenFail } {
         @setCold(true);
         assert(self.err_msg == null);
-        const src_loc = @as(LazySrcLoc, .{ .node_offset = 0 }).toSrcLocWithDecl(self.decl);
+        const src_loc = @as(LazySrcLoc, .{ .node_offset = 0 }).toSrcLoc(self.decl);
         self.err_msg = try Module.ErrorMsg.create(self.gpa, src_loc, "TODO (LLVM): " ++ format, args);
         return error.CodegenFail;
     }
@@ -1021,6 +1024,7 @@ pub const DeclGen = struct {
                 else => |tag| return self.todo("implement const of pointer type '{}' ({})", .{ tv.ty, tag }),
             },
             .Array => {
+                const gpa = self.gpa;
                 if (tv.val.castTag(.bytes)) |payload| {
                     const zero_sentinel = if (tv.ty.sentinel()) |sentinel| blk: {
                         if (sentinel.tag() == .zero) break :blk true;
@@ -1034,7 +1038,6 @@ pub const DeclGen = struct {
                     );
                 }
                 if (tv.val.castTag(.array)) |payload| {
-                    const gpa = self.gpa;
                     const elem_ty = tv.ty.elemType();
                     const elem_vals = payload.data;
                     const sento = tv.ty.sentinel();
@@ -1044,6 +1047,23 @@ pub const DeclGen = struct {
                         llvm_elems[i] = try self.genTypedValue(.{ .ty = elem_ty, .val = elem_val });
                     }
                     if (sento) |sent| llvm_elems[elem_vals.len] = try self.genTypedValue(.{ .ty = elem_ty, .val = sent });
+                    const llvm_elem_ty = try self.llvmType(elem_ty);
+                    return llvm_elem_ty.constArray(
+                        llvm_elems.ptr,
+                        @intCast(c_uint, llvm_elems.len),
+                    );
+                }
+                if (tv.val.castTag(.repeated)) |payload| {
+                    const val = payload.data;
+                    const elem_ty = tv.ty.elemType();
+                    const len = tv.ty.arrayLen();
+
+                    const llvm_elems = try gpa.alloc(*const llvm.Value, len);
+                    defer gpa.free(llvm_elems);
+                    var i: u64 = 0;
+                    while (i < len) : (i += 1) {
+                        llvm_elems[i] = try self.genTypedValue(.{ .ty = elem_ty, .val = val });
+                    }
                     const llvm_elem_ty = try self.llvmType(elem_ty);
                     return llvm_elem_ty.constArray(
                         llvm_elems.ptr,
@@ -1585,7 +1605,15 @@ pub const FuncGen = struct {
         self.builder.positionBuilderAtEnd(loop_block);
         try self.genBody(body);
 
-        _ = self.builder.buildBr(loop_block);
+        // TODO instead of this logic, change AIR to have the property that
+        // every block is guaranteed to end with a noreturn instruction.
+        // Then we can simply rely on the fact that a repeat or break instruction
+        // would have been emitted already. Also the main loop in genBody can
+        // be while(true) instead of for(body), which will eliminate 1 branch on
+        // a hot path.
+        if (body.len == 0 or !self.air.typeOfIndex(body[body.len - 1]).isNoReturn()) {
+            _ = self.builder.buildBr(loop_block);
+        }
         return null;
     }
 
@@ -1799,7 +1827,7 @@ pub const FuncGen = struct {
 
         const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
         const air_asm = self.air.extraData(Air.Asm, ty_pl.payload);
-        const zir = self.dg.decl.namespace.file_scope.zir;
+        const zir = self.dg.decl.getFileScope().zir;
         const extended = zir.instructions.items(.data)[air_asm.data.zir_index].extended;
         const zir_extra = zir.extraData(Zir.Inst.Asm, extended.operand);
         const asm_source = zir.nullTerminatedString(zir_extra.data.asm_source);
@@ -1902,6 +1930,7 @@ pub const FuncGen = struct {
             llvm.Bool.fromBool(is_volatile),
             .False,
             .ATT,
+            .False,
         );
         return self.builder.buildCall(
             asm_fn,
@@ -2552,15 +2581,15 @@ pub const FuncGen = struct {
                 new_value = self.builder.buildZExt(new_value, abi_ty, "");
             }
         }
-        const result = self.builder.buildCmpXchg(
+        const result = self.builder.buildAtomicCmpXchg(
             ptr,
             expected_value,
             new_value,
             toLlvmAtomicOrdering(extra.successOrder()),
             toLlvmAtomicOrdering(extra.failureOrder()),
-            is_weak,
-            self.single_threaded,
+            llvm.Bool.fromBool(self.single_threaded),
         );
+        result.setWeak(llvm.Bool.fromBool(is_weak));
 
         const optional_ty = self.air.typeOfIndex(inst);
 
@@ -2873,7 +2902,7 @@ fn initializeLLVMTarget(arch: std.Target.Cpu.Arch) void {
             llvm.LLVMInitializeAMDGPUAsmPrinter();
             llvm.LLVMInitializeAMDGPUAsmParser();
         },
-        .arm, .armeb => {
+        .thumb, .thumbeb, .arm, .armeb => {
             llvm.LLVMInitializeARMTarget();
             llvm.LLVMInitializeARMTargetInfo();
             llvm.LLVMInitializeARMTargetMC();
@@ -2976,25 +3005,66 @@ fn initializeLLVMTarget(arch: std.Target.Cpu.Arch) void {
             llvm.LLVMInitializeXCoreTargetInfo();
             llvm.LLVMInitializeXCoreTargetMC();
             llvm.LLVMInitializeXCoreAsmPrinter();
-            // There is no LLVMInitializeXCoreAsmParser function available.
+            // There is no LLVMInitializeXCoreAsmParser function.
         },
-        .arc => {},
-        .csky => {},
-        .r600 => {},
-        .tce, .tcele => {},
-        .thumb, .thumbeb => {},
-        .le32, .le64 => {},
-        .amdil, .amdil64 => {},
-        .hsail, .hsail64 => {},
-        .spir, .spir64 => {},
-        .kalimba => {},
-        .shave => {},
-        .renderscript32 => {},
-        .renderscript64 => {},
-        .ve => {},
-        .spu_2 => {},
-        .spirv32 => {},
-        .spirv64 => {},
+        .m68k => {
+            if (build_options.llvm_has_m68k) {
+                llvm.LLVMInitializeM68kTarget();
+                llvm.LLVMInitializeM68kTargetInfo();
+                llvm.LLVMInitializeM68kTargetMC();
+                llvm.LLVMInitializeM68kAsmPrinter();
+                llvm.LLVMInitializeM68kAsmParser();
+            }
+        },
+        .csky => {
+            if (build_options.llvm_has_csky) {
+                llvm.LLVMInitializeCSKYTarget();
+                llvm.LLVMInitializeCSKYTargetInfo();
+                llvm.LLVMInitializeCSKYTargetMC();
+                // There is no LLVMInitializeCSKYAsmPrinter function.
+                llvm.LLVMInitializeCSKYAsmParser();
+            }
+        },
+        .ve => {
+            if (build_options.llvm_has_ve) {
+                llvm.LLVMInitializeVETarget();
+                llvm.LLVMInitializeVETargetInfo();
+                llvm.LLVMInitializeVETargetMC();
+                llvm.LLVMInitializeVEAsmPrinter();
+                llvm.LLVMInitializeVEAsmParser();
+            }
+        },
+        .arc => {
+            if (build_options.llvm_has_arc) {
+                llvm.LLVMInitializeARCTarget();
+                llvm.LLVMInitializeARCTargetInfo();
+                llvm.LLVMInitializeARCTargetMC();
+                llvm.LLVMInitializeARCAsmPrinter();
+                // There is no LLVMInitializeARCAsmParser function.
+            }
+        },
+
+        // LLVM backends that have no initialization functions.
+        .tce,
+        .tcele,
+        .r600,
+        .le32,
+        .le64,
+        .amdil,
+        .amdil64,
+        .hsail,
+        .hsail64,
+        .shave,
+        .spir,
+        .spir64,
+        .kalimba,
+        .renderscript32,
+        .renderscript64,
+        => {},
+
+        .spu_2 => unreachable, // LLVM does not support this backend
+        .spirv32 => unreachable, // LLVM does not support this backend
+        .spirv64 => unreachable, // LLVM does not support this backend
     }
 }
 
