@@ -580,9 +580,15 @@ pub const Type = extern union {
                 return a.tag() == b.tag();
             },
             .ErrorUnion => {
-                const a_data = a.castTag(.error_union).?.data;
-                const b_data = b.castTag(.error_union).?.data;
-                return a_data.error_set.eql(b_data.error_set) and a_data.payload.eql(b_data.payload);
+                const a_set = a.errorUnionSet();
+                const b_set = b.errorUnionSet();
+                if (!a_set.eql(b_set)) return false;
+
+                const a_payload = a.errorUnionPayload();
+                const b_payload = b.errorUnionPayload();
+                if (!a_payload.eql(b_payload)) return false;
+
+                return true;
             },
             .ErrorSet => {
                 if (a.tag() == .anyerror and b.tag() == .anyerror) {
@@ -3090,14 +3096,13 @@ pub const Type = extern union {
             return Value.initTag(.zero);
         }
 
-        if ((info.bits - 1) <= std.math.maxInt(u6)) {
+        if (info.bits <= 6) {
             const n: i64 = -(@as(i64, 1) << @truncate(u6, info.bits - 1));
             return Value.Tag.int_i64.create(arena, n);
         }
 
-        var res = try std.math.big.int.Managed.initSet(arena, 1);
-        try res.shiftLeft(res, info.bits - 1);
-        res.negate();
+        var res = try std.math.big.int.Managed.init(arena);
+        try res.setTwosCompIntLimit(.min, info.signedness, info.bits);
 
         const res_const = res.toConst();
         if (res_const.positive) {
@@ -3112,21 +3117,19 @@ pub const Type = extern union {
         assert(self.zigTypeTag() == .Int);
         const info = self.intInfo(target);
 
-        if (info.signedness == .signed and (info.bits - 1) <= std.math.maxInt(u6)) {
-            const n: i64 = (@as(i64, 1) << @truncate(u6, info.bits - 1)) - 1;
-            return Value.Tag.int_i64.create(arena, n);
-        } else if (info.signedness == .signed and info.bits <= std.math.maxInt(u6)) {
-            const n: u64 = (@as(u64, 1) << @truncate(u6, info.bits)) - 1;
-            return Value.Tag.int_u64.create(arena, n);
-        }
-
-        var res = try std.math.big.int.Managed.initSet(arena, 1);
-        try res.shiftLeft(res, info.bits - @boolToInt(info.signedness == .signed));
-        const one = std.math.big.int.Const{
-            .limbs = &[_]std.math.big.Limb{1},
-            .positive = true,
+        if (info.bits <= 6) switch (info.signedness) {
+            .signed => {
+                const n: i64 = (@as(i64, 1) << @truncate(u6, info.bits - 1)) - 1;
+                return Value.Tag.int_i64.create(arena, n);
+            },
+            .unsigned => {
+                const n: u64 = (@as(u64, 1) << @truncate(u6, info.bits)) - 1;
+                return Value.Tag.int_u64.create(arena, n);
+            },
         };
-        res.sub(res.toConst(), one) catch unreachable;
+
+        var res = try std.math.big.int.Managed.init(arena);
+        try res.setTwosCompIntLimit(.max, info.signedness, info.bits);
 
         const res_const = res.toConst();
         if (res_const.positive) {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
 const io = std.io;
 const fs = std.fs;
@@ -34,7 +35,7 @@ pub fn fatal(comptime format: []const u8, args: anytype) noreturn {
 /// be byte-indexed with a u32 integer.
 pub const max_src_size = std.math.maxInt(u32);
 
-pub const debug_extensions_enabled = std.builtin.mode == .Debug;
+pub const debug_extensions_enabled = builtin.mode == .Debug;
 
 pub const Color = enum {
     auto,
@@ -90,7 +91,7 @@ const debug_usage = normal_usage ++
 
 const usage = if (debug_extensions_enabled) debug_usage else normal_usage;
 
-pub const log_level: std.log.Level = switch (std.builtin.mode) {
+pub const log_level: std.log.Level = switch (builtin.mode) {
     .Debug => .debug,
     .ReleaseSafe, .ReleaseFast => .info,
     .ReleaseSmall => .crit,
@@ -142,7 +143,7 @@ pub fn main() anyerror!void {
 
     var gpa_need_deinit = false;
     const gpa = gpa: {
-        if (!std.builtin.link_libc) {
+        if (!builtin.link_libc) {
             gpa_need_deinit = true;
             break :gpa &general_purpose_allocator.allocator;
         }
@@ -420,6 +421,7 @@ const usage_build_generic =
     \\  --test-cmd [arg]               Specify test execution command one arg at a time
     \\  --test-cmd-bin                 Appends test binary path to test cmd args
     \\  --test-evented-io              Runs the test in evented I/O mode
+    \\  --test-no-exec                 Compiles test binary without running it
     \\
     \\Debug Options (Zig Compiler Development):
     \\  -ftime-report                Print timing diagnostics
@@ -603,6 +605,7 @@ fn buildOutputType(
     var linker_nxcompat = false;
     var linker_dynamicbase = false;
     var test_evented_io = false;
+    var test_no_exec = false;
     var stack_size_override: ?u64 = null;
     var image_base_override: ?u64 = null;
     var use_llvm: ?bool = null;
@@ -938,6 +941,8 @@ fn buildOutputType(
                         try test_exec_args.append(null);
                     } else if (mem.eql(u8, arg, "--test-evented-io")) {
                         test_evented_io = true;
+                    } else if (mem.eql(u8, arg, "--test-no-exec")) {
+                        test_no_exec = true;
                     } else if (mem.eql(u8, arg, "--watch")) {
                         watch = true;
                     } else if (mem.eql(u8, arg, "-ftime-report")) {
@@ -1684,13 +1689,13 @@ fn buildOutputType(
         }
     }
 
-    if (comptime std.Target.current.isDarwin()) {
+    if (comptime builtin.target.isDarwin()) {
         // If we want to link against frameworks, we need system headers.
         if (framework_dirs.items.len > 0 or frameworks.items.len > 0)
             want_native_include_dirs = true;
     }
 
-    const is_darwin_on_darwin = (comptime std.Target.current.isDarwin()) and cross_target.isDarwin();
+    const is_darwin_on_darwin = (comptime builtin.target.isDarwin()) and cross_target.isDarwin();
 
     if (sysroot == null and (cross_target.isNativeOs() or is_darwin_on_darwin) and
         (system_libs.items.len != 0 or want_native_include_dirs))
@@ -1702,7 +1707,7 @@ fn buildOutputType(
             warn("{s}", .{warning});
         }
 
-        const has_sysroot = if (comptime std.Target.current.isDarwin()) outer: {
+        const has_sysroot = if (comptime builtin.target.isDarwin()) outer: {
             const should_get_sdk_path = if (cross_target.isNativeOs() and target_info.target.os.tag == .macos) inner: {
                 const min = target_info.target.os.getVersionRange().semver.min;
                 const at_least_mojave = min.major >= 11 or (min.major >= 10 and min.minor >= 14);
@@ -2167,7 +2172,8 @@ fn buildOutputType(
     }
 
     const run_or_test = switch (arg_mode) {
-        .run, .zig_test => true,
+        .run => true,
+        .zig_test => !test_no_exec,
         else => false,
     };
     if (run_or_test) {
@@ -2350,7 +2356,7 @@ fn runOrTest(
     defer argv.deinit();
 
     if (test_exec_args.len == 0) {
-        if (!std.Target.current.canExecBinariesOf(target)) {
+        if (!builtin.target.canExecBinariesOf(target)) {
             switch (arg_mode) {
                 .zig_test => {
                     warn("created {s} but skipping execution because it is non-native", .{exe_path});
@@ -3910,7 +3916,7 @@ fn gimmeMoreOfThoseSweetSweetFileDescriptors() void {
     const posix = std.os;
 
     var lim = posix.getrlimit(.NOFILE) catch return; // Oh well; we tried.
-    if (comptime std.Target.current.isDarwin()) {
+    if (comptime builtin.target.isDarwin()) {
         // On Darwin, `NOFILE` is bounded by a hardcoded value `OPEN_MAX`.
         // According to the man pages for setrlimit():
         //   setrlimit() now returns with errno set to EINVAL in places that historically succeeded.
@@ -3954,7 +3960,7 @@ fn detectNativeTargetInfo(gpa: *Allocator, cross_target: std.zig.CrossTarget) !s
 /// check for resource leaks can be accurate. In release builds, this
 /// calls exit(0), and does not return.
 pub fn cleanExit() void {
-    if (std.builtin.mode == .Debug) {
+    if (builtin.mode == .Debug) {
         return;
     } else {
         process.exit(0);

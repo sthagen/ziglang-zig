@@ -938,28 +938,130 @@ pub const Value = extern union {
 
     pub fn toBool(self: Value) bool {
         return switch (self.tag()) {
-            .bool_true => true,
+            .bool_true, .one => true,
             .bool_false, .zero => false,
             else => unreachable,
         };
     }
 
+    pub fn bitCast(
+        val: Value,
+        old_ty: Type,
+        new_ty: Type,
+        target: Target,
+        gpa: *Allocator,
+        arena: *Allocator,
+    ) !Value {
+        // For types with well-defined memory layouts, we serialize them a byte buffer,
+        // then deserialize to the new type.
+        const buffer = try gpa.alloc(u8, old_ty.abiSize(target));
+        defer gpa.free(buffer);
+        val.writeToMemory(old_ty, target, buffer);
+        return Value.readFromMemory(new_ty, target, buffer, arena);
+    }
+
+    pub fn writeToMemory(val: Value, ty: Type, target: Target, buffer: []u8) void {
+        switch (ty.zigTypeTag()) {
+            .Int => {
+                var bigint_buffer: BigIntSpace = undefined;
+                const bigint = val.toBigInt(&bigint_buffer);
+                const bits = ty.intInfo(target).bits;
+                bigint.writeTwosComplement(buffer, bits, target.cpu.arch.endian());
+            },
+            .Float => switch (ty.floatBits(target)) {
+                16 => return floatWriteToMemory(f16, val.toFloat(f16), target, buffer),
+                32 => return floatWriteToMemory(f32, val.toFloat(f32), target, buffer),
+                64 => return floatWriteToMemory(f64, val.toFloat(f64), target, buffer),
+                128 => return floatWriteToMemory(f128, val.toFloat(f128), target, buffer),
+                else => unreachable,
+            },
+            else => @panic("TODO implement writeToMemory for more types"),
+        }
+    }
+
+    pub fn readFromMemory(ty: Type, target: Target, buffer: []const u8, arena: *Allocator) !Value {
+        switch (ty.zigTypeTag()) {
+            .Int => {
+                const int_info = ty.intInfo(target);
+                const endian = target.cpu.arch.endian();
+                // TODO use a correct amount of limbs
+                const limbs_buffer = try arena.alloc(std.math.big.Limb, 2);
+                var bigint = BigIntMutable.init(limbs_buffer, 0);
+                bigint.readTwosComplement(buffer, int_info.bits, endian, int_info.signedness);
+                // TODO if it fits in 64 bits then use one of those tags
+
+                const result_limbs = bigint.limbs[0..bigint.len];
+                if (bigint.positive) {
+                    return Value.Tag.int_big_positive.create(arena, result_limbs);
+                } else {
+                    return Value.Tag.int_big_negative.create(arena, result_limbs);
+                }
+            },
+            .Float => switch (ty.floatBits(target)) {
+                16 => return Value.Tag.float_16.create(arena, floatReadFromMemory(f16, target, buffer)),
+                32 => return Value.Tag.float_32.create(arena, floatReadFromMemory(f32, target, buffer)),
+                64 => return Value.Tag.float_64.create(arena, floatReadFromMemory(f64, target, buffer)),
+                128 => return Value.Tag.float_128.create(arena, floatReadFromMemory(f128, target, buffer)),
+                else => unreachable,
+            },
+            else => @panic("TODO implement readFromMemory for more types"),
+        }
+    }
+
+    fn floatWriteToMemory(comptime F: type, f: F, target: Target, buffer: []u8) void {
+        const Int = @Type(.{ .Int = .{
+            .signedness = .unsigned,
+            .bits = @typeInfo(F).Float.bits,
+        } });
+        const int = @bitCast(Int, f);
+        std.mem.writeInt(Int, buffer[0..@sizeOf(Int)], int, target.cpu.arch.endian());
+    }
+
+    fn floatReadFromMemory(comptime F: type, target: Target, buffer: []const u8) F {
+        const Int = @Type(.{ .Int = .{
+            .signedness = .unsigned,
+            .bits = @typeInfo(F).Float.bits,
+        } });
+        const int = std.mem.readInt(Int, buffer[0..@sizeOf(Int)], target.cpu.arch.endian());
+        return @bitCast(F, int);
+    }
+
     /// Asserts that the value is a float or an integer.
-    pub fn toFloat(self: Value, comptime T: type) T {
-        return switch (self.tag()) {
-            .float_16 => @floatCast(T, self.castTag(.float_16).?.data),
-            .float_32 => @floatCast(T, self.castTag(.float_32).?.data),
-            .float_64 => @floatCast(T, self.castTag(.float_64).?.data),
-            .float_128 => @floatCast(T, self.castTag(.float_128).?.data),
+    pub fn toFloat(val: Value, comptime T: type) T {
+        return switch (val.tag()) {
+            .float_16 => @floatCast(T, val.castTag(.float_16).?.data),
+            .float_32 => @floatCast(T, val.castTag(.float_32).?.data),
+            .float_64 => @floatCast(T, val.castTag(.float_64).?.data),
+            .float_128 => @floatCast(T, val.castTag(.float_128).?.data),
 
             .zero => 0,
             .one => 1,
-            .int_u64 => @intToFloat(T, self.castTag(.int_u64).?.data),
-            .int_i64 => @intToFloat(T, self.castTag(.int_i64).?.data),
+            .int_u64 => @intToFloat(T, val.castTag(.int_u64).?.data),
+            .int_i64 => @intToFloat(T, val.castTag(.int_i64).?.data),
 
-            .int_big_positive, .int_big_negative => @panic("big int to f128"),
+            .int_big_positive => @floatCast(T, bigIntToFloat(val.castTag(.int_big_positive).?.data, true)),
+            .int_big_negative => @floatCast(T, bigIntToFloat(val.castTag(.int_big_negative).?.data, false)),
             else => unreachable,
         };
+    }
+
+    /// TODO move this to std lib big int code
+    fn bigIntToFloat(limbs: []const std.math.big.Limb, positive: bool) f128 {
+        if (limbs.len == 0) return 0;
+
+        const base = std.math.maxInt(std.math.big.Limb) + 1;
+        var result: f128 = 0;
+        var i: usize = limbs.len;
+        while (i != 0) {
+            i -= 1;
+            const limb: f128 = @intToFloat(f128, limbs[i]);
+            result = @mulAdd(f128, base, limb, result);
+        }
+        if (positive) {
+            return result;
+        } else {
+            return -result;
+        }
     }
 
     pub fn clz(val: Value, ty: Type, target: Target) u64 {
@@ -1660,19 +1762,26 @@ pub const Value = extern union {
         if (ty.isAnyFloat()) {
             return floatAdd(lhs, rhs, ty, arena);
         }
-        const result = try intAdd(lhs, rhs, arena);
 
-        const max = try ty.maxInt(arena, target);
-        if (compare(result, .gt, max, ty)) {
-            @panic("TODO comptime wrapping integer addition");
+        const info = ty.intInfo(target);
+
+        var lhs_space: Value.BigIntSpace = undefined;
+        var rhs_space: Value.BigIntSpace = undefined;
+        const lhs_bigint = lhs.toBigInt(&lhs_space);
+        const rhs_bigint = rhs.toBigInt(&rhs_space);
+        const limbs = try arena.alloc(
+            std.math.big.Limb,
+            std.math.big.int.calcTwosCompLimbCount(info.bits),
+        );
+        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        result_bigint.addWrap(lhs_bigint, rhs_bigint, info.signedness, info.bits);
+        const result_limbs = result_bigint.limbs[0..result_bigint.len];
+
+        if (result_bigint.positive) {
+            return Value.Tag.int_big_positive.create(arena, result_limbs);
+        } else {
+            return Value.Tag.int_big_negative.create(arena, result_limbs);
         }
-
-        const min = try ty.minInt(arena, target);
-        if (compare(result, .lt, min, ty)) {
-            @panic("TODO comptime wrapping integer addition");
-        }
-
-        return result;
     }
 
     /// Supports integers only; asserts neither operand is undefined.
@@ -1686,19 +1795,25 @@ pub const Value = extern union {
         assert(!lhs.isUndef());
         assert(!rhs.isUndef());
 
-        const result = try intAdd(lhs, rhs, arena);
+        const info = ty.intInfo(target);
 
-        const max = try ty.maxInt(arena, target);
-        if (compare(result, .gt, max, ty)) {
-            return max;
+        var lhs_space: Value.BigIntSpace = undefined;
+        var rhs_space: Value.BigIntSpace = undefined;
+        const lhs_bigint = lhs.toBigInt(&lhs_space);
+        const rhs_bigint = rhs.toBigInt(&rhs_space);
+        const limbs = try arena.alloc(
+            std.math.big.Limb,
+            std.math.big.int.calcTwosCompLimbCount(info.bits),
+        );
+        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        result_bigint.addSat(lhs_bigint, rhs_bigint, info.signedness, info.bits);
+        const result_limbs = result_bigint.limbs[0..result_bigint.len];
+
+        if (result_bigint.positive) {
+            return Value.Tag.int_big_positive.create(arena, result_limbs);
+        } else {
+            return Value.Tag.int_big_negative.create(arena, result_limbs);
         }
-
-        const min = try ty.minInt(arena, target);
-        if (compare(result, .lt, min, ty)) {
-            return min;
-        }
-
-        return result;
     }
 
     /// Supports both floats and ints; handles undefined.
@@ -1714,19 +1829,26 @@ pub const Value = extern union {
         if (ty.isAnyFloat()) {
             return floatSub(lhs, rhs, ty, arena);
         }
-        const result = try intSub(lhs, rhs, arena);
 
-        const max = try ty.maxInt(arena, target);
-        if (compare(result, .gt, max, ty)) {
-            @panic("TODO comptime wrapping integer subtraction");
+        const info = ty.intInfo(target);
+
+        var lhs_space: Value.BigIntSpace = undefined;
+        var rhs_space: Value.BigIntSpace = undefined;
+        const lhs_bigint = lhs.toBigInt(&lhs_space);
+        const rhs_bigint = rhs.toBigInt(&rhs_space);
+        const limbs = try arena.alloc(
+            std.math.big.Limb,
+            std.math.big.int.calcTwosCompLimbCount(info.bits),
+        );
+        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        result_bigint.subWrap(lhs_bigint, rhs_bigint, info.signedness, info.bits);
+        const result_limbs = result_bigint.limbs[0..result_bigint.len];
+
+        if (result_bigint.positive) {
+            return Value.Tag.int_big_positive.create(arena, result_limbs);
+        } else {
+            return Value.Tag.int_big_negative.create(arena, result_limbs);
         }
-
-        const min = try ty.minInt(arena, target);
-        if (compare(result, .lt, min, ty)) {
-            @panic("TODO comptime wrapping integer subtraction");
-        }
-
-        return result;
     }
 
     /// Supports integers only; asserts neither operand is undefined.
@@ -1740,19 +1862,25 @@ pub const Value = extern union {
         assert(!lhs.isUndef());
         assert(!rhs.isUndef());
 
-        const result = try intSub(lhs, rhs, arena);
+        const info = ty.intInfo(target);
 
-        const max = try ty.maxInt(arena, target);
-        if (compare(result, .gt, max, ty)) {
-            return max;
+        var lhs_space: Value.BigIntSpace = undefined;
+        var rhs_space: Value.BigIntSpace = undefined;
+        const lhs_bigint = lhs.toBigInt(&lhs_space);
+        const rhs_bigint = rhs.toBigInt(&rhs_space);
+        const limbs = try arena.alloc(
+            std.math.big.Limb,
+            std.math.big.int.calcTwosCompLimbCount(info.bits),
+        );
+        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        result_bigint.subSat(lhs_bigint, rhs_bigint, info.signedness, info.bits);
+        const result_limbs = result_bigint.limbs[0..result_bigint.len];
+
+        if (result_bigint.positive) {
+            return Value.Tag.int_big_positive.create(arena, result_limbs);
+        } else {
+            return Value.Tag.int_big_negative.create(arena, result_limbs);
         }
-
-        const min = try ty.minInt(arena, target);
-        if (compare(result, .lt, min, ty)) {
-            return min;
-        }
-
-        return result;
     }
 
     /// Supports both floats and ints; handles undefined.
@@ -1768,19 +1896,31 @@ pub const Value = extern union {
         if (ty.isAnyFloat()) {
             return floatMul(lhs, rhs, ty, arena);
         }
-        const result = try intMul(lhs, rhs, arena);
 
-        const max = try ty.maxInt(arena, target);
-        if (compare(result, .gt, max, ty)) {
-            @panic("TODO comptime wrapping integer multiplication");
+        const info = ty.intInfo(target);
+
+        var lhs_space: Value.BigIntSpace = undefined;
+        var rhs_space: Value.BigIntSpace = undefined;
+        const lhs_bigint = lhs.toBigInt(&lhs_space);
+        const rhs_bigint = rhs.toBigInt(&rhs_space);
+        const limbs = try arena.alloc(
+            std.math.big.Limb,
+            std.math.big.int.calcTwosCompLimbCount(info.bits),
+        );
+        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        var limbs_buffer = try arena.alloc(
+            std.math.big.Limb,
+            std.math.big.int.calcMulWrapLimbsBufferLen(info.bits, lhs_bigint.limbs.len, rhs_bigint.limbs.len, 1),
+        );
+        defer arena.free(limbs_buffer);
+        result_bigint.mulWrap(lhs_bigint, rhs_bigint, info.signedness, info.bits, limbs_buffer, arena);
+        const result_limbs = result_bigint.limbs[0..result_bigint.len];
+
+        if (result_bigint.positive) {
+            return Value.Tag.int_big_positive.create(arena, result_limbs);
+        } else {
+            return Value.Tag.int_big_negative.create(arena, result_limbs);
         }
-
-        const min = try ty.minInt(arena, target);
-        if (compare(result, .lt, min, ty)) {
-            @panic("TODO comptime wrapping integer multiplication");
-        }
-
-        return result;
     }
 
     /// Supports integers only; asserts neither operand is undefined.
@@ -1794,19 +1934,35 @@ pub const Value = extern union {
         assert(!lhs.isUndef());
         assert(!rhs.isUndef());
 
-        const result = try intMul(lhs, rhs, arena);
+        const info = ty.intInfo(target);
 
-        const max = try ty.maxInt(arena, target);
-        if (compare(result, .gt, max, ty)) {
-            return max;
+        var lhs_space: Value.BigIntSpace = undefined;
+        var rhs_space: Value.BigIntSpace = undefined;
+        const lhs_bigint = lhs.toBigInt(&lhs_space);
+        const rhs_bigint = rhs.toBigInt(&rhs_space);
+        const limbs = try arena.alloc(
+            std.math.big.Limb,
+            std.math.max(
+                // For the saturate
+                std.math.big.int.calcTwosCompLimbCount(info.bits),
+                lhs_bigint.limbs.len + rhs_bigint.limbs.len,
+            ),
+        );
+        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        var limbs_buffer = try arena.alloc(
+            std.math.big.Limb,
+            std.math.big.int.calcMulLimbsBufferLen(lhs_bigint.limbs.len, rhs_bigint.limbs.len, 1),
+        );
+        defer arena.free(limbs_buffer);
+        result_bigint.mul(lhs_bigint, rhs_bigint, limbs_buffer, arena);
+        result_bigint.saturate(result_bigint.toConst(), info.signedness, info.bits);
+        const result_limbs = result_bigint.limbs[0..result_bigint.len];
+
+        if (result_bigint.positive) {
+            return Value.Tag.int_big_positive.create(arena, result_limbs);
+        } else {
+            return Value.Tag.int_big_negative.create(arena, result_limbs);
         }
-
-        const min = try ty.minInt(arena, target);
-        if (compare(result, .lt, min, ty)) {
-            return min;
-        }
-
-        return result;
     }
 
     /// Supports both floats and ints; handles undefined.
@@ -2118,7 +2274,7 @@ pub const Value = extern union {
         const rhs_bigint = rhs.toBigInt(&rhs_space);
         const limbs = try allocator.alloc(
             std.math.big.Limb,
-            lhs_bigint.limbs.len + rhs_bigint.limbs.len + 1,
+            lhs_bigint.limbs.len + rhs_bigint.limbs.len,
         );
         var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
         var limbs_buffer = try allocator.alloc(
@@ -2136,12 +2292,24 @@ pub const Value = extern union {
         }
     }
 
-    pub fn intTrunc(val: Value, arena: *Allocator, bits: u16) !Value {
-        const x = val.toUnsignedInt(); // TODO: implement comptime truncate on big ints
-        if (bits == 64) return val;
-        const mask = (@as(u64, 1) << @intCast(u6, bits)) - 1;
-        const truncated = x & mask;
-        return Tag.int_u64.create(arena, truncated);
+    pub fn intTrunc(val: Value, allocator: *Allocator, signedness: std.builtin.Signedness, bits: u16) !Value {
+        var val_space: Value.BigIntSpace = undefined;
+        const val_bigint = val.toBigInt(&val_space);
+
+        const limbs = try allocator.alloc(
+            std.math.big.Limb,
+            std.math.big.int.calcTwosCompLimbCount(bits),
+        );
+        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+
+        result_bigint.truncate(val_bigint, signedness, bits);
+        const result_limbs = result_bigint.limbs[0..result_bigint.len];
+
+        if (result_bigint.positive) {
+            return Value.Tag.int_big_positive.create(allocator, result_limbs);
+        } else {
+            return Value.Tag.int_big_negative.create(allocator, result_limbs);
+        }
     }
 
     pub fn shl(lhs: Value, rhs: Value, allocator: *Allocator) !Value {
