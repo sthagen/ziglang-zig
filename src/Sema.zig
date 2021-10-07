@@ -1644,7 +1644,10 @@ fn zirEnumDecl(
             // that points to this default value expression rather than the struct.
             // But only resolve the source location if we need to emit a compile error.
             const tag_val = (try sema.resolveInstConst(block, src, tag_val_ref)).val;
-            enum_obj.values.putAssumeCapacityNoClobberContext(tag_val, {}, .{ .ty = enum_obj.tag_ty });
+            const copied_tag_val = try tag_val.copy(&new_decl_arena.allocator);
+            enum_obj.values.putAssumeCapacityNoClobberContext(copied_tag_val, {}, .{
+                .ty = enum_obj.tag_ty,
+            });
         } else if (any_values) {
             const tag_val = try Value.Tag.int_u64.create(&new_decl_arena.allocator, field_i);
             enum_obj.values.putAssumeCapacityNoClobberContext(tag_val, {}, .{ .ty = enum_obj.tag_ty });
@@ -4312,7 +4315,8 @@ fn zirIntToEnum(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
     }
 
     try sema.requireRuntimeBlock(block, src);
-    return block.addTyOp(.bitcast, dest_ty, operand);
+    // TODO insert safety check to make sure the value matches an enum value
+    return block.addTyOp(.intcast, dest_ty, operand);
 }
 
 /// Pointer in, pointer out.
@@ -5050,6 +5054,7 @@ fn zirIntCast(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air
     }
 
     try sema.requireRuntimeBlock(block, operand_src);
+    // TODO insert safety check to make sure the value fits in the dest type
     return block.addTyOp(.intcast, dest_type, operand);
 }
 
@@ -11608,7 +11613,7 @@ fn analyzeSliceLen(
         if (slice_val.isUndef()) {
             return sema.addConstUndef(Type.initTag(.usize));
         }
-        return sema.fail(block, src, "TODO implement Sema analyzeSliceLen on comptime slice", .{});
+        return sema.addIntUnsigned(Type.usize, slice_val.sliceLen());
     }
     try sema.requireRuntimeBlock(block, src);
     return block.addTyOp(.slice_len, Type.initTag(.usize), slice_inst);

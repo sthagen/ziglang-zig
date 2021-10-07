@@ -18,6 +18,8 @@ const strong_linkage = if (is_test)
 else
     std.builtin.GlobalLinkage.Strong;
 
+const long_double_is_f128 = builtin.target.longDoubleIsF128();
+
 comptime {
     const __extenddftf2 = @import("compiler_rt/extendXfYf2.zig").__extenddftf2;
     @export(__extenddftf2, .{ .name = "__extenddftf2", .linkage = linkage });
@@ -75,6 +77,15 @@ comptime {
     }
 
     if (!builtin.zig_is_stage2) {
+        if (!long_double_is_f128) {
+            // TODO implement these
+            //const __extendxftf2 = @import("compiler_rt/extendXfYf2.zig").__extendxftf2;
+            //@export(__extendxftf2, .{ .name = "__extendxftf2", .linkage = linkage });
+
+            //const __trunctfxf2 = @import("compiler_rt/truncXfYf2.zig").__trunctfxf2;
+            //@export(__trunctfxf2, .{ .name = "__trunctfxf2", .linkage = linkage });
+        }
+
         switch (arch) {
             .i386,
             .x86_64,
@@ -616,7 +627,13 @@ comptime {
         @export(__mulodi4, .{ .name = "__mulodi4", .linkage = linkage });
 
         _ = @import("compiler_rt/atomics.zig");
+
+        @export(fmaq, .{ .name = "fmaq", .linkage = linkage });
     }
+}
+
+fn fmaq(a: f128, b: f128, c: f128) callconv(.C) f128 {
+    return std.math.fma(f128, a, b, c);
 }
 
 // Avoid dragging in the runtime safety mechanisms into this .o file,

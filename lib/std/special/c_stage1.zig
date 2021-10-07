@@ -5,6 +5,7 @@ const isNan = std.math.isNan;
 const native_arch = builtin.cpu.arch;
 const native_abi = builtin.abi;
 const native_os = builtin.os.tag;
+const long_double_is_f128 = builtin.target.longDoubleIsF128();
 
 const is_wasm = switch (native_arch) {
     .wasm32, .wasm64 => true,
@@ -654,6 +655,13 @@ export fn floor(x: f64) f64 {
 
 export fn ceil(x: f64) f64 {
     return math.ceil(x);
+}
+
+export fn fmal(a: c_longdouble, b: c_longdouble, c: c_longdouble) c_longdouble {
+    if (!long_double_is_f128) {
+        @panic("TODO implement this");
+    }
+    return math.fma(c_longdouble, a, b, c);
 }
 
 export fn fma(a: f64, b: f64, c: f64) f64 {
