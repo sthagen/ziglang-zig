@@ -1282,10 +1282,10 @@ fn arrayInitExpr(
             }
         },
         .ptr, .inferred_ptr => |ptr_inst| {
-            return arrayInitExprRlPtr(gz, scope, node, array_init.ast.elements, ptr_inst);
+            return arrayInitExprRlPtr(gz, scope, rl, node, ptr_inst, array_init.ast.elements, types.array);
         },
         .block_ptr => |block_gz| {
-            return arrayInitExprRlPtr(gz, scope, node, array_init.ast.elements, block_gz.rl_ptr);
+            return arrayInitExprRlPtr(gz, scope, rl, node, block_gz.rl_ptr, array_init.ast.elements, types.array);
         },
     }
 }
@@ -1341,9 +1341,29 @@ fn arrayInitExprRlTy(
 fn arrayInitExprRlPtr(
     gz: *GenZir,
     scope: *Scope,
+    rl: ResultLoc,
     node: Ast.Node.Index,
-    elements: []const Ast.Node.Index,
     result_ptr: Zir.Inst.Ref,
+    elements: []const Ast.Node.Index,
+    array_ty: Zir.Inst.Ref,
+) InnerError!Zir.Inst.Ref {
+    if (array_ty == .none) {
+        return arrayInitExprRlPtrInner(gz, scope, node, result_ptr, elements);
+    }
+
+    var as_scope = try gz.makeCoercionScope(scope, array_ty, result_ptr);
+    defer as_scope.instructions.deinit(gz.astgen.gpa);
+
+    const result = try arrayInitExprRlPtrInner(&as_scope, scope, node, as_scope.rl_ptr, elements);
+    return as_scope.finishCoercion(gz, rl, node, result, array_ty);
+}
+
+fn arrayInitExprRlPtrInner(
+    gz: *GenZir,
+    scope: *Scope,
+    node: Ast.Node.Index,
+    result_ptr: Zir.Inst.Ref,
+    elements: []const Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const gpa = astgen.gpa;
@@ -1352,15 +1372,14 @@ fn arrayInitExprRlPtr(
     defer gpa.free(elem_ptr_list);
 
     for (elements) |elem_init, i| {
-        const index_inst = try gz.addInt(i);
-        const elem_ptr = try gz.addPlNode(.elem_ptr_node, elem_init, Zir.Inst.Bin{
-            .lhs = result_ptr,
-            .rhs = index_inst,
+        const elem_ptr = try gz.addPlNode(.elem_ptr_imm, elem_init, Zir.Inst.ElemPtrImm{
+            .ptr = result_ptr,
+            .index = @intCast(u32, i),
         });
         elem_ptr_list[i] = refToIndex(elem_ptr).?;
         _ = try expr(gz, scope, .{ .ptr = elem_ptr }, elem_init);
     }
-    _ = try gz.addPlNode(.validate_array_init_ptr, node, Zir.Inst.Block{
+    _ = try gz.addPlNode(.validate_array_init, node, Zir.Inst.Block{
         .body_len = @intCast(u32, elem_ptr_list.len),
     });
     try astgen.extra.appendSlice(gpa, elem_ptr_list);
@@ -1539,7 +1558,7 @@ fn structInitExprRlPtrInner(
         field_ptr_list[i] = refToIndex(field_ptr).?;
         _ = try expr(gz, scope, .{ .ptr = field_ptr }, field_init);
     }
-    _ = try gz.addPlNode(.validate_struct_init_ptr, node, Zir.Inst.Block{
+    _ = try gz.addPlNode(.validate_struct_init, node, Zir.Inst.Block{
         .body_len = @intCast(u32, field_ptr_list.len),
     });
     try astgen.extra.appendSlice(gpa, field_ptr_list);
@@ -2040,6 +2059,7 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
             .elem_ptr,
             .elem_val,
             .elem_ptr_node,
+            .elem_ptr_imm,
             .elem_val_node,
             .field_ptr,
             .field_val,
@@ -2246,8 +2266,8 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
             .store_to_block_ptr,
             .store_to_inferred_ptr,
             .resolve_inferred_alloc,
-            .validate_struct_init_ptr,
-            .validate_array_init_ptr,
+            .validate_struct_init,
+            .validate_array_init,
             .set_align_stack,
             .set_cold,
             .set_float_mode,
@@ -6453,7 +6473,7 @@ fn ret(gz: *GenZir, scope: *Scope, node: Ast.Node.Index) InnerError!Zir.Inst.Ref
         .never => {
             // Returning a value that cannot be an error; skip error defers.
             try genDefers(gz, defer_outer, scope, .normal_only);
-            _ = try gz.addUnNode(.ret_node, operand, node);
+            try gz.addRet(rl, operand, node);
             return Zir.Inst.Ref.unreachable_value;
         },
         .always => {

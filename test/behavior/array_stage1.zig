@@ -39,13 +39,6 @@ test "void arrays" {
     try expect(array.len == 4);
 }
 
-test "array literal" {
-    const hex_mult = [_]u16{ 4096, 256, 16, 1 };
-
-    try expect(hex_mult.len == 4);
-    try expect(hex_mult[1] == 256);
-}
-
 test "array dot len const expr" {
     try expect(comptime x: {
         break :x some_array.len == 4;

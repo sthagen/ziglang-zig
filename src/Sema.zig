@@ -479,6 +479,7 @@ pub fn analyzeBody(
             .load                         => try sema.zirLoad(block, inst),
             .elem_ptr                     => try sema.zirElemPtr(block, inst),
             .elem_ptr_node                => try sema.zirElemPtrNode(block, inst),
+            .elem_ptr_imm                 => try sema.zirElemPtrImm(block, inst),
             .elem_val                     => try sema.zirElemVal(block, inst),
             .elem_val_node                => try sema.zirElemValNode(block, inst),
             .elem_type                    => try sema.zirElemType(block, inst),
@@ -741,13 +742,13 @@ pub fn analyzeBody(
                 i += 1;
                 continue;
             },
-            .validate_struct_init_ptr => {
-                try sema.zirValidateStructInitPtr(block, inst);
+            .validate_struct_init => {
+                try sema.zirValidateStructInit(block, inst);
                 i += 1;
                 continue;
             },
-            .validate_array_init_ptr => {
-                try sema.zirValidateArrayInitPtr(block, inst);
+            .validate_array_init => {
+                try sema.zirValidateArrayInit(block, inst);
                 i += 1;
                 continue;
             },
@@ -1211,6 +1212,15 @@ pub fn fail(
 
 fn failWithOwnedErrorMsg(sema: *Sema, err_msg: *Module.ErrorMsg) CompileError {
     @setCold(true);
+
+    if (crash_report.is_enabled and sema.mod.comp.debug_compile_errors) {
+        std.debug.print("compile error during Sema: {s}, src: {s}:{}\n", .{
+            err_msg.msg,
+            err_msg.src_loc.file_scope.sub_file_path,
+            err_msg.src_loc.lazy,
+        });
+        crash_report.compilerPanic("unexpected compile error occurred", null);
+    }
 
     const mod = sema.mod;
 
@@ -2106,7 +2116,7 @@ fn zirResolveInferredAlloc(sema: *Sema, block: *Block, inst: Zir.Inst.Index) Com
     }
 }
 
-fn zirValidateStructInitPtr(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!void {
+fn zirValidateStructInit(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -2117,15 +2127,15 @@ fn zirValidateStructInitPtr(sema: *Sema, block: *Block, inst: Zir.Inst.Index) Co
     const field_ptr_data = sema.code.instructions.items(.data)[instrs[0]].pl_node;
     const field_ptr_extra = sema.code.extraData(Zir.Inst.Field, field_ptr_data.payload_index).data;
     const object_ptr = sema.resolveInst(field_ptr_extra.lhs);
-    const agg_ty = sema.typeOf(object_ptr).elemType();
+    const agg_ty = sema.typeOf(object_ptr).childType();
     switch (agg_ty.zigTypeTag()) {
-        .Struct => return sema.validateStructInitPtr(
+        .Struct => return sema.validateStructInit(
             block,
             agg_ty.castTag(.@"struct").?.data,
             init_src,
             instrs,
         ),
-        .Union => return sema.validateUnionInitPtr(
+        .Union => return sema.validateUnionInit(
             block,
             agg_ty.cast(Type.Payload.Union).?.data,
             init_src,
@@ -2136,7 +2146,7 @@ fn zirValidateStructInitPtr(sema: *Sema, block: *Block, inst: Zir.Inst.Index) Co
     }
 }
 
-fn validateUnionInitPtr(
+fn validateUnionInit(
     sema: *Sema,
     block: *Block,
     union_obj: *Module.Union,
@@ -2175,7 +2185,7 @@ fn validateUnionInitPtr(
     _ = try block.addBinOp(.set_union_tag, union_ptr, new_tag);
 }
 
-fn validateStructInitPtr(
+fn validateStructInit(
     sema: *Sema,
     block: *Block,
     struct_obj: *Module.Struct,
@@ -2239,10 +2249,22 @@ fn validateStructInitPtr(
     }
 }
 
-fn zirValidateArrayInitPtr(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!void {
-    const inst_data = sema.code.instructions.items(.data)[inst].pl_node;
-    const src = inst_data.src();
-    return sema.fail(block, src, "TODO implement Sema.zirValidateArrayInitPtr", .{});
+fn zirValidateArrayInit(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!void {
+    const validate_inst = sema.code.instructions.items(.data)[inst].pl_node;
+    const init_src = validate_inst.src();
+    const validate_extra = sema.code.extraData(Zir.Inst.Block, validate_inst.payload_index);
+    const instrs = sema.code.extra[validate_extra.end..][0..validate_extra.data.body_len];
+    const elem_ptr_data = sema.code.instructions.items(.data)[instrs[0]].pl_node;
+    const elem_ptr_extra = sema.code.extraData(Zir.Inst.ElemPtrImm, elem_ptr_data.payload_index).data;
+    const array_ptr = sema.resolveInst(elem_ptr_extra.ptr);
+    const array_ty = sema.typeOf(array_ptr).childType();
+    const array_len = array_ty.arrayLen();
+
+    if (instrs.len != array_len) {
+        return sema.fail(block, init_src, "expected {d} array elements; found {d}", .{
+            array_len, instrs.len,
+        });
+    }
 }
 
 fn failWithBadFieldAccess(
@@ -5169,6 +5191,18 @@ fn zirElemPtrNode(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError
     return sema.elemPtr(block, src, array_ptr, elem_index, elem_index_src);
 }
 
+fn zirElemPtrImm(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const inst_data = sema.code.instructions.items(.data)[inst].pl_node;
+    const src = inst_data.src();
+    const extra = sema.code.extraData(Zir.Inst.ElemPtrImm, inst_data.payload_index).data;
+    const array_ptr = sema.resolveInst(extra.ptr);
+    const elem_index = try sema.addIntUnsigned(Type.usize, extra.index);
+    return sema.elemPtr(block, src, array_ptr, elem_index, src);
+}
+
 fn zirSliceStart(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
     const tracy = trace(@src());
     defer tracy.end();
@@ -6614,9 +6648,9 @@ fn zirNegate(
     defer tracy.end();
 
     const inst_data = sema.code.instructions.items(.data)[inst].un_node;
-    const src: LazySrcLoc = .{ .node_offset_bin_op = inst_data.src_node };
-    const lhs_src: LazySrcLoc = .{ .node_offset_bin_lhs = inst_data.src_node };
-    const rhs_src: LazySrcLoc = .{ .node_offset_bin_rhs = inst_data.src_node };
+    const src = inst_data.src();
+    const lhs_src = src;
+    const rhs_src = src; // TODO better source location
     const lhs = sema.resolveInst(.zero);
     const rhs = sema.resolveInst(inst_data.operand);
 
@@ -9884,7 +9918,8 @@ fn zirCDefine(
     const src: LazySrcLoc = .{ .node_offset = extra.node };
 
     const name = try sema.resolveConstString(block, src, extra.lhs);
-    if (sema.typeOf(extra.rhs).zigTypeTag() != .Void) {
+    const rhs = sema.resolveInst(extra.rhs);
+    if (sema.typeOf(rhs).zigTypeTag() != .Void) {
         const value = try sema.resolveConstString(block, src, extra.rhs);
         try block.c_import_buf.?.writer().print("#define {s} {s}\n", .{ name, value });
     } else {
@@ -12060,16 +12095,19 @@ fn resolvePeerTypes(
         const chosen_ty = sema.typeOf(chosen);
         if (candidate_ty.eql(chosen_ty))
             continue;
-        if (candidate_ty.zigTypeTag() == .NoReturn)
+        const candidate_ty_tag = candidate_ty.zigTypeTag();
+        const chosen_ty_tag = chosen_ty.zigTypeTag();
+
+        if (candidate_ty_tag == .NoReturn)
             continue;
-        if (chosen_ty.zigTypeTag() == .NoReturn) {
+        if (chosen_ty_tag == .NoReturn) {
             chosen = candidate;
             chosen_i = candidate_i + 1;
             continue;
         }
-        if (candidate_ty.zigTypeTag() == .Undefined)
+        if (candidate_ty_tag == .Undefined)
             continue;
-        if (chosen_ty.zigTypeTag() == .Undefined) {
+        if (chosen_ty_tag == .Undefined) {
             chosen = candidate;
             chosen_i = candidate_i + 1;
             continue;
@@ -12092,30 +12130,41 @@ fn resolvePeerTypes(
             continue;
         }
 
-        if (chosen_ty.zigTypeTag() == .ComptimeInt and candidate_ty.isInt()) {
+        if (chosen_ty_tag == .ComptimeInt and candidate_ty.isInt()) {
             chosen = candidate;
             chosen_i = candidate_i + 1;
             continue;
         }
 
-        if (chosen_ty.isInt() and candidate_ty.zigTypeTag() == .ComptimeInt) {
+        if (chosen_ty.isInt() and candidate_ty_tag == .ComptimeInt) {
             continue;
         }
 
-        if (chosen_ty.zigTypeTag() == .ComptimeFloat and candidate_ty.isRuntimeFloat()) {
+        if ((chosen_ty_tag == .ComptimeFloat or chosen_ty_tag == .ComptimeInt) and
+            candidate_ty.isRuntimeFloat())
+        {
+            chosen = candidate;
+            chosen_i = candidate_i + 1;
+            continue;
+        }
+        if (chosen_ty.isRuntimeFloat() and
+            (candidate_ty_tag == .ComptimeFloat or candidate_ty_tag == .ComptimeInt))
+        {
+            continue;
+        }
+
+        if (chosen_ty_tag == .Enum and candidate_ty_tag == .EnumLiteral) {
+            continue;
+        }
+        if (chosen_ty_tag == .EnumLiteral and candidate_ty_tag == .Enum) {
             chosen = candidate;
             chosen_i = candidate_i + 1;
             continue;
         }
 
-        if (chosen_ty.isRuntimeFloat() and candidate_ty.zigTypeTag() == .ComptimeFloat) {
+        if (chosen_ty_tag == .ComptimeFloat and candidate_ty_tag == .ComptimeInt)
             continue;
-        }
-
-        if (chosen_ty.zigTypeTag() == .Enum and candidate_ty.zigTypeTag() == .EnumLiteral) {
-            continue;
-        }
-        if (chosen_ty.zigTypeTag() == .EnumLiteral and candidate_ty.zigTypeTag() == .Enum) {
+        if (chosen_ty_tag == .ComptimeInt and candidate_ty_tag == .ComptimeFloat) {
             chosen = candidate;
             chosen_i = candidate_i + 1;
             continue;
