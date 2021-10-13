@@ -785,7 +785,7 @@ pub const Struct = struct {
     /// The Decl that corresponds to the struct itself.
     owner_decl: *Decl,
     /// Set of field names in declaration order.
-    fields: std.StringArrayHashMapUnmanaged(Field),
+    fields: Fields,
     /// Represents the declarations inside this struct.
     namespace: Namespace,
     /// Offset from `owner_decl`, points to the struct AST node.
@@ -804,6 +804,8 @@ pub const Struct = struct {
     /// If true, definitely nonzero size at runtime. If false, resolving the fields
     /// is necessary to determine whether it has bits at runtime.
     known_has_bits: bool,
+
+    pub const Fields = std.StringArrayHashMapUnmanaged(Field);
 
     /// The `Type` and `Value` memory is owned by the arena of the Struct's owner_decl.
     pub const Field = struct {
@@ -935,7 +937,7 @@ pub const Union = struct {
     /// This will be set to the null type until status is `have_field_types`.
     tag_ty: Type,
     /// Set of field names in declaration order.
-    fields: std.StringArrayHashMapUnmanaged(Field),
+    fields: Fields,
     /// Represents the declarations inside this union.
     namespace: Namespace,
     /// Offset from `owner_decl`, points to the union decl AST node.
@@ -957,6 +959,8 @@ pub const Union = struct {
         ty: Type,
         abi_align: Value,
     };
+
+    pub const Fields = std.StringArrayHashMapUnmanaged(Field);
 
     pub fn getFullyQualifiedName(s: *Union, gpa: *Allocator) ![]u8 {
         return s.owner_decl.getFullyQualifiedName(gpa);
@@ -992,20 +996,87 @@ pub const Union = struct {
 
     pub fn mostAlignedField(u: Union, target: Target) u32 {
         assert(u.haveFieldTypes());
-        var most_alignment: u64 = 0;
+        var most_alignment: u32 = 0;
         var most_index: usize = undefined;
         for (u.fields.values()) |field, i| {
             if (!field.ty.hasCodeGenBits()) continue;
-            const field_align = if (field.abi_align.tag() == .abi_align_default)
-                field.ty.abiAlignment(target)
-            else
-                field.abi_align.toUnsignedInt();
+
+            const field_align = a: {
+                if (field.abi_align.tag() == .abi_align_default) {
+                    break :a field.ty.abiAlignment(target);
+                } else {
+                    break :a @intCast(u32, field.abi_align.toUnsignedInt());
+                }
+            };
             if (field_align > most_alignment) {
                 most_alignment = field_align;
                 most_index = i;
             }
         }
         return @intCast(u32, most_index);
+    }
+
+    pub fn abiAlignment(u: Union, target: Target, have_tag: bool) u32 {
+        var max_align: u32 = 0;
+        if (have_tag) max_align = u.tag_ty.abiAlignment(target);
+        for (u.fields.values()) |field| {
+            if (!field.ty.hasCodeGenBits()) continue;
+
+            const field_align = a: {
+                if (field.abi_align.tag() == .abi_align_default) {
+                    break :a field.ty.abiAlignment(target);
+                } else {
+                    break :a @intCast(u32, field.abi_align.toUnsignedInt());
+                }
+            };
+            max_align = @maximum(max_align, field_align);
+        }
+        assert(max_align != 0);
+        return max_align;
+    }
+
+    pub fn abiSize(u: Union, target: Target, have_tag: bool) u64 {
+        assert(u.haveFieldTypes());
+        const is_packed = u.layout == .Packed;
+        if (is_packed) @panic("TODO packed unions");
+
+        var payload_size: u64 = 0;
+        var payload_align: u32 = 0;
+        for (u.fields.values()) |field| {
+            if (!field.ty.hasCodeGenBits()) continue;
+
+            const field_align = a: {
+                if (field.abi_align.tag() == .abi_align_default) {
+                    break :a field.ty.abiAlignment(target);
+                } else {
+                    break :a @intCast(u32, field.abi_align.toUnsignedInt());
+                }
+            };
+            payload_size = @maximum(payload_size, field.ty.abiSize(target));
+            payload_align = @maximum(payload_align, field_align);
+        }
+        if (!have_tag) {
+            return std.mem.alignForwardGeneric(u64, payload_size, payload_align);
+        }
+        // Put the tag before or after the payload depending on which one's
+        // alignment is greater.
+        const tag_size = u.tag_ty.abiSize(target);
+        const tag_align = u.tag_ty.abiAlignment(target);
+        var size: u64 = 0;
+        if (tag_align >= payload_align) {
+            // {Tag, Payload}
+            size += tag_size;
+            size = std.mem.alignForwardGeneric(u64, size, payload_align);
+            size += payload_size;
+            size = std.mem.alignForwardGeneric(u64, size, tag_align);
+        } else {
+            // {Payload, Tag}
+            size += payload_size;
+            size = std.mem.alignForwardGeneric(u64, size, tag_align);
+            size += tag_size;
+            size = std.mem.alignForwardGeneric(u64, size, payload_align);
+        }
+        return size;
     }
 };
 
@@ -1814,6 +1885,55 @@ pub const SrcLoc = struct {
                 const token_starts = tree.tokens.items(.start);
                 return token_starts[tok_index];
             },
+
+            .node_offset_array_type_len => |node_off| {
+                const tree = try src_loc.file_scope.getTree(gpa);
+                const node_tags = tree.nodes.items(.tag);
+                const parent_node = src_loc.declRelativeToNodeIndex(node_off);
+
+                const full: Ast.full.ArrayType = switch (node_tags[parent_node]) {
+                    .array_type => tree.arrayType(parent_node),
+                    .array_type_sentinel => tree.arrayTypeSentinel(parent_node),
+                    else => unreachable,
+                };
+                const node = full.ast.elem_count;
+                const main_tokens = tree.nodes.items(.main_token);
+                const tok_index = main_tokens[node];
+                const token_starts = tree.tokens.items(.start);
+                return token_starts[tok_index];
+            },
+            .node_offset_array_type_sentinel => |node_off| {
+                const tree = try src_loc.file_scope.getTree(gpa);
+                const node_tags = tree.nodes.items(.tag);
+                const parent_node = src_loc.declRelativeToNodeIndex(node_off);
+
+                const full: Ast.full.ArrayType = switch (node_tags[parent_node]) {
+                    .array_type => tree.arrayType(parent_node),
+                    .array_type_sentinel => tree.arrayTypeSentinel(parent_node),
+                    else => unreachable,
+                };
+                const node = full.ast.sentinel;
+                const main_tokens = tree.nodes.items(.main_token);
+                const tok_index = main_tokens[node];
+                const token_starts = tree.tokens.items(.start);
+                return token_starts[tok_index];
+            },
+            .node_offset_array_type_elem => |node_off| {
+                const tree = try src_loc.file_scope.getTree(gpa);
+                const node_tags = tree.nodes.items(.tag);
+                const parent_node = src_loc.declRelativeToNodeIndex(node_off);
+
+                const full: Ast.full.ArrayType = switch (node_tags[parent_node]) {
+                    .array_type => tree.arrayType(parent_node),
+                    .array_type_sentinel => tree.arrayTypeSentinel(parent_node),
+                    else => unreachable,
+                };
+                const node = full.ast.elem_type;
+                const main_tokens = tree.nodes.items(.main_token);
+                const tok_index = main_tokens[node];
+                const token_starts = tree.tokens.items(.start);
+                return token_starts[tok_index];
+            },
         }
     }
 
@@ -2014,6 +2134,24 @@ pub const LazySrcLoc = union(enum) {
     /// expression AST node. Next, navigate to the string literal of the `extern "foo"`.
     /// The Decl is determined contextually.
     node_offset_lib_name: i32,
+    /// The source location points to the len expression of an `[N:S]T`
+    /// expression, found by taking this AST node index offset from the containing
+    /// Decl AST node, which points to an `[N:S]T` expression AST node. Next, navigate
+    /// to the len expression.
+    /// The Decl is determined contextually.
+    node_offset_array_type_len: i32,
+    /// The source location points to the sentinel expression of an `[N:S]T`
+    /// expression, found by taking this AST node index offset from the containing
+    /// Decl AST node, which points to an `[N:S]T` expression AST node. Next, navigate
+    /// to the sentinel expression.
+    /// The Decl is determined contextually.
+    node_offset_array_type_sentinel: i32,
+    /// The source location points to the elem expression of an `[N:S]T`
+    /// expression, found by taking this AST node index offset from the containing
+    /// Decl AST node, which points to an `[N:S]T` expression AST node. Next, navigate
+    /// to the elem expression.
+    /// The Decl is determined contextually.
+    node_offset_array_type_elem: i32,
 
     /// Upgrade to a `SrcLoc` based on the `Decl` provided.
     pub fn toSrcLoc(lazy: LazySrcLoc, decl: *Decl) SrcLoc {
@@ -2059,6 +2197,9 @@ pub const LazySrcLoc = union(enum) {
             .node_offset_fn_type_ret_ty,
             .node_offset_anyframe_type,
             .node_offset_lib_name,
+            .node_offset_array_type_len,
+            .node_offset_array_type_sentinel,
+            .node_offset_array_type_elem,
             => .{
                 .file_scope = decl.getFileScope(),
                 .parent_decl_node = decl.src_node,
@@ -4052,36 +4193,6 @@ pub fn optionalType(arena: *Allocator, child_type: Type) Allocator.Error!Type {
         ),
         else => return Type.Tag.optional.create(arena, child_type),
     }
-}
-
-pub fn arrayType(
-    arena: *Allocator,
-    len: u64,
-    sentinel: ?Value,
-    elem_type: Type,
-) Allocator.Error!Type {
-    if (elem_type.eql(Type.initTag(.u8))) {
-        if (sentinel) |some| {
-            if (some.eql(Value.initTag(.zero), elem_type)) {
-                return Type.Tag.array_u8_sentinel_0.create(arena, len);
-            }
-        } else {
-            return Type.Tag.array_u8.create(arena, len);
-        }
-    }
-
-    if (sentinel) |some| {
-        return Type.Tag.array_sentinel.create(arena, .{
-            .len = len,
-            .sentinel = some,
-            .elem_type = elem_type,
-        });
-    }
-
-    return Type.Tag.array.create(arena, .{
-        .len = len,
-        .elem_type = elem_type,
-    });
 }
 
 pub fn errorUnionType(

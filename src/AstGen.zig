@@ -1235,7 +1235,15 @@ fn arrayInitExpr(
                     };
                 } else {
                     const sentinel = try comptimeExpr(gz, scope, .{ .ty = elem_type }, array_type.ast.sentinel);
-                    const array_type_inst = try gz.addArrayTypeSentinel(len_inst, elem_type, sentinel);
+                    const array_type_inst = try gz.addPlNode(
+                        .array_type_sentinel,
+                        array_init.ast.type_expr,
+                        Zir.Inst.ArrayTypeSentinel{
+                            .len = len_inst,
+                            .elem_type = elem_type,
+                            .sentinel = sentinel,
+                        },
+                    );
                     break :inst .{
                         .array = array_type_inst,
                         .elem = elem_type,
@@ -1425,7 +1433,15 @@ fn structInitExpr(
                     break :blk try gz.addBin(.array_type, .zero_usize, elem_type);
                 } else blk: {
                     const sentinel = try comptimeExpr(gz, scope, .{ .ty = elem_type }, array_type.ast.sentinel);
-                    break :blk try gz.addArrayTypeSentinel(.zero_usize, elem_type, sentinel);
+                    break :blk try gz.addPlNode(
+                        .array_type_sentinel,
+                        struct_init.ast.type_expr,
+                        Zir.Inst.ArrayTypeSentinel{
+                            .len = .zero_usize,
+                            .elem_type = elem_type,
+                            .sentinel = sentinel,
+                        },
+                    );
                 };
                 const result = try gz.addUnNode(.struct_init_empty, array_type_inst, node);
                 return rvalue(gz, rl, result, node);
@@ -2976,11 +2992,15 @@ fn arrayTypeSentinel(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.I
     {
         return astgen.failNode(len_node, "unable to infer array size", .{});
     }
-    const len = try expr(gz, scope, .{ .coerced_ty = .usize_type }, len_node);
+    const len = try reachableExpr(gz, scope, .{ .coerced_ty = .usize_type }, len_node, node);
     const elem_type = try typeExpr(gz, scope, extra.elem_type);
-    const sentinel = try expr(gz, scope, .{ .coerced_ty = elem_type }, extra.sentinel);
+    const sentinel = try reachableExpr(gz, scope, .{ .coerced_ty = elem_type }, extra.sentinel, node);
 
-    const result = try gz.addArrayTypeSentinel(len, elem_type, sentinel);
+    const result = try gz.addPlNode(.array_type_sentinel, node, Zir.Inst.ArrayTypeSentinel{
+        .len = len,
+        .elem_type = elem_type,
+        .sentinel = sentinel,
+    });
     return rvalue(gz, rl, result, node);
 }
 
@@ -4134,7 +4154,7 @@ fn unionDeclInner(
         if (member.comptime_token) |comptime_token| {
             return astgen.failTok(comptime_token, "union fields cannot be marked comptime", .{});
         }
-        try fields_data.ensureUnusedCapacity(gpa, if (node_tags[member.ast.type_expr] != .@"anytype") 4 else 3);
+        try fields_data.ensureUnusedCapacity(gpa, 4);
 
         const field_name = try astgen.identAsString(member.ast.name_token);
         fields_data.appendAssumeCapacity(field_name);
@@ -4149,9 +4169,14 @@ fn unionDeclInner(
             (@as(u32, @boolToInt(have_value)) << 30) |
             (@as(u32, @boolToInt(unused)) << 31);
 
-        if (have_type and node_tags[member.ast.type_expr] != .@"anytype") {
-            const field_type = try typeExpr(&block_scope, &namespace.base, member.ast.type_expr);
+        if (have_type) {
+            const field_type: Zir.Inst.Ref = if (node_tags[member.ast.type_expr] == .@"anytype")
+                .none
+            else
+                try typeExpr(&block_scope, &namespace.base, member.ast.type_expr);
             fields_data.appendAssumeCapacity(@enumToInt(field_type));
+        } else if (arg_inst == .none and !have_auto_enum) {
+            return astgen.failNode(member_node, "union field missing type", .{});
         }
         if (have_align) {
             const align_inst = try expr(&block_scope, &block_scope.base, .{ .ty = .u32_type }, member.ast.align_expr);
@@ -4162,6 +4187,20 @@ fn unionDeclInner(
                 return astgen.failNodeNotes(
                     node,
                     "explicitly valued tagged union missing integer tag type",
+                    .{},
+                    &[_]u32{
+                        try astgen.errNoteNode(
+                            member.ast.value_expr,
+                            "tag value specified here",
+                            .{},
+                        ),
+                    },
+                );
+            }
+            if (!have_auto_enum) {
+                return astgen.failNodeNotes(
+                    node,
+                    "explicitly valued tagged union requires inferred enum tag type",
                     .{},
                     &[_]u32{
                         try astgen.errNoteNode(
@@ -6540,7 +6579,7 @@ fn identifier(
     const ident_name = try astgen.identifierTokenString(ident_token);
 
     if (ident_name_raw[0] != '@') {
-        if (simple_types.get(ident_name)) |zir_const_ref| {
+        if (primitives.get(ident_name)) |zir_const_ref| {
             return rvalue(gz, rl, zir_const_ref, ident);
         }
 
@@ -8071,7 +8110,7 @@ fn calleeExpr(
     }
 }
 
-pub const simple_types = std.ComptimeStringMap(Zir.Inst.Ref, .{
+const primitives = std.ComptimeStringMap(Zir.Inst.Ref, .{
     .{ "anyerror", .anyerror_type },
     .{ "anyframe", .anyframe_type },
     .{ "bool", .bool_type },
@@ -9998,32 +10037,6 @@ const GenZir = struct {
         return indexToRef(new_index);
     }
 
-    fn addArrayTypeSentinel(
-        gz: *GenZir,
-        len: Zir.Inst.Ref,
-        sentinel: Zir.Inst.Ref,
-        elem_type: Zir.Inst.Ref,
-    ) !Zir.Inst.Ref {
-        const gpa = gz.astgen.gpa;
-        try gz.instructions.ensureUnusedCapacity(gpa, 1);
-        try gz.astgen.instructions.ensureUnusedCapacity(gpa, 1);
-
-        const payload_index = try gz.astgen.addExtra(Zir.Inst.ArrayTypeSentinel{
-            .sentinel = sentinel,
-            .elem_type = elem_type,
-        });
-        const new_index = @intCast(Zir.Inst.Index, gz.astgen.instructions.len);
-        gz.astgen.instructions.appendAssumeCapacity(.{
-            .tag = .array_type_sentinel,
-            .data = .{ .array_type_sentinel = .{
-                .len = len,
-                .payload_index = payload_index,
-            } },
-        });
-        gz.instructions.appendAssumeCapacity(new_index);
-        return indexToRef(new_index);
-    }
-
     fn addUnTok(
         gz: *GenZir,
         tag: Zir.Inst.Tag,
@@ -10505,8 +10518,8 @@ fn nullTerminatedString(astgen: AstGen, index: usize) [*:0]const u8 {
     return @ptrCast([*:0]const u8, astgen.string_bytes.items.ptr) + index;
 }
 
-fn isPrimitive(name: []const u8) bool {
-    if (simple_types.get(name) != null) return true;
+pub fn isPrimitive(name: []const u8) bool {
+    if (primitives.get(name) != null) return true;
     if (name.len < 2) return false;
     const first_c = name[0];
     if (first_c != 'i' and first_c != 'u') return false;

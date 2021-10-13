@@ -210,8 +210,8 @@ pub const Inst = struct {
         /// `[N]T` syntax. No source location provided.
         /// Uses the `bin` union field. lhs is length, rhs is element type.
         array_type,
-        /// `[N:S]T` syntax. No source location provided.
-        /// Uses the `array_type_sentinel` field.
+        /// `[N:S]T` syntax. Source location is the array type expression node.
+        /// Uses the `pl_node` union field. Payload is `ArrayTypeSentinel`.
         array_type_sentinel,
         /// `@Vector` builtin.
         /// Uses the `pl_node` union field with `Bin` payload.
@@ -1256,7 +1256,7 @@ pub const Inst = struct {
                 .array_cat = .pl_node,
                 .array_mul = .pl_node,
                 .array_type = .bin,
-                .array_type_sentinel = .array_type_sentinel,
+                .array_type_sentinel = .pl_node,
                 .vector_type = .pl_node,
                 .elem_type = .un_node,
                 .indexable_ptr_len = .un_node,
@@ -1644,7 +1644,7 @@ pub const Inst = struct {
     /// be derived by subtracting `typed_value_map.len`.
     ///
     /// When adding a tag to this enum, consider adding a corresponding entry to
-    /// `simple_types` in astgen.
+    /// `primitives` in astgen.
     ///
     /// The tag type is specified so that it is safe to bitcast between `[]u32`
     /// and `[]Ref`.
@@ -2137,11 +2137,6 @@ pub const Inst = struct {
         node: i32,
         int: u64,
         float: f64,
-        array_type_sentinel: struct {
-            len: Ref,
-            /// index into extra, points to an `ArrayTypeSentinel`
-            payload_index: u32,
-        },
         ptr_type_simple: struct {
             is_allowzero: bool,
             is_mutable: bool,
@@ -2245,7 +2240,6 @@ pub const Inst = struct {
             node,
             int,
             float,
-            array_type_sentinel,
             ptr_type_simple,
             ptr_type,
             int_type,
@@ -2427,6 +2421,7 @@ pub const Inst = struct {
     };
 
     pub const ArrayTypeSentinel = struct {
+        len: Ref,
         sentinel: Ref,
         elem_type: Ref,
     };
@@ -2686,6 +2681,7 @@ pub const Inst = struct {
     /// 9. fields: { // for every fields_len
     ///        field_name: u32, // null terminated string index
     ///        field_type: Ref, // if corresponding bit is set
+    ///        - if none, means `anytype`.
     ///        align: Ref, // if corresponding bit is set
     ///        tag_value: Ref, // if corresponding bit is set
     ///    }
