@@ -4,6 +4,7 @@ const TableHeader = uefi.tables.TableHeader;
 const Time = uefi.Time;
 const TimeCapabilities = uefi.TimeCapabilities;
 const Status = uefi.Status;
+const MemoryDescriptor = uefi.tables.MemoryDescriptor;
 
 /// Runtime services are provided by the firmware before and after exitBootServices has been called.
 ///
@@ -22,22 +23,26 @@ pub const RuntimeServices = extern struct {
     setTime: Status, // TODO
     getWakeupTime: Status, // TODO
     setWakeupTime: Status, // TODO
-    setVirtualAddressMap: Status, // TODO
-    convertPointer: Status, // TODO
+
+    /// Changes the runtime addressing mode of EFI firmware from physical to virtual.
+    setVirtualAddressMap: fn (usize, usize, u32, [*]MemoryDescriptor) callconv(.C) Status,
+
+    /// Determines the new virtual address that is to be used on subsequent memory accesses.
+    convertPointer: fn (usize, **anyopaque) callconv(.C) Status,
 
     /// Returns the value of a variable.
-    getVariable: fn ([*:0]const u16, *align(8) const Guid, ?*u32, *usize, ?*c_void) callconv(.C) Status,
+    getVariable: fn ([*:0]const u16, *align(8) const Guid, ?*u32, *usize, ?*anyopaque) callconv(.C) Status,
 
     /// Enumerates the current variable names.
     getNextVariableName: fn (*usize, [*:0]u16, *align(8) Guid) callconv(.C) Status,
 
     /// Sets the value of a variable.
-    setVariable: fn ([*:0]const u16, *align(8) const Guid, u32, usize, *c_void) callconv(.C) Status,
+    setVariable: fn ([*:0]const u16, *align(8) const Guid, u32, usize, *anyopaque) callconv(.C) Status,
 
     getNextHighMonotonicCount: Status, // TODO
 
     /// Resets the entire platform.
-    resetSystem: fn (ResetType, Status, usize, ?*const c_void) callconv(.C) noreturn,
+    resetSystem: fn (ResetType, Status, usize, ?*const anyopaque) callconv(.C) noreturn,
 
     updateCapsule: Status, // TODO
     queryCapsuleCapabilities: Status, // TODO

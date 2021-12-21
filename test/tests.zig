@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const debug = std.debug;
-const warn = debug.warn;
 const build = std.build;
 const CrossTarget = std.zig.CrossTarget;
 const io = std.io;
@@ -190,7 +189,7 @@ const test_targets = blk: {
         //    .target = .{
         //        .cpu_arch = .mips,
         //        .os_tag = .linux,
-        //        .abi = .gnu,
+        //        .abi = .gnueabihf,
         //    },
         //    .link_libc = true,
         //},
@@ -217,7 +216,7 @@ const test_targets = blk: {
         //    .target = .{
         //        .cpu_arch = .mipsel,
         //        .os_tag = .linux,
-        //        .abi = .gnu,
+        //        .abi = .gnueabihf,
         //    },
         //    .link_libc = true,
         //},
@@ -237,6 +236,15 @@ const test_targets = blk: {
             },
             .link_libc = true,
         },
+        // https://github.com/ziglang/zig/issues/2256
+        //TestTarget{
+        //    .target = .{
+        //        .cpu_arch = .powerpc,
+        //        .os_tag = .linux,
+        //        .abi = .gnueabihf,
+        //    },
+        //    .link_libc = true,
+        //},
 
         TestTarget{
             .target = .{
@@ -271,8 +279,14 @@ const test_targets = blk: {
                 .os_tag = .macos,
                 .abi = .gnu,
             },
-            // https://github.com/ziglang/zig/issues/3295
-            .disable_native = true,
+        },
+
+        TestTarget{
+            .target = .{
+                .cpu_arch = .aarch64,
+                .os_tag = .macos,
+                .abi = .gnu,
+            },
         },
 
         TestTarget{
@@ -508,11 +522,6 @@ pub fn addPkgTests(
     skip_single_threaded: bool,
     skip_non_native: bool,
     skip_libc: bool,
-    is_wine_enabled: bool,
-    is_qemu_enabled: bool,
-    is_wasmtime_enabled: bool,
-    is_darling_enabled: bool,
-    glibc_dir: ?[]const u8,
 ) *build.Step {
     const step = b.step(b.fmt("test-{s}", .{name}), desc);
 
@@ -569,11 +578,6 @@ pub fn addPkgTests(
             these_tests.linkSystemLibrary("c");
         }
         these_tests.overrideZigLibDir("lib");
-        these_tests.enable_wine = is_wine_enabled;
-        these_tests.enable_qemu = is_qemu_enabled;
-        these_tests.enable_wasmtime = is_wasmtime_enabled;
-        these_tests.enable_darling = is_darling_enabled;
-        these_tests.glibc_multi_install_dir = glibc_dir;
         these_tests.addIncludeDir("test");
 
         step.dependOn(&these_tests.step);
@@ -716,7 +720,7 @@ pub const StackTracesContext = struct {
             defer args.deinit();
             args.append(full_exe_path) catch unreachable;
 
-            warn("Test {d}/{d} {s}...", .{ self.test_index + 1, self.context.test_index, self.name });
+            std.debug.print("Test {d}/{d} {s}...", .{ self.test_index + 1, self.context.test_index, self.name });
 
             const child = std.ChildProcess.init(args.items, b.allocator) catch unreachable;
             defer child.deinit();
@@ -745,7 +749,7 @@ pub const StackTracesContext = struct {
                 .Exited => |code| {
                     const expect_code: u32 = 1;
                     if (code != expect_code) {
-                        warn("Process {s} exited with error code {d} but expected code {d}\n", .{
+                        std.debug.print("Process {s} exited with error code {d} but expected code {d}\n", .{
                             full_exe_path,
                             code,
                             expect_code,
@@ -755,17 +759,17 @@ pub const StackTracesContext = struct {
                     }
                 },
                 .Signal => |signum| {
-                    warn("Process {s} terminated on signal {d}\n", .{ full_exe_path, signum });
+                    std.debug.print("Process {s} terminated on signal {d}\n", .{ full_exe_path, signum });
                     printInvocation(args.items);
                     return error.TestFailed;
                 },
                 .Stopped => |signum| {
-                    warn("Process {s} stopped on signal {d}\n", .{ full_exe_path, signum });
+                    std.debug.print("Process {s} stopped on signal {d}\n", .{ full_exe_path, signum });
                     printInvocation(args.items);
                     return error.TestFailed;
                 },
                 .Unknown => |code| {
-                    warn("Process {s} terminated unexpectedly with error code {d}\n", .{ full_exe_path, code });
+                    std.debug.print("Process {s} terminated unexpectedly with error code {d}\n", .{ full_exe_path, code });
                     printInvocation(args.items);
                     return error.TestFailed;
                 },
@@ -829,7 +833,7 @@ pub const StackTracesContext = struct {
             };
 
             if (!mem.eql(u8, self.expect_output, got)) {
-                warn(
+                std.debug.print(
                     \\
                     \\========= Expected this output: =========
                     \\{s}
@@ -839,7 +843,7 @@ pub const StackTracesContext = struct {
                 , .{ self.expect_output, got });
                 return error.TestFailed;
             }
-            warn("OK\n", .{});
+            std.debug.print("OK\n", .{});
         }
     };
 };
@@ -1003,14 +1007,14 @@ pub const GenHContext = struct {
             const self = @fieldParentPtr(GenHCmpOutputStep, "step", step);
             const b = self.context.b;
 
-            warn("Test {d}/{d} {s}...", .{ self.test_index + 1, self.context.test_index, self.name });
+            std.debug.print("Test {d}/{d} {s}...", .{ self.test_index + 1, self.context.test_index, self.name });
 
             const full_h_path = self.obj.getOutputHPath();
             const actual_h = try io.readFileAlloc(b.allocator, full_h_path);
 
             for (self.case.expected_lines.items) |expected_line| {
                 if (mem.indexOf(u8, actual_h, expected_line) == null) {
-                    warn(
+                    std.debug.print(
                         \\
                         \\========= Expected this output: ================
                         \\{s}
@@ -1021,7 +1025,7 @@ pub const GenHContext = struct {
                     return error.TestFailed;
                 }
             }
-            warn("OK\n", .{});
+            std.debug.print("OK\n", .{});
         }
     };
 
@@ -1077,7 +1081,7 @@ pub const GenHContext = struct {
 
 fn printInvocation(args: []const []const u8) void {
     for (args) |arg| {
-        warn("{s} ", .{arg});
+        std.debug.print("{s} ", .{arg});
     }
-    warn("\n", .{});
+    std.debug.print("\n", .{});
 }

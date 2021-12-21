@@ -31,6 +31,8 @@ pub const File = struct {
     pub const Handle = os.fd_t;
     pub const Mode = os.mode_t;
     pub const INode = os.ino_t;
+    pub const Uid = os.uid_t;
+    pub const Gid = os.gid_t;
 
     pub const Kind = enum {
         BlockDevice,
@@ -362,6 +364,27 @@ pub const File = struct {
         };
     }
 
+    pub const ChmodError = std.os.FChmodError;
+
+    /// Changes the mode of the file.
+    /// The process must have the correct privileges in order to do this
+    /// successfully, or must have the effective user ID matching the owner
+    /// of the file.
+    pub fn chmod(self: File, new_mode: Mode) ChmodError!void {
+        try os.fchmod(self.handle, new_mode);
+    }
+
+    pub const ChownError = std.os.FChownError;
+
+    /// Changes the owner and group of the file.
+    /// The process must have the correct privileges in order to do this
+    /// successfully. The group may be changed by the owner of the file to
+    /// any group of which the owner is a member. If the owner or group is
+    /// specified as `null`, the ID is not changed.
+    pub fn chown(self: File, owner: ?Uid, group: ?Gid) ChownError!void {
+        try os.fchown(self.handle, owner, group);
+    }
+
     pub const UpdateTimesError = os.FutimensError || windows.SetFileTimeError;
 
     /// The underlying file system may have a different granularity than nanoseconds,
@@ -397,7 +420,7 @@ pub const File = struct {
     /// Reads all the bytes from the current position to the end of the file.
     /// On success, caller owns returned buffer.
     /// If the file is larger than `max_bytes`, returns `error.FileTooBig`.
-    pub fn readToEndAlloc(self: File, allocator: *mem.Allocator, max_bytes: usize) ![]u8 {
+    pub fn readToEndAlloc(self: File, allocator: mem.Allocator, max_bytes: usize) ![]u8 {
         return self.readToEndAllocOptions(allocator, max_bytes, null, @alignOf(u8), null);
     }
 
@@ -409,7 +432,7 @@ pub const File = struct {
     /// Allows specifying alignment and a sentinel value.
     pub fn readToEndAllocOptions(
         self: File,
-        allocator: *mem.Allocator,
+        allocator: mem.Allocator,
         max_bytes: usize,
         size_hint: ?usize,
         comptime alignment: u29,

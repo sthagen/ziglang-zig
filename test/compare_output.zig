@@ -179,7 +179,7 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
     cases.addC("expose function pointer to C land",
         \\const c = @cImport(@cInclude("stdlib.h"));
         \\
-        \\export fn compare_fn(a: ?*const c_void, b: ?*const c_void) c_int {
+        \\export fn compare_fn(a: ?*const anyopaque, b: ?*const anyopaque) c_int {
         \\    const a_int = @ptrCast(*const i32, @alignCast(@alignOf(i32), a));
         \\    const b_int = @ptrCast(*const i32, @alignCast(@alignOf(i32), b));
         \\    if (a_int.* < b_int.*) {
@@ -194,7 +194,7 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\pub export fn main() c_int {
         \\    var array = [_]u32{ 1, 7, 3, 2, 0, 9, 4, 8, 6, 5 };
         \\
-        \\    c.qsort(@ptrCast(?*c_void, &array), @intCast(c_ulong, array.len), @sizeOf(i32), compare_fn);
+        \\    c.qsort(@ptrCast(?*anyopaque, &array), @intCast(c_ulong, array.len), @sizeOf(i32), compare_fn);
         \\
         \\    for (array) |item, i| {
         \\        if (item != i) {
@@ -435,8 +435,8 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\pub const log_level: std.log.Level = .debug;
         \\
         \\pub const scope_levels = [_]std.log.ScopeLevel{
-        \\    .{ .scope = .a, .level = .alert },
-        \\    .{ .scope = .c, .level = .emerg },
+        \\    .{ .scope = .a, .level = .warn },
+        \\    .{ .scope = .c, .level = .err },
         \\};
         \\
         \\const loga = std.log.scoped(.a);
@@ -452,10 +452,6 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\    logb.info("", .{});
         \\    logc.info("", .{});
         \\
-        \\    loga.notice("", .{});
-        \\    logb.notice("", .{});
-        \\    logc.notice("", .{});
-        \\
         \\    loga.warn("", .{});
         \\    logb.warn("", .{});
         \\    logc.warn("", .{});
@@ -463,18 +459,6 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\    loga.err("", .{});
         \\    logb.err("", .{});
         \\    logc.err("", .{});
-        \\
-        \\    loga.crit("", .{});
-        \\    logb.crit("", .{});
-        \\    logc.crit("", .{});
-        \\
-        \\    loga.alert("", .{});
-        \\    logb.alert("", .{});
-        \\    logc.alert("", .{});
-        \\
-        \\    loga.emerg("", .{});
-        \\    logb.emerg("", .{});
-        \\    logc.emerg("", .{});
         \\}
         \\pub fn log(
         \\    comptime level: std.log.Level,
@@ -483,22 +467,18 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\    args: anytype,
         \\) void {
         \\    const level_txt = comptime level.asText();
-        \\    const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
+        \\    const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "):";
         \\    const stdout = std.io.getStdOut().writer();
         \\    nosuspend stdout.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
         \\}
     ,
-        \\debug(b): 
-        \\info(b): 
-        \\notice(b): 
-        \\warning(b): 
-        \\error(b): 
-        \\critical(b): 
-        \\alert(a): 
-        \\alert(b): 
-        \\emergency(a): 
-        \\emergency(b): 
-        \\emergency(c): 
+        \\debug(b):
+        \\info(b):
+        \\warning(a):
+        \\warning(b):
+        \\error(a):
+        \\error(b):
+        \\error(c):
         \\
     );
 
@@ -511,12 +491,12 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\pub fn main() !void {
         \\    var allocator_buf: [10]u8 = undefined;
         \\    var fixedBufferAllocator = std.mem.validationWrap(std.heap.FixedBufferAllocator.init(&allocator_buf));
-        \\    const allocator = &std.heap.loggingAllocator(&fixedBufferAllocator.allocator).allocator;
+        \\    const allocator = std.heap.loggingAllocator(fixedBufferAllocator.allocator()).allocator();
         \\
         \\    var a = try allocator.alloc(u8, 10);
         \\    a = allocator.shrink(a, 5);
         \\    try std.testing.expect(a.len == 5);
-        \\    try std.testing.expectError(error.OutOfMemory, allocator.resize(a, 20));
+        \\    try std.testing.expect(allocator.resize(a, 20) == null);
         \\    allocator.free(a);
         \\}
         \\
@@ -534,8 +514,8 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
     ,
         \\debug: alloc - success - len: 10, ptr_align: 1, len_align: 0
         \\debug: shrink - success - 10 to 5, len_align: 0, buf_align: 1
-        \\critical: expand - failure: OutOfMemory - 5 to 20, len_align: 0, buf_align: 1
-        \\debug: free - success - len: 5
+        \\error: expand - failure - 5 to 20, len_align: 0, buf_align: 1
+        \\debug: free - len: 5
         \\
     );
 }

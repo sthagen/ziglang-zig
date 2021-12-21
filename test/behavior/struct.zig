@@ -6,37 +6,28 @@ const expectEqual = std.testing.expectEqual;
 const expectEqualSlices = std.testing.expectEqualSlices;
 const maxInt = std.math.maxInt;
 
+top_level_field: i32,
+
+test "top level fields" {
+    var instance = @This(){
+        .top_level_field = 1234,
+    };
+    instance.top_level_field += 1;
+    try expect(@as(i32, 1235) == instance.top_level_field);
+}
+
 const StructWithNoFields = struct {
     fn add(a: i32, b: i32) i32 {
         return a + b;
     }
 };
 
-test "call struct static method" {
-    const result = StructWithNoFields.add(3, 4);
-    try expect(result == 7);
-}
-
-const should_be_11 = StructWithNoFields.add(5, 6);
-
-test "invoke static method in global scope" {
-    try expect(should_be_11 == 11);
-}
-
-const empty_global_instance = StructWithNoFields{};
-
-test "return empty struct instance" {
-    _ = returnEmptyStructInstance();
-}
-fn returnEmptyStructInstance() StructWithNoFields {
-    return empty_global_instance;
-}
-
 const StructFoo = struct {
     a: i32,
     b: bool,
     c: f32,
 };
+
 test "structs" {
     var foo: StructFoo = undefined;
     @memset(@ptrCast([*]u8, &foo), 0, @sizeOf(StructFoo));
@@ -64,6 +55,26 @@ test "struct byval assign" {
     try expect(foo2.a == 1234);
 }
 
+test "call struct static method" {
+    const result = StructWithNoFields.add(3, 4);
+    try expect(result == 7);
+}
+
+const should_be_11 = StructWithNoFields.add(5, 6);
+
+test "invoke static method in global scope" {
+    try expect(should_be_11 == 11);
+}
+
+const empty_global_instance = StructWithNoFields{};
+
+test "return empty struct instance" {
+    _ = returnEmptyStructInstance();
+}
+fn returnEmptyStructInstance() StructWithNoFields {
+    return empty_global_instance;
+}
+
 const Node = struct {
     val: Val,
     next: *Node,
@@ -72,6 +83,23 @@ const Node = struct {
 const Val = struct {
     x: i32,
 };
+
+test "fn call of struct field" {
+    const Foo = struct {
+        ptr: fn () i32,
+    };
+    const S = struct {
+        fn aFunc() i32 {
+            return 13;
+        }
+
+        fn callStructField(foo: Foo) i32 {
+            return foo.ptr();
+        }
+    };
+
+    try expect(S.callStructField(Foo{ .ptr = S.aFunc }) == 13);
+}
 
 test "struct initializer" {
     const val = Val{ .x = 42 };
@@ -91,33 +119,12 @@ test "call member function directly" {
     try expect(result == 1234);
 }
 
-test "struct point to self" {
-    var root: Node = undefined;
-    root.val.x = 1;
-
-    var node: Node = undefined;
-    node.next = &root;
-    node.val.x = 2;
-
-    root.next = &node;
-
-    try expect(node.next.next.next.val.x == 1);
+test "store member function in variable" {
+    const instance = MemberFnTestFoo{ .x = 1234 };
+    const memberFn = MemberFnTestFoo.member;
+    const result = memberFn(instance);
+    try expect(result == 1234);
 }
-
-test "void struct fields" {
-    const foo = VoidStructFieldsFoo{
-        .a = void{},
-        .b = 1,
-        .c = void{},
-    };
-    try expect(foo.b == 1);
-    try expect(@sizeOf(VoidStructFieldsFoo) == 4);
-}
-const VoidStructFieldsFoo = struct {
-    a: void,
-    b: i32,
-    c: void,
-};
 
 test "member functions" {
     const r = MemberFnRand{ .seed = 1234 };
@@ -145,10 +152,50 @@ fn makeBar2(x: i32, y: i32) Bar {
     };
 }
 
-test "return empty struct from fn" {
-    _ = testReturnEmptyStructFromFn();
+test "call method with mutable reference to struct with no fields" {
+    const S = struct {
+        fn doC(s: *const @This()) bool {
+            _ = s;
+            return true;
+        }
+        fn do(s: *@This()) bool {
+            _ = s;
+            return true;
+        }
+    };
+
+    var s = S{};
+    try expect(S.doC(&s));
+    try expect(s.doC());
+    try expect(S.do(&s));
+    try expect(s.do());
 }
-const EmptyStruct2 = struct {};
-fn testReturnEmptyStructFromFn() EmptyStruct2 {
-    return EmptyStruct2{};
+
+test "usingnamespace within struct scope" {
+    const S = struct {
+        usingnamespace struct {
+            pub fn inner() i32 {
+                return 42;
+            }
+        };
+    };
+    try expect(@as(i32, 42) == S.inner());
+}
+
+test "struct field init with catch" {
+    const S = struct {
+        fn doTheTest() !void {
+            var x: anyerror!isize = 1;
+            var req = Foo{
+                .field = x catch undefined,
+            };
+            try expect(req.field == 1);
+        }
+
+        pub const Foo = extern struct {
+            field: isize,
+        };
+    };
+    try S.doTheTest();
+    comptime try S.doTheTest();
 }

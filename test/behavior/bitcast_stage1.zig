@@ -5,22 +5,6 @@ const expectEqual = std.testing.expectEqual;
 const maxInt = std.math.maxInt;
 const native_endian = builtin.target.cpu.arch.endian();
 
-test "@bitCast enum to its integer type" {
-    const SOCK = enum(c_int) {
-        A,
-        B,
-
-        fn testBitCastExternEnum() !void {
-            var SOCK_DGRAM = @This().B;
-            var sock_dgram = @bitCast(c_int, SOCK_DGRAM);
-            try expect(sock_dgram == 1);
-        }
-    };
-
-    try SOCK.testBitCastExternEnum();
-    comptime try SOCK.testBitCastExternEnum();
-}
-
 test "@bitCast packed structs at runtime and comptime" {
     const Full = packed struct {
         number: u16,
@@ -111,12 +95,6 @@ test "implicit cast to error union by returning" {
     comptime try S.entry();
 }
 
-// issue #3010: compiler segfault
-test "bitcast literal [4]u8 param to u32" {
-    const ip = @bitCast(u32, [_]u8{ 255, 255, 255, 255 });
-    try expect(ip == maxInt(u32));
-}
-
 test "bitcast packed struct literal to byte" {
     const Foo = packed struct {
         value: u8,
@@ -150,10 +128,4 @@ test "triple level result location with bitcast sandwich passed as tuple element
         }
     };
     try S.foo(.{@as(f64, @bitCast(f32, @as(u32, 0x414570A4)))});
-}
-
-test "bitcast generates a temporary value" {
-    var y = @as(u16, 0x55AA);
-    const x = @bitCast(u16, @bitCast([2]u8, y));
-    try expectEqual(y, x);
 }

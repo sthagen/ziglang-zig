@@ -58,7 +58,7 @@ cdir: ?CodeDirectory = null,
 
 pub fn calcAdhocSignature(
     self: *CodeSignature,
-    allocator: *Allocator,
+    allocator: Allocator,
     file: fs.File,
     id: []const u8,
     text_segment: macho.segment_command_64,
@@ -102,7 +102,7 @@ pub fn calcAdhocSignature(
     var buffer = try allocator.alloc(u8, page_size);
     defer allocator.free(buffer);
 
-    try cdir.data.ensureTotalCapacity(allocator, total_pages * hash_size + id.len + 1);
+    try cdir.data.ensureTotalCapacityPrecise(allocator, total_pages * hash_size + id.len + 1);
 
     // 1. Save the identifier and update offsets
     cdir.inner.identOffset = cdir.inner.length;
@@ -145,7 +145,7 @@ pub fn write(self: CodeSignature, writer: anytype) !void {
     try self.cdir.?.write(writer);
 }
 
-pub fn deinit(self: *CodeSignature, allocator: *Allocator) void {
+pub fn deinit(self: *CodeSignature, allocator: Allocator) void {
     if (self.cdir) |*cdir| {
         cdir.data.deinit(allocator);
     }

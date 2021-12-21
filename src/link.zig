@@ -18,6 +18,22 @@ const wasi_libc = @import("wasi_libc.zig");
 const Air = @import("Air.zig");
 const Liveness = @import("Liveness.zig");
 
+pub const SystemLib = struct {
+    needed: bool = false,
+};
+
+pub fn hashAddSystemLibs(
+    hh: *Cache.HashHelper,
+    hm: std.StringArrayHashMapUnmanaged(SystemLib),
+) void {
+    const keys = hm.keys();
+    hh.add(keys.len);
+    hh.addListOfBytes(keys);
+    for (hm.values()) |value| {
+        hh.add(value.needed);
+    }
+}
+
 pub const producer_string = if (builtin.is_test) "zig test" else "zig " ++ build_options.version;
 
 pub const Emit = struct {
@@ -31,6 +47,8 @@ pub const Options = struct {
     /// This is `null` when -fno-emit-bin is used. When `openPath` or `flush` is called,
     /// it will have already been null-checked.
     emit: ?Emit,
+    /// This is `null` not building a Windows DLL, or when -fno-emit-implib is used.
+    implib_emit: ?Emit,
     target: std.Target,
     output_mode: std.builtin.OutputMode,
     link_mode: std.builtin.LinkMode,
@@ -72,6 +90,7 @@ pub const Options = struct {
     emit_relocs: bool,
     rdynamic: bool,
     z_nodelete: bool,
+    z_notext: bool,
     z_defs: bool,
     z_origin: bool,
     z_noexecstack: bool,
@@ -80,7 +99,13 @@ pub const Options = struct {
     tsaware: bool,
     nxcompat: bool,
     dynamicbase: bool,
+    linker_optimization: u8,
     bind_global_refs_locally: bool,
+    import_memory: bool,
+    initial_memory: ?u64,
+    max_memory: ?u64,
+    export_symbol_names: []const []const u8,
+    global_base: ?u64,
     is_native_os: bool,
     is_native_abi: bool,
     pic: bool,
@@ -90,6 +115,7 @@ pub const Options = struct {
     tsan: bool,
     stack_check: bool,
     red_zone: bool,
+    omit_frame_pointer: bool,
     single_threaded: bool,
     verbose_link: bool,
     dll_export_fns: bool,
@@ -109,22 +135,30 @@ pub const Options = struct {
     version_script: ?[]const u8,
     soname: ?[]const u8,
     llvm_cpu_features: ?[*:0]const u8,
-    /// Extra args passed directly to LLD. Ignored when not linking with LLD.
-    extra_lld_args: []const []const u8,
 
     objects: []const []const u8,
     framework_dirs: []const []const u8,
     frameworks: []const []const u8,
-    system_libs: std.StringArrayHashMapUnmanaged(void),
+    system_libs: std.StringArrayHashMapUnmanaged(SystemLib),
     wasi_emulated_libs: []const wasi_libc.CRTFile,
     lib_dirs: []const []const u8,
     rpath_list: []const []const u8,
 
     version: ?std.builtin.Version,
+    compatibility_version: ?std.builtin.Version,
     libc_installation: ?*const LibCInstallation,
 
     /// WASI-only. Type of WASI execution model ("command" or "reactor").
     wasi_exec_model: std.builtin.WasiExecModel = undefined,
+
+    /// (Zig compiler development) Enable dumping of linker's state as JSON.
+    enable_link_snapshots: bool = false,
+
+    /// (Darwin) Path and version of the native SDK if detected.
+    native_darwin_sdk: ?std.zig.system.darwin.DarwinSDK = null,
+
+    /// (Darwin) Install name for the dylib
+    install_name: ?[]const u8 = null,
 
     pub fn effectiveOutputMode(options: Options) std.builtin.OutputMode {
         return if (options.use_lld) .Obj else options.output_mode;
@@ -135,7 +169,7 @@ pub const File = struct {
     tag: Tag,
     options: Options,
     file: ?fs.File,
-    allocator: *Allocator,
+    allocator: Allocator,
     /// When linking with LLD, this linker code will output an object file only at
     /// this location, and then this path can be placed on the LLD linker line.
     intermediary_basename: ?[]const u8 = null,
@@ -191,13 +225,17 @@ pub const File = struct {
     /// incremental linking fails, falls back to truncating the file and
     /// rewriting it. A malicious file is detected as incremental link failure
     /// and does not cause Illegal Behavior. This operation is not atomic.
-    pub fn openPath(allocator: *Allocator, options: Options) !*File {
+    pub fn openPath(allocator: Allocator, options: Options) !*File {
+        if (options.object_format == .macho) {
+            return &(try MachO.openPath(allocator, options)).base;
+        }
+
         const use_stage1 = build_options.is_stage1 and options.use_stage1;
         if (use_stage1 or options.emit == null) {
             return switch (options.object_format) {
                 .coff => &(try Coff.createEmpty(allocator, options)).base,
                 .elf => &(try Elf.createEmpty(allocator, options)).base,
-                .macho => &(try MachO.createEmpty(allocator, options)).base,
+                .macho => unreachable,
                 .wasm => &(try Wasm.createEmpty(allocator, options)).base,
                 .plan9 => return &(try Plan9.createEmpty(allocator, options)).base,
                 .c => unreachable, // Reported error earlier.
@@ -215,7 +253,7 @@ pub const File = struct {
                 return switch (options.object_format) {
                     .coff => &(try Coff.createEmpty(allocator, options)).base,
                     .elf => &(try Elf.createEmpty(allocator, options)).base,
-                    .macho => &(try MachO.createEmpty(allocator, options)).base,
+                    .macho => unreachable,
                     .plan9 => &(try Plan9.createEmpty(allocator, options)).base,
                     .wasm => &(try Wasm.createEmpty(allocator, options)).base,
                     .c => unreachable, // Reported error earlier.
@@ -235,7 +273,7 @@ pub const File = struct {
         const file: *File = switch (options.object_format) {
             .coff => &(try Coff.openPath(allocator, sub_path, options)).base,
             .elf => &(try Elf.openPath(allocator, sub_path, options)).base,
-            .macho => &(try MachO.openPath(allocator, sub_path, options)).base,
+            .macho => unreachable,
             .plan9 => &(try Plan9.openPath(allocator, sub_path, options)).base,
             .wasm => &(try Wasm.openPath(allocator, sub_path, options)).base,
             .c => &(try C.openPath(allocator, sub_path, options)).base,
@@ -321,9 +359,39 @@ pub const File = struct {
         }
     }
 
+    pub const UpdateDeclError = error{
+        OutOfMemory,
+        Overflow,
+        Underflow,
+        FileTooBig,
+        InputOutput,
+        FilesOpenedWithWrongFlags,
+        IsDir,
+        NoSpaceLeft,
+        Unseekable,
+        PermissionDenied,
+        FileBusy,
+        SystemResources,
+        OperationAborted,
+        BrokenPipe,
+        ConnectionResetByPeer,
+        ConnectionTimedOut,
+        NotOpenForReading,
+        WouldBlock,
+        AccessDenied,
+        Unexpected,
+        DiskQuota,
+        NotOpenForWriting,
+        AnalysisFail,
+        CodegenFail,
+        EmitFail,
+        NameTooLong,
+        CurrentWorkingDirectoryUnlinked,
+    };
+
     /// May be called before or after updateDeclExports but must be called
     /// after allocateDeclIndexes for any given Decl.
-    pub fn updateDecl(base: *File, module: *Module, decl: *Module.Decl) !void {
+    pub fn updateDecl(base: *File, module: *Module, decl: *Module.Decl) UpdateDeclError!void {
         log.debug("updateDecl {*} ({s}), type={}", .{ decl, decl.name, decl.ty });
         assert(decl.has_tv);
         switch (base.tag) {
@@ -341,7 +409,7 @@ pub const File = struct {
 
     /// May be called before or after updateDeclExports but must be called
     /// after allocateDeclIndexes for any given Decl.
-    pub fn updateFunc(base: *File, module: *Module, func: *Module.Fn, air: Air, liveness: Liveness) !void {
+    pub fn updateFunc(base: *File, module: *Module, func: *Module.Fn, air: Air, liveness: Liveness) UpdateDeclError!void {
         log.debug("updateFunc {*} ({s}), type={}", .{
             func.owner_decl, func.owner_decl.name, func.owner_decl.ty,
         });
@@ -358,7 +426,7 @@ pub const File = struct {
         }
     }
 
-    pub fn updateDeclLineNumber(base: *File, module: *Module, decl: *Module.Decl) !void {
+    pub fn updateDeclLineNumber(base: *File, module: *Module, decl: *Module.Decl) UpdateDeclError!void {
         log.debug("updateDeclLineNumber {*} ({s}), line={}", .{
             decl, decl.name, decl.src_line + 1,
         });
@@ -378,12 +446,17 @@ pub const File = struct {
     /// TODO we're transitioning to deleting this function and instead having
     /// each linker backend notice the first time updateDecl or updateFunc is called, or
     /// a callee referenced from AIR.
-    pub fn allocateDeclIndexes(base: *File, decl: *Module.Decl) !void {
+    pub fn allocateDeclIndexes(base: *File, decl: *Module.Decl) error{OutOfMemory}!void {
         log.debug("allocateDeclIndexes {*} ({s})", .{ decl, decl.name });
         switch (base.tag) {
             .coff => return @fieldParentPtr(Coff, "base", base).allocateDeclIndexes(decl),
             .elf => return @fieldParentPtr(Elf, "base", base).allocateDeclIndexes(decl),
-            .macho => return @fieldParentPtr(MachO, "base", base).allocateDeclIndexes(decl),
+            .macho => return @fieldParentPtr(MachO, "base", base).allocateDeclIndexes(decl) catch |err| switch (err) {
+                // remap this error code because we are transitioning away from
+                // `allocateDeclIndexes`.
+                error.Overflow => return error.OutOfMemory,
+                error.OutOfMemory => return error.OutOfMemory,
+            },
             .wasm => return @fieldParentPtr(Wasm, "base", base).allocateDeclIndexes(decl),
             .plan9 => return @fieldParentPtr(Plan9, "base", base).allocateDeclIndexes(decl),
             .c, .spirv => {},
@@ -465,6 +538,7 @@ pub const File = struct {
             try fs.cwd().copyFile(cached_pp_file_path, fs.cwd(), full_out_path, .{});
             return;
         }
+
         const use_lld = build_options.have_llvm and base.options.use_lld;
         if (use_lld and base.options.output_mode == .Lib and base.options.link_mode == .Static) {
             return base.linkAsArchive(comp);
@@ -558,7 +632,7 @@ pub const File = struct {
 
         var arena_allocator = std.heap.ArenaAllocator.init(base.allocator);
         defer arena_allocator.deinit();
-        const arena = &arena_allocator.allocator;
+        const arena = arena_allocator.allocator();
 
         const directory = base.options.emit.?.directory; // Just an alias to make it shorter to type.
 
@@ -576,7 +650,11 @@ pub const File = struct {
                 const full_obj_path = try o_directory.join(arena, &[_][]const u8{obj_basename});
                 break :blk full_obj_path;
             }
-            try base.flushModule(comp);
+            if (base.options.object_format == .macho) {
+                try base.cast(MachO).?.flushObject(comp);
+            } else {
+                try base.flushModule(comp);
+            }
             const obj_basename = base.intermediary_basename.?;
             const full_obj_path = try directory.join(arena, &[_][]const u8{obj_basename});
             break :blk full_obj_path;
@@ -637,10 +715,10 @@ pub const File = struct {
             };
         }
 
-        var object_files = std.ArrayList([*:0]const u8).init(base.allocator);
+        const num_object_files = base.options.objects.len + comp.c_object_table.count() + 2;
+        var object_files = try std.ArrayList([*:0]const u8).initCapacity(base.allocator, num_object_files);
         defer object_files.deinit();
 
-        try object_files.ensureTotalCapacity(base.options.objects.len + comp.c_object_table.count() + 2);
         for (base.options.objects) |obj_path| {
             object_files.appendAssumeCapacity(try arena.dupeZ(u8, obj_path));
         }

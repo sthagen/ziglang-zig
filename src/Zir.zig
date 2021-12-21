@@ -72,6 +72,7 @@ pub fn extraData(code: Zir, comptime T: type, index: usize) struct { data: T, en
             Inst.Ref => @intToEnum(Inst.Ref, code.extra[i]),
             i32 => @bitCast(i32, code.extra[i]),
             Inst.Call.Flags => @bitCast(Inst.Call.Flags, code.extra[i]),
+            Inst.SwitchBlock.Bits => @bitCast(Inst.SwitchBlock.Bits, code.extra[i]),
             else => @compileError("bad field type"),
         };
         i += 1;
@@ -100,7 +101,7 @@ pub fn hasCompileErrors(code: Zir) bool {
     return code.extra[@enumToInt(ExtraIndex.compile_errors)] != 0;
 }
 
-pub fn deinit(code: *Zir, gpa: *Allocator) void {
+pub fn deinit(code: *Zir, gpa: Allocator) void {
     code.instructions.deinit(gpa);
     gpa.free(code.string_bytes);
     gpa.free(code.extra);
@@ -239,10 +240,6 @@ pub const Inst = struct {
         /// Reinterpret the memory representation of a value as a different type.
         /// Uses the pl_node field with payload `Bin`.
         bitcast,
-        /// A typed result location pointer is bitcasted to a new result location pointer.
-        /// The new result location pointer has an inferred type.
-        /// Uses the pl_node field with payload `Bin`.
-        bitcast_result_ptr,
         /// Bitwise NOT. `~`
         /// Uses `un_node`.
         bit_not,
@@ -481,6 +478,7 @@ pub const Inst = struct {
         /// Includes a token source location.
         /// Uses the `un_tok` union field.
         /// The operand needs to get coerced to the function's return type.
+        /// TODO rename this to `ret_tok` because coercion is now done unconditionally in Sema.
         ret_coerce,
         /// Sends control flow back to the function's callee.
         /// The return operand is `error.foo` where `foo` is given by the string.
@@ -546,9 +544,6 @@ pub const Inst = struct {
         /// Returns the type of a value.
         /// Uses the `un_node` field.
         typeof,
-        /// Given a value which is a pointer, returns the element type.
-        /// Uses the `un_node` field.
-        typeof_elem,
         /// Given a value, look at the type of it, which must be an integer type.
         /// Returns the integer type for the RHS of a shift operation.
         /// Uses the `un_node` field.
@@ -618,39 +613,16 @@ pub const Inst = struct {
         enum_literal,
         /// A switch expression. Uses the `pl_node` union field.
         /// AST node is the switch, payload is `SwitchBlock`.
-        /// All prongs of target handled.
         switch_block,
-        /// Same as switch_block, except one or more prongs have multiple items.
-        /// Payload is `SwitchBlockMulti`
-        switch_block_multi,
-        /// Same as switch_block, except has an else prong.
-        switch_block_else,
-        /// Same as switch_block_else, except one or more prongs have multiple items.
-        /// Payload is `SwitchBlockMulti`
-        switch_block_else_multi,
-        /// Same as switch_block, except has an underscore prong.
-        switch_block_under,
-        /// Same as switch_block, except one or more prongs have multiple items.
-        /// Payload is `SwitchBlockMulti`
-        switch_block_under_multi,
-        /// Same as `switch_block` but the target is a pointer to the value being switched on.
-        switch_block_ref,
-        /// Same as `switch_block_multi` but the target is a pointer to the value being switched on.
-        /// Payload is `SwitchBlockMulti`
-        switch_block_ref_multi,
-        /// Same as `switch_block_else` but the target is a pointer to the value being switched on.
-        switch_block_ref_else,
-        /// Same as `switch_block_else_multi` but the target is a pointer to the
-        /// value being switched on.
-        /// Payload is `SwitchBlockMulti`
-        switch_block_ref_else_multi,
-        /// Same as `switch_block_under` but the target is a pointer to the value
-        /// being switched on.
-        switch_block_ref_under,
-        /// Same as `switch_block_under_multi` but the target is a pointer to
-        /// the value being switched on.
-        /// Payload is `SwitchBlockMulti`
-        switch_block_ref_under_multi,
+        /// Produces the value that will be switched on. For example, for
+        /// integers, it returns the integer with no modifications. For tagged unions, it
+        /// returns the active enum tag.
+        /// Uses the `un_node` union field.
+        switch_cond,
+        /// Same as `switch_cond`, except the input operand is a pointer to
+        /// what will be switched on.
+        /// Uses the `un_node` union field.
+        switch_cond_ref,
         /// Produces the capture value for a switch prong.
         /// Uses the `switch_capture` field.
         switch_capture,
@@ -906,9 +878,6 @@ pub const Inst = struct {
         /// Implements the `@fieldParentPtr` builtin.
         /// Uses the `pl_node` union field with payload `FieldParentPtr`.
         field_parent_ptr,
-        /// Implements the `@maximum` builtin.
-        /// Uses the `pl_node` union field with payload `Bin`
-        maximum,
         /// Implements the `@memcpy` builtin.
         /// Uses the `pl_node` union field with payload `Memcpy`.
         memcpy,
@@ -918,6 +887,9 @@ pub const Inst = struct {
         /// Implements the `@minimum` builtin.
         /// Uses the `pl_node` union field with payload `Bin`
         minimum,
+        /// Implements the `@maximum` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`
+        maximum,
         /// Implements the `@asyncCall` builtin.
         /// Uses the `pl_node` union field with payload `AsyncCall`.
         builtin_async_call,
@@ -998,7 +970,6 @@ pub const Inst = struct {
                 .as_node,
                 .bit_and,
                 .bitcast,
-                .bitcast_result_ptr,
                 .bit_or,
                 .block,
                 .block_inline,
@@ -1071,7 +1042,6 @@ pub const Inst = struct {
                 .negate,
                 .negate_wrap,
                 .typeof,
-                .typeof_elem,
                 .xor,
                 .optional_type,
                 .optional_payload_safe,
@@ -1109,17 +1079,8 @@ pub const Inst = struct {
                 .switch_capture_else,
                 .switch_capture_else_ref,
                 .switch_block,
-                .switch_block_multi,
-                .switch_block_else,
-                .switch_block_else_multi,
-                .switch_block_under,
-                .switch_block_under_multi,
-                .switch_block_ref,
-                .switch_block_ref_multi,
-                .switch_block_ref_else,
-                .switch_block_ref_else_multi,
-                .switch_block_ref_under,
-                .switch_block_ref_under_multi,
+                .switch_cond,
+                .switch_cond_ref,
                 .validate_struct_init,
                 .validate_array_init,
                 .struct_init_empty,
@@ -1265,7 +1226,6 @@ pub const Inst = struct {
                 .as_node = .pl_node,
                 .bit_and = .pl_node,
                 .bitcast = .pl_node,
-                .bitcast_result_ptr = .pl_node,
                 .bit_not = .un_node,
                 .bit_or = .pl_node,
                 .block = .pl_node,
@@ -1348,7 +1308,6 @@ pub const Inst = struct {
                 .negate = .un_node,
                 .negate_wrap = .un_node,
                 .typeof = .un_node,
-                .typeof_elem = .un_node,
                 .typeof_log2_int_type = .un_node,
                 .log2_int_type = .un_node,
                 .@"unreachable" = .@"unreachable",
@@ -1367,17 +1326,8 @@ pub const Inst = struct {
                 .ensure_err_payload_void = .un_tok,
                 .enum_literal = .str_tok,
                 .switch_block = .pl_node,
-                .switch_block_multi = .pl_node,
-                .switch_block_else = .pl_node,
-                .switch_block_else_multi = .pl_node,
-                .switch_block_under = .pl_node,
-                .switch_block_under_multi = .pl_node,
-                .switch_block_ref = .pl_node,
-                .switch_block_ref_multi = .pl_node,
-                .switch_block_ref_else = .pl_node,
-                .switch_block_ref_else_multi = .pl_node,
-                .switch_block_ref_under = .pl_node,
-                .switch_block_ref_under_multi = .pl_node,
+                .switch_cond = .un_node,
+                .switch_cond_ref = .un_node,
                 .switch_capture = .switch_capture,
                 .switch_capture_ref = .switch_capture,
                 .switch_capture_multi = .switch_capture,
@@ -1622,6 +1572,9 @@ pub const Inst = struct {
         wasm_memory_size,
         /// `operand` is payload index to `BinNode`.
         wasm_memory_grow,
+        /// The `@prefetch` builtin.
+        /// `operand` is payload index to `BinNode`.
+        prefetch,
 
         pub const InstData = struct {
             opcode: Extended,
@@ -1679,7 +1632,7 @@ pub const Inst = struct {
         f32_type,
         f64_type,
         f128_type,
-        c_void_type,
+        anyopaque_type,
         bool_type,
         void_type,
         type_type,
@@ -1698,6 +1651,7 @@ pub const Inst = struct {
         float_mode_type,
         reduce_op_type,
         call_options_type,
+        prefetch_options_type,
         export_options_type,
         extern_options_type,
         type_info_type,
@@ -1851,9 +1805,9 @@ pub const Inst = struct {
                 .ty = Type.initTag(.type),
                 .val = Value.initTag(.f128_type),
             },
-            .c_void_type = .{
+            .anyopaque_type = .{
                 .ty = Type.initTag(.type),
-                .val = Value.initTag(.c_void_type),
+                .val = Value.initTag(.anyopaque_type),
             },
             .bool_type = .{
                 .ty = Type.initTag(.type),
@@ -1966,6 +1920,10 @@ pub const Inst = struct {
             .call_options_type = .{
                 .ty = Type.initTag(.type),
                 .val = Value.initTag(.call_options_type),
+            },
+            .prefetch_options_type = .{
+                .ty = Type.initTag(.type),
+                .val = Value.initTag(.prefetch_options_type),
             },
             .export_options_type = .{
                 .ty = Type.initTag(.type),
@@ -2466,37 +2424,17 @@ pub const Inst = struct {
         index: u32,
     };
 
-    /// This form is supported when there are no ranges, and exactly 1 item per block.
-    /// Depending on zir tag and len fields, extra fields trail
-    /// this one in the extra array.
-    /// 0. else_body { // If the tag has "_else" or "_under" in it.
+    /// 0. multi_cases_len: u32 // If has_multi_cases is set.
+    /// 1. else_body { // If has_else or has_under is set.
     ///        body_len: u32,
     ///        body member Index for every body_len
     ///     }
-    /// 1. cases: {
-    ///        item: Ref,
-    ///        body_len: u32,
-    ///        body member Index for every body_len
-    ///    } for every cases_len
-    pub const SwitchBlock = struct {
-        operand: Ref,
-        cases_len: u32,
-    };
-
-    /// This form is required when there exists a block which has more than one item,
-    /// or a range.
-    /// Depending on zir tag and len fields, extra fields trail
-    /// this one in the extra array.
-    /// 0. else_body { // If the tag has "_else" or "_under" in it.
-    ///        body_len: u32,
-    ///        body member Index for every body_len
-    ///     }
-    /// 1. scalar_cases: { // for every scalar_cases_len
+    /// 2. scalar_cases: { // for every scalar_cases_len
     ///        item: Ref,
     ///        body_len: u32,
     ///        body member Index for every body_len
     ///     }
-    /// 2. multi_cases: { // for every multi_cases_len
+    /// 3. multi_cases: { // for every multi_cases_len
     ///        items_len: u32,
     ///        ranges_len: u32,
     ///        body_len: u32,
@@ -2507,10 +2445,88 @@ pub const Inst = struct {
     ///        }
     ///        body member Index for every body_len
     ///    }
-    pub const SwitchBlockMulti = struct {
+    pub const SwitchBlock = struct {
+        /// This is always a `switch_cond` or `switch_cond_ref` instruction.
+        /// If it is a `switch_cond_ref` instruction, bits.is_ref is always true.
+        /// If it is a `switch_cond` instruction, bits.is_ref is always false.
+        /// Both `switch_cond` and `switch_cond_ref` return a value, not a pointer,
+        /// that is useful for the case items, but cannot be used for capture values.
+        /// For the capture values, Sema is expected to find the operand of this operand
+        /// and use that.
         operand: Ref,
-        scalar_cases_len: u32,
-        multi_cases_len: u32,
+        bits: Bits,
+
+        pub const Bits = packed struct {
+            /// If true, one or more prongs have multiple items.
+            has_multi_cases: bool,
+            /// If true, there is an else prong. This is mutually exclusive with `has_under`.
+            has_else: bool,
+            /// If true, there is an underscore prong. This is mutually exclusive with `has_else`.
+            has_under: bool,
+            /// If true, the `operand` is a pointer to the value being switched on.
+            /// TODO this flag is redundant with the tag of operand and can be removed.
+            is_ref: bool,
+            scalar_cases_len: ScalarCasesLen,
+
+            pub const ScalarCasesLen = u28;
+
+            pub fn specialProng(bits: Bits) SpecialProng {
+                const has_else: u2 = @boolToInt(bits.has_else);
+                const has_under: u2 = @boolToInt(bits.has_under);
+                return switch ((has_else << 1) | has_under) {
+                    0b00 => .none,
+                    0b01 => .under,
+                    0b10 => .@"else",
+                    0b11 => unreachable,
+                };
+            }
+        };
+
+        pub const ScalarProng = struct {
+            item: Ref,
+            body: []const Index,
+        };
+
+        /// TODO performance optimization: instead of having this helper method
+        /// change the definition of switch_capture instruction to store extra_index
+        /// instead of prong_index. This way, Sema won't be doing O(N^2) iterations
+        /// over the switch prongs.
+        pub fn getScalarProng(
+            self: SwitchBlock,
+            zir: Zir,
+            extra_end: usize,
+            prong_index: usize,
+        ) ScalarProng {
+            var extra_index: usize = extra_end;
+
+            if (self.bits.has_multi_cases) {
+                extra_index += 1;
+            }
+
+            if (self.bits.specialProng() != .none) {
+                const body_len = zir.extra[extra_index];
+                extra_index += 1;
+                const body = zir.extra[extra_index..][0..body_len];
+                extra_index += body.len;
+            }
+
+            var scalar_i: usize = 0;
+            while (true) : (scalar_i += 1) {
+                const item = @intToEnum(Ref, zir.extra[extra_index]);
+                extra_index += 1;
+                const body_len = zir.extra[extra_index];
+                extra_index += 1;
+                const body = zir.extra[extra_index..][0..body_len];
+                extra_index += body.len;
+
+                if (scalar_i < prong_index) continue;
+
+                return .{
+                    .item = item,
+                    .body = body,
+                };
+            }
+        }
     };
 
     pub const Field = struct {
@@ -2934,7 +2950,7 @@ pub const Inst = struct {
 
     /// Trailing: for each `imports_len` there is an Item
     pub const Imports = struct {
-        imports_len: Zir.Inst.Index,
+        imports_len: Inst.Index,
 
         pub const Item = struct {
             /// null terminated string index
@@ -3077,7 +3093,7 @@ pub fn declIteratorInner(zir: Zir, extra_index: usize, decls_len: u32) DeclItera
 
 /// The iterator would have to allocate memory anyway to iterate. So here we populate
 /// an ArrayList as the result.
-pub fn findDecls(zir: Zir, list: *std.ArrayList(Zir.Inst.Index), decl_sub_index: u32) !void {
+pub fn findDecls(zir: Zir, list: *std.ArrayList(Inst.Index), decl_sub_index: u32) !void {
     const block_inst = zir.extra[decl_sub_index + 6];
     list.clearRetainingCapacity();
 
@@ -3086,8 +3102,8 @@ pub fn findDecls(zir: Zir, list: *std.ArrayList(Zir.Inst.Index), decl_sub_index:
 
 fn findDeclsInner(
     zir: Zir,
-    list: *std.ArrayList(Zir.Inst.Index),
-    inst: Zir.Inst.Index,
+    list: *std.ArrayList(Inst.Index),
+    inst: Inst.Index,
 ) Allocator.Error!void {
     const tags = zir.instructions.items(.tag);
     const datas = zir.instructions.items(.data);
@@ -3148,19 +3164,7 @@ fn findDeclsInner(
             try zir.findDeclsBody(list, then_body);
             try zir.findDeclsBody(list, else_body);
         },
-        .switch_block => return findDeclsSwitch(zir, list, inst, .none),
-        .switch_block_else => return findDeclsSwitch(zir, list, inst, .@"else"),
-        .switch_block_under => return findDeclsSwitch(zir, list, inst, .under),
-        .switch_block_ref => return findDeclsSwitch(zir, list, inst, .none),
-        .switch_block_ref_else => return findDeclsSwitch(zir, list, inst, .@"else"),
-        .switch_block_ref_under => return findDeclsSwitch(zir, list, inst, .under),
-
-        .switch_block_multi => return findDeclsSwitchMulti(zir, list, inst, .none),
-        .switch_block_else_multi => return findDeclsSwitchMulti(zir, list, inst, .@"else"),
-        .switch_block_under_multi => return findDeclsSwitchMulti(zir, list, inst, .under),
-        .switch_block_ref_multi => return findDeclsSwitchMulti(zir, list, inst, .none),
-        .switch_block_ref_else_multi => return findDeclsSwitchMulti(zir, list, inst, .@"else"),
-        .switch_block_ref_under_multi => return findDeclsSwitchMulti(zir, list, inst, .under),
+        .switch_block => return findDeclsSwitch(zir, list, inst),
 
         .suspend_block => @panic("TODO iterate suspend block"),
 
@@ -3170,71 +3174,34 @@ fn findDeclsInner(
 
 fn findDeclsSwitch(
     zir: Zir,
-    list: *std.ArrayList(Zir.Inst.Index),
-    inst: Zir.Inst.Index,
-    special_prong: SpecialProng,
+    list: *std.ArrayList(Inst.Index),
+    inst: Inst.Index,
 ) Allocator.Error!void {
     const inst_data = zir.instructions.items(.data)[inst].pl_node;
     const extra = zir.extraData(Inst.SwitchBlock, inst_data.payload_index);
-    const special: struct {
-        body: []const Inst.Index,
-        end: usize,
-    } = switch (special_prong) {
-        .none => .{ .body = &.{}, .end = extra.end },
-        .under, .@"else" => blk: {
-            const body_len = zir.extra[extra.end];
-            const extra_body_start = extra.end + 1;
-            break :blk .{
-                .body = zir.extra[extra_body_start..][0..body_len],
-                .end = extra_body_start + body_len,
-            };
-        },
-    };
 
-    try zir.findDeclsBody(list, special.body);
+    var extra_index: usize = extra.end;
 
-    var extra_index: usize = special.end;
-    var scalar_i: usize = 0;
-    while (scalar_i < extra.data.cases_len) : (scalar_i += 1) {
+    const multi_cases_len = if (extra.data.bits.has_multi_cases) blk: {
+        const multi_cases_len = zir.extra[extra_index];
         extra_index += 1;
+        break :blk multi_cases_len;
+    } else 0;
+
+    const special_prong = extra.data.bits.specialProng();
+    if (special_prong != .none) {
         const body_len = zir.extra[extra_index];
         extra_index += 1;
         const body = zir.extra[extra_index..][0..body_len];
-        extra_index += body_len;
+        extra_index += body.len;
 
         try zir.findDeclsBody(list, body);
     }
-}
 
-fn findDeclsSwitchMulti(
-    zir: Zir,
-    list: *std.ArrayList(Zir.Inst.Index),
-    inst: Zir.Inst.Index,
-    special_prong: SpecialProng,
-) Allocator.Error!void {
-    const inst_data = zir.instructions.items(.data)[inst].pl_node;
-    const extra = zir.extraData(Inst.SwitchBlockMulti, inst_data.payload_index);
-    const special: struct {
-        body: []const Inst.Index,
-        end: usize,
-    } = switch (special_prong) {
-        .none => .{ .body = &.{}, .end = extra.end },
-        .under, .@"else" => blk: {
-            const body_len = zir.extra[extra.end];
-            const extra_body_start = extra.end + 1;
-            break :blk .{
-                .body = zir.extra[extra_body_start..][0..body_len],
-                .end = extra_body_start + body_len,
-            };
-        },
-    };
-
-    try zir.findDeclsBody(list, special.body);
-
-    var extra_index: usize = special.end;
     {
+        const scalar_cases_len = extra.data.bits.scalar_cases_len;
         var scalar_i: usize = 0;
-        while (scalar_i < extra.data.scalar_cases_len) : (scalar_i += 1) {
+        while (scalar_i < scalar_cases_len) : (scalar_i += 1) {
             extra_index += 1;
             const body_len = zir.extra[extra_index];
             extra_index += 1;
@@ -3246,7 +3213,7 @@ fn findDeclsSwitchMulti(
     }
     {
         var multi_i: usize = 0;
-        while (multi_i < extra.data.multi_cases_len) : (multi_i += 1) {
+        while (multi_i < multi_cases_len) : (multi_i += 1) {
             const items_len = zir.extra[extra_index];
             extra_index += 1;
             const ranges_len = zir.extra[extra_index];
@@ -3352,4 +3319,19 @@ pub fn getFnInfo(zir: Zir, fn_inst: Inst.Index) FnInfo {
         .body = info.body,
         .total_params_len = total_params_len,
     };
+}
+
+const ref_start_index: u32 = Inst.Ref.typed_value_map.len;
+
+pub fn indexToRef(inst: Inst.Index) Inst.Ref {
+    return @intToEnum(Inst.Ref, ref_start_index + inst);
+}
+
+pub fn refToIndex(inst: Inst.Ref) ?Inst.Index {
+    const ref_int = @enumToInt(inst);
+    if (ref_int >= ref_start_index) {
+        return ref_int - ref_start_index;
+    } else {
+        return null;
+    }
 }

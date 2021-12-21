@@ -295,21 +295,21 @@ pub fn format(
         }
 
         // Parse the width parameter
-        options.width = init: {
-            if (comptime parser.maybe('[')) {
-                const arg_name = comptime parser.until(']');
+        options.width = comptime init: {
+            if (parser.maybe('[')) {
+                const arg_name = parser.until(']');
 
-                if (!comptime parser.maybe(']')) {
+                if (!parser.maybe(']')) {
                     @compileError("Expected closing ]");
                 }
 
-                const index = comptime meta.fieldIndex(ArgsType, arg_name) orelse
+                const index = meta.fieldIndex(ArgsType, arg_name) orelse
                     @compileError("No argument with name '" ++ arg_name ++ "'");
-                const arg_index = comptime arg_state.nextArg(index);
+                const arg_index = arg_state.nextArg(index);
 
                 break :init @field(args, fields_info[arg_index].name);
             } else {
-                break :init comptime parser.number();
+                break :init parser.number();
             }
         };
 
@@ -321,21 +321,21 @@ pub fn format(
         }
 
         // Parse the precision parameter
-        options.precision = init: {
-            if (comptime parser.maybe('[')) {
-                const arg_name = comptime parser.until(']');
+        options.precision = comptime init: {
+            if (parser.maybe('[')) {
+                const arg_name = parser.until(']');
 
-                if (!comptime parser.maybe(']')) {
+                if (!parser.maybe(']')) {
                     @compileError("Expected closing ]");
                 }
 
-                const arg_i = comptime meta.fieldIndex(ArgsType, arg_name) orelse
+                const arg_i = meta.fieldIndex(ArgsType, arg_name) orelse
                     @compileError("No argument with name '" ++ arg_name ++ "'");
-                const arg_to_use = comptime arg_state.nextArg(arg_i);
+                const arg_to_use = arg_state.nextArg(arg_i);
 
                 break :init @field(args, fields_info[arg_to_use].name);
             } else {
-                break :init comptime parser.number();
+                break :init parser.number();
             }
         };
 
@@ -1803,7 +1803,7 @@ pub fn count(comptime fmt: []const u8, args: anytype) u64 {
 
 pub const AllocPrintError = error{OutOfMemory};
 
-pub fn allocPrint(allocator: *mem.Allocator, comptime fmt: []const u8, args: anytype) AllocPrintError![]u8 {
+pub fn allocPrint(allocator: mem.Allocator, comptime fmt: []const u8, args: anytype) AllocPrintError![]u8 {
     const size = math.cast(usize, count(fmt, args)) catch |err| switch (err) {
         // Output too long. Can't possibly allocate enough memory to display it.
         error.Overflow => return error.OutOfMemory,
@@ -1814,10 +1814,9 @@ pub fn allocPrint(allocator: *mem.Allocator, comptime fmt: []const u8, args: any
     };
 }
 
-/// Deprecated, use allocPrintZ
-pub const allocPrint0 = allocPrintZ;
+pub const allocPrint0 = @compileError("deprecated; use allocPrintZ");
 
-pub fn allocPrintZ(allocator: *mem.Allocator, comptime fmt: []const u8, args: anytype) AllocPrintError![:0]u8 {
+pub fn allocPrintZ(allocator: mem.Allocator, comptime fmt: []const u8, args: anytype) AllocPrintError![:0]u8 {
     const result = try allocPrint(allocator, fmt ++ "\x00", args);
     return result[0 .. result.len - 1 :0];
 }
@@ -2367,9 +2366,6 @@ test "bytes.hex" {
     try expectFmt("lowercase: 000ebabe\n", "lowercase: {x}\n", .{fmtSliceHexLower(bytes_with_zeros)});
 }
 
-pub const trim = @compileError("deprecated; use std.mem.trim with std.ascii.spaces instead");
-pub const isWhiteSpace = @compileError("deprecated; use std.ascii.isSpace instead");
-
 /// Decodes the sequence of bytes represented by the specified string of
 /// hexadecimal characters.
 /// Returns a slice of the output buffer containing the decoded bytes.
@@ -2576,6 +2572,8 @@ test "runtime width specifier" {
     var width: usize = 9;
     try expectFmt("~~hello~~", "{s:~^[1]}", .{ "hello", width });
     try expectFmt("~~hello~~", "{s:~^[width]}", .{ .string = "hello", .width = width });
+    try expectFmt("    hello", "{s:[1]}", .{ "hello", width });
+    try expectFmt("42     hello", "{d} {s:[2]}", .{ 42, "hello", width });
 }
 
 test "runtime precision specifier" {

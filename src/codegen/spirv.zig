@@ -70,7 +70,7 @@ pub fn writeInstructionWithString(code: *std.ArrayList(Word), opcode: Opcode, ar
 /// of data which needs to be persistent over different calls to Decl code generation.
 pub const SPIRVModule = struct {
     /// A general-purpose allocator which may be used to allocate temporary resources required for compilation.
-    gpa: *Allocator,
+    gpa: Allocator,
 
     /// The parent module.
     module: *Module,
@@ -103,7 +103,7 @@ pub const SPIRVModule = struct {
     /// just the ones for OpLine. Note that OpLine needs the result of OpString, and not that of OpSource.
     file_names: std.StringHashMap(ResultId),
 
-    pub fn init(gpa: *Allocator, module: *Module) SPIRVModule {
+    pub fn init(gpa: Allocator, module: *Module) SPIRVModule {
         return .{
             .gpa = gpa,
             .module = module,
@@ -629,7 +629,7 @@ pub const DeclGen = struct {
             const params = decl.ty.fnParamLen();
             var i: usize = 0;
 
-            try self.args.ensureTotalCapacity(params);
+            try self.args.ensureUnusedCapacity(params);
             while (i < params) : (i += 1) {
                 const param_type_id = self.spv.types.get(decl.ty.fnParamType(i)).?;
                 const arg_result_id = self.spv.allocResultId();
@@ -669,7 +669,6 @@ pub const DeclGen = struct {
             .add, .addwrap => try self.airArithOp(inst, .{.OpFAdd, .OpIAdd, .OpIAdd}),
             .sub, .subwrap => try self.airArithOp(inst, .{.OpFSub, .OpISub, .OpISub}),
             .mul, .mulwrap => try self.airArithOp(inst, .{.OpFMul, .OpIMul, .OpIMul}),
-            .div           => try self.airArithOp(inst, .{.OpFDiv, .OpSDiv, .OpUDiv}),
 
             .bit_and  => try self.airBinOpSimple(inst, .OpBitwiseAnd),
             .bit_or   => try self.airBinOpSimple(inst, .OpBitwiseOr),

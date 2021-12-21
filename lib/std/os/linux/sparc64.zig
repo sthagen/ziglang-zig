@@ -568,6 +568,10 @@ pub const SYS = enum(usize) {
     faccessat2 = 439,
     process_madvise = 440,
     epoll_pwait2 = 441,
+    mount_setattr = 442,
+    landlock_create_ruleset = 444,
+    landlock_add_rule = 445,
+    landlock_restrict_self = 446,
 
     _,
 };
@@ -656,7 +660,7 @@ pub const msghdr = extern struct {
     msg_namelen: socklen_t,
     msg_iov: [*]iovec,
     msg_iovlen: u64,
-    msg_control: ?*c_void,
+    msg_control: ?*anyopaque,
     msg_controllen: u64,
     msg_flags: i32,
 };
@@ -666,7 +670,7 @@ pub const msghdr_const = extern struct {
     msg_namelen: socklen_t,
     msg_iov: [*]iovec_const,
     msg_iovlen: u64,
-    msg_control: ?*c_void,
+    msg_control: ?*anyopaque,
     msg_controllen: u64,
     msg_flags: i32,
 };
@@ -715,7 +719,7 @@ pub const Stat = extern struct {
 
 pub const timeval = extern struct {
     tv_sec: isize,
-    tv_usec: isize,
+    tv_usec: i32,
 };
 
 pub const timezone = extern struct {
@@ -823,4 +827,64 @@ pub const ucontext_t = extern struct {
     mcontext: mcontext_t,
     stack: stack_t,
     sigmask: sigset_t,
+};
+
+pub const rlimit_resource = enum(c_int) {
+    /// Per-process CPU limit, in seconds.
+    CPU,
+
+    /// Largest file that can be created, in bytes.
+    FSIZE,
+
+    /// Maximum size of data segment, in bytes.
+    DATA,
+
+    /// Maximum size of stack segment, in bytes.
+    STACK,
+
+    /// Largest core file that can be created, in bytes.
+    CORE,
+
+    /// Largest resident set size, in bytes.
+    /// This affects swapping; processes that are exceeding their
+    /// resident set size will be more likely to have physical memory
+    /// taken from them.
+    RSS,
+
+    /// Number of open files.
+    NOFILE,
+
+    /// Number of processes.
+    NPROC,
+
+    /// Locked-in-memory address space.
+    MEMLOCK,
+
+    /// Address space limit.
+    AS,
+
+    /// Maximum number of file locks.
+    LOCKS,
+
+    /// Maximum number of pending signals.
+    SIGPENDING,
+
+    /// Maximum bytes in POSIX message queues.
+    MSGQUEUE,
+
+    /// Maximum nice priority allowed to raise to.
+    /// Nice levels 19 .. -20 correspond to 0 .. 39
+    /// values of this resource limit.
+    NICE,
+
+    /// Maximum realtime priority allowed for non-priviledged
+    /// processes.
+    RTPRIO,
+
+    /// Maximum CPU time in µs that a process scheduled under a real-time
+    /// scheduling policy may consume without making a blocking system
+    /// call before being forcibly descheduled.
+    RTTIME,
+
+    _,
 };

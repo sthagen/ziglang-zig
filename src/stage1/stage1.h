@@ -112,6 +112,7 @@ struct ZigTarget {
 
     const char *llvm_cpu_name;
     const char *llvm_cpu_features;
+    const char *llvm_target_abi;
 };
 
 // ABI warning
@@ -199,6 +200,7 @@ struct ZigStage1 {
     bool include_compiler_rt;
     bool enable_stack_probing;
     bool red_zone;
+    bool omit_frame_pointer;
     bool enable_time_report;
     bool enable_stack_report;
     bool test_is_evented;

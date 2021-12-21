@@ -3,6 +3,40 @@ const builtin = @import("builtin");
 const TestContext = @import("../src/test.zig").TestContext;
 
 pub fn addCases(ctx: *TestContext) !void {
+    {
+        var case = ctx.obj("stage2 compile errors", .{});
+
+        case.addError(
+            \\export fn a() usize {
+            \\    return @embedFile("/root/foo").len;
+            \\}
+        , &[_][]const u8{
+            ":2:23: error: embed of file outside package path: '/root/foo'",
+        });
+
+        case.addError(
+            \\export fn a() usize {
+            \\    return @import("../../above.zig").len;
+            \\}
+        , &[_][]const u8{
+            ":2:20: error: import of file outside package path: '../../above.zig'",
+        });
+    }
+
+    ctx.objErrStage1("exported enum without explicit integer tag type",
+        \\const E = enum { one, two };
+        \\comptime {
+        \\    @export(E, .{ .name = "E" });
+        \\}
+        \\const e: E = .two;
+        \\comptime {
+        \\    @export(e, .{ .name = "e" });
+        \\}
+    , &.{
+        "tmp.zig:3:13: error: exported enum without explicit integer tag type",
+        "tmp.zig:7:13: error: exported enum value without explicit integer tag type",
+    });
+
     ctx.objErrStage1("issue #9346: return outside of function scope",
         \\pub const empty = return 1;
     , &.{"tmp.zig:1:19: error: 'return' outside function scope"});
@@ -2640,7 +2674,7 @@ pub fn addCases(ctx: *TestContext) !void {
         \\    }
         \\}
     , &[_][]const u8{
-        "tmp.zig:3:9: error: expected type 'error{Hi}', found '(enum literal)'",
+        "tmp.zig:3:9: error: expected type 'error{Hi}', found '@Type(.EnumLiteral)'",
     });
 
     ctx.objErrStage1("@sizeOf bad type",
@@ -2648,7 +2682,7 @@ pub fn addCases(ctx: *TestContext) !void {
         \\    return @sizeOf(@TypeOf(null));
         \\}
     , &[_][]const u8{
-        "tmp.zig:2:20: error: no size available for type '(null)'",
+        "tmp.zig:2:20: error: no size available for type '@Type(.Null)'",
     });
 
     ctx.objErrStage1("generic function where return type is self-referenced",
@@ -2995,7 +3029,7 @@ pub fn addCases(ctx: *TestContext) !void {
         \\};
     , &[_][]const u8{
         "tmp.zig:2:5: error: type 'anyerror' not allowed in packed struct; no guaranteed in-memory representation",
-        "tmp.zig:5:5: error: array of 'u24' not allowed in packed struct due to padding bits",
+        "tmp.zig:5:5: error: array of 'u24' not allowed in packed struct due to padding bits (must be padded from 48 to 64 bits)",
         "tmp.zig:8:5: error: type 'anyerror' not allowed in packed struct; no guaranteed in-memory representation",
         "tmp.zig:11:5: error: non-packed, non-extern struct 'S' not allowed in packed struct; no guaranteed in-memory representation",
         "tmp.zig:14:5: error: non-packed, non-extern struct 'U' not allowed in packed struct; no guaranteed in-memory representation",
@@ -3024,10 +3058,10 @@ pub fn addCases(ctx: *TestContext) !void {
         "tmp.zig:1:15: error: parameter of type 'anytype' not allowed in function with calling convention 'C'",
     });
 
-    ctx.objErrStage1("C pointer to c_void",
+    ctx.objErrStage1("C pointer to anyopaque",
         \\export fn a() void {
-        \\    var x: *c_void = undefined;
-        \\    var y: [*c]c_void = x;
+        \\    var x: *anyopaque = undefined;
+        \\    var y: [*c]anyopaque = x;
         \\    _ = y;
         \\}
     , &[_][]const u8{
@@ -3271,7 +3305,7 @@ pub fn addCases(ctx: *TestContext) !void {
 
     ctx.objErrStage1("compile log a pointer to an opaque value",
         \\export fn entry() void {
-        \\    @compileLog(@ptrCast(*const c_void, &entry));
+        \\    @compileLog(@ptrCast(*const anyopaque, &entry));
         \\}
     , &[_][]const u8{
         "tmp.zig:2:5: error: found compile log statement",
@@ -3431,16 +3465,16 @@ pub fn addCases(ctx: *TestContext) !void {
         "tmp.zig:2:11: error: use of undeclared identifier 'SymbolThatDoesNotExist'",
     });
 
-    ctx.objErrStage1("don't implicit cast double pointer to *c_void",
+    ctx.objErrStage1("don't implicit cast double pointer to *anyopaque",
         \\export fn entry() void {
         \\    var a: u32 = 1;
-        \\    var ptr: *align(@alignOf(u32)) c_void = &a;
+        \\    var ptr: *align(@alignOf(u32)) anyopaque = &a;
         \\    var b: *u32 = @ptrCast(*u32, ptr);
-        \\    var ptr2: *c_void = &b;
+        \\    var ptr2: *anyopaque = &b;
         \\    _ = ptr2;
         \\}
     , &[_][]const u8{
-        "tmp.zig:5:26: error: expected type '*c_void', found '**u32'",
+        "tmp.zig:5:29: error: expected type '*anyopaque', found '**u32'",
     });
 
     ctx.objErrStage1("runtime index into comptime type slice",
@@ -4011,9 +4045,9 @@ pub fn addCases(ctx: *TestContext) !void {
         "tmp.zig:8:9: error: integer value '256' cannot be stored in type 'u8'",
     });
 
-    ctx.objErrStage1("use c_void as return type of fn ptr",
+    ctx.objErrStage1("use anyopaque as return type of fn ptr",
         \\export fn entry() void {
-        \\    const a: fn () c_void = undefined;
+        \\    const a: fn () anyopaque = undefined;
         \\    _ = a;
         \\}
     , &[_][]const u8{
@@ -4999,6 +5033,23 @@ pub fn addCases(ctx: *TestContext) !void {
         "tmp.zig:2:5: note: control flow is diverted here",
     });
 
+    ctx.objErrStage1("unreachable code - nested returns",
+        \\export fn a() i32 {
+        \\    return return 1;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:5: error: unreachable code",
+        "tmp.zig:2:12: note: control flow is diverted here",
+    });
+
+    ctx.objErrStage1("chained comparison operators",
+        \\export fn a(value: u32) bool {
+        \\    return 1 < value < 1000;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:22: error: comparison operators cannot be chained",
+    });
+
     ctx.objErrStage1("bad import",
         \\const bogus = @import("bogus-does-not-exist.zig",);
     , &[_][]const u8{
@@ -5740,7 +5791,7 @@ pub fn addCases(ctx: *TestContext) !void {
         \\
         \\export fn entry() usize { return @sizeOf(@TypeOf(a)); }
     , &[_][]const u8{
-        "tmp.zig:1:16: error: expected type '*u8', found '(null)'",
+        "tmp.zig:1:16: error: expected type '*u8', found '@Type(.Null)'",
     });
 
     ctx.objErrStage1("indexing an array of size zero",
@@ -7418,10 +7469,10 @@ pub fn addCases(ctx: *TestContext) !void {
         \\extern fn bar(d: *Derp) void;
         \\export fn foo() void {
         \\    var x = @as(u8, 1);
-        \\    bar(@ptrCast(*c_void, &x));
+        \\    bar(@ptrCast(*anyopaque, &x));
         \\}
     , &[_][]const u8{
-        "tmp.zig:5:9: error: expected type '*Derp', found '*c_void'",
+        "tmp.zig:5:9: error: expected type '*Derp', found '*anyopaque'",
     });
 
     ctx.objErrStage1("non-const variables of things that require const variables",
@@ -7463,12 +7514,12 @@ pub fn addCases(ctx: *TestContext) !void {
         \\};
     , &[_][]const u8{
         "tmp.zig:2:4: error: variable of type '*const comptime_int' must be const or comptime",
-        "tmp.zig:6:4: error: variable of type '(undefined)' must be const or comptime",
+        "tmp.zig:6:4: error: variable of type '@Type(.Undefined)' must be const or comptime",
         "tmp.zig:10:4: error: variable of type 'comptime_int' must be const or comptime",
         "tmp.zig:10:4: note: to modify this variable at runtime, it must be given an explicit fixed-size number type",
         "tmp.zig:14:4: error: variable of type 'comptime_float' must be const or comptime",
         "tmp.zig:14:4: note: to modify this variable at runtime, it must be given an explicit fixed-size number type",
-        "tmp.zig:18:4: error: variable of type '(null)' must be const or comptime",
+        "tmp.zig:18:4: error: variable of type '@Type(.Null)' must be const or comptime",
         "tmp.zig:22:4: error: variable of type 'Opaque' not allowed",
         "tmp.zig:26:4: error: variable of type 'type' must be const or comptime",
         "tmp.zig:30:4: error: variable of type '(bound fn(*const Foo) void)' must be const or comptime",
@@ -7521,7 +7572,7 @@ pub fn addCases(ctx: *TestContext) !void {
         \\
         \\export fn entry() void {
         \\    const a = MdNode.Header {
-        \\        .text = MdText.init(&std.testing.allocator),
+        \\        .text = MdText.init(std.testing.allocator),
         \\        .weight = HeaderWeight.H1,
         \\    };
         \\    _ = a;
@@ -8235,8 +8286,8 @@ pub fn addCases(ctx: *TestContext) !void {
     , &[_][]const u8{
         "tmp.zig:2:18: error: Opaque return type 'FooType' not allowed",
         "tmp.zig:1:1: note: type declared here",
-        "tmp.zig:5:18: error: Null return type '(null)' not allowed",
-        "tmp.zig:8:18: error: Undefined return type '(undefined)' not allowed",
+        "tmp.zig:5:18: error: Null return type '@Type(.Null)' not allowed",
+        "tmp.zig:8:18: error: Undefined return type '@Type(.Undefined)' not allowed",
     });
 
     ctx.objErrStage1("generic function returning opaque type",
@@ -8257,9 +8308,9 @@ pub fn addCases(ctx: *TestContext) !void {
         "tmp.zig:6:16: error: call to generic function with Opaque return type 'FooType' not allowed",
         "tmp.zig:2:1: note: function declared here",
         "tmp.zig:1:1: note: type declared here",
-        "tmp.zig:9:16: error: call to generic function with Null return type '(null)' not allowed",
+        "tmp.zig:9:16: error: call to generic function with Null return type '@Type(.Null)' not allowed",
         "tmp.zig:2:1: note: function declared here",
-        "tmp.zig:12:16: error: call to generic function with Undefined return type '(undefined)' not allowed",
+        "tmp.zig:12:16: error: call to generic function with Undefined return type '@Type(.Undefined)' not allowed",
         "tmp.zig:2:1: note: function declared here",
     });
 
@@ -8286,9 +8337,9 @@ pub fn addCases(ctx: *TestContext) !void {
         \\}
     , &[_][]const u8{
         "tmp.zig:3:28: error: parameter of opaque type 'FooType' not allowed",
-        "tmp.zig:8:28: error: parameter of type '(null)' not allowed",
+        "tmp.zig:8:28: error: parameter of type '@Type(.Null)' not allowed",
         "tmp.zig:12:11: error: parameter of opaque type 'FooType' not allowed",
-        "tmp.zig:17:11: error: parameter of type '(null)' not allowed",
+        "tmp.zig:17:11: error: parameter of type '@Type(.Null)' not allowed",
     });
 
     ctx.objErrStage1( // fixed bug #2032
@@ -8714,10 +8765,10 @@ pub fn addCases(ctx: *TestContext) !void {
 
     ctx.objErrStage1("integer underflow error",
         \\export fn entry() void {
-        \\    _ = @intToPtr(*c_void, ~@as(usize, @import("std").math.maxInt(usize)) - 1);
+        \\    _ = @intToPtr(*anyopaque, ~@as(usize, @import("std").math.maxInt(usize)) - 1);
         \\}
     , &[_][]const u8{
-        ":2:75: error: operation caused overflow",
+        ":2:78: error: operation caused overflow",
     });
 
     {
@@ -8813,14 +8864,14 @@ pub fn addCases(ctx: *TestContext) !void {
         "tmp.zig:8:12: error: negation of type 'u32'",
     });
 
-    ctx.objErrStage1("Issue #5618: coercion of ?*c_void to *c_void must fail.",
+    ctx.objErrStage1("Issue #5618: coercion of ?*anyopaque to *anyopaque must fail.",
         \\export fn foo() void {
-        \\    var u: ?*c_void = null;
-        \\    var v: *c_void = undefined;
+        \\    var u: ?*anyopaque = null;
+        \\    var v: *anyopaque = undefined;
         \\    v = u;
         \\}
     , &[_][]const u8{
-        "tmp.zig:4:9: error: expected type '*c_void', found '?*c_void'",
+        "tmp.zig:4:9: error: expected type '*anyopaque', found '?*anyopaque'",
     });
 
     ctx.objErrStage1("Issue #6823: don't allow .* to be followed by **",
@@ -8862,11 +8913,30 @@ pub fn addCases(ctx: *TestContext) !void {
     });
 
     ctx.objErrStage1("saturating arithmetic does not allow floats",
-        \\pub fn main() !void {
+        \\export fn a() void {
         \\    _ = @as(f32, 1.0) +| @as(f32, 1.0);
         \\}
     , &[_][]const u8{
         "error: invalid operands to binary expression: 'f32' and 'f32'",
+    });
+
+    ctx.objErrStage1("saturating shl does not allow negative rhs at comptime",
+        \\export fn a() void {
+        \\    _ = @as(i32, 1) <<| @as(i32, -2);
+        \\}
+    , &[_][]const u8{
+        "error: shift by negative value -2",
+    });
+
+    ctx.objErrStage1("saturating shl assign does not allow negative rhs at comptime",
+        \\export fn a() void {
+        \\    comptime {
+        \\      var x = @as(i32, 1);
+        \\      x <<|= @as(i32, -2);
+        \\  }
+        \\}
+    , &[_][]const u8{
+        "error: shift by negative value -2",
     });
 
     ctx.objErrStage1("undeclared identifier in unanalyzed branch",

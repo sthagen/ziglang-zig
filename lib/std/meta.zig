@@ -594,8 +594,7 @@ test "std.meta.FieldEnum" {
     try expectEqualEnum(enum { a, b, c }, FieldEnum(union { a: u8, b: void, c: f32 }));
 }
 
-// Deprecated: use Tag
-pub const TagType = Tag;
+pub const TagType = @compileError("deprecated; use Tag");
 
 pub fn Tag(comptime T: type) type {
     return switch (@typeInfo(T)) {
@@ -648,7 +647,7 @@ const TagPayloadType = TagPayload;
 ///Given a tagged union type, and an enum, return the type of the union
 /// field corresponding to the enum tag.
 pub fn TagPayload(comptime U: type, tag: Tag(U)) type {
-    try testing.expect(trait.is(.Union)(U));
+    comptime debug.assert(trait.is(.Union)(U));
 
     const info = @typeInfo(U).Union;
 
@@ -864,6 +863,19 @@ pub fn Int(comptime signedness: std.builtin.Signedness, comptime bit_count: u16)
             .bits = bit_count,
         },
     });
+}
+
+pub fn Float(comptime bit_count: u8) type {
+    return @Type(TypeInfo{
+        .Float = .{ .bits = bit_count },
+    });
+}
+
+test "std.meta.Float" {
+    try testing.expectEqual(f16, Float(16));
+    try testing.expectEqual(f32, Float(32));
+    try testing.expectEqual(f64, Float(64));
+    try testing.expectEqual(f128, Float(128));
 }
 
 pub fn Vector(comptime len: u32, comptime child: type) type {

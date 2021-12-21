@@ -59,7 +59,7 @@ test "strcpy" {
 
     s1[0] = 0;
     _ = strcpy(&s1, "foobarbaz");
-    try std.testing.expectEqualSlices(u8, "foobarbaz", std.mem.spanZ(&s1));
+    try std.testing.expectEqualSlices(u8, "foobarbaz", std.mem.sliceTo(&s1, 0));
 }
 
 fn strncpy(dest: [*:0]u8, src: [*:0]const u8, n: usize) callconv(.C) [*:0]u8 {
@@ -79,7 +79,7 @@ test "strncpy" {
 
     s1[0] = 0;
     _ = strncpy(&s1, "foobarbaz", @sizeOf(@TypeOf(s1)));
-    try std.testing.expectEqualSlices(u8, "foobarbaz", std.mem.spanZ(&s1));
+    try std.testing.expectEqualSlices(u8, "foobarbaz", std.mem.sliceTo(&s1, 0));
 }
 
 fn strcat(dest: [*:0]u8, src: [*:0]const u8) callconv(.C) [*:0]u8 {
@@ -102,7 +102,7 @@ test "strcat" {
     _ = strcat(&s1, "foo");
     _ = strcat(&s1, "bar");
     _ = strcat(&s1, "baz");
-    try std.testing.expectEqualSlices(u8, "foobarbaz", std.mem.spanZ(&s1));
+    try std.testing.expectEqualSlices(u8, "foobarbaz", std.mem.sliceTo(&s1, 0));
 }
 
 fn strncat(dest: [*:0]u8, src: [*:0]const u8, avail: usize) callconv(.C) [*:0]u8 {
@@ -125,7 +125,7 @@ test "strncat" {
     _ = strncat(&s1, "foo1111", 3);
     _ = strncat(&s1, "bar1111", 3);
     _ = strncat(&s1, "baz1111", 3);
-    try std.testing.expectEqualSlices(u8, "foobarbaz", std.mem.spanZ(&s1));
+    try std.testing.expectEqualSlices(u8, "foobarbaz", std.mem.sliceTo(&s1, 0));
 }
 
 fn strcmp(s1: [*:0]const u8, s2: [*:0]const u8) callconv(.C) c_int {
@@ -639,37 +639,31 @@ export fn fmod(x: f64, y: f64) f64 {
     return generic_fmod(f64, x, y);
 }
 
-// TODO add intrinsics for these (and probably the double version too)
-// and have the math stuff use the intrinsic. same as @mod and @rem
-export fn floorf(x: f32) f32 {
-    return math.floor(x);
-}
-
 export fn ceilf(x: f32) f32 {
     return math.ceil(x);
 }
-
-export fn floor(x: f64) f64 {
-    return math.floor(x);
-}
-
 export fn ceil(x: f64) f64 {
     return math.ceil(x);
 }
-
-export fn fmal(a: c_longdouble, b: c_longdouble, c: c_longdouble) c_longdouble {
+export fn ceill(x: c_longdouble) c_longdouble {
     if (!long_double_is_f128) {
         @panic("TODO implement this");
     }
-    return math.fma(c_longdouble, a, b, c);
+    return math.ceil(x);
+}
+
+export fn fmaf(a: f32, b: f32, c: f32) f32 {
+    return math.fma(f32, a, b, c);
 }
 
 export fn fma(a: f64, b: f64, c: f64) f64 {
     return math.fma(f64, a, b, c);
 }
-
-export fn fmaf(a: f32, b: f32, c: f32) f32 {
-    return math.fma(f32, a, b, c);
+export fn fmal(a: c_longdouble, b: c_longdouble, c: c_longdouble) c_longdouble {
+    if (!long_double_is_f128) {
+        @panic("TODO implement this");
+    }
+    return math.fma(c_longdouble, a, b, c);
 }
 
 export fn sin(a: f64) f64 {
@@ -751,6 +745,13 @@ export fn trunc(a: f64) f64 {
 }
 
 export fn truncf(a: f32) f32 {
+    return math.trunc(a);
+}
+
+export fn truncl(a: c_longdouble) c_longdouble {
+    if (!long_double_is_f128) {
+        @panic("TODO implement this");
+    }
     return math.trunc(a);
 }
 

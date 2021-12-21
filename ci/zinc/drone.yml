@@ -1,0 +1,46 @@
+---
+kind: pipeline
+type: docker
+name: x86_64-linux
+platform:
+  os: linux
+  arch: amd64
+workspace:
+  path: /workspace
+
+steps:
+- name: probe
+  image: ci/debian-amd64:11.1-2
+  commands:
+  - ./ci/zinc/linux_probe.sh
+
+- name: build
+  image: ci/debian-amd64:11.1-2
+  commands:
+  - ./ci/zinc/linux_build.sh
+
+- name: test
+  depends_on:
+  - build
+  image: ci/debian-amd64:11.1-2
+  commands:
+  - ./ci/zinc/linux_test.sh
+
+- name: package
+  depends_on:
+  - test
+  when:
+    branch:
+      - master
+    event:
+      - push
+  image: ci/debian-amd64:11.1-2
+  environment:
+    AWS_ACCESS_KEY_ID:
+      from_secret: AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY:
+      from_secret: AWS_SECRET_ACCESS_KEY
+    SRHT_OAUTH_TOKEN:
+      from_secret: SRHT_OAUTH_TOKEN
+  commands:
+  - ./ci/zinc/linux_package.sh

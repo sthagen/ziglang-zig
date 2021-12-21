@@ -568,6 +568,11 @@ pub const SYS = enum(usize) {
     faccessat2 = 439,
     process_madvise = 440,
     epoll_pwait2 = 441,
+    mount_setattr = 442,
+    landlock_create_ruleset = 444,
+    landlock_add_rule = 445,
+    landlock_restrict_self = 446,
+    memfd_secret = 447,
 
     _,
 };
@@ -655,7 +660,7 @@ pub const msghdr = extern struct {
     namelen: socklen_t,
     iov: [*]iovec,
     iovlen: i32,
-    control: ?*c_void,
+    control: ?*anyopaque,
     controllen: socklen_t,
     flags: i32,
 };
@@ -665,7 +670,7 @@ pub const msghdr_const = extern struct {
     namelen: socklen_t,
     iov: [*]iovec_const,
     iovlen: i32,
-    control: ?*c_void,
+    control: ?*anyopaque,
     controllen: socklen_t,
     flags: i32,
 };

@@ -2,11 +2,12 @@ const std = @import("std");
 const builtin = @import("builtin");
 const is_test = builtin.is_test;
 const os_tag = builtin.os.tag;
-const arch = builtin.stage2_arch;
+const arch = builtin.cpu.arch;
 const abi = builtin.abi;
 
 const is_gnu = abi.isGnu();
 const is_mingw = os_tag == .windows and is_gnu;
+const is_darwin = std.Target.Os.Tag.isDarwin(os_tag);
 
 const linkage = if (is_test)
     std.builtin.GlobalLinkage.Internal
@@ -44,36 +45,118 @@ comptime {
     const __getf2 = @import("compiler_rt/compareXf2.zig").__getf2;
     @export(__getf2, .{ .name = "__getf2", .linkage = linkage });
 
+    const __eqsf2 = @import("compiler_rt/compareXf2.zig").__eqsf2;
+    @export(__eqsf2, .{ .name = "__eqsf2", .linkage = linkage });
+    const __eqdf2 = @import("compiler_rt/compareXf2.zig").__eqdf2;
+    @export(__eqdf2, .{ .name = "__eqdf2", .linkage = linkage });
+
+    const __ltsf2 = @import("compiler_rt/compareXf2.zig").__ltsf2;
+    @export(__ltsf2, .{ .name = "__ltsf2", .linkage = linkage });
+    const __ltdf2 = @import("compiler_rt/compareXf2.zig").__ltdf2;
+    @export(__ltdf2, .{ .name = "__ltdf2", .linkage = linkage });
+
+    const __nesf2 = @import("compiler_rt/compareXf2.zig").__nesf2;
+    @export(__nesf2, .{ .name = "__nesf2", .linkage = linkage });
+    const __nedf2 = @import("compiler_rt/compareXf2.zig").__nedf2;
+    @export(__nedf2, .{ .name = "__nedf2", .linkage = linkage });
+
+    const __gtsf2 = @import("compiler_rt/compareXf2.zig").__gtsf2;
+    @export(__gtsf2, .{ .name = "__gtsf2", .linkage = linkage });
+    const __gtdf2 = @import("compiler_rt/compareXf2.zig").__gtdf2;
+    @export(__gtdf2, .{ .name = "__gtdf2", .linkage = linkage });
+
     if (!is_test) {
         @export(__lesf2, .{ .name = "__cmpsf2", .linkage = linkage });
         @export(__ledf2, .{ .name = "__cmpdf2", .linkage = linkage });
         @export(__letf2, .{ .name = "__cmptf2", .linkage = linkage });
-
-        const __eqsf2 = @import("compiler_rt/compareXf2.zig").__eqsf2;
-        @export(__eqsf2, .{ .name = "__eqsf2", .linkage = linkage });
-        const __eqdf2 = @import("compiler_rt/compareXf2.zig").__eqdf2;
-        @export(__eqdf2, .{ .name = "__eqdf2", .linkage = linkage });
         @export(__letf2, .{ .name = "__eqtf2", .linkage = linkage });
-
-        const __ltsf2 = @import("compiler_rt/compareXf2.zig").__ltsf2;
-        @export(__ltsf2, .{ .name = "__ltsf2", .linkage = linkage });
-        const __ltdf2 = @import("compiler_rt/compareXf2.zig").__ltdf2;
-        @export(__ltdf2, .{ .name = "__ltdf2", .linkage = linkage });
         @export(__letf2, .{ .name = "__lttf2", .linkage = linkage });
-
-        const __nesf2 = @import("compiler_rt/compareXf2.zig").__nesf2;
-        @export(__nesf2, .{ .name = "__nesf2", .linkage = linkage });
-        const __nedf2 = @import("compiler_rt/compareXf2.zig").__nedf2;
-        @export(__nedf2, .{ .name = "__nedf2", .linkage = linkage });
-        @export(__letf2, .{ .name = "__netf2", .linkage = linkage });
-
-        const __gtsf2 = @import("compiler_rt/compareXf2.zig").__gtsf2;
-        @export(__gtsf2, .{ .name = "__gtsf2", .linkage = linkage });
-        const __gtdf2 = @import("compiler_rt/compareXf2.zig").__gtdf2;
-        @export(__gtdf2, .{ .name = "__gtdf2", .linkage = linkage });
         @export(__getf2, .{ .name = "__gttf2", .linkage = linkage });
-
+        @export(__letf2, .{ .name = "__netf2", .linkage = linkage });
         @export(__extendhfsf2, .{ .name = "__gnu_h2f_ieee", .linkage = linkage });
+    }
+
+    // Integral arithmetic which returns if overflow
+    const __mulosi4 = @import("compiler_rt/mulo.zig").__mulosi4;
+    @export(__mulosi4, .{ .name = "__mulosi4", .linkage = linkage });
+    const __mulodi4 = @import("compiler_rt/mulo.zig").__mulodi4;
+    @export(__mulodi4, .{ .name = "__mulodi4", .linkage = linkage });
+    const __muloti4 = @import("compiler_rt/mulo.zig").__muloti4;
+    @export(__muloti4, .{ .name = "__muloti4", .linkage = linkage });
+
+    if (builtin.os.tag == .windows) {
+        // Default stack-probe functions emitted by LLVM
+        if (is_mingw) {
+            const _chkstk = @import("compiler_rt/stack_probe.zig")._chkstk;
+            @export(_chkstk, .{ .name = "_alloca", .linkage = strong_linkage });
+            const ___chkstk_ms = @import("compiler_rt/stack_probe.zig").___chkstk_ms;
+            @export(___chkstk_ms, .{ .name = "___chkstk_ms", .linkage = strong_linkage });
+        } else if (!builtin.link_libc) {
+            // This symbols are otherwise exported by MSVCRT.lib
+            const _chkstk = @import("compiler_rt/stack_probe.zig")._chkstk;
+            @export(_chkstk, .{ .name = "_chkstk", .linkage = strong_linkage });
+            const __chkstk = @import("compiler_rt/stack_probe.zig").__chkstk;
+            @export(__chkstk, .{ .name = "__chkstk", .linkage = strong_linkage });
+        }
+
+        switch (arch) {
+            .i386 => {
+                const __divti3 = @import("compiler_rt/divti3.zig").__divti3;
+                @export(__divti3, .{ .name = "__divti3", .linkage = linkage });
+                const __modti3 = @import("compiler_rt/modti3.zig").__modti3;
+                @export(__modti3, .{ .name = "__modti3", .linkage = linkage });
+                const __multi3 = @import("compiler_rt/multi3.zig").__multi3;
+                @export(__multi3, .{ .name = "__multi3", .linkage = linkage });
+                const __udivti3 = @import("compiler_rt/udivti3.zig").__udivti3;
+                @export(__udivti3, .{ .name = "__udivti3", .linkage = linkage });
+                const __udivmodti4 = @import("compiler_rt/udivmodti4.zig").__udivmodti4;
+                @export(__udivmodti4, .{ .name = "__udivmodti4", .linkage = linkage });
+                const __umodti3 = @import("compiler_rt/umodti3.zig").__umodti3;
+                @export(__umodti3, .{ .name = "__umodti3", .linkage = linkage });
+            },
+            .x86_64 => {
+                // The "ti" functions must use Vector(2, u64) parameter types to adhere to the ABI
+                // that LLVM expects compiler-rt to have.
+                const __divti3_windows_x86_64 = @import("compiler_rt/divti3.zig").__divti3_windows_x86_64;
+                @export(__divti3_windows_x86_64, .{ .name = "__divti3", .linkage = linkage });
+                const __modti3_windows_x86_64 = @import("compiler_rt/modti3.zig").__modti3_windows_x86_64;
+                @export(__modti3_windows_x86_64, .{ .name = "__modti3", .linkage = linkage });
+                const __multi3_windows_x86_64 = @import("compiler_rt/multi3.zig").__multi3_windows_x86_64;
+                @export(__multi3_windows_x86_64, .{ .name = "__multi3", .linkage = linkage });
+                const __udivti3_windows_x86_64 = @import("compiler_rt/udivti3.zig").__udivti3_windows_x86_64;
+                @export(__udivti3_windows_x86_64, .{ .name = "__udivti3", .linkage = linkage });
+                const __udivmodti4_windows_x86_64 = @import("compiler_rt/udivmodti4.zig").__udivmodti4_windows_x86_64;
+                @export(__udivmodti4_windows_x86_64, .{ .name = "__udivmodti4", .linkage = linkage });
+                const __umodti3_windows_x86_64 = @import("compiler_rt/umodti3.zig").__umodti3_windows_x86_64;
+                @export(__umodti3_windows_x86_64, .{ .name = "__umodti3", .linkage = linkage });
+            },
+            else => {},
+        }
+        if (arch.isAARCH64()) {
+            const __chkstk = @import("compiler_rt/stack_probe.zig").__chkstk;
+            @export(__chkstk, .{ .name = "__chkstk", .linkage = strong_linkage });
+            const __divti3_windows = @import("compiler_rt/divti3.zig").__divti3;
+            @export(__divti3_windows, .{ .name = "__divti3", .linkage = linkage });
+            const __modti3 = @import("compiler_rt/modti3.zig").__modti3;
+            @export(__modti3, .{ .name = "__modti3", .linkage = linkage });
+            const __udivti3_windows = @import("compiler_rt/udivti3.zig").__udivti3;
+            @export(__udivti3_windows, .{ .name = "__udivti3", .linkage = linkage });
+            const __umodti3 = @import("compiler_rt/umodti3.zig").__umodti3;
+            @export(__umodti3, .{ .name = "__umodti3", .linkage = linkage });
+        }
+    } else {
+        const __divti3 = @import("compiler_rt/divti3.zig").__divti3;
+        @export(__divti3, .{ .name = "__divti3", .linkage = linkage });
+        const __modti3 = @import("compiler_rt/modti3.zig").__modti3;
+        @export(__modti3, .{ .name = "__modti3", .linkage = linkage });
+        const __multi3 = @import("compiler_rt/multi3.zig").__multi3;
+        @export(__multi3, .{ .name = "__multi3", .linkage = linkage });
+        const __udivti3 = @import("compiler_rt/udivti3.zig").__udivti3;
+        @export(__udivti3, .{ .name = "__udivti3", .linkage = linkage });
+        const __udivmodti4 = @import("compiler_rt/udivmodti4.zig").__udivmodti4;
+        @export(__udivmodti4, .{ .name = "__udivmodti4", .linkage = linkage });
+        const __umodti3 = @import("compiler_rt/umodti3.zig").__umodti3;
+        @export(__umodti3, .{ .name = "__umodti3", .linkage = linkage });
     }
 
     if (!builtin.zig_is_stage2) {
@@ -96,7 +179,6 @@ comptime {
                     .linkage = linkage,
                 });
             },
-
             else => {},
         }
 
@@ -137,6 +219,7 @@ comptime {
         const __divtf3 = @import("compiler_rt/divtf3.zig").__divtf3;
         @export(__divtf3, .{ .name = "__divtf3", .linkage = linkage });
 
+        // Integral bit manipulation
         const __ashldi3 = @import("compiler_rt/shift.zig").__ashldi3;
         @export(__ashldi3, .{ .name = "__ashldi3", .linkage = linkage });
         const __ashlti3 = @import("compiler_rt/shift.zig").__ashlti3;
@@ -150,6 +233,45 @@ comptime {
         const __lshrti3 = @import("compiler_rt/shift.zig").__lshrti3;
         @export(__lshrti3, .{ .name = "__lshrti3", .linkage = linkage });
 
+        const __clzsi2 = @import("compiler_rt/count0bits.zig").__clzsi2;
+        @export(__clzsi2, .{ .name = "__clzsi2", .linkage = linkage });
+        const __clzdi2 = @import("compiler_rt/count0bits.zig").__clzdi2;
+        @export(__clzdi2, .{ .name = "__clzdi2", .linkage = linkage });
+        const __clzti2 = @import("compiler_rt/count0bits.zig").__clzti2;
+        @export(__clzti2, .{ .name = "__clzti2", .linkage = linkage });
+        const __ctzsi2 = @import("compiler_rt/count0bits.zig").__ctzsi2;
+        @export(__ctzsi2, .{ .name = "__ctzsi2", .linkage = linkage });
+        const __ctzdi2 = @import("compiler_rt/count0bits.zig").__ctzdi2;
+        @export(__ctzdi2, .{ .name = "__ctzdi2", .linkage = linkage });
+        const __ctzti2 = @import("compiler_rt/count0bits.zig").__ctzti2;
+        @export(__ctzti2, .{ .name = "__ctzti2", .linkage = linkage });
+        const __ffssi2 = @import("compiler_rt/count0bits.zig").__ffssi2;
+        @export(__ffssi2, .{ .name = "__ffssi2", .linkage = linkage });
+        const __ffsdi2 = @import("compiler_rt/count0bits.zig").__ffsdi2;
+        @export(__ffsdi2, .{ .name = "__ffsdi2", .linkage = linkage });
+        const __ffsti2 = @import("compiler_rt/count0bits.zig").__ffsti2;
+        @export(__ffsti2, .{ .name = "__ffsti2", .linkage = linkage });
+
+        const __paritysi2 = @import("compiler_rt/parity.zig").__paritysi2;
+        @export(__paritysi2, .{ .name = "__paritysi2", .linkage = linkage });
+        const __paritydi2 = @import("compiler_rt/parity.zig").__paritydi2;
+        @export(__paritydi2, .{ .name = "__paritydi2", .linkage = linkage });
+        const __parityti2 = @import("compiler_rt/parity.zig").__parityti2;
+        @export(__parityti2, .{ .name = "__parityti2", .linkage = linkage });
+        const __popcountsi2 = @import("compiler_rt/popcount.zig").__popcountsi2;
+        @export(__popcountsi2, .{ .name = "__popcountsi2", .linkage = linkage });
+        const __popcountdi2 = @import("compiler_rt/popcount.zig").__popcountdi2;
+        @export(__popcountdi2, .{ .name = "__popcountdi2", .linkage = linkage });
+        const __popcountti2 = @import("compiler_rt/popcount.zig").__popcountti2;
+        @export(__popcountti2, .{ .name = "__popcountti2", .linkage = linkage });
+        const __bswapsi2 = @import("compiler_rt/bswap.zig").__bswapsi2;
+        @export(__bswapsi2, .{ .name = "__bswapsi2", .linkage = linkage });
+        const __bswapdi2 = @import("compiler_rt/bswap.zig").__bswapdi2;
+        @export(__bswapdi2, .{ .name = "__bswapdi2", .linkage = linkage });
+        const __bswapti2 = @import("compiler_rt/bswap.zig").__bswapti2;
+        @export(__bswapti2, .{ .name = "__bswapti2", .linkage = linkage });
+
+        // Integral / floating point conversion (part 1/2)
         const __floatsidf = @import("compiler_rt/floatsiXf.zig").__floatsidf;
         @export(__floatsidf, .{ .name = "__floatsidf", .linkage = linkage });
         const __floatsisf = @import("compiler_rt/floatsiXf.zig").__floatsisf;
@@ -211,6 +333,7 @@ comptime {
         const __extendsfdf2 = @import("compiler_rt/extendXfYf2.zig").__extendsfdf2;
         @export(__extendsfdf2, .{ .name = "__extendsfdf2", .linkage = linkage });
 
+        // Integral / floating point conversion (part 2/2)
         const __fixunssfsi = @import("compiler_rt/fixunssfsi.zig").__fixunssfsi;
         @export(__fixunssfsi, .{ .name = "__fixunssfsi", .linkage = linkage });
         const __fixunssfdi = @import("compiler_rt/fixunssfdi.zig").__fixunssfdi;
@@ -253,9 +376,19 @@ comptime {
 
         const __udivmoddi4 = @import("compiler_rt/int.zig").__udivmoddi4;
         @export(__udivmoddi4, .{ .name = "__udivmoddi4", .linkage = linkage });
-        const __popcountdi2 = @import("compiler_rt/popcountdi2.zig").__popcountdi2;
-        @export(__popcountdi2, .{ .name = "__popcountdi2", .linkage = linkage });
 
+        if (is_darwin) {
+            const __isPlatformVersionAtLeast = @import("compiler_rt/os_version_check.zig").__isPlatformVersionAtLeast;
+            @export(__isPlatformVersionAtLeast, .{ .name = "__isPlatformVersionAtLeast", .linkage = linkage });
+        }
+
+        // Integral arithmetic
+        const __negsi2 = @import("compiler_rt/negXi2.zig").__negsi2;
+        @export(__negsi2, .{ .name = "__negsi2", .linkage = linkage });
+        const __negdi2 = @import("compiler_rt/negXi2.zig").__negdi2;
+        @export(__negdi2, .{ .name = "__negdi2", .linkage = linkage });
+        const __negti2 = @import("compiler_rt/negXi2.zig").__negti2;
+        @export(__negti2, .{ .name = "__negti2", .linkage = linkage });
         const __mulsi3 = @import("compiler_rt/int.zig").__mulsi3;
         @export(__mulsi3, .{ .name = "__mulsi3", .linkage = linkage });
         const __muldi3 = @import("compiler_rt/muldi3.zig").__muldi3;
@@ -283,17 +416,37 @@ comptime {
         const __udivmodsi4 = @import("compiler_rt/int.zig").__udivmodsi4;
         @export(__udivmodsi4, .{ .name = "__udivmodsi4", .linkage = linkage });
 
+        // missing: Integral arithmetic with trapping overflow
+
+        // missing: Integral arithmetic which returns if overflow
+
+        // Integral comparison
+        // (a <  b) => 0
+        // (a == b) => 1
+        // (a >  b) => 2
+        const __cmpsi2 = @import("compiler_rt/cmp.zig").__cmpsi2;
+        @export(__cmpsi2, .{ .name = "__cmpsi2", .linkage = linkage });
+        const __cmpdi2 = @import("compiler_rt/cmp.zig").__cmpdi2;
+        @export(__cmpdi2, .{ .name = "__cmpdi2", .linkage = linkage });
+        const __cmpti2 = @import("compiler_rt/cmp.zig").__cmpti2;
+        @export(__cmpti2, .{ .name = "__cmpti2", .linkage = linkage });
+        const __ucmpsi2 = @import("compiler_rt/cmp.zig").__ucmpsi2;
+        @export(__ucmpsi2, .{ .name = "__ucmpsi2", .linkage = linkage });
+        const __ucmpdi2 = @import("compiler_rt/cmp.zig").__ucmpdi2;
+        @export(__ucmpdi2, .{ .name = "__ucmpdi2", .linkage = linkage });
+        const __ucmpti2 = @import("compiler_rt/cmp.zig").__ucmpti2;
+        @export(__ucmpti2, .{ .name = "__ucmpti2", .linkage = linkage });
+
+        // missing: Floating point raised to integer power
+
+        // missing: Complex arithmetic
+        // (a + ib) * (c + id)
+        // (a + ib) / (c + id)
+
         const __negsf2 = @import("compiler_rt/negXf2.zig").__negsf2;
         @export(__negsf2, .{ .name = "__negsf2", .linkage = linkage });
         const __negdf2 = @import("compiler_rt/negXf2.zig").__negdf2;
         @export(__negdf2, .{ .name = "__negdf2", .linkage = linkage });
-
-        const __clzsi2 = @import("compiler_rt/count0bits.zig").__clzsi2;
-        @export(__clzsi2, .{ .name = "__clzsi2", .linkage = linkage });
-        const __clzdi2 = @import("compiler_rt/count0bits.zig").__clzdi2;
-        @export(__clzdi2, .{ .name = "__clzdi2", .linkage = linkage });
-        const __clzti2 = @import("compiler_rt/count0bits.zig").__clzti2;
-        @export(__clzti2, .{ .name = "__clzti2", .linkage = linkage });
 
         if (builtin.link_libc and os_tag == .openbsd) {
             const __emutls_get_address = @import("compiler_rt/emutls.zig").__emutls_get_address;
@@ -547,93 +700,34 @@ comptime {
             @export(__unordtf2, .{ .name = "__unordkf2", .linkage = linkage });
         }
 
-        if (builtin.os.tag == .windows) {
-            // Default stack-probe functions emitted by LLVM
-            if (is_mingw) {
-                const _chkstk = @import("compiler_rt/stack_probe.zig")._chkstk;
-                @export(_chkstk, .{ .name = "_alloca", .linkage = strong_linkage });
-                const ___chkstk_ms = @import("compiler_rt/stack_probe.zig").___chkstk_ms;
-                @export(___chkstk_ms, .{ .name = "___chkstk_ms", .linkage = strong_linkage });
-            } else if (!builtin.link_libc) {
-                // This symbols are otherwise exported by MSVCRT.lib
-                const _chkstk = @import("compiler_rt/stack_probe.zig")._chkstk;
-                @export(_chkstk, .{ .name = "_chkstk", .linkage = strong_linkage });
-                const __chkstk = @import("compiler_rt/stack_probe.zig").__chkstk;
-                @export(__chkstk, .{ .name = "__chkstk", .linkage = strong_linkage });
-            }
-
-            switch (arch) {
-                .i386 => {
-                    const __divti3 = @import("compiler_rt/divti3.zig").__divti3;
-                    @export(__divti3, .{ .name = "__divti3", .linkage = linkage });
-                    const __modti3 = @import("compiler_rt/modti3.zig").__modti3;
-                    @export(__modti3, .{ .name = "__modti3", .linkage = linkage });
-                    const __multi3 = @import("compiler_rt/multi3.zig").__multi3;
-                    @export(__multi3, .{ .name = "__multi3", .linkage = linkage });
-                    const __udivti3 = @import("compiler_rt/udivti3.zig").__udivti3;
-                    @export(__udivti3, .{ .name = "__udivti3", .linkage = linkage });
-                    const __udivmodti4 = @import("compiler_rt/udivmodti4.zig").__udivmodti4;
-                    @export(__udivmodti4, .{ .name = "__udivmodti4", .linkage = linkage });
-                    const __umodti3 = @import("compiler_rt/umodti3.zig").__umodti3;
-                    @export(__umodti3, .{ .name = "__umodti3", .linkage = linkage });
-                },
-                .x86_64 => {
-                    // The "ti" functions must use Vector(2, u64) parameter types to adhere to the ABI
-                    // that LLVM expects compiler-rt to have.
-                    const __divti3_windows_x86_64 = @import("compiler_rt/divti3.zig").__divti3_windows_x86_64;
-                    @export(__divti3_windows_x86_64, .{ .name = "__divti3", .linkage = linkage });
-                    const __modti3_windows_x86_64 = @import("compiler_rt/modti3.zig").__modti3_windows_x86_64;
-                    @export(__modti3_windows_x86_64, .{ .name = "__modti3", .linkage = linkage });
-                    const __multi3_windows_x86_64 = @import("compiler_rt/multi3.zig").__multi3_windows_x86_64;
-                    @export(__multi3_windows_x86_64, .{ .name = "__multi3", .linkage = linkage });
-                    const __udivti3_windows_x86_64 = @import("compiler_rt/udivti3.zig").__udivti3_windows_x86_64;
-                    @export(__udivti3_windows_x86_64, .{ .name = "__udivti3", .linkage = linkage });
-                    const __udivmodti4_windows_x86_64 = @import("compiler_rt/udivmodti4.zig").__udivmodti4_windows_x86_64;
-                    @export(__udivmodti4_windows_x86_64, .{ .name = "__udivmodti4", .linkage = linkage });
-                    const __umodti3_windows_x86_64 = @import("compiler_rt/umodti3.zig").__umodti3_windows_x86_64;
-                    @export(__umodti3_windows_x86_64, .{ .name = "__umodti3", .linkage = linkage });
-                },
-                else => {},
-            }
-            if (arch.isAARCH64()) {
-                const __chkstk = @import("compiler_rt/stack_probe.zig").__chkstk;
-                @export(__chkstk, .{ .name = "__chkstk", .linkage = strong_linkage });
-                const __divti3_windows = @import("compiler_rt/divti3.zig").__divti3;
-                @export(__divti3_windows, .{ .name = "__divti3", .linkage = linkage });
-                const __modti3 = @import("compiler_rt/modti3.zig").__modti3;
-                @export(__modti3, .{ .name = "__modti3", .linkage = linkage });
-                const __udivti3_windows = @import("compiler_rt/udivti3.zig").__udivti3;
-                @export(__udivti3_windows, .{ .name = "__udivti3", .linkage = linkage });
-                const __umodti3 = @import("compiler_rt/umodti3.zig").__umodti3;
-                @export(__umodti3, .{ .name = "__umodti3", .linkage = linkage });
-            }
-        } else {
-            const __divti3 = @import("compiler_rt/divti3.zig").__divti3;
-            @export(__divti3, .{ .name = "__divti3", .linkage = linkage });
-            const __modti3 = @import("compiler_rt/modti3.zig").__modti3;
-            @export(__modti3, .{ .name = "__modti3", .linkage = linkage });
-            const __multi3 = @import("compiler_rt/multi3.zig").__multi3;
-            @export(__multi3, .{ .name = "__multi3", .linkage = linkage });
-            const __udivti3 = @import("compiler_rt/udivti3.zig").__udivti3;
-            @export(__udivti3, .{ .name = "__udivti3", .linkage = linkage });
-            const __udivmodti4 = @import("compiler_rt/udivmodti4.zig").__udivmodti4;
-            @export(__udivmodti4, .{ .name = "__udivmodti4", .linkage = linkage });
-            const __umodti3 = @import("compiler_rt/umodti3.zig").__umodti3;
-            @export(__umodti3, .{ .name = "__umodti3", .linkage = linkage });
-        }
-        const __muloti4 = @import("compiler_rt/muloti4.zig").__muloti4;
-        @export(__muloti4, .{ .name = "__muloti4", .linkage = linkage });
-        const __mulodi4 = @import("compiler_rt/mulodi4.zig").__mulodi4;
-        @export(__mulodi4, .{ .name = "__mulodi4", .linkage = linkage });
-
         _ = @import("compiler_rt/atomics.zig");
 
         @export(fmaq, .{ .name = "fmaq", .linkage = linkage });
+        @export(floorf, .{ .name = "floorf", .linkage = linkage });
+        @export(floor, .{ .name = "floor", .linkage = linkage });
+        @export(floorl, .{ .name = "floorl", .linkage = linkage });
     }
 }
 
+const math = std.math;
+
 fn fmaq(a: f128, b: f128, c: f128) callconv(.C) f128 {
-    return std.math.fma(f128, a, b, c);
+    return math.fma(f128, a, b, c);
+}
+
+// TODO add intrinsics for these (and probably the double version too)
+// and have the math stuff use the intrinsic. same as @mod and @rem
+fn floorf(x: f32) callconv(.C) f32 {
+    return math.floor(x);
+}
+fn floor(x: f64) callconv(.C) f64 {
+    return math.floor(x);
+}
+fn floorl(x: c_longdouble) callconv(.C) c_longdouble {
+    if (!long_double_is_f128) {
+        @panic("TODO implement this");
+    }
+    return math.floor(x);
 }
 
 // Avoid dragging in the runtime safety mechanisms into this .o file,

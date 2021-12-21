@@ -29,7 +29,7 @@ pub const Rational = struct {
 
     /// Create a new Rational. A small amount of memory will be allocated on initialization.
     /// This will be 2 * Int.default_capacity.
-    pub fn init(a: *Allocator) !Rational {
+    pub fn init(a: Allocator) !Rational {
         return Rational{
             .p = try Int.init(a),
             .q = try Int.initSet(a, 1),
@@ -589,9 +589,10 @@ test "big.rational set/to Float round-trip" {
     var a = try Rational.init(testing.allocator);
     defer a.deinit();
     var prng = std.rand.DefaultPrng.init(0x5EED);
+    const random = prng.random();
     var i: usize = 0;
     while (i < 512) : (i += 1) {
-        const r = prng.random.float(f64);
+        const r = random.float(f64);
         try a.setFloat(f64, r);
         try testing.expect((try a.toFloat(f64)) == r);
     }

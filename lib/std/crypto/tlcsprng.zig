@@ -11,7 +11,10 @@ const os = std.os;
 
 /// We use this as a layer of indirection because global const pointers cannot
 /// point to thread-local variables.
-pub var interface = std.rand.Random{ .fillFn = tlsCsprngFill };
+pub const interface = std.rand.Random{
+    .ptr = undefined,
+    .fillFn = tlsCsprngFill,
+};
 
 const os_has_fork = switch (builtin.os.tag) {
     .dragonfly,
@@ -37,6 +40,7 @@ const maybe_have_wipe_on_fork = builtin.os.isAtLeast(.linux, .{
     .major = 4,
     .minor = 14,
 }) orelse true;
+const is_haiku = builtin.os.tag == .haiku;
 
 const Context = struct {
     init_state: enum(u8) { uninitialized = 0, initialized, failed },
@@ -55,7 +59,7 @@ var install_atfork_handler = std.once(struct {
 
 threadlocal var wipe_mem: []align(mem.page_size) u8 = &[_]u8{};
 
-fn tlsCsprngFill(_: *const std.rand.Random, buffer: []u8) void {
+fn tlsCsprngFill(_: *anyopaque, buffer: []u8) void {
     if (builtin.link_libc and @hasDecl(std.c, "arc4random_buf")) {
         // arc4random is already a thread-local CSPRNG.
         return std.c.arc4random_buf(buffer.ptr, buffer.len);
@@ -69,7 +73,7 @@ fn tlsCsprngFill(_: *const std.rand.Random, buffer: []u8) void {
 
     if (wipe_mem.len == 0) {
         // Not initialized yet.
-        if (want_fork_safety and maybe_have_wipe_on_fork) {
+        if (want_fork_safety and maybe_have_wipe_on_fork or is_haiku) {
             // Allocate a per-process page, madvise operates with page
             // granularity.
             wipe_mem = os.mmap(

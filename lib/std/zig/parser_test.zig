@@ -87,6 +87,29 @@ test "zig fmt: rewrite @byteOffsetOf to @offsetOf" {
     );
 }
 
+// TODO Remove this after zig 0.10.0 is released.
+test "zig fmt: rewrite c_void to anyopaque" {
+    try testTransform(
+        \\const Foo = struct {
+        \\    c_void: *c_void,
+        \\};
+        \\
+        \\fn foo(a: ?*c_void) !*c_void {
+        \\    return a orelse unreachable;
+        \\}
+        \\
+    ,
+        \\const Foo = struct {
+        \\    c_void: *anyopaque,
+        \\};
+        \\
+        \\fn foo(a: ?*anyopaque) !*anyopaque {
+        \\    return a orelse unreachable;
+        \\}
+        \\
+    );
+}
+
 test "zig fmt: simple top level comptime block" {
     try testCanonical(
         \\// line comment
@@ -323,6 +346,50 @@ test "zig fmt: container declaration, transform trailing comma" {
     ,
         \\const X = struct {
         \\    foo: i32,
+        \\    bar: i8,
+        \\};
+        \\
+    );
+}
+
+test "zig fmt: container declaration, comment, add trailing comma" {
+    try testTransform(
+        \\const X = struct {
+        \\    foo: i32, // foo
+        \\    bar: i8
+        \\};
+    ,
+        \\const X = struct {
+        \\    foo: i32, // foo
+        \\    bar: i8,
+        \\};
+        \\
+    );
+    try testTransform(
+        \\const X = struct {
+        \\    foo: i32 // foo
+        \\};
+    ,
+        \\const X = struct {
+        \\    foo: i32, // foo
+        \\};
+        \\
+    );
+}
+
+test "zig fmt: container declaration, multiline string, add trailing comma" {
+    try testTransform(
+        \\const X = struct {
+        \\    foo: []const u8 =
+        \\        \\ foo
+        \\    ,
+        \\    bar: i8
+        \\};
+    ,
+        \\const X = struct {
+        \\    foo: []const u8 =
+        \\        \\ foo
+        \\    ,
         \\    bar: i8,
         \\};
         \\
@@ -1176,7 +1243,7 @@ test "zig fmt: doc comments on param decl" {
     try testCanonical(
         \\pub const Allocator = struct {
         \\    shrinkFn: fn (
-        \\        self: *Allocator,
+        \\        self: Allocator,
         \\        /// Guaranteed to be the same as what was returned from most recent call to
         \\        /// `allocFn`, `reallocFn`, or `shrinkFn`.
         \\        old_mem: []u8,
@@ -4206,7 +4273,7 @@ test "zig fmt: Only indent multiline string literals in function calls" {
 
 test "zig fmt: Don't add extra newline after if" {
     try testCanonical(
-        \\pub fn atomicSymLink(allocator: *Allocator, existing_path: []const u8, new_path: []const u8) !void {
+        \\pub fn atomicSymLink(allocator: Allocator, existing_path: []const u8, new_path: []const u8) !void {
         \\    if (cwd().symLink(existing_path, new_path, .{})) {
         \\        return;
         \\    }
@@ -4398,7 +4465,7 @@ test "zig fmt: regression test for #5722" {
         \\    while (it.next()) |node|
         \\        view_tags.append(node.view.current_tags) catch {
         \\            c.wl_resource_post_no_memory(self.wl_resource);
-        \\            log.crit(.river_status, "out of memory", .{});
+        \\            log.err(.river_status, "out of memory", .{});
         \\            return;
         \\        };
         \\}
@@ -5012,8 +5079,8 @@ test "recovery: non-associative operators" {
         \\const x = a == b == c;
         \\const x = a == b != c;
     , &[_]Error{
-        .expected_token,
-        .expected_token,
+        .chained_comparison_operators,
+        .chained_comparison_operators,
     });
 }
 
@@ -5275,7 +5342,7 @@ const maxInt = std.math.maxInt;
 
 var fixed_buffer_mem: [100 * 1024]u8 = undefined;
 
-fn testParse(source: [:0]const u8, allocator: *mem.Allocator, anything_changed: *bool) ![]u8 {
+fn testParse(source: [:0]const u8, allocator: mem.Allocator, anything_changed: *bool) ![]u8 {
     const stderr = io.getStdErr().writer();
 
     var tree = try std.zig.parse(allocator, source);
@@ -5307,9 +5374,10 @@ fn testTransform(source: [:0]const u8, expected_source: []const u8) !void {
     const needed_alloc_count = x: {
         // Try it once with unlimited memory, make sure it works
         var fixed_allocator = std.heap.FixedBufferAllocator.init(fixed_buffer_mem[0..]);
-        var failing_allocator = std.testing.FailingAllocator.init(&fixed_allocator.allocator, maxInt(usize));
+        var failing_allocator = std.testing.FailingAllocator.init(fixed_allocator.allocator(), maxInt(usize));
+        const allocator = failing_allocator.allocator();
         var anything_changed: bool = undefined;
-        const result_source = try testParse(source, &failing_allocator.allocator, &anything_changed);
+        const result_source = try testParse(source, allocator, &anything_changed);
         try std.testing.expectEqualStrings(expected_source, result_source);
         const changes_expected = source.ptr != expected_source.ptr;
         if (anything_changed != changes_expected) {
@@ -5317,16 +5385,16 @@ fn testTransform(source: [:0]const u8, expected_source: []const u8) !void {
             return error.TestFailed;
         }
         try std.testing.expect(anything_changed == changes_expected);
-        failing_allocator.allocator.free(result_source);
+        allocator.free(result_source);
         break :x failing_allocator.index;
     };
 
     var fail_index: usize = 0;
     while (fail_index < needed_alloc_count) : (fail_index += 1) {
         var fixed_allocator = std.heap.FixedBufferAllocator.init(fixed_buffer_mem[0..]);
-        var failing_allocator = std.testing.FailingAllocator.init(&fixed_allocator.allocator, fail_index);
+        var failing_allocator = std.testing.FailingAllocator.init(fixed_allocator.allocator(), fail_index);
         var anything_changed: bool = undefined;
-        if (testParse(source, &failing_allocator.allocator, &anything_changed)) |_| {
+        if (testParse(source, failing_allocator.allocator(), &anything_changed)) |_| {
             return error.NondeterministicMemoryUsage;
         } else |err| switch (err) {
             error.OutOfMemory => {

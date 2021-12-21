@@ -25,7 +25,7 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
     const gpa = comp.gpa;
     var arena_allocator = std.heap.ArenaAllocator.init(gpa);
     defer arena_allocator.deinit();
-    const arena = &arena_allocator.allocator;
+    const arena = arena_allocator.allocator();
 
     switch (crt_file) {
         .crti_o => {
@@ -191,11 +191,20 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
             return comp.build_crt_file("c", .Lib, c_source_files.items);
         },
         .libc_so => {
+            const target = comp.getTarget();
+            const arch_define = try std.fmt.allocPrint(arena, "-DARCH_{s}", .{
+                @tagName(target.cpu.arch),
+            });
+            const clang_argv: []const []const u8 = if (target.cpu.arch.ptrBitWidth() == 64)
+                &[_][]const u8{ "-DPTR64", arch_define }
+            else
+                &[_][]const u8{arch_define};
+
             const sub_compilation = try Compilation.create(comp.gpa, .{
                 .local_cache_directory = comp.global_cache_directory,
                 .global_cache_directory = comp.global_cache_directory,
                 .zig_lib_directory = comp.zig_lib_directory,
-                .target = comp.getTarget(),
+                .target = target,
                 .root_name = "c",
                 .main_pkg = null,
                 .output_mode = .Lib,
@@ -207,6 +216,7 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
                 .want_sanitize_c = false,
                 .want_stack_check = false,
                 .want_red_zone = comp.bin_file.options.red_zone,
+                .omit_frame_pointer = comp.bin_file.options.omit_frame_pointer,
                 .want_valgrind = false,
                 .want_tsan = false,
                 .emit_h = null,
@@ -222,8 +232,9 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
                 .verbose_llvm_cpu_features = comp.verbose_llvm_cpu_features,
                 .clang_passthrough_mode = comp.clang_passthrough_mode,
                 .c_source_files = &[_]Compilation.CSourceFile{
-                    .{ .src_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{ "libc", "musl", "libc.s" }) },
+                    .{ .src_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{ "libc", "musl", "libc.S" }) },
                 },
+                .clang_argv = clang_argv,
                 .skip_linker_dependencies = true,
                 .soname = "libc.so",
             });
@@ -309,7 +320,7 @@ const Ext = enum {
     o3,
 };
 
-fn addSrcFile(arena: *Allocator, source_table: *std.StringArrayHashMap(Ext), file_path: []const u8) !void {
+fn addSrcFile(arena: Allocator, source_table: *std.StringArrayHashMap(Ext), file_path: []const u8) !void {
     const ext: Ext = ext: {
         if (mem.endsWith(u8, file_path, ".c")) {
             if (mem.startsWith(u8, file_path, "musl/src/malloc/") or
@@ -343,7 +354,7 @@ fn addSrcFile(arena: *Allocator, source_table: *std.StringArrayHashMap(Ext), fil
 
 fn addCcArgs(
     comp: *Compilation,
-    arena: *Allocator,
+    arena: Allocator,
     args: *std.ArrayList([]const u8),
     want_O3: bool,
 ) error{OutOfMemory}!void {
@@ -393,7 +404,7 @@ fn addCcArgs(
     });
 }
 
-fn start_asm_path(comp: *Compilation, arena: *Allocator, basename: []const u8) ![]const u8 {
+fn start_asm_path(comp: *Compilation, arena: Allocator, basename: []const u8) ![]const u8 {
     const target = comp.getTarget();
     return comp.zig_lib_directory.join(arena, &[_][]const u8{
         "libc", "musl", "crt", archName(target.cpu.arch), basename,

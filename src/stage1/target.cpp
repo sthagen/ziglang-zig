@@ -680,6 +680,8 @@ uint32_t target_c_type_size_in_bits(const ZigTarget *target, CIntType id) {
         case OsSolaris:
         case OsEmscripten:
         case OsPlan9:
+        case OsCUDA:
+        case OsNVCL:
             switch (id) {
                 case CIntTypeShort:
                 case CIntTypeUShort:
@@ -741,8 +743,6 @@ uint32_t target_c_type_size_in_bits(const ZigTarget *target, CIntType id) {
         case OsRTEMS:
         case OsNaCl:
         case OsAIX:
-        case OsCUDA:
-        case OsNVCL:
         case OsAMDHSA:
         case OsPS4:
         case OsELFIAMCU:
@@ -938,6 +938,10 @@ bool target_has_valgrind_support(const ZigTarget *target) {
 
 bool target_is_wasm(const ZigTarget *target) {
     return target->arch == ZigLLVM_wasm32 || target->arch == ZigLLVM_wasm64;
+}
+
+bool target_is_bpf(const ZigTarget *target) {
+    return target->arch == ZigLLVM_bpfel || target->arch == ZigLLVM_bpfeb;
 }
 
 ZigLLVM_EnvironmentType target_default_abi(ZigLLVM_ArchType arch, Os os) {

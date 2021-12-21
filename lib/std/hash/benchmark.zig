@@ -11,6 +11,7 @@ const MiB = 1024 * KiB;
 const GiB = 1024 * MiB;
 
 var prng = std.rand.DefaultPrng.init(0);
+const random = prng.random();
 
 const Hash = struct {
     ty: type,
@@ -88,7 +89,7 @@ pub fn benchmarkHash(comptime H: anytype, bytes: usize) !Result {
     };
 
     var block: [block_size]u8 = undefined;
-    prng.random.bytes(block[0..]);
+    random.bytes(block[0..]);
 
     var offset: usize = 0;
     var timer = try Timer.start();
@@ -110,7 +111,7 @@ pub fn benchmarkHash(comptime H: anytype, bytes: usize) !Result {
 pub fn benchmarkHashSmallKeys(comptime H: anytype, key_size: usize, bytes: usize) !Result {
     const key_count = bytes / key_size;
     var block: [block_size]u8 = undefined;
-    prng.random.bytes(block[0..]);
+    random.bytes(block[0..]);
 
     var i: usize = 0;
     var timer = try Timer.start();
@@ -141,7 +142,7 @@ pub fn benchmarkHashSmallKeys(comptime H: anytype, key_size: usize, bytes: usize
 }
 
 fn usage() void {
-    std.debug.warn(
+    std.debug.print(
         \\throughput_test [options]
         \\
         \\Options:
@@ -164,7 +165,7 @@ pub fn main() !void {
 
     var buffer: [1024]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(buffer[0..]);
-    const args = try std.process.argsAlloc(&fixed.allocator);
+    const args = try std.process.argsAlloc(fixed.allocator());
 
     var filter: ?[]u8 = "";
     var count: usize = mode(128 * MiB);

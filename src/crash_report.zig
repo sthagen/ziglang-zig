@@ -16,7 +16,7 @@ pub const is_enabled = builtin.mode == .Debug;
 /// You will also need to call initialize() on startup, preferably as the very first operation in your program.
 pub const root_decls = struct {
     pub const panic = if (is_enabled) compilerPanic else std.builtin.default_panic;
-    pub const enable_segfault_handler = if (is_enabled) false else debug.default_enable_segfault_handler;
+    pub const enable_segfault_handler = false;
 };
 
 /// Install signal handlers to identify crashes and report diagnostics.
@@ -85,7 +85,7 @@ fn dumpStatusReport() !void {
     const anal = zir_state orelse return;
     // Note: We have the panic mutex here, so we can safely use the global crash heap.
     var fba = std.heap.FixedBufferAllocator.init(&crash_heap);
-    const allocator = &fba.allocator;
+    const allocator = fba.allocator();
 
     const stderr = io.getStdErr().writer();
     const block: *Sema.Block = anal.block;
@@ -179,7 +179,7 @@ pub fn attachSegfaultHandler() void {
     os.sigaction(os.SIG.BUS, &act, null);
 }
 
-fn handleSegfaultLinux(sig: i32, info: *const os.siginfo_t, ctx_ptr: ?*const c_void) callconv(.C) noreturn {
+fn handleSegfaultLinux(sig: i32, info: *const os.siginfo_t, ctx_ptr: ?*const anyopaque) callconv(.C) noreturn {
     // TODO: use alarm() here to prevent infinite loops
     PanicSwitch.preDispatch();
 
@@ -422,7 +422,7 @@ const PanicSwitch = struct {
 
         state.recover_stage = .release_ref_count;
 
-        _ = panic_mutex.acquire();
+        panic_mutex.lock();
 
         state.recover_stage = .release_mutex;
 
@@ -482,7 +482,7 @@ const PanicSwitch = struct {
     noinline fn releaseMutex(state: *volatile PanicState) noreturn {
         state.recover_stage = .abort;
 
-        panic_mutex.releaseDirect();
+        panic_mutex.unlock();
 
         goTo(releaseRefCount, .{state});
     }

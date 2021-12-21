@@ -71,9 +71,9 @@ entry_val: ?u64 = null,
 got_len: usize = 0,
 // A list of all the free got indexes, so when making a new decl
 // don't make a new one, just use one from here.
-got_index_free_list: std.ArrayListUnmanaged(u64) = .{},
+got_index_free_list: std.ArrayListUnmanaged(usize) = .{},
 
-syms_index_free_list: std.ArrayListUnmanaged(u64) = .{},
+syms_index_free_list: std.ArrayListUnmanaged(usize) = .{},
 
 const Bases = struct {
     text: u64,
@@ -132,7 +132,7 @@ pub fn defaultBaseAddrs(arch: std.Target.Cpu.Arch) Bases {
 
 pub const PtrWidth = enum { p32, p64 };
 
-pub fn createEmpty(gpa: *Allocator, options: link.Options) !*Plan9 {
+pub fn createEmpty(gpa: Allocator, options: link.Options) !*Plan9 {
     if (options.use_llvm)
         return error.LLVMBackendDoesNotSupportPlan9;
     const sixtyfour_bit: bool = switch (options.target.cpu.arch.ptrBitWidth()) {
@@ -168,7 +168,7 @@ fn putFn(self: *Plan9, decl: *Module.Decl, out: FnDeclOutput) !void {
         try fn_map_res.value_ptr.functions.put(gpa, decl, out);
     } else {
         const file = decl.getFileScope();
-        const arena = &self.path_arena.allocator;
+        const arena = self.path_arena.allocator();
         // each file gets a symbol
         fn_map_res.value_ptr.* = .{
             .sym_index = blk: {
@@ -299,7 +299,7 @@ pub fn updateDecl(self: *Plan9, module: *Module, decl: *Module.Decl) !void {
             return;
         },
     };
-    var duped_code = try std.mem.dupe(self.base.allocator, u8, code);
+    var duped_code = try self.base.allocator.dupe(u8, code);
     errdefer self.base.allocator.free(duped_code);
     try self.data_decl_table.put(self.base.allocator, decl, duped_code);
     return self.updateFinish(decl);
@@ -356,8 +356,8 @@ pub fn changeLine(l: *std.ArrayList(u8), delta_line: i32) !void {
     }
 }
 
-fn declCount(self: *Plan9) u64 {
-    var fn_decl_count: u64 = 0;
+fn declCount(self: *Plan9) usize {
+    var fn_decl_count: usize = 0;
     var itf_files = self.fn_decl_table.iterator();
     while (itf_files.next()) |ent| {
         // get the submap
@@ -406,14 +406,14 @@ pub fn flushModule(self: *Plan9, comp: *Compilation) !void {
     defer linecountinfo.deinit();
     // text
     {
-        var linecount: u32 = 0;
+        var linecount: i64 = -1;
         var it_file = self.fn_decl_table.iterator();
         while (it_file.next()) |fentry| {
             var it = fentry.value_ptr.functions.iterator();
             while (it.next()) |entry| {
                 const decl = entry.key_ptr.*;
                 const out = entry.value_ptr.*;
-                log.debug("write text decl {*} ({s}), lines {d} to {d}", .{ decl, decl.name, out.start_line, out.end_line });
+                log.debug("write text decl {*} ({s}), lines {d} to {d}", .{ decl, decl.name, out.start_line + 1, out.end_line });
                 {
                     // connect the previous decl to the next
                     const delta_line = @intCast(i32, out.start_line) - @intCast(i32, linecount);
@@ -621,7 +621,7 @@ pub fn deinit(self: *Plan9) void {
 
 pub const Export = ?usize;
 pub const base_tag = .plan9;
-pub fn openPath(allocator: *Allocator, sub_path: []const u8, options: link.Options) !*Plan9 {
+pub fn openPath(allocator: Allocator, sub_path: []const u8, options: link.Options) !*Plan9 {
     if (options.use_llvm)
         return error.LLVMBackendDoesNotSupportPlan9;
     assert(options.object_format == .plan9);
@@ -660,8 +660,7 @@ pub fn openPath(allocator: *Allocator, sub_path: []const u8, options: link.Optio
 }
 
 pub fn writeSym(self: *Plan9, w: anytype, sym: aout.Sym) !void {
-    log.debug("write sym.name: {s}", .{sym.name});
-    log.debug("write sym.value: {x}", .{sym.value});
+    log.debug("write sym{{name: {s}, value: {x}}}", .{ sym.name, sym.value });
     if (sym.type == .bad) return; // we don't want to write free'd symbols
     if (!self.sixtyfour_bit) {
         try w.writeIntBig(u32, @intCast(u32, sym.value));

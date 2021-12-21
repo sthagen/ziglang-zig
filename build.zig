@@ -3,7 +3,6 @@ const builtin = std.builtin;
 const Builder = std.build.Builder;
 const tests = @import("test/tests.zig");
 const BufMap = std.BufMap;
-const warn = std.debug.warn;
 const mem = std.mem;
 const ArrayList = std.ArrayList;
 const io = std.io;
@@ -11,7 +10,7 @@ const fs = std.fs;
 const InstallDirectoryOptions = std.build.InstallDirectoryOptions;
 const assert = std.debug.assert;
 
-const zig_version = std.builtin.Version{ .major = 0, .minor = 9, .patch = 0 };
+const zig_version = std.builtin.Version{ .major = 0, .minor = 10, .patch = 0 };
 
 pub fn build(b: *Builder) !void {
     b.setPreferredReleaseMode(.ReleaseFast);
@@ -110,6 +109,8 @@ pub fn build(b: *Builder) !void {
         return;
 
     const tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
+    const tracy_callstack = b.option(bool, "tracy-callstack", "Include callstack information with Tracy data. Does nothing if -Dtracy is not provided") orelse false;
+    const tracy_allocation = b.option(bool, "tracy-allocation", "Include allocation information with Tracy data. Does nothing if -Dtracy is not provided") orelse false;
     const link_libc = b.option(bool, "force-link-libc", "Force self-hosted compiler to link libc") orelse enable_llvm;
     const strip = b.option(bool, "strip", "Omit debug information") orelse false;
 
@@ -205,6 +206,7 @@ pub fn build(b: *Builder) !void {
     }
 
     const enable_logging = b.option(bool, "log", "Whether to enable logging") orelse false;
+    const enable_link_snapshots = b.option(bool, "link-snapshot", "Whether to enable linker state snapshots") orelse false;
 
     const opt_version_string = b.option([]const u8, "version-string", "Override Zig version string. Default is to find out with git.");
     const version = if (opt_version_string) |version| version else v: {
@@ -220,7 +222,7 @@ pub fn build(b: *Builder) !void {
 
         switch (mem.count(u8, git_describe, "-")) {
             0 => {
-                // Tagged release version (e.g. 0.8.0).
+                // Tagged release version (e.g. 0.9.0).
                 if (!mem.eql(u8, git_describe, version_string)) {
                     std.debug.print("Zig version '{s}' does not match Git tag '{s}'\n", .{ version_string, git_describe });
                     std.process.exit(1);
@@ -228,7 +230,7 @@ pub fn build(b: *Builder) !void {
                 break :v version_string;
             },
             2 => {
-                // Untagged development build (e.g. 0.8.0-684-gbbe2cca1a).
+                // Untagged development build (e.g. 0.9.0-dev.2025+ecf0050a9).
                 var it = mem.split(u8, git_describe, "-");
                 const tagged_ancestor = it.next() orelse unreachable;
                 const commit_height = it.next() orelse unreachable;
@@ -261,7 +263,10 @@ pub fn build(b: *Builder) !void {
     exe_options.addOption(std.SemanticVersion, "semver", semver);
 
     exe_options.addOption(bool, "enable_logging", enable_logging);
+    exe_options.addOption(bool, "enable_link_snapshots", enable_link_snapshots);
     exe_options.addOption(bool, "enable_tracy", tracy != null);
+    exe_options.addOption(bool, "enable_tracy_callstack", tracy_callstack);
+    exe_options.addOption(bool, "enable_tracy_allocation", tracy_allocation);
     exe_options.addOption(bool, "is_stage1", is_stage1);
     exe_options.addOption(bool, "omit_stage2", omit_stage2);
     if (tracy) |tracy_path| {
@@ -291,16 +296,11 @@ pub fn build(b: *Builder) !void {
 
     const test_filter = b.option([]const u8, "test-filter", "Skip tests that do not match filter");
 
-    const is_wine_enabled = b.option(bool, "enable-wine", "Use Wine to run cross compiled Windows tests") orelse false;
-    const is_qemu_enabled = b.option(bool, "enable-qemu", "Use QEMU to run cross compiled foreign architecture tests") orelse false;
-    const is_wasmtime_enabled = b.option(bool, "enable-wasmtime", "Use Wasmtime to enable and run WASI libstd tests") orelse false;
-    const is_darling_enabled = b.option(bool, "enable-darling", "[Experimental] Use Darling to run cross compiled macOS tests") orelse false;
-    const glibc_multi_dir = b.option([]const u8, "enable-foreign-glibc", "Provide directory with glibc installations to run cross compiled tests that link glibc");
-
     const test_stage2_options = b.addOptions();
     test_stage2.addOptions("build_options", test_stage2_options);
 
     test_stage2_options.addOption(bool, "enable_logging", enable_logging);
+    test_stage2_options.addOption(bool, "enable_link_snapshots", enable_link_snapshots);
     test_stage2_options.addOption(bool, "skip_non_native", skip_non_native);
     test_stage2_options.addOption(bool, "skip_compile_errors", skip_compile_errors);
     test_stage2_options.addOption(bool, "is_stage1", is_stage1);
@@ -310,12 +310,13 @@ pub fn build(b: *Builder) !void {
     test_stage2_options.addOption(bool, "llvm_has_csky", llvm_has_csky);
     test_stage2_options.addOption(bool, "llvm_has_ve", llvm_has_ve);
     test_stage2_options.addOption(bool, "llvm_has_arc", llvm_has_arc);
-    test_stage2_options.addOption(bool, "enable_qemu", is_qemu_enabled);
-    test_stage2_options.addOption(bool, "enable_wine", is_wine_enabled);
-    test_stage2_options.addOption(bool, "enable_wasmtime", is_wasmtime_enabled);
+    test_stage2_options.addOption(bool, "enable_qemu", b.enable_qemu);
+    test_stage2_options.addOption(bool, "enable_wine", b.enable_wine);
+    test_stage2_options.addOption(bool, "enable_wasmtime", b.enable_wasmtime);
+    test_stage2_options.addOption(bool, "enable_rosetta", b.enable_rosetta);
+    test_stage2_options.addOption(bool, "enable_darling", b.enable_darling);
     test_stage2_options.addOption(u32, "mem_leak_frames", mem_leak_frames * 2);
-    test_stage2_options.addOption(bool, "enable_darling", is_darling_enabled);
-    test_stage2_options.addOption(?[]const u8, "glibc_multi_install_dir", glibc_multi_dir);
+    test_stage2_options.addOption(?[]const u8, "glibc_runtimes_dir", b.glibc_runtimes_dir);
     test_stage2_options.addOption([:0]const u8, "version", try b.allocator.dupeZ(u8, version));
     test_stage2_options.addOption(std.SemanticVersion, "semver", semver);
 
@@ -360,11 +361,6 @@ pub fn build(b: *Builder) !void {
         false, // skip_single_threaded
         skip_non_native,
         skip_libc,
-        is_wine_enabled,
-        is_qemu_enabled,
-        is_wasmtime_enabled,
-        is_darling_enabled,
-        glibc_multi_dir,
     ));
 
     toolchain_step.dependOn(tests.addPkgTests(
@@ -377,11 +373,6 @@ pub fn build(b: *Builder) !void {
         true, // skip_single_threaded
         skip_non_native,
         true, // skip_libc
-        is_wine_enabled,
-        is_qemu_enabled,
-        is_wasmtime_enabled,
-        is_darling_enabled,
-        glibc_multi_dir,
     ));
 
     toolchain_step.dependOn(tests.addPkgTests(
@@ -394,11 +385,6 @@ pub fn build(b: *Builder) !void {
         true, // skip_single_threaded
         skip_non_native,
         true, // skip_libc
-        is_wine_enabled,
-        is_qemu_enabled,
-        is_wasmtime_enabled,
-        is_darling_enabled,
-        glibc_multi_dir,
     ));
 
     toolchain_step.dependOn(tests.addCompareOutputTests(b, test_filter, modes));
@@ -424,11 +410,6 @@ pub fn build(b: *Builder) !void {
         false,
         skip_non_native,
         skip_libc,
-        is_wine_enabled,
-        is_qemu_enabled,
-        is_wasmtime_enabled,
-        is_darling_enabled,
-        glibc_multi_dir,
     );
 
     const test_step = b.step("test", "Run all the tests");
@@ -551,9 +532,9 @@ fn addCxxKnownPath(
     const path_unpadded = mem.tokenize(u8, path_padded, "\r\n").next().?;
     if (mem.eql(u8, path_unpadded, objname)) {
         if (errtxt) |msg| {
-            warn("{s}", .{msg});
+            std.debug.print("{s}", .{msg});
         } else {
-            warn("Unable to determine path to {s}\n", .{objname});
+            std.debug.print("Unable to determine path to {s}\n", .{objname});
         }
         return error.RequiredLibraryNotFound;
     }
@@ -680,7 +661,7 @@ fn findAndParseConfigH(b: *Builder, config_h_path_option: ?[]const u8) ?CMakeCon
 }
 
 fn toNativePathSep(b: *Builder, s: []const u8) []u8 {
-    const duplicated = mem.dupe(b.allocator, u8, s) catch unreachable;
+    const duplicated = b.allocator.dupe(u8, s) catch unreachable;
     for (duplicated) |*byte| switch (byte.*) {
         '/' => byte.* = fs.path.sep,
         else => {},

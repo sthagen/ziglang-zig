@@ -61,6 +61,11 @@ pub const StackTrace = struct {
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
+        // TODO: re-evaluate whether to use format() methods at all.
+        // Until then, avoid an error when using GeneralPurposeAllocator with WebAssembly
+        // where it tries to call detectTTYConfig here.
+        if (builtin.os.tag == .freestanding) return;
+
         _ = fmt;
         _ = options;
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -70,7 +75,7 @@ pub const StackTrace = struct {
         };
         const tty_config = std.debug.detectTTYConfig();
         try writer.writeAll("\n");
-        std.debug.writeStackTrace(self, writer, &arena.allocator, debug_info, tty_config) catch |err| {
+        std.debug.writeStackTrace(self, writer, arena.allocator(), debug_info, tty_config) catch |err| {
             try writer.print("Unable to print stack trace: {s}\n", .{@errorName(err)});
         };
         try writer.writeAll("\n");
@@ -648,6 +653,31 @@ pub const CallOptions = struct {
 
 /// This data structure is used by the Zig language code generation and
 /// therefore must be kept in sync with the compiler implementation.
+pub const PrefetchOptions = struct {
+    /// Whether the prefetch should prepare for a read or a write.
+    rw: Rw = .read,
+    /// 0 means no temporal locality. That is, the data can be immediately
+    /// dropped from the cache after it is accessed.
+    ///
+    /// 3 means high temporal locality. That is, the data should be kept in
+    /// the cache as it is likely to be accessed again soon.
+    locality: u2 = 3,
+    /// The cache that the prefetch should be preformed on.
+    cache: Cache = .data,
+
+    pub const Rw = enum {
+        read,
+        write,
+    };
+
+    pub const Cache = enum {
+        instruction,
+        data,
+    };
+};
+
+/// This data structure is used by the Zig language code generation and
+/// therefore must be kept in sync with the compiler implementation.
 pub const ExportOptions = struct {
     name: []const u8,
     linkage: GlobalLinkage = .Strong,
@@ -702,7 +732,7 @@ pub fn default_panic(msg: []const u8, error_return_trace: ?*StackTrace) noreturn
             }
         },
         .wasi => {
-            std.debug.warn("{s}", .{msg});
+            std.debug.print("{s}", .{msg});
             std.os.abort();
         },
         .uefi => {

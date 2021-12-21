@@ -17,7 +17,7 @@ pub fn syscall0(number: SYS) usize {
         \\ 1:
         : [ret] "={$2}" (-> usize),
         : [number] "{$2}" (@enumToInt(number)),
-        : "memory", "cc", "$7"
+        : "$1", "$3", "$4", "$5", "$6", "$7", "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$24", "$25", "hi", "lo", "memory"
     );
 }
 
@@ -37,7 +37,7 @@ pub fn syscall_pipe(fd: *[2]i32) usize {
         : [ret] "={$2}" (-> usize),
         : [number] "{$2}" (@enumToInt(SYS.pipe)),
           [fd] "{$4}" (fd),
-        : "memory", "cc", "$7"
+        : "$1", "$3", "$5", "$6", "$7", "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$24", "$25", "hi", "lo", "memory"
     );
 }
 
@@ -50,7 +50,7 @@ pub fn syscall1(number: SYS, arg1: usize) usize {
         : [ret] "={$2}" (-> usize),
         : [number] "{$2}" (@enumToInt(number)),
           [arg1] "{$4}" (arg1),
-        : "memory", "cc", "$7"
+        : "$1", "$3", "$5", "$6", "$7", "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$24", "$25", "hi", "lo", "memory"
     );
 }
 
@@ -64,7 +64,7 @@ pub fn syscall2(number: SYS, arg1: usize, arg2: usize) usize {
         : [number] "{$2}" (@enumToInt(number)),
           [arg1] "{$4}" (arg1),
           [arg2] "{$5}" (arg2),
-        : "memory", "cc", "$7"
+        : "$1", "$3", "$6", "$7", "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$24", "$25", "hi", "lo", "memory"
     );
 }
 
@@ -79,7 +79,7 @@ pub fn syscall3(number: SYS, arg1: usize, arg2: usize, arg3: usize) usize {
           [arg1] "{$4}" (arg1),
           [arg2] "{$5}" (arg2),
           [arg3] "{$6}" (arg3),
-        : "memory", "cc", "$7"
+        : "$1", "$3", "$7", "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$24", "$25", "hi", "lo", "memory"
     );
 }
 
@@ -95,7 +95,7 @@ pub fn syscall4(number: SYS, arg1: usize, arg2: usize, arg3: usize, arg4: usize)
           [arg2] "{$5}" (arg2),
           [arg3] "{$6}" (arg3),
           [arg4] "{$7}" (arg4),
-        : "memory", "cc", "$7"
+        : "$1", "$3", "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$24", "$25", "hi", "lo", "memory"
     );
 }
 
@@ -116,7 +116,7 @@ pub fn syscall5(number: SYS, arg1: usize, arg2: usize, arg3: usize, arg4: usize,
           [arg3] "{$6}" (arg3),
           [arg4] "{$7}" (arg4),
           [arg5] "r" (arg5),
-        : "memory", "cc", "$7"
+        : "$1", "$3", "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$24", "$25", "hi", "lo", "memory"
     );
 }
 
@@ -150,7 +150,7 @@ pub fn syscall6(
           [arg4] "{$7}" (arg4),
           [arg5] "r" (arg5),
           [arg6] "r" (arg6),
-        : "memory", "cc", "$7"
+        : "$1", "$3", "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$24", "$25", "hi", "lo", "memory"
     );
 }
 
@@ -184,7 +184,7 @@ pub fn syscall7(
           [arg5] "r" (arg5),
           [arg6] "r" (arg6),
           [arg7] "r" (arg7),
-        : "memory", "cc", "$7"
+        : "$1", "$3", "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$24", "$25", "hi", "lo", "memory"
     );
 }
 
@@ -195,7 +195,7 @@ pub fn restore() callconv(.Naked) void {
     return asm volatile ("syscall"
         :
         : [number] "{$2}" (@enumToInt(SYS.sigreturn)),
-        : "memory", "cc", "$7"
+        : "$1", "$3", "$4", "$5", "$6", "$7", "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$24", "$25", "hi", "lo", "memory"
     );
 }
 
@@ -203,7 +203,7 @@ pub fn restore_rt() callconv(.Naked) void {
     return asm volatile ("syscall"
         :
         : [number] "{$2}" (@enumToInt(SYS.rt_sigreturn)),
-        : "memory", "cc", "$7"
+        : "$1", "$3", "$4", "$5", "$6", "$7", "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$24", "$25", "hi", "lo", "memory"
     );
 }
 
@@ -626,6 +626,10 @@ pub const SYS = enum(usize) {
     faccessat2 = Linux + 439,
     process_madvise = Linux + 440,
     epoll_pwait2 = Linux + 441,
+    mount_setattr = Linux + 442,
+    landlock_create_ruleset = Linux + 444,
+    landlock_add_rule = Linux + 445,
+    landlock_restrict_self = Linux + 446,
 
     _,
 };
@@ -765,3 +769,63 @@ pub const timezone = extern struct {
 };
 
 pub const Elf_Symndx = u32;
+
+pub const rlimit_resource = enum(c_int) {
+    /// Per-process CPU limit, in seconds.
+    CPU,
+
+    /// Largest file that can be created, in bytes.
+    FSIZE,
+
+    /// Maximum size of data segment, in bytes.
+    DATA,
+
+    /// Maximum size of stack segment, in bytes.
+    STACK,
+
+    /// Largest core file that can be created, in bytes.
+    CORE,
+
+    /// Number of open files.
+    NOFILE,
+
+    /// Address space limit.
+    AS,
+
+    /// Largest resident set size, in bytes.
+    /// This affects swapping; processes that are exceeding their
+    /// resident set size will be more likely to have physical memory
+    /// taken from them.
+    RSS,
+
+    /// Number of processes.
+    NPROC,
+
+    /// Locked-in-memory address space.
+    MEMLOCK,
+
+    /// Maximum number of file locks.
+    LOCKS,
+
+    /// Maximum number of pending signals.
+    SIGPENDING,
+
+    /// Maximum bytes in POSIX message queues.
+    MSGQUEUE,
+
+    /// Maximum nice priority allowed to raise to.
+    /// Nice levels 19 .. -20 correspond to 0 .. 39
+    /// values of this resource limit.
+    NICE,
+
+    /// Maximum realtime priority allowed for non-priviledged
+    /// processes.
+    RTPRIO,
+
+    /// Maximum CPU time in µs that a process scheduled under a real-time
+    /// scheduling policy may consume without making a blocking system
+    /// call before being forcibly descheduled.
+    RTTIME,
+
+    _,
+};

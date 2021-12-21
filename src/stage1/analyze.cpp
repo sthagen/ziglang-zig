@@ -1777,11 +1777,12 @@ static Error emit_error_unless_type_allowed_in_packed_container(CodeGen *g, ZigT
             if ((err = emit_error_unless_type_allowed_in_packed_container(g, elem_type, source_node, container_name)))
                 return err;
             // TODO revisit this when doing https://github.com/ziglang/zig/issues/1512
-            if (type_size(g, type_entry) * 8 == type_size_bits(g, type_entry))
-                return ErrorNone;
+            size_t abi_size_in_bits = type_size(g, type_entry) * 8;
+            size_t size_in_bits = type_size_bits(g, type_entry);
+            if (abi_size_in_bits == size_in_bits) return ErrorNone;
             add_node_error(g, source_node,
-                buf_sprintf("array of '%s' not allowed in packed %s due to padding bits",
-                    buf_ptr(&elem_type->name), container_name));
+                buf_sprintf("array of '%s' not allowed in packed %s due to padding bits (must be padded from %zu to %zu bits)",
+                    buf_ptr(&elem_type->name), container_name, size_in_bits, abi_size_in_bits));
             return ErrorSemanticAnalyzeFail;
         }
         case ZigTypeIdStruct:
@@ -7626,7 +7627,10 @@ void render_const_value(CodeGen *g, Buf *buf, ZigValue *const_val) {
                     ZigValue *array = ptr_val->data.x_ptr.data.base_array.array_val;
                     size_t start = ptr_val->data.x_ptr.data.base_array.elem_index;
 
-                    render_const_val_array(g, buf, &type_entry->name, array, start, len);
+                    if (array->special == ConstValSpecialUndef)
+                        buf_append_str(buf, "undefined");
+                    else
+                        render_const_val_array(g, buf, &type_entry->name, array, start, len);
                 } else {
                     buf_appendf(buf, "(struct %s constant)", buf_ptr(&type_entry->name));
                 }

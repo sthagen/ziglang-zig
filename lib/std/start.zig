@@ -30,6 +30,8 @@ comptime {
                 }
             } else if (builtin.os.tag == .windows) {
                 @export(wWinMainCRTStartup2, .{ .name = "wWinMainCRTStartup" });
+            } else if (builtin.os.tag == .wasi and @hasDecl(root, "main")) {
+                @export(wasmMain2, .{ .name = "_start" });
             } else {
                 if (!@hasDecl(root, "_start")) {
                     @export(_start2, .{ .name = "_start" });
@@ -98,6 +100,22 @@ fn callMain2() noreturn {
     exit2(0);
 }
 
+fn wasmMain2() u8 {
+    switch (@typeInfo(@typeInfo(@TypeOf(root.main)).Fn.return_type.?)) {
+        .Void => {
+            root.main();
+            return 0;
+        },
+        .Int => |info| {
+            if (info.bits != 8 or info.signedness == .signed) {
+                @compileError(bad_main_ret);
+            }
+            return root.main();
+        },
+        else => @compileError("Bad return type main"),
+    }
+}
+
 fn wWinMainCRTStartup2() callconv(.C) noreturn {
     root.main();
     exit2(0);
@@ -128,6 +146,14 @@ fn exit2(code: usize) noreturn {
                     : [number] "{x8}" (93),
                       [arg1] "{x0}" (code),
                     : "memory", "cc"
+                );
+            },
+            .riscv64 => {
+                asm volatile ("ecall"
+                    :
+                    : [number] "{a7}" (94),
+                      [arg1] "{a0}" (0),
+                    : "rcx", "r11", "memory"
                 );
             },
             else => @compileError("TODO"),

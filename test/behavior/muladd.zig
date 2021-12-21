@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const expect = @import("std").testing.expect;
 
 test "@mulAdd" {
@@ -24,8 +25,11 @@ fn testMulAdd() !void {
         var c: f64 = 6.25;
         try expect(@mulAdd(f64, a, b, c) == 20);
     }
-    // TODO https://github.com/ziglang/zig/issues/9900
-    if (@import("builtin").cpu.arch != .aarch64) {
+    if (builtin.os.tag == .macos and builtin.cpu.arch == .aarch64) {
+        // https://github.com/ziglang/zig/issues/9900
+        return error.SkipZigTest;
+    }
+    {
         var a: f16 = 5.5;
         var b: f128 = 2.5;
         var c: f128 = 6.25;

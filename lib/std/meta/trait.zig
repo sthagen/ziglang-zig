@@ -2,7 +2,6 @@ const std = @import("../std.zig");
 const mem = std.mem;
 const debug = std.debug;
 const testing = std.testing;
-const warn = debug.warn;
 
 const meta = @import("../meta.zig");
 
@@ -354,7 +353,7 @@ test "std.meta.trait.isConstPtr" {
 
 pub fn isContainer(comptime T: type) bool {
     return switch (@typeInfo(T)) {
-        .Struct, .Union, .Enum => true,
+        .Struct, .Union, .Enum, .Opaque => true,
         else => false,
     };
 }
@@ -368,10 +367,12 @@ test "std.meta.trait.isContainer" {
         A,
         B,
     };
+    const TestOpaque = opaque {};
 
     try testing.expect(isContainer(TestStruct));
     try testing.expect(isContainer(TestUnion));
     try testing.expect(isContainer(TestEnum));
+    try testing.expect(isContainer(TestOpaque));
     try testing.expect(!isContainer(u8));
 }
 

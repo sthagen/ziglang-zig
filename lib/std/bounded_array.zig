@@ -34,7 +34,7 @@ pub fn BoundedArray(comptime T: type, comptime capacity: usize) type {
         }
 
         /// View the internal array as a constant slice whose size was previously set.
-        pub fn constSlice(self: Self) []const T {
+        pub fn constSlice(self: *const Self) []const T {
             return self.buffer[0..self.len];
         }
 
@@ -121,7 +121,7 @@ pub fn BoundedArray(comptime T: type, comptime capacity: usize) type {
         /// Insert `item` at index `i` by moving `slice[n .. slice.len]` to make room.
         /// This operation is O(N).
         pub fn insert(self: *Self, i: usize, item: T) !void {
-            if (i >= self.len) {
+            if (i > self.len) {
                 return error.IndexOutOfBounds;
             }
             _ = try self.addOne();
@@ -166,6 +166,13 @@ pub fn BoundedArray(comptime T: type, comptime capacity: usize) type {
         /// Extend the slice by 1 element.
         pub fn append(self: *Self, item: T) !void {
             const new_item_ptr = try self.addOne();
+            new_item_ptr.* = item;
+        }
+
+        /// Extend the slice by 1 element, asserting the capacity is already
+        /// enough to store the new item.
+        pub fn appendAssumeCapacity(self: *Self, item: T) void {
+            const new_item_ptr = self.addOneAssumeCapacity();
             new_item_ptr.* = item;
         }
 
@@ -262,6 +269,10 @@ test "BoundedArray" {
     try testing.expectEqual(a.len, 6);
     try testing.expectEqual(a.pop(), 0xff);
 
+    a.appendAssumeCapacity(0xff);
+    try testing.expectEqual(a.len, 6);
+    try testing.expectEqual(a.pop(), 0xff);
+
     try a.resize(1);
     try testing.expectEqual(a.popOrNull(), 0);
     try testing.expectEqual(a.popOrNull(), null);
@@ -277,6 +288,10 @@ test "BoundedArray" {
     try testing.expectEqual(a.get(5), 0xaa);
     try testing.expectEqual(a.get(9), 3);
     try testing.expectEqual(a.get(10), 4);
+
+    try a.insert(11, 0xbb);
+    try testing.expectEqual(a.len, 12);
+    try testing.expectEqual(a.pop(), 0xbb);
 
     try a.appendSlice(&x);
     try testing.expectEqual(a.len, 11 + x.len);

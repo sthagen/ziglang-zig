@@ -363,10 +363,6 @@ static bool cc_want_sret_attr(CallingConvention cc) {
     zig_unreachable();
 }
 
-static bool codegen_have_frame_pointer(CodeGen *g) {
-    return g->build_mode == BuildModeDebug;
-}
-
 static void add_common_fn_attributes(CodeGen *g, LLVMValueRef llvm_fn) {
     if (!g->red_zone) {
         addLLVMFnAttr(llvm_fn, "noredzone");
@@ -603,7 +599,7 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
         addLLVMFnAttrInt(llvm_fn, "alignstack", fn->alignstack_value);
     }
 
-    if (codegen_have_frame_pointer(g) && cc != CallingConventionInline) {
+    if (!g->omit_frame_pointer && cc != CallingConventionInline) {
         ZigLLVMAddFunctionAttr(llvm_fn, "frame-pointer", "all");
     }
     if (fn->section_name) {
@@ -1143,6 +1139,24 @@ static LLVMValueRef gen_wasm_memory_grow(CodeGen *g) {
     return g->wasm_memory_grow;
 }
 
+static LLVMValueRef gen_prefetch(CodeGen *g) {
+    if (g->prefetch)
+        return g->prefetch;
+
+    // declare void @llvm.prefetch(i8*, i32, i32, i32)
+    LLVMTypeRef param_types[] = {
+        LLVMPointerType(LLVMInt8Type(), 0),
+        LLVMInt32Type(),
+        LLVMInt32Type(),
+        LLVMInt32Type(),
+    };
+    LLVMTypeRef fn_type = LLVMFunctionType(LLVMVoidType(), param_types, 4, false);
+    g->prefetch = LLVMAddFunction(g->module, "llvm.prefetch.p0i8", fn_type);
+    assert(LLVMGetIntrinsicID(g->prefetch));
+
+    return g->prefetch;
+}
+
 static LLVMValueRef get_stacksave_fn_val(CodeGen *g) {
     if (g->stacksave_fn_val)
         return g->stacksave_fn_val;
@@ -1223,7 +1237,7 @@ static LLVMValueRef get_add_error_return_trace_addr_fn(CodeGen *g) {
     // Error return trace memory is in the stack, which is impossible to be at address 0
     // on any architecture.
     addLLVMArgAttr(fn_val, (unsigned)0, "nonnull");
-    if (codegen_have_frame_pointer(g)) {
+    if (!g->omit_frame_pointer) {
         ZigLLVMAddFunctionAttr(fn_val, "frame-pointer", "all");
     }
 
@@ -1299,7 +1313,7 @@ static LLVMValueRef get_return_err_fn(CodeGen *g) {
     LLVMSetLinkage(fn_val, LLVMInternalLinkage);
     ZigLLVMFunctionSetCallingConv(fn_val, get_llvm_cc(g, CallingConventionUnspecified));
     add_common_fn_attributes(g, fn_val);
-    if (codegen_have_frame_pointer(g)) {
+    if (!g->omit_frame_pointer) {
         ZigLLVMAddFunctionAttr(fn_val, "frame-pointer", "all");
     }
 
@@ -1381,7 +1395,7 @@ static LLVMValueRef get_safety_crash_err_fn(CodeGen *g) {
     LLVMSetLinkage(fn_val, LLVMInternalLinkage);
     ZigLLVMFunctionSetCallingConv(fn_val, get_llvm_cc(g, CallingConventionUnspecified));
     add_common_fn_attributes(g, fn_val);
-    if (codegen_have_frame_pointer(g)) {
+    if (!g->omit_frame_pointer) {
         ZigLLVMAddFunctionAttr(fn_val, "frame-pointer", "all");
     }
     // Not setting alignment here. See the comment above about
@@ -2389,7 +2403,7 @@ static LLVMValueRef get_merge_err_ret_traces_fn_val(CodeGen *g) {
 
     addLLVMArgAttr(fn_val, (unsigned)1, "noalias");
     addLLVMArgAttr(fn_val, (unsigned)1, "readonly");
-    if (codegen_have_frame_pointer(g)) {
+    if (!g->omit_frame_pointer) {
         ZigLLVMAddFunctionAttr(fn_val, "frame-pointer", "all");
     }
 
@@ -2964,33 +2978,7 @@ static LLVMValueRef gen_div(CodeGen *g, bool want_runtime_safety, bool want_fast
                 }
                 return result;
             case DivKindTrunc:
-                {
-                    LLVMBasicBlockRef ltz_block = LLVMAppendBasicBlock(g->cur_fn_val, "DivTruncLTZero");
-                    LLVMBasicBlockRef gez_block = LLVMAppendBasicBlock(g->cur_fn_val, "DivTruncGEZero");
-                    LLVMBasicBlockRef end_block = LLVMAppendBasicBlock(g->cur_fn_val, "DivTruncEnd");
-                    LLVMValueRef ltz = LLVMBuildFCmp(g->builder, LLVMRealOLT, val1, zero, "");
-                    if (operand_type->id == ZigTypeIdVector) {
-                        ltz = ZigLLVMBuildOrReduce(g->builder, ltz);
-                    }
-                    LLVMBuildCondBr(g->builder, ltz, ltz_block, gez_block);
-
-                    LLVMPositionBuilderAtEnd(g->builder, ltz_block);
-                    LLVMValueRef ceiled = gen_float_op(g, result, operand_type, BuiltinFnIdCeil);
-                    LLVMBasicBlockRef ceiled_end_block = LLVMGetInsertBlock(g->builder);
-                    LLVMBuildBr(g->builder, end_block);
-
-                    LLVMPositionBuilderAtEnd(g->builder, gez_block);
-                    LLVMValueRef floored = gen_float_op(g, result, operand_type, BuiltinFnIdFloor);
-                    LLVMBasicBlockRef floored_end_block = LLVMGetInsertBlock(g->builder);
-                    LLVMBuildBr(g->builder, end_block);
-
-                    LLVMPositionBuilderAtEnd(g->builder, end_block);
-                    LLVMValueRef phi = LLVMBuildPhi(g->builder, get_llvm_type(g, operand_type), "");
-                    LLVMValueRef incoming_values[] = { ceiled, floored };
-                    LLVMBasicBlockRef incoming_blocks[] = { ceiled_end_block, floored_end_block };
-                    LLVMAddIncoming(phi, incoming_values, incoming_blocks, 2);
-                    return phi;
-                }
+                return gen_float_op(g, result, operand_type, BuiltinFnIdTrunc);
             case DivKindFloor:
                 return gen_float_op(g, result, operand_type, BuiltinFnIdFloor);
         }
@@ -5205,11 +5193,13 @@ static LLVMValueRef get_int_builtin_fn(CodeGen *g, ZigType *expr_type, BuiltinFn
         n_args = 2;
         key.id = ZigLLVMFnIdCtz;
         key.data.ctz.bit_count = (uint32_t)int_type->data.integral.bit_count;
+        key.data.ctz.vector_len = vector_len;
     } else if (fn_id == BuiltinFnIdClz) {
         fn_name = "ctlz";
         n_args = 2;
         key.id = ZigLLVMFnIdClz;
         key.data.clz.bit_count = (uint32_t)int_type->data.integral.bit_count;
+        key.data.clz.vector_len = vector_len;
     } else if (fn_id == BuiltinFnIdPopCount) {
         fn_name = "ctpop";
         n_args = 1;
@@ -5227,6 +5217,7 @@ static LLVMValueRef get_int_builtin_fn(CodeGen *g, ZigType *expr_type, BuiltinFn
         n_args = 1;
         key.id = ZigLLVMFnIdBitReverse;
         key.data.bit_reverse.bit_count = (uint32_t)int_type->data.integral.bit_count;
+        key.data.bit_reverse.vector_len = vector_len;
     } else {
         zig_unreachable();
     }
@@ -5429,8 +5420,9 @@ static LLVMValueRef get_enum_tag_name_function(CodeGen *g, ZigType *enum_type) {
     if (enum_type->data.enumeration.name_function)
         return enum_type->data.enumeration.name_function;
 
-    ZigType *u8_ptr_type = get_pointer_to_type_extra(g, g->builtin_types.entry_u8, false, false,
-            PtrLenUnknown, get_abi_alignment(g, g->builtin_types.entry_u8), 0, 0, false);
+    ZigType *u8_ptr_type = get_pointer_to_type_extra2(g, g->builtin_types.entry_u8, false, false,
+            PtrLenUnknown, get_abi_alignment(g, g->builtin_types.entry_u8), 0, 0, false,
+            VECTOR_INDEX_NONE, nullptr, g->intern.for_zero_byte());
     ZigType *u8_slice_type = get_slice_type(g, u8_ptr_type);
     ZigType *tag_int_type = enum_type->data.enumeration.tag_int_type;
 
@@ -5444,7 +5436,7 @@ static LLVMValueRef get_enum_tag_name_function(CodeGen *g, ZigType *enum_type) {
     LLVMSetLinkage(fn_val, LLVMInternalLinkage);
     ZigLLVMFunctionSetCallingConv(fn_val, get_llvm_cc(g, CallingConventionUnspecified));
     add_common_fn_attributes(g, fn_val);
-    if (codegen_have_frame_pointer(g)) {
+    if (!g->omit_frame_pointer) {
         ZigLLVMAddFunctionAttr(fn_val, "frame-pointer", "all");
     }
 
@@ -5483,7 +5475,7 @@ static LLVMValueRef get_enum_tag_name_function(CodeGen *g, ZigType *enum_type) {
             continue;
         }
 
-        LLVMValueRef str_init = LLVMConstString(buf_ptr(name), (unsigned)buf_len(name), true);
+        LLVMValueRef str_init = LLVMConstString(buf_ptr(name), (unsigned)buf_len(name), false);
         LLVMValueRef str_global = LLVMAddGlobal(g->module, LLVMTypeOf(str_init), "");
         LLVMSetInitializer(str_global, str_init);
         LLVMSetLinkage(str_global, LLVMPrivateLinkage);
@@ -5925,6 +5917,52 @@ static LLVMValueRef ir_render_wasm_memory_grow(CodeGen *g, Stage1Air *executable
     return val;
 }
 
+static LLVMValueRef ir_render_prefetch(CodeGen *g, Stage1Air *executable, Stage1AirInstPrefetch *instruction) {
+    static_assert(PrefetchRwRead == 0, "");
+    static_assert(PrefetchRwWrite == 1, "");
+    assert(instruction->rw == PrefetchRwRead || instruction->rw == PrefetchRwWrite);
+
+    assert(instruction->locality >= 0 && instruction->locality <= 3);
+
+    static_assert(PrefetchCacheInstruction == 0, "");
+    static_assert(PrefetchCacheData == 1, "");
+    assert(instruction->cache == PrefetchCacheData || instruction->cache == PrefetchCacheInstruction);
+    
+    // LLVM fails during codegen of instruction cache prefetchs for these architectures.
+    // This is an LLVM bug as the prefetch intrinsic should be a noop if not supported by the target.
+    // To work around this, simply don't emit llvm.prefetch in this case.
+    // See https://bugs.llvm.org/show_bug.cgi?id=21037
+    if (instruction->cache == PrefetchCacheInstruction) {
+        switch (g->zig_target->arch) {
+            case ZigLLVM_x86:
+            case ZigLLVM_x86_64:
+                return nullptr;
+            default:
+                break;
+        }
+    }
+
+    // Another case of the same LLVM bug described above
+    if (instruction->rw == PrefetchRwWrite && instruction->cache == PrefetchCacheInstruction) {
+        switch (g->zig_target->arch) {
+            case ZigLLVM_arm:
+                return nullptr;
+            default:
+                break;
+        }
+
+    }
+
+    LLVMValueRef params[] = {
+        LLVMBuildBitCast(g->builder, ir_llvm_value(g, instruction->ptr), LLVMPointerType(LLVMInt8Type(), 0), ""),
+        LLVMConstInt(LLVMInt32Type(), instruction->rw, false),
+        LLVMConstInt(LLVMInt32Type(), instruction->locality, false),
+        LLVMConstInt(LLVMInt32Type(), instruction->cache, false),
+    };
+    LLVMValueRef val = LLVMBuildCall(g->builder, gen_prefetch(g), params, 4, "");
+    return val;
+}
+
 static LLVMValueRef ir_render_slice(CodeGen *g, Stage1Air *executable, Stage1AirInstSlice *instruction) {
     Error err;
 
@@ -6170,7 +6208,7 @@ static LLVMValueRef ir_render_breakpoint(CodeGen *g, Stage1Air *executable, Stag
 static LLVMValueRef ir_render_return_address(CodeGen *g, Stage1Air *executable,
         Stage1AirInstReturnAddress *instruction)
 {
-    if (target_is_wasm(g->zig_target) && g->zig_target->os != OsEmscripten) {
+    if ((target_is_wasm(g->zig_target) && g->zig_target->os != OsEmscripten) || target_is_bpf(g->zig_target)) {
         // I got this error from LLVM 10:
         // "Non-Emscripten WebAssembly hasn't implemented __builtin_return_address"
         return LLVMConstNull(get_llvm_type(g, instruction->base.value->type));
@@ -7176,6 +7214,8 @@ static LLVMValueRef ir_render_instruction(CodeGen *g, Stage1Air *executable, Sta
             return ir_render_wasm_memory_grow(g, executable, (Stage1AirInstWasmMemoryGrow *) instruction);
         case Stage1AirInstIdExtern:
             return ir_render_extern(g, executable, (Stage1AirInstExtern *) instruction);
+        case Stage1AirInstIdPrefetch:
+            return ir_render_prefetch(g, executable, (Stage1AirInstPrefetch *) instruction);
     }
     zig_unreachable();
 }
@@ -8782,17 +8822,17 @@ static void define_builtin_types(CodeGen *g) {
     }
     {
         ZigType *entry = new_type_table_entry(ZigTypeIdEnumLiteral);
-        buf_init_from_str(&entry->name, "(enum literal)");
+        buf_init_from_str(&entry->name, "@Type(.EnumLiteral)");
         g->builtin_types.entry_enum_literal = entry;
     }
     {
         ZigType *entry = new_type_table_entry(ZigTypeIdUndefined);
-        buf_init_from_str(&entry->name, "(undefined)");
+        buf_init_from_str(&entry->name, "@Type(.Undefined)");
         g->builtin_types.entry_undef = entry;
     }
     {
         ZigType *entry = new_type_table_entry(ZigTypeIdNull);
-        buf_init_from_str(&entry->name, "(null)");
+        buf_init_from_str(&entry->name, "@Type(.Null)");
         g->builtin_types.entry_null = entry;
     }
     {
@@ -8931,6 +8971,10 @@ static void define_builtin_types(CodeGen *g) {
         case ZigLLVM_bpfeb:
             add_fp_entry(g, "c_longdouble", 64, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
             break;
+        case ZigLLVM_nvptx:
+        case ZigLLVM_nvptx64:
+            add_fp_entry(g, "c_longdouble", 64, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
+            break;
         default:
             zig_panic("TODO implement mapping for c_longdouble");
     }
@@ -8970,9 +9014,9 @@ static void define_builtin_types(CodeGen *g) {
     g->builtin_types.entry_i64 = get_int_type(g, true, 64);
 
     {
-        g->builtin_types.entry_c_void = get_opaque_type(g, nullptr, nullptr, "c_void",
-                buf_create_from_str("c_void"));
-        g->primitive_type_table.put(&g->builtin_types.entry_c_void->name, g->builtin_types.entry_c_void);
+        g->builtin_types.entry_anyopaque = get_opaque_type(g, nullptr, nullptr, "anyopaque",
+                buf_create_from_str("anyopaque"));
+        g->primitive_type_table.put(&g->builtin_types.entry_anyopaque->name, g->builtin_types.entry_anyopaque);
     }
 
     {
@@ -9142,6 +9186,7 @@ static void define_builtin_fns(CodeGen *g) {
     create_builtin_fn(g, BuiltinFnIdReduce, "reduce", 2);
     create_builtin_fn(g, BuiltinFnIdMaximum, "maximum", 2);
     create_builtin_fn(g, BuiltinFnIdMinimum, "minimum", 2);
+    create_builtin_fn(g, BuiltinFnIdPrefetch, "prefetch", 2);
 }
 
 static const char *bool_to_str(bool b) {
@@ -9328,7 +9373,7 @@ Buf *codegen_generate_builtin_source(CodeGen *g) {
     buf_appendf(contents, "pub const abi = std.Target.Abi.%s;\n", cur_abi);
     buf_appendf(contents, "pub const cpu = std.Target.Cpu.baseline(.%s);\n", cur_arch);
     buf_appendf(contents, "pub const stage2_arch: std.Target.Cpu.Arch = .%s;\n", cur_arch);
-    buf_appendf(contents, "pub const os = std.Target.Os.Tag.defaultVersionRange(.%s);\n", cur_os);
+    buf_appendf(contents, "pub const os = std.Target.Os.Tag.defaultVersionRange(.%s, .%s);\n", cur_os, cur_arch);
     buf_appendf(contents,
         "pub const target = std.Target{\n"
         "    .cpu = cpu,\n"
@@ -9509,9 +9554,8 @@ static void init(CodeGen *g) {
     // TODO handle float ABI better- it should depend on the ABI portion of std.Target
     ZigLLVMABIType float_abi = ZigLLVMABITypeDefault;
 
-    // TODO a way to override this as part of std.Target ABI?
-    const char *abi_name = nullptr;
-    if (target_is_riscv(g->zig_target)) {
+    const char *abi_name = g->zig_target->llvm_target_abi;
+    if (abi_name == nullptr && target_is_riscv(g->zig_target)) {
         // RISC-V Linux defaults to ilp32d/lp64d
         if (g->zig_target->os == OsLinux) {
             abi_name = (g->zig_target->arch == ZigLLVM_riscv32) ? "ilp32d" : "lp64d";

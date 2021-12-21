@@ -6,7 +6,7 @@ pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
-    const allocator = &arena.allocator;
+    const allocator = arena.allocator();
 
     const out_dir = "out";
     try std.fs.cwd().makePath(out_dir);
@@ -18,7 +18,7 @@ pub fn main() !void {
 }
 
 fn render(
-    allocator: *mem.Allocator,
+    allocator: mem.Allocator,
     in_file: []const u8,
     out_file: []const u8,
     fmt: enum {
@@ -74,7 +74,7 @@ fn render(
                             try writer.writeAll(trimmed);
                         }
                     } else {
-                        std.debug.warn("line {d}: missing variable: {s}\n", .{ line, var_name });
+                        std.debug.print("line {d}: missing variable: {s}\n", .{ line, var_name });
                         try writer.writeAll("(missing)");
                     }
                     state = State.EndBrace;
@@ -86,7 +86,7 @@ fn render(
                     state = State.Start;
                 },
                 else => {
-                    std.debug.warn("line {d}: invalid byte: '0x{x}'", .{ line, byte });
+                    std.debug.print("line {d}: invalid byte: '0x{x}'", .{ line, byte });
                     std.process.exit(1);
                 },
             },

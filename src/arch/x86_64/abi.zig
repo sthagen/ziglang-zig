@@ -34,6 +34,17 @@ pub fn classifySystemV(ty: Type, target: Target) [8]Class {
     };
     var result = [1]Class{.none} ** 8;
     switch (ty.zigTypeTag()) {
+        .Pointer => switch (ty.ptrSize()) {
+            .Slice => {
+                result[0] = .integer;
+                result[1] = .integer;
+                return result;
+            },
+            else => {
+                result[0] = .integer;
+                return result;
+            },
+        },
         .Int, .Enum, .ErrorSet => {
             const bits = ty.intInfo(target).bits;
             if (bits <= 64) {
@@ -196,7 +207,7 @@ pub fn classifySystemV(ty: Type, target: Target) [8]Class {
                         // "Otherwise class SSE is used."
                         result[result_i] = .sse;
                     }
-                    byte_i += field_size;
+                    byte_i += @intCast(usize, field_size);
                     if (byte_i == 8) {
                         byte_i = 0;
                         result_i += 1;
@@ -211,7 +222,7 @@ pub fn classifySystemV(ty: Type, target: Target) [8]Class {
                     result_i += field_class.len;
                     // If there are any bytes leftover, we have to try to combine
                     // the next field with them.
-                    byte_i = field_size % 8;
+                    byte_i = @intCast(usize, field_size % 8);
                     if (byte_i != 0) result_i -= 1;
                 }
             }

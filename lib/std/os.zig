@@ -1,18 +1,18 @@
-// This file contains thin wrappers around OS-specific APIs, with these
-// specific goals in mind:
-// * Convert "errno"-style error codes into Zig errors.
-// * When null-terminated byte buffers are required, provide APIs which accept
-//   slices as well as APIs which accept null-terminated byte buffers. Same goes
-//   for UTF-16LE encoding.
-// * Where operating systems share APIs, e.g. POSIX, these thin wrappers provide
-//   cross platform abstracting.
-// * When there exists a corresponding libc function and linking libc, the libc
-//   implementation is used. Exceptions are made for known buggy areas of libc.
-//   On Linux libc can be side-stepped by using `std.os.linux` directly.
-// * For Windows, this file represents the API that libc would provide for
-//   Windows. For thin wrappers around Windows-specific APIs, see `std.os.windows`.
-// Note: The Zig standard library does not support POSIX thread cancellation, and
-// in general EINTR is handled by trying again.
+//! This file contains thin wrappers around OS-specific APIs, with these
+//! specific goals in mind:
+//! * Convert "errno"-style error codes into Zig errors.
+//! * When null-terminated byte buffers are required, provide APIs which accept
+//!   slices as well as APIs which accept null-terminated byte buffers. Same goes
+//!   for UTF-16LE encoding.
+//! * Where operating systems share APIs, e.g. POSIX, these thin wrappers provide
+//!   cross platform abstracting.
+//! * When there exists a corresponding libc function and linking libc, the libc
+//!   implementation is used. Exceptions are made for known buggy areas of libc.
+//!   On Linux libc can be side-stepped by using `std.os.linux` directly.
+//! * For Windows, this file represents the API that libc would provide for
+//!   Windows. For thin wrappers around Windows-specific APIs, see `std.os.windows`.
+//! Note: The Zig standard library does not support POSIX thread cancellation, and
+//! in general EINTR is handled by trying again.
 
 const root = @import("root");
 const std = @import("std.zig");
@@ -33,6 +33,7 @@ pub const netbsd = std.c;
 pub const openbsd = std.c;
 pub const solaris = std.c;
 pub const linux = @import("os/linux.zig");
+pub const plan9 = @import("os/plan9.zig");
 pub const uefi = @import("os/uefi.zig");
 pub const wasi = @import("os/wasi.zig");
 pub const windows = @import("os/windows.zig");
@@ -251,6 +252,87 @@ pub fn close(fd: fd_t) void {
         .BADF => unreachable, // Always a race condition.
         .INTR => return, // This is still a success. See https://github.com/ziglang/zig/issues/2425
         else => return,
+    }
+}
+
+pub const FChmodError = error{
+    AccessDenied,
+    InputOutput,
+    SymLinkLoop,
+    FileNotFound,
+    SystemResources,
+    ReadOnlyFileSystem,
+} || UnexpectedError;
+
+/// Changes the mode of the file referred to by the file descriptor.
+/// The process must have the correct privileges in order to do this
+/// successfully, or must have the effective user ID matching the owner
+/// of the file.
+pub fn fchmod(fd: fd_t, mode: mode_t) FChmodError!void {
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi)
+        @compileError("Unsupported OS");
+
+    while (true) {
+        const res = system.fchmod(fd, mode);
+
+        switch (system.getErrno(res)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .BADF => unreachable, // Can be reached if the fd refers to a directory opened without `OpenDirOptions{ .iterate = true }`
+
+            .FAULT => unreachable,
+            .INVAL => unreachable,
+            .ACCES => return error.AccessDenied,
+            .IO => return error.InputOutput,
+            .LOOP => return error.SymLinkLoop,
+            .NOENT => return error.FileNotFound,
+            .NOMEM => return error.SystemResources,
+            .NOTDIR => return error.FileNotFound,
+            .PERM => return error.AccessDenied,
+            .ROFS => return error.ReadOnlyFileSystem,
+            else => |err| return unexpectedErrno(err),
+        }
+    }
+}
+
+pub const FChownError = error{
+    AccessDenied,
+    InputOutput,
+    SymLinkLoop,
+    FileNotFound,
+    SystemResources,
+    ReadOnlyFileSystem,
+} || UnexpectedError;
+
+/// Changes the owner and group of the file referred to by the file descriptor.
+/// The process must have the correct privileges in order to do this
+/// successfully. The group may be changed by the owner of the directory to
+/// any group of which the owner is a member. If the owner or group is
+/// specified as `null`, the ID is not changed.
+pub fn fchown(fd: fd_t, owner: ?uid_t, group: ?gid_t) FChownError!void {
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi)
+        @compileError("Unsupported OS");
+
+    while (true) {
+        const res = system.fchown(fd, owner orelse @as(u32, 0) -% 1, group orelse @as(u32, 0) -% 1);
+
+        switch (system.getErrno(res)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .BADF => unreachable, // Can be reached if the fd refers to a directory opened without `OpenDirOptions{ .iterate = true }`
+
+            .FAULT => unreachable,
+            .INVAL => unreachable,
+            .ACCES => return error.AccessDenied,
+            .IO => return error.InputOutput,
+            .LOOP => return error.SymLinkLoop,
+            .NOENT => return error.FileNotFound,
+            .NOMEM => return error.SystemResources,
+            .NOTDIR => return error.FileNotFound,
+            .PERM => return error.AccessDenied,
+            .ROFS => return error.ReadOnlyFileSystem,
+            else => |err| return unexpectedErrno(err),
+        }
     }
 }
 
@@ -492,7 +574,7 @@ pub fn read(fd: fd_t, buf: []u8) ReadError!usize {
         .macos, .ios, .watchos, .tvos => math.maxInt(i32),
         else => math.maxInt(isize),
     };
-    const adjusted_len = math.min(max_count, buf.len);
+    const adjusted_len = @minimum(max_count, buf.len);
 
     while (true) {
         const rc = system.read(fd, buf.ptr, adjusted_len);
@@ -621,7 +703,7 @@ pub fn pread(fd: fd_t, buf: []u8, offset: u64) PReadError!usize {
         .macos, .ios, .watchos, .tvos => math.maxInt(i32),
         else => math.maxInt(isize),
     };
-    const adjusted_len = math.min(max_count, buf.len);
+    const adjusted_len = @minimum(max_count, buf.len);
 
     const pread_sym = if (builtin.os.tag == .linux and builtin.link_libc)
         system.pread64
@@ -873,7 +955,7 @@ pub fn write(fd: fd_t, bytes: []const u8) WriteError!usize {
         .macos, .ios, .watchos, .tvos => math.maxInt(i32),
         else => math.maxInt(isize),
     };
-    const adjusted_len = math.min(max_count, bytes.len);
+    const adjusted_len = @minimum(max_count, bytes.len);
 
     while (true) {
         const rc = system.write(fd, bytes.ptr, adjusted_len);
@@ -1029,7 +1111,7 @@ pub fn pwrite(fd: fd_t, bytes: []const u8, offset: u64) PWriteError!usize {
         .macos, .ios, .watchos, .tvos => math.maxInt(i32),
         else => math.maxInt(isize),
     };
-    const adjusted_len = math.min(max_count, bytes.len);
+    const adjusted_len = @minimum(max_count, bytes.len);
 
     const pwrite_sym = if (builtin.os.tag == .linux and builtin.link_libc)
         system.pwrite64
@@ -1193,6 +1275,16 @@ pub const OpenError = error{
     BadPathName,
     InvalidUtf8,
 
+    /// One of these three things:
+    /// * pathname  refers to an executable image which is currently being
+    ///   executed and write access was requested.
+    /// * pathname refers to a file that is currently in  use  as  a  swap
+    ///   file, and the O_TRUNC flag was specified.
+    /// * pathname  refers  to  a file that is currently being read by the
+    ///   kernel (e.g., for module/firmware loading), and write access was
+    ///   requested.
+    FileBusy,
+
     WouldBlock,
 } || UnexpectedError;
 
@@ -1206,8 +1298,6 @@ pub fn open(file_path: []const u8, flags: u32, perm: mode_t) OpenError!fd_t {
     const file_path_c = try toPosixPath(file_path);
     return openZ(&file_path_c, flags, perm);
 }
-
-pub const openC = @compileError("deprecated: renamed to openZ");
 
 /// Open and possibly create a file. Keeps trying if it gets interrupted.
 /// See also `open`.
@@ -1347,8 +1437,6 @@ pub fn openatWasi(dir_fd: fd_t, file_path: []const u8, lookup_flags: lookupflags
     }
 }
 
-pub const openatC = @compileError("deprecated: renamed to openatZ");
-
 /// Open and possibly create a file. Keeps trying if it gets interrupted.
 /// `file_path` is relative to the open directory handle `dir_fd`.
 /// See also `openat`.
@@ -1390,6 +1478,7 @@ pub fn openatZ(dir_fd: fd_t, file_path: [*:0]const u8, flags: u32, mode: mode_t)
             .BUSY => return error.DeviceBusy,
             .OPNOTSUPP => return error.FileLocksNotSupported,
             .AGAIN => return error.WouldBlock,
+            .TXTBSY => return error.FileBusy,
             else => |err| return unexpectedErrno(err),
         }
     }
@@ -1447,8 +1536,6 @@ pub const ExecveError = error{
     NameTooLong,
 } || UnexpectedError;
 
-pub const execveC = @compileError("deprecated: use execveZ");
-
 /// Like `execve` except the parameters are null-terminated,
 /// matching the syscall API on all targets. This removes the need for an allocator.
 /// This function ignores PATH environment variable. See `execvpeZ` for that.
@@ -1475,11 +1562,20 @@ pub fn execveZ(
         .NOENT => return error.FileNotFound,
         .NOTDIR => return error.NotDir,
         .TXTBSY => return error.FileBusy,
-        else => |err| return unexpectedErrno(err),
+        else => |err| switch (builtin.os.tag) {
+            .macos, .ios, .tvos, .watchos => switch (err) {
+                .BADEXEC => return error.InvalidExe,
+                .BADARCH => return error.InvalidExe,
+                else => return unexpectedErrno(err),
+            },
+            .linux, .solaris => switch (err) {
+                .LIBBAD => return error.InvalidExe,
+                else => return unexpectedErrno(err),
+            },
+            else => return unexpectedErrno(err),
+        },
     }
 }
-
-pub const execvpeC = @compileError("deprecated in favor of execvpeZ");
 
 pub const Arg0Expand = enum {
     expand,
@@ -1498,7 +1594,7 @@ pub fn execvpeZ_expandArg0(
     },
     envp: [*:null]const ?[*:0]const u8,
 ) ExecveError {
-    const file_slice = mem.spanZ(file);
+    const file_slice = mem.sliceTo(file, 0);
     if (mem.indexOfScalar(u8, file_slice, '/') != null) return execveZ(file, child_argv, envp);
 
     const PATH = getenvZ("PATH") orelse "/usr/local/bin:/bin/:/usr/bin";
@@ -1598,19 +1694,17 @@ pub fn getenv(key: []const u8) ?[]const u8 {
     return null;
 }
 
-pub const getenvC = @compileError("Deprecated in favor of `getenvZ`");
-
 /// Get an environment variable with a null-terminated name.
 /// See also `getenv`.
 pub fn getenvZ(key: [*:0]const u8) ?[]const u8 {
     if (builtin.link_libc) {
         const value = system.getenv(key) orelse return null;
-        return mem.spanZ(value);
+        return mem.sliceTo(value, 0);
     }
     if (builtin.os.tag == .windows) {
         @compileError("std.os.getenvZ is unavailable for Windows because environment string is in WTF-16 format. See std.process.getEnvVarOwned for cross-platform API or std.os.getenvW for Windows-specific API.");
     }
-    return getenv(mem.spanZ(key));
+    return getenv(mem.sliceTo(key, 0));
 }
 
 /// Windows-only. Get an environment variable with a null-terminated, WTF-16 encoded name.
@@ -1621,7 +1715,7 @@ pub fn getenvW(key: [*:0]const u16) ?[:0]const u16 {
     if (builtin.os.tag != .windows) {
         @compileError("std.os.getenvW is a Windows-only API");
     }
-    const key_slice = mem.spanZ(key);
+    const key_slice = mem.sliceTo(key, 0);
     const ptr = windows.peb().ProcessParameters.Environment;
     var ascii_match: ?[:0]const u16 = null;
     var i: usize = 0;
@@ -1676,7 +1770,7 @@ pub fn getcwd(out_buffer: []u8) GetCwdError![]u8 {
         break :blk errno(system.getcwd(out_buffer.ptr, out_buffer.len));
     };
     switch (err) {
-        .SUCCESS => return mem.spanZ(std.meta.assumeSentinel(out_buffer.ptr, 0)),
+        .SUCCESS => return mem.sliceTo(std.meta.assumeSentinel(out_buffer.ptr, 0), 0),
         .FAULT => unreachable,
         .INVAL => unreachable,
         .NOENT => return error.CurrentWorkingDirectoryUnlinked,
@@ -1719,8 +1813,6 @@ pub fn symlink(target_path: []const u8, sym_link_path: []const u8) SymLinkError!
     const sym_link_path_c = try toPosixPath(sym_link_path);
     return symlinkZ(&target_path_c, &sym_link_path_c);
 }
-
-pub const symlinkC = @compileError("deprecated: renamed to symlinkZ");
 
 /// This is the same as `symlink` except the parameters are null-terminated pointers.
 /// See also `symlink`.
@@ -1765,8 +1857,6 @@ pub fn symlinkat(target_path: []const u8, newdirfd: fd_t, sym_link_path: []const
     const sym_link_path_c = try toPosixPath(sym_link_path);
     return symlinkatZ(&target_path_c, newdirfd, &sym_link_path_c);
 }
-
-pub const symlinkatC = @compileError("deprecated: renamed to symlinkatZ");
 
 /// WASI-only. The same as `symlinkat` but targeting WASI.
 /// See also `symlinkat`.
@@ -1941,8 +2031,6 @@ pub fn unlink(file_path: []const u8) UnlinkError!void {
     }
 }
 
-pub const unlinkC = @compileError("deprecated: renamed to unlinkZ");
-
 /// Same as `unlink` except the parameter is a null terminated UTF8-encoded string.
 pub fn unlinkZ(file_path: [*:0]const u8) UnlinkError!void {
     if (builtin.os.tag == .windows) {
@@ -1991,8 +2079,6 @@ pub fn unlinkat(dirfd: fd_t, file_path: []const u8, flags: u32) UnlinkatError!vo
         return unlinkatZ(dirfd, &file_path_c, flags);
     }
 }
-
-pub const unlinkatC = @compileError("deprecated: renamed to unlinkatZ");
 
 /// WASI-only. Same as `unlinkat` but targeting WASI.
 /// See also `unlinkat`.
@@ -2100,8 +2186,6 @@ pub fn rename(old_path: []const u8, new_path: []const u8) RenameError!void {
         return renameZ(&old_path_c, &new_path_c);
     }
 }
-
-pub const renameC = @compileError("deprecated: renamed to renameZ");
 
 /// Same as `rename` except the parameters are null-terminated byte arrays.
 pub fn renameZ(old_path: [*:0]const u8, new_path: [*:0]const u8) RenameError!void {
@@ -2296,8 +2380,6 @@ pub fn mkdirat(dir_fd: fd_t, sub_dir_path: []const u8, mode: u32) MakeDirError!v
     }
 }
 
-pub const mkdiratC = @compileError("deprecated: renamed to mkdiratZ");
-
 pub fn mkdiratWasi(dir_fd: fd_t, sub_dir_path: []const u8, mode: u32) MakeDirError!void {
     _ = mode;
     switch (wasi.path_create_directory(dir_fd, sub_dir_path.ptr, sub_dir_path.len)) {
@@ -2466,8 +2548,6 @@ pub fn rmdir(dir_path: []const u8) DeleteDirError!void {
     }
 }
 
-pub const rmdirC = @compileError("deprecated: renamed to rmdirZ");
-
 /// Same as `rmdir` except the parameter is null-terminated.
 pub fn rmdirZ(dir_path: [*:0]const u8) DeleteDirError!void {
     if (builtin.os.tag == .windows) {
@@ -2480,7 +2560,7 @@ pub fn rmdirZ(dir_path: [*:0]const u8) DeleteDirError!void {
         .PERM => return error.AccessDenied,
         .BUSY => return error.FileBusy,
         .FAULT => unreachable,
-        .INVAL => unreachable,
+        .INVAL => return error.BadPathName,
         .LOOP => return error.SymLinkLoop,
         .NAMETOOLONG => return error.NameTooLong,
         .NOENT => return error.FileNotFound,
@@ -2530,8 +2610,6 @@ pub fn chdir(dir_path: []const u8) ChangeCurDirError!void {
         return chdirZ(&dir_path_c);
     }
 }
-
-pub const chdirC = @compileError("deprecated: renamed to chdirZ");
 
 /// Same as `chdir` except the parameter is null-terminated.
 pub fn chdirZ(dir_path: [*:0]const u8) ChangeCurDirError!void {
@@ -2592,6 +2670,7 @@ pub const ReadLinkError = error{
     NameTooLong,
     FileNotFound,
     SystemResources,
+    NotLink,
     NotDir,
     InvalidUtf8,
     BadPathName,
@@ -2614,8 +2693,6 @@ pub fn readlink(file_path: []const u8, out_buffer: []u8) ReadLinkError![]u8 {
     }
 }
 
-pub const readlinkC = @compileError("deprecated: renamed to readlinkZ");
-
 /// Windows-only. Same as `readlink` except `file_path` is WTF16 encoded.
 /// See also `readlinkZ`.
 pub fn readlinkW(file_path: []const u16, out_buffer: []u8) ReadLinkError![]u8 {
@@ -2633,7 +2710,7 @@ pub fn readlinkZ(file_path: [*:0]const u8, out_buffer: []u8) ReadLinkError![]u8 
         .SUCCESS => return out_buffer[0..@bitCast(usize, rc)],
         .ACCES => return error.AccessDenied,
         .FAULT => unreachable,
-        .INVAL => unreachable,
+        .INVAL => return error.NotLink,
         .IO => return error.FileSystem,
         .LOOP => return error.SymLinkLoop,
         .NAMETOOLONG => return error.NameTooLong,
@@ -2659,8 +2736,6 @@ pub fn readlinkat(dirfd: fd_t, file_path: []const u8, out_buffer: []u8) ReadLink
     return readlinkatZ(dirfd, &file_path_c, out_buffer);
 }
 
-pub const readlinkatC = @compileError("deprecated: renamed to readlinkatZ");
-
 /// WASI-only. Same as `readlinkat` but targets WASI.
 /// See also `readlinkat`.
 pub fn readlinkatWasi(dirfd: fd_t, file_path: []const u8, out_buffer: []u8) ReadLinkError![]u8 {
@@ -2669,7 +2744,7 @@ pub fn readlinkatWasi(dirfd: fd_t, file_path: []const u8, out_buffer: []u8) Read
         .SUCCESS => return out_buffer[0..bufused],
         .ACCES => return error.AccessDenied,
         .FAULT => unreachable,
-        .INVAL => unreachable,
+        .INVAL => return error.NotLink,
         .IO => return error.FileSystem,
         .LOOP => return error.SymLinkLoop,
         .NAMETOOLONG => return error.NameTooLong,
@@ -2699,7 +2774,7 @@ pub fn readlinkatZ(dirfd: fd_t, file_path: [*:0]const u8, out_buffer: []u8) Read
         .SUCCESS => return out_buffer[0..@bitCast(usize, rc)],
         .ACCES => return error.AccessDenied,
         .FAULT => unreachable,
-        .INVAL => unreachable,
+        .INVAL => return error.NotLink,
         .IO => return error.FileSystem,
         .LOOP => return error.SymLinkLoop,
         .NAMETOOLONG => return error.NameTooLong,
@@ -2829,7 +2904,7 @@ pub fn isCygwinPty(handle: fd_t) bool {
     if (windows.kernel32.GetFileInformationByHandleEx(
         handle,
         windows.FileNameInfo,
-        @ptrCast(*c_void, &name_info_bytes),
+        @ptrCast(*anyopaque, &name_info_bytes),
         name_info_bytes.len,
     ) == 0) {
         return false;
@@ -3654,8 +3729,6 @@ pub fn fstatat(dirfd: fd_t, pathname: []const u8, flags: u32) FStatAtError!Stat 
     }
 }
 
-pub const fstatatC = @compileError("deprecated: renamed to fstatatZ");
-
 /// WASI-only. Same as `fstatat` but targeting WASI.
 /// See also `fstatat`.
 pub fn fstatatWasi(dirfd: fd_t, pathname: []const u8, flags: u32) FStatAtError!Stat {
@@ -3799,8 +3872,6 @@ pub fn inotify_add_watch(inotify_fd: i32, pathname: []const u8, mask: u32) INoti
     const pathname_c = try toPosixPath(pathname);
     return inotify_add_watchZ(inotify_fd, &pathname_c, mask);
 }
-
-pub const inotify_add_watchC = @compileError("deprecated: renamed to inotify_add_watchZ");
 
 /// Same as `inotify_add_watch` except pathname is null-terminated.
 pub fn inotify_add_watchZ(inotify_fd: i32, pathname: [*:0]const u8, mask: u32) INotifyAddWatchError!i32 {
@@ -3970,8 +4041,6 @@ pub fn access(path: []const u8, mode: u32) AccessError!void {
     return accessZ(&path_c, mode);
 }
 
-pub const accessC = @compileError("Deprecated in favor of `accessZ`");
-
 /// Same as `access` except `path` is null-terminated.
 pub fn accessZ(path: [*:0]const u8, mode: u32) AccessError!void {
     if (builtin.os.tag == .windows) {
@@ -4060,7 +4129,7 @@ pub fn faccessatW(dirfd: fd_t, sub_path_w: [*:0]const u16, mode: u32, flags: u32
         return;
     }
 
-    const path_len_bytes = math.cast(u16, mem.lenZ(sub_path_w) * 2) catch |err| switch (err) {
+    const path_len_bytes = math.cast(u16, mem.sliceTo(sub_path_w, 0).len * 2) catch |err| switch (err) {
         error.Overflow => return error.NameTooLong,
     };
     var nt_name = windows.UNICODE_STRING{
@@ -4167,9 +4236,9 @@ pub const SysCtlError = error{
 
 pub fn sysctl(
     name: []const c_int,
-    oldp: ?*c_void,
+    oldp: ?*anyopaque,
     oldlenp: ?*usize,
-    newp: ?*c_void,
+    newp: ?*anyopaque,
     newlen: usize,
 ) SysCtlError!void {
     if (builtin.os.tag == .wasi) {
@@ -4190,13 +4259,11 @@ pub fn sysctl(
     }
 }
 
-pub const sysctlbynameC = @compileError("deprecated: renamed to sysctlbynameZ");
-
 pub fn sysctlbynameZ(
     name: [*:0]const u8,
-    oldp: ?*c_void,
+    oldp: ?*anyopaque,
     oldlenp: ?*usize,
-    newp: ?*c_void,
+    newp: ?*anyopaque,
     newlen: usize,
 ) SysCtlError!void {
     if (builtin.os.tag == .wasi) {
@@ -4506,7 +4573,8 @@ pub const FlockError = error{
     FileLocksNotSupported,
 } || UnexpectedError;
 
-/// Depending on the operating system `flock` may or may not interact with `fcntl` locks made by other processes.
+/// Depending on the operating system `flock` may or may not interact with
+/// `fcntl` locks made by other processes.
 pub fn flock(fd: fd_t, operation: i32) FlockError!void {
     while (true) {
         const rc = system.flock(fd, operation);
@@ -4568,8 +4636,6 @@ pub fn realpath(pathname: []const u8, out_buffer: *[MAX_PATH_BYTES]u8) RealPathE
     return realpathZ(&pathname_c, out_buffer);
 }
 
-pub const realpathC = @compileError("deprecated: renamed realpathZ");
-
 /// Same as `realpath` except `pathname` is null-terminated.
 pub fn realpathZ(pathname: [*:0]const u8, out_buffer: *[MAX_PATH_BYTES]u8) RealPathError![]u8 {
     if (builtin.os.tag == .windows) {
@@ -4581,6 +4647,7 @@ pub fn realpathZ(pathname: [*:0]const u8, out_buffer: *[MAX_PATH_BYTES]u8) RealP
         const fd = openZ(pathname, flags, 0) catch |err| switch (err) {
             error.FileLocksNotSupported => unreachable,
             error.WouldBlock => unreachable,
+            error.FileBusy => unreachable, // not asking for write permissions
             else => |e| return e,
         };
         defer close(fd);
@@ -4601,7 +4668,7 @@ pub fn realpathZ(pathname: [*:0]const u8, out_buffer: *[MAX_PATH_BYTES]u8) RealP
         .IO => return error.InputOutput,
         else => |err| return unexpectedErrno(err),
     };
-    return mem.spanZ(result_path);
+    return mem.sliceTo(result_path, 0);
 }
 
 /// Same as `realpath` except `pathname` is UTF16LE-encoded.
@@ -4676,6 +4743,7 @@ pub fn getFdPath(fd: fd_t, out_buffer: *[MAX_PATH_BYTES]u8) RealPathError![]u8 {
             const target = readlinkZ(std.meta.assumeSentinel(proc_path.ptr, 0), out_buffer) catch |err| {
                 switch (err) {
                     error.UnsupportedReparsePointType => unreachable, // Windows only,
+                    error.NotLink => unreachable,
                     else => |e| return e,
                 }
             };
@@ -4687,6 +4755,7 @@ pub fn getFdPath(fd: fd_t, out_buffer: *[MAX_PATH_BYTES]u8) RealPathError![]u8 {
 
             const target = readlinkZ(proc_path, out_buffer) catch |err| switch (err) {
                 error.UnsupportedReparsePointType => unreachable,
+                error.NotLink => unreachable,
                 else => |e| return e,
             };
             return target;
@@ -4732,12 +4801,12 @@ pub fn dl_iterate_phdr(
 
     if (builtin.link_libc) {
         switch (system.dl_iterate_phdr(struct {
-            fn callbackC(info: *dl_phdr_info, size: usize, data: ?*c_void) callconv(.C) c_int {
+            fn callbackC(info: *dl_phdr_info, size: usize, data: ?*anyopaque) callconv(.C) c_int {
                 const context_ptr = @ptrCast(*const Context, @alignCast(@alignOf(*const Context), data));
                 callback(info, size, context_ptr.*) catch |err| return @errorToInt(err);
                 return 0;
             }
-        }.callbackC, @intToPtr(?*c_void, @ptrToInt(&context)))) {
+        }.callbackC, @intToPtr(?*anyopaque, @ptrToInt(&context)))) {
             0 => return,
             else => |err| return @errSetCast(Error, @intToError(@intCast(u16, err))), // TODO don't hardcode u16
         }
@@ -4912,7 +4981,7 @@ pub const UnexpectedError = error{
 /// and you get an unexpected error.
 pub fn unexpectedErrno(err: E) UnexpectedError {
     if (unexpected_error_tracing) {
-        std.debug.warn("unexpected errno: {d}\n", .{@enumToInt(err)});
+        std.debug.print("unexpected errno: {d}\n", .{@enumToInt(err)});
         std.debug.dumpCurrentStackTrace(null);
     }
     return error.Unexpected;
@@ -5007,7 +5076,7 @@ pub const GetHostNameError = error{PermissionDenied} || UnexpectedError;
 pub fn gethostname(name_buffer: *[HOST_NAME_MAX]u8) GetHostNameError![]u8 {
     if (builtin.link_libc) {
         switch (errno(system.gethostname(name_buffer, name_buffer.len))) {
-            .SUCCESS => return mem.spanZ(std.meta.assumeSentinel(name_buffer, 0)),
+            .SUCCESS => return mem.sliceTo(std.meta.assumeSentinel(name_buffer, 0), 0),
             .FAULT => unreachable,
             .NAMETOOLONG => unreachable, // HOST_NAME_MAX prevents this
             .PERM => return error.PermissionDenied,
@@ -5016,7 +5085,7 @@ pub fn gethostname(name_buffer: *[HOST_NAME_MAX]u8) GetHostNameError![]u8 {
     }
     if (builtin.os.tag == .linux) {
         const uts = uname();
-        const hostname = mem.spanZ(std.meta.assumeSentinel(&uts.nodename, 0));
+        const hostname = mem.sliceTo(std.meta.assumeSentinel(&uts.nodename, 0), 0);
         mem.copy(u8, name_buffer, hostname);
         return name_buffer[0..hostname.len];
     }
@@ -5439,7 +5508,9 @@ pub fn sendfile(
             }
 
             // Here we match BSD behavior, making a zero count value send as many bytes as possible.
-            const adjusted_count = if (in_len == 0) max_count else math.min(in_len, @as(size_t, max_count));
+            const adjusted_count_tmp = if (in_len == 0) max_count else @minimum(in_len, @as(size_t, max_count));
+            // TODO we should not need this cast; improve return type of @minimum
+            const adjusted_count = @intCast(usize, adjusted_count_tmp);
 
             const sendfile_sym = if (builtin.link_libc)
                 system.sendfile64
@@ -5522,7 +5593,7 @@ pub fn sendfile(
                 hdtr = &hdtr_data;
             }
 
-            const adjusted_count = math.min(in_len, max_count);
+            const adjusted_count = @minimum(in_len, max_count);
 
             while (true) {
                 var sbytes: off_t = undefined;
@@ -5601,7 +5672,9 @@ pub fn sendfile(
                 hdtr = &hdtr_data;
             }
 
-            const adjusted_count = math.min(in_len, @as(u63, max_count));
+            const adjusted_count_temporary = @minimum(in_len, @as(u63, max_count));
+            // TODO we should not need this int cast; improve the return type of `@minimum`
+            const adjusted_count = @intCast(u63, adjusted_count_temporary);
 
             while (true) {
                 var sbytes: off_t = adjusted_count;
@@ -5655,7 +5728,9 @@ pub fn sendfile(
     rw: {
         var buf: [8 * 4096]u8 = undefined;
         // Here we match BSD behavior, making a zero count value send as many bytes as possible.
-        const adjusted_count = if (in_len == 0) buf.len else math.min(buf.len, in_len);
+        const adjusted_count_tmp = if (in_len == 0) buf.len else @minimum(buf.len, in_len);
+        // TODO we should not need this cast; improve return type of @minimum
+        const adjusted_count = @intCast(usize, adjusted_count_tmp);
         const amt_read = try pread(in_fd, buf[0..adjusted_count], in_offset);
         if (amt_read == 0) {
             if (in_len == 0) {
@@ -5756,7 +5831,7 @@ pub fn copy_file_range(fd_in: fd_t, off_in: u64, fd_out: fd_t, off_out: u64, len
     }
 
     var buf: [8 * 4096]u8 = undefined;
-    const adjusted_count = math.min(buf.len, len);
+    const adjusted_count = @minimum(buf.len, len);
     const amt_read = try pread(fd_in, buf[0..adjusted_count], off_in);
     // TODO without @as the line below fails to compile for wasm32-wasi:
     // error: integer value 0 cannot be coerced to type 'os.PWriteError!usize'
@@ -5817,7 +5892,8 @@ pub fn ppoll(fds: []pollfd, timeout: ?*const timespec, mask: ?*const sigset_t) P
         ts_ptr = &ts;
         ts = timeout_ns.*;
     }
-    const rc = system.ppoll(fds.ptr, fds.len, ts_ptr, mask);
+    const fds_count = math.cast(nfds_t, fds.len) catch return error.SystemResources;
+    const rc = system.ppoll(fds.ptr, fds_count, ts_ptr, mask);
     switch (errno(rc)) {
         .SUCCESS => return @intCast(usize, rc),
         .FAULT => unreachable,
@@ -5919,7 +5995,7 @@ pub fn dn_expand(
     const end = msg.ptr + msg.len;
     if (p == end or exp_dn.len == 0) return error.InvalidDnsPacket;
     var dest = exp_dn.ptr;
-    const dend = dest + std.math.min(exp_dn.len, 254);
+    const dend = dest + @minimum(exp_dn.len, 254);
     // detect reference loop using an iteration counter
     var i: usize = 0;
     while (i < msg.len) : (i += 2) {
@@ -6037,8 +6113,6 @@ pub const MemFdCreateError = error{
     /// for older kernel versions.
     SystemOutdated,
 } || UnexpectedError;
-
-pub const memfd_createC = @compileError("deprecated: renamed to memfd_createZ");
 
 pub fn memfd_createZ(name: [*:0]const u8, flags: u32) MemFdCreateError!fd_t {
     // memfd_create is available only in glibc versions starting with 2.27.
@@ -6340,6 +6414,90 @@ pub fn madvise(ptr: [*]align(mem.page_size) u8, length: usize, advice: u32) Madv
         .IO => return error.WouldExceedMaximumResidentSetSize,
         .NOMEM => return error.OutOfMemory,
         .NOSYS => return error.MadviseUnavailable,
+        else => |err| return unexpectedErrno(err),
+    }
+}
+
+pub const PerfEventOpenError = error{
+    /// Returned if the perf_event_attr size value is too small (smaller
+    /// than PERF_ATTR_SIZE_VER0), too big (larger than the page  size),
+    /// or  larger  than the kernel supports and the extra bytes are not
+    /// zero.  When E2BIG is returned, the perf_event_attr size field is
+    /// overwritten by the kernel to be the size of the structure it was
+    /// expecting.
+    TooBig,
+    /// Returned when the requested event requires CAP_SYS_ADMIN permis‐
+    /// sions  (or a more permissive perf_event paranoid setting).  Some
+    /// common cases where an unprivileged process  may  encounter  this
+    /// error:  attaching  to a process owned by a different user; moni‐
+    /// toring all processes on a given CPU (i.e.,  specifying  the  pid
+    /// argument  as  -1); and not setting exclude_kernel when the para‐
+    /// noid setting requires it.
+    /// Also:
+    /// Returned on many (but not all) architectures when an unsupported
+    /// exclude_hv,  exclude_idle,  exclude_user, or exclude_kernel set‐
+    /// ting is specified.
+    /// It can also happen, as with EACCES, when the requested event re‐
+    /// quires   CAP_SYS_ADMIN   permissions   (or   a  more  permissive
+    /// perf_event paranoid setting).  This includes  setting  a  break‐
+    /// point on a kernel address, and (since Linux 3.13) setting a ker‐
+    /// nel function-trace tracepoint.
+    PermissionDenied,
+    /// Returned if another event already has exclusive  access  to  the
+    /// PMU.
+    DeviceBusy,
+    /// Each  opened  event uses one file descriptor.  If a large number
+    /// of events are opened, the per-process limit  on  the  number  of
+    /// open file descriptors will be reached, and no more events can be
+    /// created.
+    ProcessResources,
+    EventRequiresUnsupportedCpuFeature,
+    /// Returned if  you  try  to  add  more  breakpoint
+    /// events than supported by the hardware.
+    TooManyBreakpoints,
+    /// Returned  if PERF_SAMPLE_STACK_USER is set in sample_type and it
+    /// is not supported by hardware.
+    SampleStackNotSupported,
+    /// Returned if an event requiring a specific  hardware  feature  is
+    /// requested  but  there is no hardware support.  This includes re‐
+    /// questing low-skid events if not supported, branch tracing if  it
+    /// is not available, sampling if no PMU interrupt is available, and
+    /// branch stacks for software events.
+    EventNotSupported,
+    /// Returned  if  PERF_SAMPLE_CALLCHAIN  is   requested   and   sam‐
+    /// ple_max_stack   is   larger   than   the  maximum  specified  in
+    /// /proc/sys/kernel/perf_event_max_stack.
+    SampleMaxStackOverflow,
+    /// Returned if attempting to attach to a process that does not  exist.
+    ProcessNotFound,
+} || UnexpectedError;
+
+pub fn perf_event_open(
+    attr: *linux.perf_event_attr,
+    pid: pid_t,
+    cpu: i32,
+    group_fd: fd_t,
+    flags: usize,
+) PerfEventOpenError!fd_t {
+    const rc = system.perf_event_open(attr, pid, cpu, group_fd, flags);
+    switch (errno(rc)) {
+        .SUCCESS => return @intCast(fd_t, rc),
+        .@"2BIG" => return error.TooBig,
+        .ACCES => return error.PermissionDenied,
+        .BADF => unreachable, // group_fd file descriptor is not valid.
+        .BUSY => return error.DeviceBusy,
+        .FAULT => unreachable, // Segmentation fault.
+        .INVAL => unreachable, // Bad attr settings.
+        .INTR => unreachable, // Mixed perf and ftrace handling for a uprobe.
+        .MFILE => return error.ProcessResources,
+        .NODEV => return error.EventRequiresUnsupportedCpuFeature,
+        .NOENT => unreachable, // Invalid type setting.
+        .NOSPC => return error.TooManyBreakpoints,
+        .NOSYS => return error.SampleStackNotSupported,
+        .OPNOTSUPP => return error.EventNotSupported,
+        .OVERFLOW => return error.SampleMaxStackOverflow,
+        .PERM => return error.PermissionDenied,
+        .SRCH => return error.ProcessNotFound,
         else => |err| return unexpectedErrno(err),
     }
 }

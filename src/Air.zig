@@ -80,11 +80,27 @@ pub const Inst = struct {
         /// is the same as both operands.
         /// Uses the `bin_op` field.
         mul_sat,
-        /// Integer or float division. For integers, wrapping is undefined behavior.
+        /// Float division.
         /// Both operands are guaranteed to be the same type, and the result type
         /// is the same as both operands.
         /// Uses the `bin_op` field.
-        div,
+        div_float,
+        /// Truncating integer or float division. For integers, wrapping is undefined behavior.
+        /// Both operands are guaranteed to be the same type, and the result type
+        /// is the same as both operands.
+        /// Uses the `bin_op` field.
+        div_trunc,
+        /// Flooring integer or float division. For integers, wrapping is undefined behavior.
+        /// Both operands are guaranteed to be the same type, and the result type
+        /// is the same as both operands.
+        /// Uses the `bin_op` field.
+        div_floor,
+        /// Integer or float division. Guaranteed no remainder.
+        /// For integers, wrapping is undefined behavior.
+        /// Both operands are guaranteed to be the same type, and the result type
+        /// is the same as both operands.
+        /// Uses the `bin_op` field.
+        div_exact,
         /// Integer or float remainder division.
         /// Both operands are guaranteed to be the same type, and the result type
         /// is the same as both operands.
@@ -107,6 +123,18 @@ pub const Inst = struct {
         /// The lhs is the pointer, rhs is the offset. Result type is the same as lhs.
         /// Uses the `bin_op` field.
         ptr_sub,
+        /// Given two operands which can be floats, integers, or vectors, returns the
+        /// greater of the operands. For vectors it operates element-wise.
+        /// Both operands are guaranteed to be the same type, and the result type
+        /// is the same as both operands.
+        /// Uses the `bin_op` field.
+        max,
+        /// Given two operands which can be floats, integers, or vectors, returns the
+        /// lesser of the operands. For vectors it operates element-wise.
+        /// Both operands are guaranteed to be the same type, and the result type
+        /// is the same as both operands.
+        /// Uses the `bin_op` field.
+        min,
         /// Allocates stack local memory.
         /// Uses the `ty` field.
         alloc,
@@ -174,6 +202,10 @@ pub const Inst = struct {
         /// Result type will always be an unsigned integer big enough to fit the answer.
         /// Uses the `ty_op` field.
         ctz,
+        /// Count number of 1 bits in an integer according to its representation in twos complement.
+        /// Result type will always be an unsigned integer big enough to fit the answer.
+        /// Uses the `ty_op` field.
+        popcount,
 
         /// `<`. Result type is always bool.
         /// Uses the `bin_op` field.
@@ -304,6 +336,9 @@ pub const Inst = struct {
         /// *?T => *T. If the value is null, undefined behavior.
         /// Uses the `ty_op` field.
         optional_payload_ptr,
+        /// *?T => *T. Sets the value to non-null with an undefined payload value.
+        /// Uses the `ty_op` field.
+        optional_payload_ptr_set,
         /// Given a payload value, wraps it in an optional type.
         /// Uses the `ty_op` field.
         wrap_optional,
@@ -348,6 +383,9 @@ pub const Inst = struct {
         /// Given a tagged union value, get its tag value.
         /// Uses the `ty_op` field.
         get_union_tag,
+        /// Constructs a slice from a pointer and a length.
+        /// Uses the `ty_pl` field, payload is `Bin`. lhs is ptr, rhs is len.
+        slice,
         /// Given a slice value, return the length.
         /// Result type is always usize.
         /// Uses the `ty_op` field.
@@ -355,6 +393,12 @@ pub const Inst = struct {
         /// Given a slice value, return the pointer.
         /// Uses the `ty_op` field.
         slice_ptr,
+        /// Given a pointer to a slice, return a pointer to the length of the slice.
+        /// Uses the `ty_op` field.
+        ptr_slice_len_ptr,
+        /// Given a pointer to a slice, return a pointer to the pointer of the slice.
+        /// Uses the `ty_op` field.
+        ptr_slice_ptr_ptr,
         /// Given an array value and element index, return the element value at that index.
         /// Result type is the element type of the array operand.
         /// Uses the `bin_op` field.
@@ -363,10 +407,10 @@ pub const Inst = struct {
         /// Result type is the element type of the slice operand.
         /// Uses the `bin_op` field.
         slice_elem_val,
-        /// Given a pointer to a slice, and element index, return the element value at that index.
-        /// Result type is the element type of the slice operand (2 element type operations).
-        /// Uses the `bin_op` field.
-        ptr_slice_elem_val,
+        /// Given a slice value and element index, return a pointer to the element value at that index.
+        /// Result type is a pointer to the element type of the slice operand.
+        /// Uses the `ty_pl` field with payload `Bin`.
+        slice_elem_ptr,
         /// Given a pointer value, and element index, return the element value at that index.
         /// Result type is the element type of the pointer operand.
         /// Uses the `bin_op` field.
@@ -375,11 +419,6 @@ pub const Inst = struct {
         /// Result type is pointer to the element type of the pointer operand.
         /// Uses the `ty_pl` field with payload `Bin`.
         ptr_elem_ptr,
-        /// Given a pointer to a pointer, and element index, return the element value of the inner
-        /// pointer at that index.
-        /// Result type is the element type of the inner pointer operand.
-        /// Uses the `bin_op` field.
-        ptr_ptr_elem_val,
         /// Given a pointer to an array, return a slice.
         /// Uses the `ty_op` field.
         array_to_slice,
@@ -628,7 +667,10 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .mul,
         .mulwrap,
         .mul_sat,
-        .div,
+        .div_float,
+        .div_trunc,
+        .div_floor,
+        .div_exact,
         .rem,
         .mod,
         .bit_and,
@@ -640,6 +682,8 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .shl,
         .shl_exact,
         .shl_sat,
+        .min,
+        .max,
         => return air.typeOf(datas[inst].bin_op.lhs),
 
         .cmp_lt,
@@ -671,9 +715,11 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .constant,
         .struct_field_ptr,
         .struct_field_val,
+        .slice_elem_ptr,
         .ptr_elem_ptr,
         .cmpxchg_weak,
         .cmpxchg_strong,
+        .slice,
         => return air.getRefType(datas[inst].ty_pl.ty),
 
         .not,
@@ -685,6 +731,7 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .trunc,
         .optional_payload,
         .optional_payload_ptr,
+        .optional_payload_ptr_set,
         .wrap_optional,
         .unwrap_errunion_payload,
         .unwrap_errunion_err,
@@ -693,6 +740,8 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .wrap_errunion_payload,
         .wrap_errunion_err,
         .slice_ptr,
+        .ptr_slice_len_ptr,
+        .ptr_slice_ptr_ptr,
         .struct_field_ptr_index_0,
         .struct_field_ptr_index_1,
         .struct_field_ptr_index_2,
@@ -703,6 +752,7 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .get_union_tag,
         .clz,
         .ctz,
+        .popcount,
         => return air.getRefType(datas[inst].ty_op.ty),
 
         .loop,
@@ -745,11 +795,6 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .slice_elem_val, .ptr_elem_val, .array_elem_val => {
             const ptr_ty = air.typeOf(datas[inst].bin_op.lhs);
             return ptr_ty.elemType();
-        },
-        .ptr_slice_elem_val, .ptr_ptr_elem_val => {
-            const outer_ptr_ty = air.typeOf(datas[inst].bin_op.lhs);
-            const inner_ptr_ty = outer_ptr_ty.elemType();
-            return inner_ptr_ty.elemType();
         },
         .atomic_load => {
             const ptr_ty = air.typeOf(datas[inst].atomic_load.ptr);
@@ -796,7 +841,7 @@ pub fn extraData(air: Air, comptime T: type, index: usize) struct { data: T, end
     };
 }
 
-pub fn deinit(air: *Air, gpa: *std.mem.Allocator) void {
+pub fn deinit(air: *Air, gpa: std.mem.Allocator) void {
     air.instructions.deinit(gpa);
     gpa.free(air.extra);
     gpa.free(air.values);

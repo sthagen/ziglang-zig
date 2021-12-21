@@ -607,6 +607,34 @@ pub const IO_Uring = struct {
         return sqe;
     }
 
+    /// Queues (but does not submit) an SQE to add a link timeout operation.
+    /// Returns a pointer to the SQE.
+    ///
+    /// You need to set linux.IOSQE_IO_LINK to flags of the target operation
+    /// and then call this method right after the target operation.
+    /// See https://lwn.net/Articles/803932/ for detail.
+    ///
+    /// If the dependent request finishes before the linked timeout, the timeout
+    /// is canceled. If the timeout finishes before the dependent request, the
+    /// dependent request will be canceled.
+    ///
+    /// The completion event result of the link_timeout will be
+    /// `-ETIME` if the timeout finishes before the dependent request
+    /// (in this case, the completion event result of the dependent request will
+    /// be `-ECANCELED`), or
+    /// `-EALREADY` if the dependent request finishes before the linked timeout.
+    pub fn link_timeout(
+        self: *IO_Uring,
+        user_data: u64,
+        ts: *const os.linux.kernel_timespec,
+        flags: u32,
+    ) !*io_uring_sqe {
+        const sqe = try self.get_sqe();
+        io_uring_prep_link_timeout(sqe, ts, flags);
+        sqe.user_data = user_data;
+        return sqe;
+    }
+
     /// Queues (but does not submit) an SQE to perform a `poll(2)`.
     /// Returns a pointer to the SQE.
     pub fn poll_add(
@@ -634,6 +662,22 @@ pub const IO_Uring = struct {
         return sqe;
     }
 
+    /// Queues (but does not submit) an SQE to update the user data of an existing poll
+    /// operation. Returns a pointer to the SQE.
+    pub fn poll_update(
+        self: *IO_Uring,
+        user_data: u64,
+        old_user_data: u64,
+        new_user_data: u64,
+        poll_mask: u32,
+        flags: u32,
+    ) !*io_uring_sqe {
+        const sqe = try self.get_sqe();
+        io_uring_prep_poll_update(sqe, old_user_data, new_user_data, poll_mask, flags);
+        sqe.user_data = user_data;
+        return sqe;
+    }
+
     /// Queues (but does not submit) an SQE to perform an `fallocate(2)`.
     /// Returns a pointer to the SQE.
     pub fn fallocate(
@@ -646,6 +690,138 @@ pub const IO_Uring = struct {
     ) !*io_uring_sqe {
         const sqe = try self.get_sqe();
         io_uring_prep_fallocate(sqe, fd, mode, offset, len);
+        sqe.user_data = user_data;
+        return sqe;
+    }
+
+    /// Queues (but does not submit) an SQE to perform an `statx(2)`.
+    /// Returns a pointer to the SQE.
+    pub fn statx(
+        self: *IO_Uring,
+        user_data: u64,
+        fd: os.fd_t,
+        path: [:0]const u8,
+        flags: u32,
+        mask: u32,
+        buf: *linux.Statx,
+    ) !*io_uring_sqe {
+        const sqe = try self.get_sqe();
+        io_uring_prep_statx(sqe, fd, path, flags, mask, buf);
+        sqe.user_data = user_data;
+        return sqe;
+    }
+
+    /// Queues (but does not submit) an SQE to remove an existing operation.
+    /// Returns a pointer to the SQE.
+    ///
+    /// The operation is identified by its `user_data`.
+    ///
+    /// The completion event result will be `0` if the operation was found and cancelled successfully,
+    /// `-EALREADY` if the operation was found but was already in progress, or
+    /// `-ENOENT` if the operation was not found.
+    pub fn cancel(
+        self: *IO_Uring,
+        user_data: u64,
+        cancel_user_data: u64,
+        flags: u32,
+    ) !*io_uring_sqe {
+        const sqe = try self.get_sqe();
+        io_uring_prep_cancel(sqe, cancel_user_data, flags);
+        sqe.user_data = user_data;
+        return sqe;
+    }
+
+    /// Queues (but does not submit) an SQE to perform a `shutdown(2)`.
+    /// Returns a pointer to the SQE.
+    ///
+    /// The operation is identified by its `user_data`.
+    pub fn shutdown(
+        self: *IO_Uring,
+        user_data: u64,
+        sockfd: os.socket_t,
+        how: u32,
+    ) !*io_uring_sqe {
+        const sqe = try self.get_sqe();
+        io_uring_prep_shutdown(sqe, sockfd, how);
+        sqe.user_data = user_data;
+        return sqe;
+    }
+
+    /// Queues (but does not submit) an SQE to perform a `renameat2(2)`.
+    /// Returns a pointer to the SQE.
+    pub fn renameat(
+        self: *IO_Uring,
+        user_data: u64,
+        old_dir_fd: os.fd_t,
+        old_path: [*:0]const u8,
+        new_dir_fd: os.fd_t,
+        new_path: [*:0]const u8,
+        flags: u32,
+    ) !*io_uring_sqe {
+        const sqe = try self.get_sqe();
+        io_uring_prep_renameat(sqe, old_dir_fd, old_path, new_dir_fd, new_path, flags);
+        sqe.user_data = user_data;
+        return sqe;
+    }
+
+    /// Queues (but does not submit) an SQE to perform a `unlinkat(2)`.
+    /// Returns a pointer to the SQE.
+    pub fn unlinkat(
+        self: *IO_Uring,
+        user_data: u64,
+        dir_fd: os.fd_t,
+        path: [*:0]const u8,
+        flags: u32,
+    ) !*io_uring_sqe {
+        const sqe = try self.get_sqe();
+        io_uring_prep_unlinkat(sqe, dir_fd, path, flags);
+        sqe.user_data = user_data;
+        return sqe;
+    }
+
+    /// Queues (but does not submit) an SQE to perform a `mkdirat(2)`.
+    /// Returns a pointer to the SQE.
+    pub fn mkdirat(
+        self: *IO_Uring,
+        user_data: u64,
+        dir_fd: os.fd_t,
+        path: [*:0]const u8,
+        mode: os.mode_t,
+    ) !*io_uring_sqe {
+        const sqe = try self.get_sqe();
+        io_uring_prep_mkdirat(sqe, dir_fd, path, mode);
+        sqe.user_data = user_data;
+        return sqe;
+    }
+
+    /// Queues (but does not submit) an SQE to perform a `symlinkat(2)`.
+    /// Returns a pointer to the SQE.
+    pub fn symlinkat(
+        self: *IO_Uring,
+        user_data: u64,
+        target: [*:0]const u8,
+        new_dir_fd: os.fd_t,
+        link_path: [*:0]const u8,
+    ) !*io_uring_sqe {
+        const sqe = try self.get_sqe();
+        io_uring_prep_symlinkat(sqe, target, new_dir_fd, link_path);
+        sqe.user_data = user_data;
+        return sqe;
+    }
+
+    /// Queues (but does not submit) an SQE to perform a `linkat(2)`.
+    /// Returns a pointer to the SQE.
+    pub fn linkat(
+        self: *IO_Uring,
+        user_data: u64,
+        old_dir_fd: os.fd_t,
+        old_path: [*:0]const u8,
+        new_dir_fd: os.fd_t,
+        new_path: [*:0]const u8,
+        flags: u32,
+    ) !*io_uring_sqe {
+        const sqe = try self.get_sqe();
+        io_uring_prep_linkat(sqe, old_dir_fd, old_path, new_dir_fd, new_path, flags);
         sqe.user_data = user_data;
         return sqe;
     }
@@ -665,7 +841,38 @@ pub const IO_Uring = struct {
         const res = linux.io_uring_register(
             self.fd,
             .REGISTER_FILES,
-            @ptrCast(*const c_void, fds.ptr),
+            @ptrCast(*const anyopaque, fds.ptr),
+            @intCast(u32, fds.len),
+        );
+        try handle_registration_result(res);
+    }
+
+    /// Updates registered file descriptors.
+    ///
+    /// Updates are applied starting at the provided offset in the original file descriptors slice.
+    /// There are three kind of updates:
+    /// * turning a sparse entry (where the fd is -1) into a real one
+    /// * removing an existing entry (set the fd to -1)
+    /// * replacing an existing entry with a new fd
+    /// Adding new file descriptors must be done with `register_files`.
+    pub fn register_files_update(self: *IO_Uring, offset: u32, fds: []const os.fd_t) !void {
+        assert(self.fd >= 0);
+
+        const FilesUpdate = struct {
+            offset: u32,
+            resv: u32,
+            fds: u64 align(8),
+        };
+        var update = FilesUpdate{
+            .offset = offset,
+            .resv = @as(u32, 0),
+            .fds = @as(u64, @ptrToInt(fds.ptr)),
+        };
+
+        const res = linux.io_uring_register(
+            self.fd,
+            .REGISTER_FILES_UPDATE,
+            @ptrCast(*const anyopaque, &update),
             @intCast(u32, fds.len),
         );
         try handle_registration_result(res);
@@ -679,14 +886,14 @@ pub const IO_Uring = struct {
         const res = linux.io_uring_register(
             self.fd,
             .REGISTER_EVENTFD,
-            @ptrCast(*const c_void, &fd),
+            @ptrCast(*const anyopaque, &fd),
             1,
         );
         try handle_registration_result(res);
     }
 
     /// Registers the file descriptor for an eventfd that will be notified of completion events on
-    /// an io_uring instance. Notifications are only posted for events that complete in an async manner. 
+    /// an io_uring instance. Notifications are only posted for events that complete in an async manner.
     /// This means that events that complete inline while being submitted do not trigger a notification event.
     /// Only a single eventfd can be registered at any given point in time.
     pub fn register_eventfd_async(self: *IO_Uring, fd: os.fd_t) !void {
@@ -694,7 +901,7 @@ pub const IO_Uring = struct {
         const res = linux.io_uring_register(
             self.fd,
             .REGISTER_EVENTFD_ASYNC,
-            @ptrCast(*const c_void, &fd),
+            @ptrCast(*const anyopaque, &fd),
             1,
         );
         try handle_registration_result(res);
@@ -976,6 +1183,16 @@ pub fn io_uring_prep_write_fixed(sqe: *io_uring_sqe, fd: os.fd_t, buffer: *os.io
     sqe.buf_index = buffer_index;
 }
 
+/// Poll masks previously used to comprise of 16 bits in the flags union of
+/// a SQE, but were then extended to comprise of 32 bits in order to make
+/// room for additional option flags. To ensure that the correct bits of
+/// poll masks are consistently and properly read across multiple kernel
+/// versions, poll masks are enforced to be little-endian.
+/// https://www.spinics.net/lists/io-uring/msg02848.html
+pub inline fn __io_uring_prep_poll_mask(poll_mask: u32) u32 {
+    return std.mem.nativeToLittle(u32, poll_mask);
+}
+
 pub fn io_uring_prep_accept(
     sqe: *io_uring_sqe,
     fd: os.fd_t,
@@ -1076,13 +1293,22 @@ pub fn io_uring_prep_timeout_remove(sqe: *io_uring_sqe, timeout_user_data: u64, 
     };
 }
 
+pub fn io_uring_prep_link_timeout(
+    sqe: *io_uring_sqe,
+    ts: *const os.linux.kernel_timespec,
+    flags: u32,
+) void {
+    linux.io_uring_prep_rw(.LINK_TIMEOUT, sqe, -1, @ptrToInt(ts), 1, 0);
+    sqe.rw_flags = flags;
+}
+
 pub fn io_uring_prep_poll_add(
     sqe: *io_uring_sqe,
     fd: os.fd_t,
     poll_mask: u32,
 ) void {
-    io_uring_prep_rw(.POLL_ADD, sqe, fd, @ptrToInt(@as(?*c_void, null)), 0, 0);
-    sqe.rw_flags = std.mem.nativeToLittle(u32, poll_mask);
+    io_uring_prep_rw(.POLL_ADD, sqe, fd, @ptrToInt(@as(?*anyopaque, null)), 0, 0);
+    sqe.rw_flags = __io_uring_prep_poll_mask(poll_mask);
 }
 
 pub fn io_uring_prep_poll_remove(
@@ -1090,6 +1316,17 @@ pub fn io_uring_prep_poll_remove(
     target_user_data: u64,
 ) void {
     io_uring_prep_rw(.POLL_REMOVE, sqe, -1, target_user_data, 0, 0);
+}
+
+pub fn io_uring_prep_poll_update(
+    sqe: *io_uring_sqe,
+    old_user_data: u64,
+    new_user_data: u64,
+    poll_mask: u32,
+    flags: u32,
+) void {
+    io_uring_prep_rw(.POLL_REMOVE, sqe, -1, old_user_data, flags, new_user_data);
+    sqe.rw_flags = __io_uring_prep_poll_mask(poll_mask);
 }
 
 pub fn io_uring_prep_fallocate(
@@ -1114,6 +1351,110 @@ pub fn io_uring_prep_fallocate(
         .splice_fd_in = 0,
         .__pad2 = [2]u64{ 0, 0 },
     };
+}
+
+pub fn io_uring_prep_statx(
+    sqe: *io_uring_sqe,
+    fd: os.fd_t,
+    path: [*:0]const u8,
+    flags: u32,
+    mask: u32,
+    buf: *linux.Statx,
+) void {
+    io_uring_prep_rw(.STATX, sqe, fd, @ptrToInt(path), mask, @ptrToInt(buf));
+    sqe.rw_flags = flags;
+}
+
+pub fn io_uring_prep_cancel(
+    sqe: *io_uring_sqe,
+    cancel_user_data: u64,
+    flags: u32,
+) void {
+    io_uring_prep_rw(.ASYNC_CANCEL, sqe, -1, cancel_user_data, 0, 0);
+    sqe.rw_flags = flags;
+}
+
+pub fn io_uring_prep_shutdown(
+    sqe: *io_uring_sqe,
+    sockfd: os.socket_t,
+    how: u32,
+) void {
+    io_uring_prep_rw(.SHUTDOWN, sqe, sockfd, 0, how, 0);
+}
+
+pub fn io_uring_prep_renameat(
+    sqe: *io_uring_sqe,
+    old_dir_fd: os.fd_t,
+    old_path: [*:0]const u8,
+    new_dir_fd: os.fd_t,
+    new_path: [*:0]const u8,
+    flags: u32,
+) void {
+    io_uring_prep_rw(
+        .RENAMEAT,
+        sqe,
+        old_dir_fd,
+        @ptrToInt(old_path),
+        0,
+        @ptrToInt(new_path),
+    );
+    sqe.len = @bitCast(u32, new_dir_fd);
+    sqe.rw_flags = flags;
+}
+
+pub fn io_uring_prep_unlinkat(
+    sqe: *io_uring_sqe,
+    dir_fd: os.fd_t,
+    path: [*:0]const u8,
+    flags: u32,
+) void {
+    io_uring_prep_rw(.UNLINKAT, sqe, dir_fd, @ptrToInt(path), 0, 0);
+    sqe.rw_flags = flags;
+}
+
+pub fn io_uring_prep_mkdirat(
+    sqe: *io_uring_sqe,
+    dir_fd: os.fd_t,
+    path: [*:0]const u8,
+    mode: os.mode_t,
+) void {
+    io_uring_prep_rw(.MKDIRAT, sqe, dir_fd, @ptrToInt(path), mode, 0);
+}
+
+pub fn io_uring_prep_symlinkat(
+    sqe: *io_uring_sqe,
+    target: [*:0]const u8,
+    new_dir_fd: os.fd_t,
+    link_path: [*:0]const u8,
+) void {
+    io_uring_prep_rw(
+        .SYMLINKAT,
+        sqe,
+        new_dir_fd,
+        @ptrToInt(target),
+        0,
+        @ptrToInt(link_path),
+    );
+}
+
+pub fn io_uring_prep_linkat(
+    sqe: *io_uring_sqe,
+    old_dir_fd: os.fd_t,
+    old_path: [*:0]const u8,
+    new_dir_fd: os.fd_t,
+    new_path: [*:0]const u8,
+    flags: u32,
+) void {
+    io_uring_prep_rw(
+        .LINKAT,
+        sqe,
+        old_dir_fd,
+        @ptrToInt(old_path),
+        0,
+        @ptrToInt(new_path),
+    );
+    sqe.len = @bitCast(u32, new_dir_fd);
+    sqe.rw_flags = flags;
 }
 
 test "structs/offsets/entries" {
@@ -1677,6 +2018,93 @@ test "timeout_remove" {
     }, cqe_timeout_remove);
 }
 
+test "accept/connect/recv/link_timeout" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var ring = IO_Uring.init(16, 0) catch |err| switch (err) {
+        error.SystemOutdated => return error.SkipZigTest,
+        error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    defer ring.deinit();
+
+    const address = try net.Address.parseIp4("127.0.0.1", 3131);
+    const kernel_backlog = 1;
+    const server = try os.socket(address.any.family, os.SOCK.STREAM | os.SOCK.CLOEXEC, 0);
+    defer os.close(server);
+    try os.setsockopt(server, os.SOL.SOCKET, os.SO.REUSEADDR, &mem.toBytes(@as(c_int, 1)));
+    try os.bind(server, &address.any, address.getOsSockLen());
+    try os.listen(server, kernel_backlog);
+
+    var buffer_recv = [_]u8{ 0, 1, 0, 1, 0 };
+
+    var accept_addr: os.sockaddr = undefined;
+    var accept_addr_len: os.socklen_t = @sizeOf(@TypeOf(accept_addr));
+    _ = try ring.accept(0xaaaaaaaa, server, &accept_addr, &accept_addr_len, 0);
+    try testing.expectEqual(@as(u32, 1), try ring.submit());
+
+    const client = try os.socket(address.any.family, os.SOCK.STREAM | os.SOCK.CLOEXEC, 0);
+    defer os.close(client);
+    _ = try ring.connect(0xcccccccc, client, &address.any, address.getOsSockLen());
+    try testing.expectEqual(@as(u32, 1), try ring.submit());
+
+    var cqe_accept = try ring.copy_cqe();
+    if (cqe_accept.err() == .INVAL) return error.SkipZigTest;
+    var cqe_connect = try ring.copy_cqe();
+    if (cqe_connect.err() == .INVAL) return error.SkipZigTest;
+
+    // The accept/connect CQEs may arrive in any order, the connect CQE will sometimes come first:
+    if (cqe_accept.user_data == 0xcccccccc and cqe_connect.user_data == 0xaaaaaaaa) {
+        const a = cqe_accept;
+        const b = cqe_connect;
+        cqe_accept = b;
+        cqe_connect = a;
+    }
+
+    try testing.expectEqual(@as(u64, 0xaaaaaaaa), cqe_accept.user_data);
+    if (cqe_accept.res <= 0) std.debug.print("\ncqe_accept.res={}\n", .{cqe_accept.res});
+    try testing.expect(cqe_accept.res > 0);
+    try testing.expectEqual(@as(u32, 0), cqe_accept.flags);
+    try testing.expectEqual(linux.io_uring_cqe{
+        .user_data = 0xcccccccc,
+        .res = 0,
+        .flags = 0,
+    }, cqe_connect);
+
+    const sqe_recv = try ring.recv(0xffffffff, cqe_accept.res, buffer_recv[0..], 0);
+    sqe_recv.flags |= linux.IOSQE_IO_LINK;
+
+    const ts = os.linux.kernel_timespec{ .tv_sec = 0, .tv_nsec = 1000000 };
+    _ = try ring.link_timeout(0x22222222, &ts, 0);
+
+    const nr_wait = try ring.submit();
+    try testing.expectEqual(@as(u32, 2), nr_wait);
+
+    var i: usize = 0;
+    while (i < nr_wait) : (i += 1) {
+        const cqe = try ring.copy_cqe();
+        switch (cqe.user_data) {
+            0xffffffff => {
+                if (cqe.res != -@as(i32, @enumToInt(linux.E.INTR)) and
+                    cqe.res != -@as(i32, @enumToInt(linux.E.CANCELED)))
+                {
+                    std.debug.print("Req 0x{x} got {d}\n", .{ cqe.user_data, cqe.res });
+                    try testing.expect(false);
+                }
+            },
+            0x22222222 => {
+                if (cqe.res != -@as(i32, @enumToInt(linux.E.ALREADY)) and
+                    cqe.res != -@as(i32, @enumToInt(linux.E.TIME)))
+                {
+                    std.debug.print("Req 0x{x} got {d}\n", .{ cqe.user_data, cqe.res });
+                    try testing.expect(false);
+                }
+            },
+            else => @panic("should not happen"),
+        }
+    }
+}
+
 test "fallocate" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
@@ -1719,4 +2147,556 @@ test "fallocate" {
     }, cqe);
 
     try testing.expectEqual(len, (try file.stat()).size);
+}
+
+test "statx" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var ring = IO_Uring.init(1, 0) catch |err| switch (err) {
+        error.SystemOutdated => return error.SkipZigTest,
+        error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    defer ring.deinit();
+
+    const path = "test_io_uring_statx";
+    const file = try std.fs.cwd().createFile(path, .{ .truncate = true, .mode = 0o666 });
+    defer file.close();
+    defer std.fs.cwd().deleteFile(path) catch {};
+
+    try testing.expectEqual(@as(u64, 0), (try file.stat()).size);
+
+    try file.writeAll("foobar");
+
+    var buf: linux.Statx = undefined;
+    const sqe = try ring.statx(
+        0xaaaaaaaa,
+        linux.AT.FDCWD,
+        path,
+        0,
+        linux.STATX_SIZE,
+        &buf,
+    );
+    try testing.expectEqual(linux.IORING_OP.STATX, sqe.opcode);
+    try testing.expectEqual(@as(i32, linux.AT.FDCWD), sqe.fd);
+    try testing.expectEqual(@as(u32, 1), try ring.submit());
+
+    const cqe = try ring.copy_cqe();
+    switch (cqe.err()) {
+        .SUCCESS => {},
+        // This kernel's io_uring does not yet implement statx():
+        .INVAL => return error.SkipZigTest,
+        // This kernel does not implement statx():
+        .NOSYS => return error.SkipZigTest,
+        // The filesystem containing the file referred to by fd does not support this operation;
+        // or the mode is not supported by the filesystem containing the file referred to by fd:
+        .OPNOTSUPP => return error.SkipZigTest,
+        // The kernel is too old to support FDCWD for dir_fd
+        .BADF => return error.SkipZigTest,
+        else => |errno| std.debug.panic("unhandled errno: {}", .{errno}),
+    }
+    try testing.expectEqual(linux.io_uring_cqe{
+        .user_data = 0xaaaaaaaa,
+        .res = 0,
+        .flags = 0,
+    }, cqe);
+
+    try testing.expect(buf.mask & os.linux.STATX_SIZE == os.linux.STATX_SIZE);
+    try testing.expectEqual(@as(u64, 6), buf.size);
+}
+
+test "accept/connect/recv/cancel" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var ring = IO_Uring.init(16, 0) catch |err| switch (err) {
+        error.SystemOutdated => return error.SkipZigTest,
+        error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    defer ring.deinit();
+
+    const address = try net.Address.parseIp4("127.0.0.1", 3131);
+    const kernel_backlog = 1;
+    const server = try os.socket(address.any.family, os.SOCK.STREAM | os.SOCK.CLOEXEC, 0);
+    defer os.close(server);
+    try os.setsockopt(server, os.SOL.SOCKET, os.SO.REUSEADDR, &mem.toBytes(@as(c_int, 1)));
+    try os.bind(server, &address.any, address.getOsSockLen());
+    try os.listen(server, kernel_backlog);
+
+    var buffer_recv = [_]u8{ 0, 1, 0, 1, 0 };
+
+    var accept_addr: os.sockaddr = undefined;
+    var accept_addr_len: os.socklen_t = @sizeOf(@TypeOf(accept_addr));
+    _ = try ring.accept(0xaaaaaaaa, server, &accept_addr, &accept_addr_len, 0);
+    try testing.expectEqual(@as(u32, 1), try ring.submit());
+
+    const client = try os.socket(address.any.family, os.SOCK.STREAM | os.SOCK.CLOEXEC, 0);
+    defer os.close(client);
+    _ = try ring.connect(0xcccccccc, client, &address.any, address.getOsSockLen());
+    try testing.expectEqual(@as(u32, 1), try ring.submit());
+
+    var cqe_accept = try ring.copy_cqe();
+    if (cqe_accept.err() == .INVAL) return error.SkipZigTest;
+    var cqe_connect = try ring.copy_cqe();
+    if (cqe_connect.err() == .INVAL) return error.SkipZigTest;
+
+    // The accept/connect CQEs may arrive in any order, the connect CQE will sometimes come first:
+    if (cqe_accept.user_data == 0xcccccccc and cqe_connect.user_data == 0xaaaaaaaa) {
+        const a = cqe_accept;
+        const b = cqe_connect;
+        cqe_accept = b;
+        cqe_connect = a;
+    }
+
+    try testing.expectEqual(@as(u64, 0xaaaaaaaa), cqe_accept.user_data);
+    if (cqe_accept.res <= 0) std.debug.print("\ncqe_accept.res={}\n", .{cqe_accept.res});
+    try testing.expect(cqe_accept.res > 0);
+    try testing.expectEqual(@as(u32, 0), cqe_accept.flags);
+    try testing.expectEqual(linux.io_uring_cqe{
+        .user_data = 0xcccccccc,
+        .res = 0,
+        .flags = 0,
+    }, cqe_connect);
+
+    _ = try ring.recv(0xffffffff, cqe_accept.res, buffer_recv[0..], 0);
+    try testing.expectEqual(@as(u32, 1), try ring.submit());
+
+    const sqe_cancel = try ring.cancel(0x99999999, 0xffffffff, 0);
+    try testing.expectEqual(linux.IORING_OP.ASYNC_CANCEL, sqe_cancel.opcode);
+    try testing.expectEqual(@as(u64, 0xffffffff), sqe_cancel.addr);
+    try testing.expectEqual(@as(u64, 0x99999999), sqe_cancel.user_data);
+    try testing.expectEqual(@as(u32, 1), try ring.submit());
+
+    const cqe_recv = try ring.copy_cqe();
+    if (cqe_recv.err() == .INVAL) return error.SkipZigTest;
+    try testing.expectEqual(linux.io_uring_cqe{
+        .user_data = 0xffffffff,
+        .res = -@as(i32, @enumToInt(linux.E.CANCELED)),
+        .flags = 0,
+    }, cqe_recv);
+
+    const cqe_cancel = try ring.copy_cqe();
+    try testing.expectEqual(linux.io_uring_cqe{
+        .user_data = 0x99999999,
+        .res = 0,
+        .flags = 0,
+    }, cqe_cancel);
+}
+
+test "register_files_update" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var ring = IO_Uring.init(1, 0) catch |err| switch (err) {
+        error.SystemOutdated => return error.SkipZigTest,
+        error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    defer ring.deinit();
+
+    const fd = try os.openZ("/dev/zero", os.O.RDONLY | os.O.CLOEXEC, 0);
+    defer os.close(fd);
+
+    var registered_fds = [_]os.fd_t{0} ** 2;
+    const fd_index = 0;
+    const fd_index2 = 1;
+    registered_fds[fd_index] = fd;
+    registered_fds[fd_index2] = -1;
+
+    ring.register_files(registered_fds[0..]) catch |err| switch (err) {
+        // Happens when the kernel doesn't support sparse entry (-1) in the file descriptors array.
+        error.FileDescriptorInvalid => return error.SkipZigTest,
+        else => |errno| std.debug.panic("unhandled errno: {}", .{errno}),
+    };
+
+    // Test IORING_REGISTER_FILES_UPDATE
+    // Only available since Linux 5.5
+
+    const fd2 = try os.openZ("/dev/zero", os.O.RDONLY | os.O.CLOEXEC, 0);
+    defer os.close(fd2);
+
+    registered_fds[fd_index] = fd2;
+    registered_fds[fd_index2] = -1;
+    try ring.register_files_update(0, registered_fds[0..]);
+
+    var buffer = [_]u8{42} ** 128;
+    {
+        const sqe = try ring.read(0xcccccccc, fd_index, &buffer, 0);
+        try testing.expectEqual(linux.IORING_OP.READ, sqe.opcode);
+        sqe.flags |= linux.IOSQE_FIXED_FILE;
+
+        try testing.expectEqual(@as(u32, 1), try ring.submit());
+        try testing.expectEqual(linux.io_uring_cqe{
+            .user_data = 0xcccccccc,
+            .res = buffer.len,
+            .flags = 0,
+        }, try ring.copy_cqe());
+        try testing.expectEqualSlices(u8, &([_]u8{0} ** buffer.len), buffer[0..]);
+    }
+
+    // Test with a non-zero offset
+
+    registered_fds[fd_index] = -1;
+    registered_fds[fd_index2] = -1;
+    try ring.register_files_update(1, registered_fds[1..]);
+
+    {
+        // Next read should still work since fd_index in the registered file descriptors hasn't been updated yet.
+        const sqe = try ring.read(0xcccccccc, fd_index, &buffer, 0);
+        try testing.expectEqual(linux.IORING_OP.READ, sqe.opcode);
+        sqe.flags |= linux.IOSQE_FIXED_FILE;
+
+        try testing.expectEqual(@as(u32, 1), try ring.submit());
+        try testing.expectEqual(linux.io_uring_cqe{
+            .user_data = 0xcccccccc,
+            .res = buffer.len,
+            .flags = 0,
+        }, try ring.copy_cqe());
+        try testing.expectEqualSlices(u8, &([_]u8{0} ** buffer.len), buffer[0..]);
+    }
+
+    try ring.register_files_update(0, registered_fds[0..]);
+
+    {
+        // Now this should fail since both fds are sparse (-1)
+        const sqe = try ring.read(0xcccccccc, fd_index, &buffer, 0);
+        try testing.expectEqual(linux.IORING_OP.READ, sqe.opcode);
+        sqe.flags |= linux.IOSQE_FIXED_FILE;
+
+        try testing.expectEqual(@as(u32, 1), try ring.submit());
+        const cqe = try ring.copy_cqe();
+        try testing.expectEqual(os.linux.E.BADF, cqe.err());
+    }
+
+    try ring.unregister_files();
+}
+
+test "shutdown" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var ring = IO_Uring.init(16, 0) catch |err| switch (err) {
+        error.SystemOutdated => return error.SkipZigTest,
+        error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    defer ring.deinit();
+
+    const address = try net.Address.parseIp4("127.0.0.1", 3131);
+
+    // Socket bound, expect shutdown to work
+    {
+        const server = try os.socket(address.any.family, os.SOCK.STREAM | os.SOCK.CLOEXEC, 0);
+        defer os.close(server);
+        try os.setsockopt(server, os.SOL.SOCKET, os.SO.REUSEADDR, &mem.toBytes(@as(c_int, 1)));
+        try os.bind(server, &address.any, address.getOsSockLen());
+        try os.listen(server, 1);
+
+        var shutdown_sqe = try ring.shutdown(0x445445445, server, os.linux.SHUT.RD);
+        try testing.expectEqual(linux.IORING_OP.SHUTDOWN, shutdown_sqe.opcode);
+        try testing.expectEqual(@as(i32, server), shutdown_sqe.fd);
+
+        try testing.expectEqual(@as(u32, 1), try ring.submit());
+
+        const cqe = try ring.copy_cqe();
+        switch (cqe.err()) {
+            .SUCCESS => {},
+            // This kernel's io_uring does not yet implement shutdown (kernel version < 5.11)
+            .INVAL => return error.SkipZigTest,
+            else => |errno| std.debug.panic("unhandled errno: {}", .{errno}),
+        }
+
+        try testing.expectEqual(linux.io_uring_cqe{
+            .user_data = 0x445445445,
+            .res = 0,
+            .flags = 0,
+        }, cqe);
+    }
+
+    // Socket not bound, expect to fail with ENOTCONN
+    {
+        const server = try os.socket(address.any.family, os.SOCK.STREAM | os.SOCK.CLOEXEC, 0);
+        defer os.close(server);
+
+        var shutdown_sqe = ring.shutdown(0x445445445, server, os.linux.SHUT.RD) catch |err| switch (err) {
+            else => |errno| std.debug.panic("unhandled errno: {}", .{errno}),
+        };
+        try testing.expectEqual(linux.IORING_OP.SHUTDOWN, shutdown_sqe.opcode);
+        try testing.expectEqual(@as(i32, server), shutdown_sqe.fd);
+
+        try testing.expectEqual(@as(u32, 1), try ring.submit());
+
+        const cqe = try ring.copy_cqe();
+        try testing.expectEqual(@as(u64, 0x445445445), cqe.user_data);
+        try testing.expectEqual(os.linux.E.NOTCONN, cqe.err());
+    }
+}
+
+test "renameat" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var ring = IO_Uring.init(1, 0) catch |err| switch (err) {
+        error.SystemOutdated => return error.SkipZigTest,
+        error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    defer ring.deinit();
+
+    const old_path = "test_io_uring_renameat_old";
+    const new_path = "test_io_uring_renameat_new";
+
+    // Write old file with data
+
+    const old_file = try std.fs.cwd().createFile(old_path, .{ .truncate = true, .mode = 0o666 });
+    defer {
+        old_file.close();
+        std.fs.cwd().deleteFile(new_path) catch {};
+    }
+    try old_file.writeAll("hello");
+
+    // Submit renameat
+
+    var sqe = try ring.renameat(
+        0x12121212,
+        linux.AT.FDCWD,
+        old_path,
+        linux.AT.FDCWD,
+        new_path,
+        0,
+    );
+    try testing.expectEqual(linux.IORING_OP.RENAMEAT, sqe.opcode);
+    try testing.expectEqual(@as(i32, linux.AT.FDCWD), sqe.fd);
+    try testing.expectEqual(@as(i32, linux.AT.FDCWD), @bitCast(i32, sqe.len));
+    try testing.expectEqual(@as(u32, 1), try ring.submit());
+
+    const cqe = try ring.copy_cqe();
+    switch (cqe.err()) {
+        .SUCCESS => {},
+        // This kernel's io_uring does not yet implement renameat (kernel version < 5.11)
+        .INVAL => return error.SkipZigTest,
+        else => |errno| std.debug.panic("unhandled errno: {}", .{errno}),
+    }
+    try testing.expectEqual(linux.io_uring_cqe{
+        .user_data = 0x12121212,
+        .res = 0,
+        .flags = 0,
+    }, cqe);
+
+    // Validate that the old file doesn't exist anymore
+    {
+        _ = std.fs.cwd().openFile(old_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => std.debug.panic("unexpected error: {}", .{err}),
+        };
+    }
+
+    // Validate that the new file exists with the proper content
+    {
+        const new_file = try std.fs.cwd().openFile(new_path, .{});
+        defer new_file.close();
+
+        var new_file_data: [16]u8 = undefined;
+        const read = try new_file.readAll(&new_file_data);
+        try testing.expectEqualStrings("hello", new_file_data[0..read]);
+    }
+}
+
+test "unlinkat" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var ring = IO_Uring.init(1, 0) catch |err| switch (err) {
+        error.SystemOutdated => return error.SkipZigTest,
+        error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    defer ring.deinit();
+
+    const path = "test_io_uring_unlinkat";
+
+    // Write old file with data
+
+    const file = try std.fs.cwd().createFile(path, .{ .truncate = true, .mode = 0o666 });
+    defer file.close();
+    defer std.fs.cwd().deleteFile(path) catch {};
+
+    // Submit unlinkat
+
+    var sqe = try ring.unlinkat(
+        0x12121212,
+        linux.AT.FDCWD,
+        path,
+        0,
+    );
+    try testing.expectEqual(linux.IORING_OP.UNLINKAT, sqe.opcode);
+    try testing.expectEqual(@as(i32, linux.AT.FDCWD), sqe.fd);
+    try testing.expectEqual(@as(u32, 1), try ring.submit());
+
+    const cqe = try ring.copy_cqe();
+    switch (cqe.err()) {
+        .SUCCESS => {},
+        // This kernel's io_uring does not yet implement unlinkat (kernel version < 5.11)
+        .INVAL => return error.SkipZigTest,
+        else => |errno| std.debug.panic("unhandled errno: {}", .{errno}),
+    }
+    try testing.expectEqual(linux.io_uring_cqe{
+        .user_data = 0x12121212,
+        .res = 0,
+        .flags = 0,
+    }, cqe);
+
+    // Validate that the file doesn't exist anymore
+    _ = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => std.debug.panic("unexpected error: {}", .{err}),
+    };
+}
+
+test "mkdirat" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var ring = IO_Uring.init(1, 0) catch |err| switch (err) {
+        error.SystemOutdated => return error.SkipZigTest,
+        error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    defer ring.deinit();
+
+    const path = "test_io_uring_mkdirat";
+
+    defer std.fs.cwd().deleteDir(path) catch {};
+
+    // Submit mkdirat
+
+    var sqe = try ring.mkdirat(
+        0x12121212,
+        linux.AT.FDCWD,
+        path,
+        0o0755,
+    );
+    try testing.expectEqual(linux.IORING_OP.MKDIRAT, sqe.opcode);
+    try testing.expectEqual(@as(i32, linux.AT.FDCWD), sqe.fd);
+    try testing.expectEqual(@as(u32, 1), try ring.submit());
+
+    const cqe = try ring.copy_cqe();
+    switch (cqe.err()) {
+        .SUCCESS => {},
+        // This kernel's io_uring does not yet implement mkdirat (kernel version < 5.15)
+        .INVAL => return error.SkipZigTest,
+        else => |errno| std.debug.panic("unhandled errno: {}", .{errno}),
+    }
+    try testing.expectEqual(linux.io_uring_cqe{
+        .user_data = 0x12121212,
+        .res = 0,
+        .flags = 0,
+    }, cqe);
+
+    // Validate that the directory exist
+    _ = try std.fs.cwd().openDir(path, .{});
+}
+
+test "symlinkat" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var ring = IO_Uring.init(1, 0) catch |err| switch (err) {
+        error.SystemOutdated => return error.SkipZigTest,
+        error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    defer ring.deinit();
+
+    const path = "test_io_uring_symlinkat";
+    const link_path = "test_io_uring_symlinkat_link";
+
+    const file = try std.fs.cwd().createFile(path, .{ .truncate = true, .mode = 0o666 });
+    defer {
+        file.close();
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile(link_path) catch {};
+    }
+
+    // Submit symlinkat
+
+    var sqe = try ring.symlinkat(
+        0x12121212,
+        path,
+        linux.AT.FDCWD,
+        link_path,
+    );
+    try testing.expectEqual(linux.IORING_OP.SYMLINKAT, sqe.opcode);
+    try testing.expectEqual(@as(i32, linux.AT.FDCWD), sqe.fd);
+    try testing.expectEqual(@as(u32, 1), try ring.submit());
+
+    const cqe = try ring.copy_cqe();
+    switch (cqe.err()) {
+        .SUCCESS => {},
+        // This kernel's io_uring does not yet implement symlinkat (kernel version < 5.15)
+        .INVAL => return error.SkipZigTest,
+        else => |errno| std.debug.panic("unhandled errno: {}", .{errno}),
+    }
+    try testing.expectEqual(linux.io_uring_cqe{
+        .user_data = 0x12121212,
+        .res = 0,
+        .flags = 0,
+    }, cqe);
+
+    // Validate that the symlink exist
+    _ = try std.fs.cwd().openFile(link_path, .{});
+}
+
+test "linkat" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var ring = IO_Uring.init(1, 0) catch |err| switch (err) {
+        error.SystemOutdated => return error.SkipZigTest,
+        error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    defer ring.deinit();
+
+    const first_path = "test_io_uring_linkat_first";
+    const second_path = "test_io_uring_linkat_second";
+
+    // Write file with data
+
+    const first_file = try std.fs.cwd().createFile(first_path, .{ .truncate = true, .mode = 0o666 });
+    defer {
+        first_file.close();
+        std.fs.cwd().deleteFile(first_path) catch {};
+        std.fs.cwd().deleteFile(second_path) catch {};
+    }
+    try first_file.writeAll("hello");
+
+    // Submit linkat
+
+    var sqe = try ring.linkat(
+        0x12121212,
+        linux.AT.FDCWD,
+        first_path,
+        linux.AT.FDCWD,
+        second_path,
+        0,
+    );
+    try testing.expectEqual(linux.IORING_OP.LINKAT, sqe.opcode);
+    try testing.expectEqual(@as(i32, linux.AT.FDCWD), sqe.fd);
+    try testing.expectEqual(@as(i32, linux.AT.FDCWD), @bitCast(i32, sqe.len));
+    try testing.expectEqual(@as(u32, 1), try ring.submit());
+
+    const cqe = try ring.copy_cqe();
+    switch (cqe.err()) {
+        .SUCCESS => {},
+        // This kernel's io_uring does not yet implement linkat (kernel version < 5.15)
+        .INVAL => return error.SkipZigTest,
+        else => |errno| std.debug.panic("unhandled errno: {}", .{errno}),
+    }
+    try testing.expectEqual(linux.io_uring_cqe{
+        .user_data = 0x12121212,
+        .res = 0,
+        .flags = 0,
+    }, cqe);
+
+    // Validate the second file
+    const second_file = try std.fs.cwd().openFile(second_path, .{});
+    defer second_file.close();
+
+    var second_file_data: [16]u8 = undefined;
+    const read = try second_file.readAll(&second_file_data);
+    try testing.expectEqualStrings("hello", second_file_data[0..read]);
 }

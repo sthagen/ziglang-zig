@@ -3,7 +3,7 @@
 set -x
 set -e
 
-brew update && brew install s3cmd
+brew update && brew install ncurses s3cmd
 
 ZIGDIR="$(pwd)"
 ARCH="x86_64"
@@ -39,7 +39,8 @@ cmake .. \
   -DCMAKE_BUILD_TYPE=Release \
   -DZIG_TARGET_TRIPLE="$TARGET" \
   -DZIG_TARGET_MCPU="$MCPU" \
-  -DZIG_STATIC=ON
+  -DZIG_STATIC=ON \
+  -DZIG_OMIT_STAGE2=ON
 
 # Now cmake will use zig as the C/C++ compiler. We reset the environment variables
 # so that installation and testing do not get affected by them.
@@ -94,4 +95,5 @@ if [ "${BUILD_REASON}" != "PullRequest" ]; then
   echo "##vso[task.setvariable variable=tarball;isOutput=true]$TARBALL"
   echo "##vso[task.setvariable variable=shasum;isOutput=true]$SHASUM"
   echo "##vso[task.setvariable variable=bytesize;isOutput=true]$BYTESIZE"
+  echo "##vso[task.setvariable variable=version;isOutput=true]$VERSION"
 fi
