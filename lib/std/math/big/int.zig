@@ -2,6 +2,8 @@ const std = @import("../../std.zig");
 const math = std.math;
 const Limb = std.math.big.Limb;
 const limb_bits = @typeInfo(Limb).Int.bits;
+const HalfLimb = std.math.big.HalfLimb;
+const half_limb_bits = @typeInfo(HalfLimb).Int.bits;
 const DoubleLimb = std.math.big.DoubleLimb;
 const SignedDoubleLimb = std.math.big.SignedDoubleLimb;
 const Log2Limb = std.math.big.Log2Limb;
@@ -443,12 +445,12 @@ pub const Mutable = struct {
         }
     }
 
-    /// r = a + b with 2s-complement wrapping semantics.
+    /// r = a + b with 2s-complement wrapping semantics. Returns whether overflow occurred.
     /// r, a and b may be aliases
     ///
     /// Asserts the result fits in `r`. An upper bound on the number of limbs needed by
     /// r is `calcTwosCompLimbCount(bit_count)`.
-    pub fn addWrap(r: *Mutable, a: Const, b: Const, signedness: Signedness, bit_count: usize) void {
+    pub fn addWrap(r: *Mutable, a: Const, b: Const, signedness: Signedness, bit_count: usize) bool {
         const req_limbs = calcTwosCompLimbCount(bit_count);
 
         // Slice of the upper bits if they exist, these will be ignored and allows us to use addCarry to determine
@@ -463,6 +465,7 @@ pub const Mutable = struct {
             .limbs = b.limbs[0..math.min(req_limbs, b.limbs.len)],
         };
 
+        var carry_truncated = false;
         if (r.addCarry(x, y)) {
             // There are two possibilities here:
             // - We overflowed req_limbs. In this case, the carry is ignored, as it would be removed by
@@ -473,10 +476,17 @@ pub const Mutable = struct {
             if (msl < req_limbs) {
                 r.limbs[msl] = 1;
                 r.len = req_limbs;
+            } else {
+                carry_truncated = true;
             }
         }
 
-        r.truncate(r.toConst(), signedness, bit_count);
+        if (!r.toConst().fitsInTwosComp(signedness, bit_count)) {
+            r.truncate(r.toConst(), signedness, bit_count);
+            return true;
+        }
+
+        return carry_truncated;
     }
 
     /// r = a + b with 2s-complement saturating semantics.
@@ -581,13 +591,13 @@ pub const Mutable = struct {
         r.add(a, b.negate());
     }
 
-    /// r = a - b with 2s-complement wrapping semantics.
+    /// r = a - b with 2s-complement wrapping semantics. Returns whether any overflow occured.
     ///
     /// r, a and b may be aliases
     /// Asserts the result fits in `r`. An upper bound on the number of limbs needed by
     /// r is `calcTwosCompLimbCount(bit_count)`.
-    pub fn subWrap(r: *Mutable, a: Const, b: Const, signedness: Signedness, bit_count: usize) void {
-        r.addWrap(a, b.negate(), signedness, bit_count);
+    pub fn subWrap(r: *Mutable, a: Const, b: Const, signedness: Signedness, bit_count: usize) bool {
+        return r.addWrap(a, b.negate(), signedness, bit_count);
     }
 
     /// r = a - b with 2s-complement saturating semantics.
@@ -1039,7 +1049,7 @@ pub const Mutable = struct {
     pub fn bitNotWrap(r: *Mutable, a: Const, signedness: Signedness, bit_count: usize) void {
         r.copy(a.negate());
         const negative_one = Const{ .limbs = &.{1}, .positive = false };
-        r.addWrap(r.toConst(), negative_one, signedness, bit_count);
+        _ = r.addWrap(r.toConst(), negative_one, signedness, bit_count);
     }
 
     /// r = a | b under 2s complement semantics.
@@ -1327,7 +1337,16 @@ pub const Mutable = struct {
         const xy_trailing = math.min(x_trailing, y_trailing);
 
         if (y.len - xy_trailing == 1) {
-            lldiv1(q.limbs, &r.limbs[0], x.limbs[xy_trailing..x.len], y.limbs[y.len - 1]);
+            const divisor = y.limbs[y.len - 1];
+
+            // Optimization for small divisor. By using a half limb we can avoid requiring DoubleLimb
+            // divisions in the hot code path. This may often require compiler_rt software-emulation.
+            if (divisor < maxInt(HalfLimb)) {
+                lldiv0p5(q.limbs, &r.limbs[0], x.limbs[xy_trailing..x.len], @intCast(HalfLimb, divisor));
+            } else {
+                lldiv1(q.limbs, &r.limbs[0], x.limbs[xy_trailing..x.len], divisor);
+            }
+
             q.normalize(x.len - xy_trailing);
             q.positive = q_positive;
 
@@ -1931,7 +1950,8 @@ pub const Const = struct {
             }
         } else {
             // Non power-of-two: batch divisions per word size.
-            const digits_per_limb = math.log(Limb, base, maxInt(Limb));
+            // We use a HalfLimb here so the division uses the faster lldiv0p5 over lldiv1 codepath.
+            const digits_per_limb = math.log(HalfLimb, base, maxInt(HalfLimb));
             var limb_base: Limb = 1;
             var j: usize = 0;
             while (j < digits_per_limb) : (j += 1) {
@@ -2443,17 +2463,18 @@ pub const Managed = struct {
         r.setMetadata(m.positive, m.len);
     }
 
-    /// r = a + b with 2s-complement wrapping semantics.
+    /// r = a + b with 2s-complement wrapping semantics. Returns whether any overflow occured.
     ///
     /// r, a and b may be aliases. If r aliases a or b, then caller must call
     /// `r.ensureTwosCompCapacity` prior to calling `add`.
     ///
     /// Returns an error if memory could not be allocated.
-    pub fn addWrap(r: *Managed, a: Const, b: Const, signedness: Signedness, bit_count: usize) Allocator.Error!void {
+    pub fn addWrap(r: *Managed, a: Const, b: Const, signedness: Signedness, bit_count: usize) Allocator.Error!bool {
         try r.ensureTwosCompCapacity(bit_count);
         var m = r.toMutable();
-        m.addWrap(a, b, signedness, bit_count);
+        const wrapped = m.addWrap(a, b, signedness, bit_count);
         r.setMetadata(m.positive, m.len);
+        return wrapped;
     }
 
     /// r = a + b with 2s-complement saturating semantics.
@@ -2481,17 +2502,18 @@ pub const Managed = struct {
         r.setMetadata(m.positive, m.len);
     }
 
-    /// r = a - b with 2s-complement wrapping semantics.
+    /// r = a - b with 2s-complement wrapping semantics. Returns whether any overflow occured.
     ///
     /// r, a and b may be aliases. If r aliases a or b, then caller must call
     /// `r.ensureTwosCompCapacity` prior to calling `add`.
     ///
     /// Returns an error if memory could not be allocated.
-    pub fn subWrap(r: *Managed, a: Const, b: Const, signedness: Signedness, bit_count: usize) Allocator.Error!void {
+    pub fn subWrap(r: *Managed, a: Const, b: Const, signedness: Signedness, bit_count: usize) Allocator.Error!bool {
         try r.ensureTwosCompCapacity(bit_count);
         var m = r.toMutable();
-        m.subWrap(a, b, signedness, bit_count);
+        const wrapped = m.subWrap(a, b, signedness, bit_count);
         r.setMetadata(m.positive, m.len);
+        return wrapped;
     }
 
     /// r = a - b with 2s-complement saturating semantics.
@@ -3195,6 +3217,30 @@ fn lldiv1(quo: []Limb, rem: *Limb, a: []const Limb, b: Limb) void {
             quo[i] = @truncate(Limb, @divTrunc(pdiv, b));
             rem.* = @truncate(Limb, pdiv - (quo[i] *% b));
         }
+    }
+}
+
+fn lldiv0p5(quo: []Limb, rem: *Limb, a: []const Limb, b: HalfLimb) void {
+    @setRuntimeSafety(debug_safety);
+    assert(a.len > 1 or a[0] >= b);
+    assert(quo.len >= a.len);
+
+    rem.* = 0;
+    for (a) |_, ri| {
+        const i = a.len - ri - 1;
+        const ai_high = a[i] >> half_limb_bits;
+        const ai_low = a[i] & ((1 << half_limb_bits) - 1);
+
+        // Split the division into two divisions acting on half a limb each. Carry remainder.
+        const ai_high_with_carry = (rem.* << half_limb_bits) | ai_high;
+        const ai_high_quo = ai_high_with_carry / b;
+        rem.* = ai_high_with_carry % b;
+
+        const ai_low_with_carry = (rem.* << half_limb_bits) | ai_low;
+        const ai_low_quo = ai_low_with_carry / b;
+        rem.* = ai_low_with_carry % b;
+
+        quo[i] = (ai_high_quo << half_limb_bits) | ai_low_quo;
     }
 }
 

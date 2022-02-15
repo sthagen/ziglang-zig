@@ -31,6 +31,7 @@ const DebugInfoOutput = @import("../../codegen.zig").DebugInfoOutput;
 const InnerError = error{
     OutOfMemory,
     CodegenFail,
+    OutOfRegisters,
 };
 
 gpa: Allocator,
@@ -274,6 +275,9 @@ pub fn generate(
 
     var call_info = function.resolveCallingConventionValues(fn_type) catch |err| switch (err) {
         error.CodegenFail => return FnResult{ .fail = function.err_msg.? },
+        error.OutOfRegisters => return FnResult{
+            .fail = try ErrorMsg.create(bin_file.allocator, src_loc, "CodeGen ran out of registers. This is a bug in the Zig compiler.", .{}),
+        },
         else => |e| return e,
     };
     defer call_info.deinit(&function);
@@ -285,6 +289,9 @@ pub fn generate(
 
     function.gen() catch |err| switch (err) {
         error.CodegenFail => return FnResult{ .fail = function.err_msg.? },
+        error.OutOfRegisters => return FnResult{
+            .fail = try ErrorMsg.create(bin_file.allocator, src_loc, "CodeGen ran out of registers. This is a bug in the Zig compiler.", .{}),
+        },
         else => |e| return e,
     };
 
@@ -504,128 +511,157 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
 
         switch (air_tags[inst]) {
             // zig fmt: off
-                    .add, .ptr_add   => try self.airAdd(inst),
-                    .addwrap         => try self.airAddWrap(inst),
-                    .add_sat         => try self.airAddSat(inst),
-                    .sub, .ptr_sub   => try self.airSub(inst),
-                    .subwrap         => try self.airSubWrap(inst),
-                    .sub_sat         => try self.airSubSat(inst),
-                    .mul             => try self.airMul(inst),
-                    .mulwrap         => try self.airMulWrap(inst),
-                    .mul_sat         => try self.airMulSat(inst),
-                    .rem             => try self.airRem(inst),
-                    .mod             => try self.airMod(inst),
-                    .shl, .shl_exact => try self.airShl(inst),
-                    .shl_sat         => try self.airShlSat(inst),
-                    .min             => try self.airMin(inst),
-                    .max             => try self.airMax(inst),
-                    .slice           => try self.airSlice(inst),
+            .add, .ptr_add   => try self.airAdd(inst),
+            .addwrap         => try self.airAddWrap(inst),
+            .add_sat         => try self.airAddSat(inst),
+            .sub, .ptr_sub   => try self.airSub(inst),
+            .subwrap         => try self.airSubWrap(inst),
+            .sub_sat         => try self.airSubSat(inst),
+            .mul             => try self.airMul(inst),
+            .mulwrap         => try self.airMulWrap(inst),
+            .mul_sat         => try self.airMulSat(inst),
+            .rem             => try self.airRem(inst),
+            .mod             => try self.airMod(inst),
+            .shl, .shl_exact => try self.airShl(inst),
+            .shl_sat         => try self.airShlSat(inst),
+            .min             => try self.airMin(inst),
+            .max             => try self.airMax(inst),
+            .slice           => try self.airSlice(inst),
 
-                    .div_float, .div_trunc, .div_floor, .div_exact => try self.airDiv(inst),
+            .sqrt,
+            .sin,
+            .cos,
+            .exp,
+            .exp2,
+            .log,
+            .log2,
+            .log10,
+            .fabs,
+            .floor,
+            .ceil,
+            .round,
+            .trunc_float
+            => try self.airUnaryMath(inst),
 
-                    .cmp_lt  => try self.airCmp(inst, .lt),
-                    .cmp_lte => try self.airCmp(inst, .lte),
-                    .cmp_eq  => try self.airCmp(inst, .eq),
-                    .cmp_gte => try self.airCmp(inst, .gte),
-                    .cmp_gt  => try self.airCmp(inst, .gt),
-                    .cmp_neq => try self.airCmp(inst, .neq),
+            .add_with_overflow => try self.airAddWithOverflow(inst),
+            .sub_with_overflow => try self.airSubWithOverflow(inst),
+            .mul_with_overflow => try self.airMulWithOverflow(inst),
+            .shl_with_overflow => try self.airShlWithOverflow(inst),
 
-                    .bool_and => try self.airBoolOp(inst),
-                    .bool_or  => try self.airBoolOp(inst),
-                    .bit_and  => try self.airBitAnd(inst),
-                    .bit_or   => try self.airBitOr(inst),
-                    .xor      => try self.airXor(inst),
-                    .shr      => try self.airShr(inst),
+            .div_float, .div_trunc, .div_floor, .div_exact => try self.airDiv(inst),
 
-                    .alloc           => try self.airAlloc(inst),
-                    .ret_ptr         => try self.airRetPtr(inst),
-                    .arg             => try self.airArg(inst),
-                    .assembly        => try self.airAsm(inst),
-                    .bitcast         => try self.airBitCast(inst),
-                    .block           => try self.airBlock(inst),
-                    .br              => try self.airBr(inst),
-                    .breakpoint      => try self.airBreakpoint(),
-                    .fence           => try self.airFence(),
-                    .call            => try self.airCall(inst),
-                    .cond_br         => try self.airCondBr(inst),
-                    .dbg_stmt        => try self.airDbgStmt(inst),
-                    .fptrunc         => try self.airFptrunc(inst),
-                    .fpext           => try self.airFpext(inst),
-                    .intcast         => try self.airIntCast(inst),
-                    .trunc           => try self.airTrunc(inst),
-                    .bool_to_int     => try self.airBoolToInt(inst),
-                    .is_non_null     => try self.airIsNonNull(inst),
-                    .is_non_null_ptr => try self.airIsNonNullPtr(inst),
-                    .is_null         => try self.airIsNull(inst),
-                    .is_null_ptr     => try self.airIsNullPtr(inst),
-                    .is_non_err      => try self.airIsNonErr(inst),
-                    .is_non_err_ptr  => try self.airIsNonErrPtr(inst),
-                    .is_err          => try self.airIsErr(inst),
-                    .is_err_ptr      => try self.airIsErrPtr(inst),
-                    .load            => try self.airLoad(inst),
-                    .loop            => try self.airLoop(inst),
-                    .not             => try self.airNot(inst),
-                    .ptrtoint        => try self.airPtrToInt(inst),
-                    .ret             => try self.airRet(inst),
-                    .ret_load        => try self.airRetLoad(inst),
-                    .store           => try self.airStore(inst),
-                    .struct_field_ptr=> try self.airStructFieldPtr(inst),
-                    .struct_field_val=> try self.airStructFieldVal(inst),
-                    .array_to_slice  => try self.airArrayToSlice(inst),
-                    .int_to_float    => try self.airIntToFloat(inst),
-                    .float_to_int    => try self.airFloatToInt(inst),
-                    .cmpxchg_strong  => try self.airCmpxchg(inst),
-                    .cmpxchg_weak    => try self.airCmpxchg(inst),
-                    .atomic_rmw      => try self.airAtomicRmw(inst),
-                    .atomic_load     => try self.airAtomicLoad(inst),
-                    .memcpy          => try self.airMemcpy(inst),
-                    .memset          => try self.airMemset(inst),
-                    .set_union_tag   => try self.airSetUnionTag(inst),
-                    .get_union_tag   => try self.airGetUnionTag(inst),
-                    .clz             => try self.airClz(inst),
-                    .ctz             => try self.airCtz(inst),
-                    .popcount        => try self.airPopcount(inst),
+            .cmp_lt  => try self.airCmp(inst, .lt),
+            .cmp_lte => try self.airCmp(inst, .lte),
+            .cmp_eq  => try self.airCmp(inst, .eq),
+            .cmp_gte => try self.airCmp(inst, .gte),
+            .cmp_gt  => try self.airCmp(inst, .gt),
+            .cmp_neq => try self.airCmp(inst, .neq),
 
-                    .atomic_store_unordered => try self.airAtomicStore(inst, .Unordered),
-                    .atomic_store_monotonic => try self.airAtomicStore(inst, .Monotonic),
-                    .atomic_store_release   => try self.airAtomicStore(inst, .Release),
-                    .atomic_store_seq_cst   => try self.airAtomicStore(inst, .SeqCst),
+            .bool_and        => try self.airBoolOp(inst),
+            .bool_or         => try self.airBoolOp(inst),
+            .bit_and         => try self.airBitAnd(inst),
+            .bit_or          => try self.airBitOr(inst),
+            .xor             => try self.airXor(inst),
+            .shr, .shr_exact => try self.airShr(inst),
 
-                    .struct_field_ptr_index_0 => try self.airStructFieldPtrIndex(inst, 0),
-                    .struct_field_ptr_index_1 => try self.airStructFieldPtrIndex(inst, 1),
-                    .struct_field_ptr_index_2 => try self.airStructFieldPtrIndex(inst, 2),
-                    .struct_field_ptr_index_3 => try self.airStructFieldPtrIndex(inst, 3),
+            .alloc           => try self.airAlloc(inst),
+            .ret_ptr         => try self.airRetPtr(inst),
+            .arg             => try self.airArg(inst),
+            .assembly        => try self.airAsm(inst),
+            .bitcast         => try self.airBitCast(inst),
+            .block           => try self.airBlock(inst),
+            .br              => try self.airBr(inst),
+            .breakpoint      => try self.airBreakpoint(),
+            .ret_addr        => try self.airRetAddr(),
+            .fence           => try self.airFence(),
+            .call            => try self.airCall(inst),
+            .cond_br         => try self.airCondBr(inst),
+            .dbg_stmt        => try self.airDbgStmt(inst),
+            .fptrunc         => try self.airFptrunc(inst),
+            .fpext           => try self.airFpext(inst),
+            .intcast         => try self.airIntCast(inst),
+            .trunc           => try self.airTrunc(inst),
+            .bool_to_int     => try self.airBoolToInt(inst),
+            .is_non_null     => try self.airIsNonNull(inst),
+            .is_non_null_ptr => try self.airIsNonNullPtr(inst),
+            .is_null         => try self.airIsNull(inst),
+            .is_null_ptr     => try self.airIsNullPtr(inst),
+            .is_non_err      => try self.airIsNonErr(inst),
+            .is_non_err_ptr  => try self.airIsNonErrPtr(inst),
+            .is_err          => try self.airIsErr(inst),
+            .is_err_ptr      => try self.airIsErrPtr(inst),
+            .load            => try self.airLoad(inst),
+            .loop            => try self.airLoop(inst),
+            .not             => try self.airNot(inst),
+            .ptrtoint        => try self.airPtrToInt(inst),
+            .ret             => try self.airRet(inst),
+            .ret_load        => try self.airRetLoad(inst),
+            .store           => try self.airStore(inst),
+            .struct_field_ptr=> try self.airStructFieldPtr(inst),
+            .struct_field_val=> try self.airStructFieldVal(inst),
+            .array_to_slice  => try self.airArrayToSlice(inst),
+            .int_to_float    => try self.airIntToFloat(inst),
+            .float_to_int    => try self.airFloatToInt(inst),
+            .cmpxchg_strong  => try self.airCmpxchg(inst),
+            .cmpxchg_weak    => try self.airCmpxchg(inst),
+            .atomic_rmw      => try self.airAtomicRmw(inst),
+            .atomic_load     => try self.airAtomicLoad(inst),
+            .memcpy          => try self.airMemcpy(inst),
+            .memset          => try self.airMemset(inst),
+            .set_union_tag   => try self.airSetUnionTag(inst),
+            .get_union_tag   => try self.airGetUnionTag(inst),
+            .clz             => try self.airClz(inst),
+            .ctz             => try self.airCtz(inst),
+            .popcount        => try self.airPopcount(inst),
+            .tag_name        => try self.airTagName(inst),
+            .error_name      => try self.airErrorName(inst),
+            .splat           => try self.airSplat(inst),
+            .vector_init     => try self.airVectorInit(inst),
+            .prefetch        => try self.airPrefetch(inst),
 
-                    .switch_br       => try self.airSwitch(inst),
-                    .slice_ptr       => try self.airSlicePtr(inst),
-                    .slice_len       => try self.airSliceLen(inst),
+            .atomic_store_unordered => try self.airAtomicStore(inst, .Unordered),
+            .atomic_store_monotonic => try self.airAtomicStore(inst, .Monotonic),
+            .atomic_store_release   => try self.airAtomicStore(inst, .Release),
+            .atomic_store_seq_cst   => try self.airAtomicStore(inst, .SeqCst),
 
-                    .ptr_slice_len_ptr => try self.airPtrSliceLenPtr(inst),
-                    .ptr_slice_ptr_ptr => try self.airPtrSlicePtrPtr(inst),
+            .struct_field_ptr_index_0 => try self.airStructFieldPtrIndex(inst, 0),
+            .struct_field_ptr_index_1 => try self.airStructFieldPtrIndex(inst, 1),
+            .struct_field_ptr_index_2 => try self.airStructFieldPtrIndex(inst, 2),
+            .struct_field_ptr_index_3 => try self.airStructFieldPtrIndex(inst, 3),
 
-                    .array_elem_val      => try self.airArrayElemVal(inst),
-                    .slice_elem_val      => try self.airSliceElemVal(inst),
-                    .slice_elem_ptr      => try self.airSliceElemPtr(inst),
-                    .ptr_elem_val        => try self.airPtrElemVal(inst),
-                    .ptr_elem_ptr        => try self.airPtrElemPtr(inst),
+            .switch_br       => try self.airSwitch(inst),
+            .slice_ptr       => try self.airSlicePtr(inst),
+            .slice_len       => try self.airSliceLen(inst),
 
-                    .constant => unreachable, // excluded from function bodies
-                    .const_ty => unreachable, // excluded from function bodies
-                    .unreach  => self.finishAirBookkeeping(),
+            .ptr_slice_len_ptr => try self.airPtrSliceLenPtr(inst),
+            .ptr_slice_ptr_ptr => try self.airPtrSlicePtrPtr(inst),
 
-                    .optional_payload           => try self.airOptionalPayload(inst),
-                    .optional_payload_ptr       => try self.airOptionalPayloadPtr(inst),
-                    .optional_payload_ptr_set   => try self.airOptionalPayloadPtrSet(inst),
-                    .unwrap_errunion_err        => try self.airUnwrapErrErr(inst),
-                    .unwrap_errunion_payload    => try self.airUnwrapErrPayload(inst),
-                    .unwrap_errunion_err_ptr    => try self.airUnwrapErrErrPtr(inst),
-                    .unwrap_errunion_payload_ptr=> try self.airUnwrapErrPayloadPtr(inst),
+            .array_elem_val      => try self.airArrayElemVal(inst),
+            .slice_elem_val      => try self.airSliceElemVal(inst),
+            .slice_elem_ptr      => try self.airSliceElemPtr(inst),
+            .ptr_elem_val        => try self.airPtrElemVal(inst),
+            .ptr_elem_ptr        => try self.airPtrElemPtr(inst),
 
-                    .wrap_optional         => try self.airWrapOptional(inst),
-                    .wrap_errunion_payload => try self.airWrapErrUnionPayload(inst),
-                    .wrap_errunion_err     => try self.airWrapErrUnionErr(inst),
-                    // zig fmt: on
+            .constant => unreachable, // excluded from function bodies
+            .const_ty => unreachable, // excluded from function bodies
+            .unreach  => self.finishAirBookkeeping(),
+
+            .optional_payload           => try self.airOptionalPayload(inst),
+            .optional_payload_ptr       => try self.airOptionalPayloadPtr(inst),
+            .optional_payload_ptr_set   => try self.airOptionalPayloadPtrSet(inst),
+            .unwrap_errunion_err        => try self.airUnwrapErrErr(inst),
+            .unwrap_errunion_payload    => try self.airUnwrapErrPayload(inst),
+            .unwrap_errunion_err_ptr    => try self.airUnwrapErrErrPtr(inst),
+            .unwrap_errunion_payload_ptr=> try self.airUnwrapErrPayloadPtr(inst),
+
+            .wrap_optional         => try self.airWrapOptional(inst),
+            .wrap_errunion_payload => try self.airWrapErrUnionPayload(inst),
+            .wrap_errunion_err     => try self.airWrapErrUnionErr(inst),
+            // zig fmt: on
         }
+
+        assert(!self.register_manager.frozenRegsExist());
+
         if (std.debug.runtime_safety) {
             if (self.air_bookkeeping < old_air_bookkeeping + 1) {
                 std.debug.panic("in codegen.zig, handling of AIR instruction %{d} ('{}') did not do proper bookkeeping. Look for a missing call to finishAir.", .{ inst, air_tags[inst] });
@@ -702,7 +738,7 @@ fn ensureProcessDeathCapacity(self: *Self, additional_count: usize) !void {
 fn addDbgInfoTypeReloc(self: *Self, ty: Type) !void {
     switch (self.debug_output) {
         .dwarf => |dbg_out| {
-            assert(ty.hasCodeGenBits());
+            assert(ty.hasRuntimeBits());
             const index = dbg_out.dbg_info.items.len;
             try dbg_out.dbg_info.resize(index + 4); // DW.AT.type,  DW.FORM.ref4
 
@@ -760,7 +796,7 @@ fn allocRegOrMem(self: *Self, inst: Air.Inst.Index, reg_ok: bool) !MCValue {
         const ptr_bits = self.target.cpu.arch.ptrBitWidth();
         const ptr_bytes: u64 = @divExact(ptr_bits, 8);
         if (abi_size <= ptr_bytes) {
-            if (self.register_manager.tryAllocReg(inst, &.{})) |reg| {
+            if (self.register_manager.tryAllocReg(inst)) |reg| {
                 return MCValue{ .register = registerAlias(reg, abi_size) };
             }
         }
@@ -783,7 +819,7 @@ pub fn spillInstruction(self: *Self, reg: Register, inst: Air.Inst.Index) !void 
 /// allocated. A second call to `copyToTmpRegister` may return the same register.
 /// This can have a side effect of spilling instructions to the stack to free up a register.
 fn copyToTmpRegister(self: *Self, ty: Type, mcv: MCValue) !Register {
-    const reg = try self.register_manager.allocReg(null, &.{});
+    const reg = try self.register_manager.allocReg(null);
     try self.genSetReg(ty, reg, mcv);
     return reg;
 }
@@ -792,7 +828,7 @@ fn copyToTmpRegister(self: *Self, ty: Type, mcv: MCValue) !Register {
 /// `reg_owner` is the instruction that gets associated with the register in the register table.
 /// This can have a side effect of spilling instructions to the stack to free up a register.
 fn copyToNewRegister(self: *Self, reg_owner: Air.Inst.Index, mcv: MCValue) !MCValue {
-    const reg = try self.register_manager.allocReg(reg_owner, &.{});
+    const reg = try self.register_manager.allocReg(reg_owner);
     try self.genSetReg(self.air.typeOfIndex(reg_owner), reg, mcv);
     return MCValue{ .register = reg };
 }
@@ -966,6 +1002,26 @@ fn airMulSat(self: *Self, inst: Air.Inst.Index) !void {
     const bin_op = self.air.instructions.items(.data)[inst].bin_op;
     const result: MCValue = if (self.liveness.isUnused(inst)) .dead else return self.fail("TODO implement mul_sat for {}", .{self.target.cpu.arch});
     return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
+}
+
+fn airAddWithOverflow(self: *Self, inst: Air.Inst.Index) !void {
+    _ = inst;
+    return self.fail("TODO implement airAddWithOverflow for {}", .{self.target.cpu.arch});
+}
+
+fn airSubWithOverflow(self: *Self, inst: Air.Inst.Index) !void {
+    _ = inst;
+    return self.fail("TODO implement airSubWithOverflow for {}", .{self.target.cpu.arch});
+}
+
+fn airMulWithOverflow(self: *Self, inst: Air.Inst.Index) !void {
+    _ = inst;
+    return self.fail("TODO implement airMulWithOverflow for {}", .{self.target.cpu.arch});
+}
+
+fn airShlWithOverflow(self: *Self, inst: Air.Inst.Index) !void {
+    _ = inst;
+    return self.fail("TODO implement airShlWithOverflow for {}", .{self.target.cpu.arch});
 }
 
 fn airDiv(self: *Self, inst: Air.Inst.Index) !void {
@@ -1182,6 +1238,15 @@ fn airPopcount(self: *Self, inst: Air.Inst.Index) !void {
     return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
 }
 
+fn airUnaryMath(self: *Self, inst: Air.Inst.Index) !void {
+    const un_op = self.air.instructions.items(.data)[inst].un_op;
+    const result: MCValue = if (self.liveness.isUnused(inst))
+        .dead
+    else
+        return self.fail("TODO implement airUnaryMath for {}", .{self.target.cpu.arch});
+    return self.finishAir(inst, result, .{ un_op, .none, .none });
+}
+
 fn reuseOperand(self: *Self, inst: Air.Inst.Index, operand: Air.Inst.Ref, op_index: Liveness.OperandInt, mcv: MCValue) bool {
     if (!self.liveness.operandDies(inst, op_index))
         return false;
@@ -1233,13 +1298,15 @@ fn load(self: *Self, dst_mcv: MCValue, ptr: MCValue, ptr_ty: Type) InnerError!vo
         .register => {
             return self.fail("TODO implement loading from MCValue.register for {}", .{self.target.cpu.arch});
         },
-        .memory => |addr| {
-            const reg = try self.register_manager.allocReg(null, &.{});
-            try self.genSetReg(ptr_ty, reg, .{ .memory = addr });
+        .memory,
+        .stack_offset,
+        => {
+            const reg = try self.register_manager.allocReg(null);
+            self.register_manager.freezeRegs(&.{reg});
+            defer self.register_manager.unfreezeRegs(&.{reg});
+
+            try self.genSetReg(ptr_ty, reg, ptr);
             try self.load(dst_mcv, .{ .register = reg }, ptr_ty);
-        },
-        .stack_offset => {
-            return self.fail("TODO implement loading from MCValue.stack_offset", .{});
         },
     }
 }
@@ -1248,7 +1315,7 @@ fn airLoad(self: *Self, inst: Air.Inst.Index) !void {
     const ty_op = self.air.instructions.items(.data)[inst].ty_op;
     const elem_ty = self.air.typeOfIndex(inst);
     const result: MCValue = result: {
-        if (!elem_ty.hasCodeGenBits())
+        if (!elem_ty.hasRuntimeBits())
             break :result MCValue.none;
 
         const ptr = try self.resolveInst(ty_op.operand);
@@ -1409,6 +1476,10 @@ fn airBreakpoint(self: *Self) !void {
     return self.finishAirBookkeeping();
 }
 
+fn airRetAddr(self: *Self) !void {
+    return self.fail("TODO implement airRetAddr for {}", .{self.target.cpu.arch});
+}
+
 fn airFence(self: *Self) !void {
     return self.fail("TODO implement fence() for {}", .{self.target.cpu.arch});
     //return self.finishAirBookkeeping();
@@ -1534,12 +1605,24 @@ fn airCall(self: *Self, inst: Air.Inst.Index) !void {
                     .data = .{ .reg = .x30 },
                 });
             } else if (func_value.castTag(.extern_fn)) |func_payload| {
-                const decl = func_payload.data;
-                const n_strx = try macho_file.addExternFn(mem.sliceTo(decl.name, 0));
+                const extern_fn = func_payload.data;
+                const decl_name = extern_fn.owner_decl.name;
+                if (extern_fn.lib_name) |lib_name| {
+                    log.debug("TODO enforce that '{s}' is expected in '{s}' library", .{
+                        decl_name,
+                        lib_name,
+                    });
+                }
+                const n_strx = try macho_file.addExternFn(mem.sliceTo(decl_name, 0));
 
                 _ = try self.addInst(.{
                     .tag = .call_extern,
-                    .data = .{ .extern_fn = n_strx },
+                    .data = .{
+                        .extern_fn = .{
+                            .atom_index = self.mod_fn.owner_decl.link.macho.local_sym_index,
+                            .sym_name = n_strx,
+                        },
+                    },
                 });
             } else {
                 return self.fail("TODO implement calling bitcasted functions", .{});
@@ -1616,7 +1699,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index) !void {
         break :result info.return_value;
     };
 
-    if (args.len <= Liveness.bpi - 2) {
+    if (args.len + 1 <= Liveness.bpi - 1) {
         var buf = [1]Air.Inst.Ref{.none} ** (Liveness.bpi - 1);
         buf[0] = callee;
         std.mem.copy(Air.Inst.Ref, buf[1..], args);
@@ -1676,6 +1759,11 @@ fn airCmp(self: *Self, inst: Air.Inst.Index, op: math.CompareOperator) !void {
             else => true,
         };
 
+        if (lhs_is_register) self.register_manager.freezeRegs(&.{lhs.register});
+        defer if (lhs_is_register) self.register_manager.unfreezeRegs(&.{lhs.register});
+        if (rhs_is_register) self.register_manager.freezeRegs(&.{rhs.register});
+        defer if (rhs_is_register) self.register_manager.unfreezeRegs(&.{rhs.register});
+
         var lhs_mcv = lhs;
         var rhs_mcv = rhs;
 
@@ -1684,15 +1772,15 @@ fn airCmp(self: *Self, inst: Air.Inst.Index, op: math.CompareOperator) !void {
             if (!lhs_is_register and !rhs_is_register) {
                 const regs = try self.register_manager.allocRegs(2, .{
                     Air.refToIndex(bin_op.rhs).?, Air.refToIndex(bin_op.lhs).?,
-                }, &.{});
+                });
                 lhs_mcv = MCValue{ .register = regs[0] };
                 rhs_mcv = MCValue{ .register = regs[1] };
             } else if (!rhs_is_register) {
-                rhs_mcv = MCValue{ .register = try self.register_manager.allocReg(Air.refToIndex(bin_op.rhs).?, &.{}) };
+                rhs_mcv = MCValue{ .register = try self.register_manager.allocReg(Air.refToIndex(bin_op.rhs).?) };
             }
         }
         if (!lhs_is_register) {
-            lhs_mcv = MCValue{ .register = try self.register_manager.allocReg(Air.refToIndex(bin_op.lhs).?, &.{}) };
+            lhs_mcv = MCValue{ .register = try self.register_manager.allocReg(Air.refToIndex(bin_op.lhs).?) };
         }
 
         // Move the operands to the newly allocated registers
@@ -2072,17 +2160,16 @@ fn airBlock(self: *Self, inst: Air.Inst.Index) !void {
         // block results.
         .mcv = MCValue{ .none = {} },
     });
-    const block_data = self.blocks.getPtr(inst).?;
-    defer block_data.relocs.deinit(self.gpa);
+    defer self.blocks.getPtr(inst).?.relocs.deinit(self.gpa);
 
     const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
     const extra = self.air.extraData(Air.Block, ty_pl.payload);
     const body = self.air.extra[extra.end..][0..extra.data.body_len];
     try self.genBody(body);
 
-    for (block_data.relocs.items) |reloc| try self.performReloc(reloc);
+    for (self.blocks.getPtr(inst).?.relocs.items) |reloc| try self.performReloc(reloc);
 
-    const result = @bitCast(MCValue, block_data.mcv);
+    const result = self.blocks.getPtr(inst).?.mcv;
     return self.finishAir(inst, result, .{ .none, .none, .none });
 }
 
@@ -2121,7 +2208,7 @@ fn airBoolOp(self: *Self, inst: Air.Inst.Index) !void {
 fn br(self: *Self, block: Air.Inst.Index, operand: Air.Inst.Ref) !void {
     const block_data = self.blocks.getPtr(block).?;
 
-    if (self.air.typeOf(operand).hasCodeGenBits()) {
+    if (self.air.typeOf(operand).hasRuntimeBits()) {
         const operand_mcv = try self.resolveInst(operand);
         const block_mcv = block_data.mcv;
         if (block_mcv == .none) {
@@ -2403,9 +2490,18 @@ fn genSetReg(self: *Self, ty: Type, reg: Register, mcv: MCValue) InnerError!void
             });
         },
         .memory => |addr| {
+            const owner_decl = self.mod_fn.owner_decl;
+            // TODO when refactoring LinkBlock, make this into a generic function.
+            const atom_index = switch (self.bin_file.tag) {
+                .macho => owner_decl.link.macho.local_sym_index,
+                .elf => owner_decl.link.elf.local_sym_index,
+                .plan9 => @intCast(u32, owner_decl.link.plan9.sym_index orelse 0),
+                else => return self.fail("TODO handle aarch64 load memory in {}", .{self.bin_file.tag}),
+            };
             _ = try self.addInst(.{
                 .tag = .load_memory,
                 .data = .{ .payload = try self.addExtra(Mir.LoadMemory{
+                    .atom_index = atom_index,
                     .register = @enumToInt(reg),
                     .addr = @intCast(u32, addr),
                 }) },
@@ -2516,12 +2612,65 @@ fn airMemcpy(self: *Self, inst: Air.Inst.Index) !void {
     return self.fail("TODO implement airMemcpy for {}", .{self.target.cpu.arch});
 }
 
+fn airTagName(self: *Self, inst: Air.Inst.Index) !void {
+    const un_op = self.air.instructions.items(.data)[inst].un_op;
+    const operand = try self.resolveInst(un_op);
+    const result: MCValue = if (self.liveness.isUnused(inst)) .dead else {
+        _ = operand;
+        return self.fail("TODO implement airTagName for aarch64", .{});
+    };
+    return self.finishAir(inst, result, .{ un_op, .none, .none });
+}
+
+fn airErrorName(self: *Self, inst: Air.Inst.Index) !void {
+    const un_op = self.air.instructions.items(.data)[inst].un_op;
+    const operand = try self.resolveInst(un_op);
+    const result: MCValue = if (self.liveness.isUnused(inst)) .dead else {
+        _ = operand;
+        return self.fail("TODO implement airErrorName for aarch64", .{});
+    };
+    return self.finishAir(inst, result, .{ un_op, .none, .none });
+}
+
+fn airSplat(self: *Self, inst: Air.Inst.Index) !void {
+    const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+    const result: MCValue = if (self.liveness.isUnused(inst)) .dead else return self.fail("TODO implement airSplat for {}", .{self.target.cpu.arch});
+    return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
+}
+
+fn airVectorInit(self: *Self, inst: Air.Inst.Index) !void {
+    const vector_ty = self.air.typeOfIndex(inst);
+    const len = vector_ty.vectorLen();
+    const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
+    const elements = @bitCast([]const Air.Inst.Ref, self.air.extra[ty_pl.payload..][0..len]);
+    const result: MCValue = res: {
+        if (self.liveness.isUnused(inst)) break :res MCValue.dead;
+        return self.fail("TODO implement airVectorInit for {}", .{self.target.cpu.arch});
+    };
+
+    if (elements.len <= Liveness.bpi - 1) {
+        var buf = [1]Air.Inst.Ref{.none} ** (Liveness.bpi - 1);
+        std.mem.copy(Air.Inst.Ref, &buf, elements);
+        return self.finishAir(inst, result, buf);
+    }
+    var bt = try self.iterateBigTomb(inst, elements.len);
+    for (elements) |elem| {
+        bt.feed(elem);
+    }
+    return bt.finishAir(result);
+}
+
+fn airPrefetch(self: *Self, inst: Air.Inst.Index) !void {
+    const prefetch = self.air.instructions.items(.data)[inst].prefetch;
+    return self.finishAir(inst, MCValue.dead, .{ prefetch.ptr, .none, .none });
+}
+
 fn resolveInst(self: *Self, inst: Air.Inst.Ref) InnerError!MCValue {
     // First section of indexes correspond to a set number of constant values.
     const ref_int = @enumToInt(inst);
     if (ref_int < Air.Inst.Ref.typed_value_map.len) {
         const tv = Air.Inst.Ref.typed_value_map[ref_int];
-        if (!tv.ty.hasCodeGenBits()) {
+        if (!tv.ty.hasRuntimeBits()) {
             return MCValue{ .none = {} };
         }
         return self.genTypedValue(tv);
@@ -2529,7 +2678,7 @@ fn resolveInst(self: *Self, inst: Air.Inst.Ref) InnerError!MCValue {
 
     // If the type has no codegen bits, no need to store it.
     const inst_ty = self.air.typeOf(inst);
-    if (!inst_ty.hasCodeGenBits())
+    if (!inst_ty.hasRuntimeBits())
         return MCValue{ .none = {} };
 
     const inst_index = @intCast(Air.Inst.Index, ref_int - Air.Inst.Ref.typed_value_map.len);
@@ -2585,11 +2734,43 @@ fn limitImmediateType(self: *Self, operand: Air.Inst.Ref, comptime T: type) !MCV
     return mcv;
 }
 
+fn lowerDeclRef(self: *Self, tv: TypedValue, decl: *Module.Decl) InnerError!MCValue {
+    const ptr_bits = self.target.cpu.arch.ptrBitWidth();
+    const ptr_bytes: u64 = @divExact(ptr_bits, 8);
+    decl.alive = true;
+    if (self.bin_file.cast(link.File.Elf)) |elf_file| {
+        const got = &elf_file.program_headers.items[elf_file.phdr_got_index.?];
+        const got_addr = got.p_vaddr + decl.link.elf.offset_table_index * ptr_bytes;
+        return MCValue{ .memory = got_addr };
+    } else if (self.bin_file.cast(link.File.MachO)) |_| {
+        // TODO I'm hacking my way through here by repurposing .memory for storing
+        // index to the GOT target symbol index.
+        return MCValue{ .memory = decl.link.macho.local_sym_index };
+    } else if (self.bin_file.cast(link.File.Coff)) |coff_file| {
+        const got_addr = coff_file.offset_table_virtual_address + decl.link.coff.offset_table_index * ptr_bytes;
+        return MCValue{ .memory = got_addr };
+    } else if (self.bin_file.cast(link.File.Plan9)) |p9| {
+        try p9.seeDecl(decl);
+        const got_addr = p9.bases.data + decl.link.plan9.got_index.? * ptr_bytes;
+        return MCValue{ .memory = got_addr };
+    } else {
+        return self.fail("TODO codegen non-ELF const Decl pointer", .{});
+    }
+    _ = tv;
+}
+
 fn genTypedValue(self: *Self, typed_value: TypedValue) InnerError!MCValue {
     if (typed_value.val.isUndef())
         return MCValue{ .undef = {} };
     const ptr_bits = self.target.cpu.arch.ptrBitWidth();
-    const ptr_bytes: u64 = @divExact(ptr_bits, 8);
+
+    if (typed_value.val.castTag(.decl_ref)) |payload| {
+        return self.lowerDeclRef(typed_value, payload.data);
+    }
+    if (typed_value.val.castTag(.decl_ref_mut)) |payload| {
+        return self.lowerDeclRef(typed_value, payload.data.decl);
+    }
+
     switch (typed_value.ty.zigTypeTag()) {
         .Pointer => switch (typed_value.ty.ptrSize()) {
             .Slice => {
@@ -2606,28 +2787,6 @@ fn genTypedValue(self: *Self, typed_value: TypedValue) InnerError!MCValue {
                 return self.fail("TODO codegen for const slices", .{});
             },
             else => {
-                if (typed_value.val.castTag(.decl_ref)) |payload| {
-                    const decl = payload.data;
-                    decl.alive = true;
-                    if (self.bin_file.cast(link.File.Elf)) |elf_file| {
-                        const got = &elf_file.program_headers.items[elf_file.phdr_got_index.?];
-                        const got_addr = got.p_vaddr + decl.link.elf.offset_table_index * ptr_bytes;
-                        return MCValue{ .memory = got_addr };
-                    } else if (self.bin_file.cast(link.File.MachO)) |_| {
-                        // TODO I'm hacking my way through here by repurposing .memory for storing
-                        // index to the GOT target symbol index.
-                        return MCValue{ .memory = decl.link.macho.local_sym_index };
-                    } else if (self.bin_file.cast(link.File.Coff)) |coff_file| {
-                        const got_addr = coff_file.offset_table_virtual_address + decl.link.coff.offset_table_index * ptr_bytes;
-                        return MCValue{ .memory = got_addr };
-                    } else if (self.bin_file.cast(link.File.Plan9)) |p9| {
-                        try p9.seeDecl(decl);
-                        const got_addr = p9.bases.data + decl.link.plan9.got_index.? * ptr_bytes;
-                        return MCValue{ .memory = got_addr };
-                    } else {
-                        return self.fail("TODO codegen non-ELF const Decl pointer", .{});
-                    }
-                }
                 if (typed_value.val.tag() == .int_u64) {
                     return MCValue{ .immediate = typed_value.val.toUnsignedInt() };
                 }
@@ -2707,7 +2866,7 @@ fn genTypedValue(self: *Self, typed_value: TypedValue) InnerError!MCValue {
             const payload_type = typed_value.ty.errorUnionPayload();
             const sub_val = typed_value.val.castTag(.eu_payload).?.data;
 
-            if (!payload_type.hasCodeGenBits()) {
+            if (!payload_type.hasRuntimeBits()) {
                 // We use the error type directly as the type.
                 return self.genTypedValue(.{ .ty = error_type, .val = sub_val });
             }
@@ -2801,7 +2960,7 @@ fn resolveCallingConventionValues(self: *Self, fn_ty: Type) !CallMCValues {
 
     if (ret_ty.zigTypeTag() == .NoReturn) {
         result.return_value = .{ .unreach = {} };
-    } else if (!ret_ty.hasCodeGenBits()) {
+    } else if (!ret_ty.hasRuntimeBits()) {
         result.return_value = .{ .none = {} };
     } else switch (cc) {
         .Naked => unreachable,

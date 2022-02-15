@@ -16,7 +16,7 @@ pub fn build(b: *Builder) !void {
     b.setPreferredReleaseMode(.ReleaseFast);
     const mode = b.standardReleaseOptions();
     const target = b.standardTargetOptions(.{});
-    const single_threaded = b.option(bool, "single-threaded", "Build artifacts that run in single threaded mode") orelse false;
+    const single_threaded = b.option(bool, "single-threaded", "Build artifacts that run in single threaded mode");
     const use_zig_libcxx = b.option(bool, "use-zig-libcxx", "If libc++ is needed, use zig's bundled version, don't try to integrate with the system") orelse false;
 
     var docgen_exe = b.addExecutable("docgen", "doc/docgen.zig");
@@ -93,11 +93,25 @@ pub fn build(b: *Builder) !void {
             .install_dir = .lib,
             .install_subdir = "zig",
             .exclude_extensions = &[_][]const u8{
-                "README.md",
+                // exclude files from lib/std/compress/
+                ".gz",
                 ".z.0",
                 ".z.9",
-                ".gz",
                 "rfc1951.txt",
+                "rfc1952.txt",
+                // exclude files from lib/std/compress/deflate/testdata
+                ".expect",
+                ".expect-noinput",
+                ".golden",
+                ".input",
+                "compress-e.txt",
+                "compress-gettysburg.txt",
+                "compress-pi.txt",
+                "rfc1951.txt",
+                // exclude files from lib/std/tz/
+                ".tzif",
+                // others
+                "README.md",
             },
             .blank_extensions = &[_][]const u8{
                 "test.zig",
@@ -111,6 +125,7 @@ pub fn build(b: *Builder) !void {
     const tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
     const tracy_callstack = b.option(bool, "tracy-callstack", "Include callstack information with Tracy data. Does nothing if -Dtracy is not provided") orelse false;
     const tracy_allocation = b.option(bool, "tracy-allocation", "Include allocation information with Tracy data. Does nothing if -Dtracy is not provided") orelse false;
+    const force_gpa = b.option(bool, "force-gpa", "Force the compiler to use GeneralPurposeAllocator") orelse false;
     const link_libc = b.option(bool, "force-link-libc", "Force self-hosted compiler to link libc") orelse enable_llvm;
     const strip = b.option(bool, "strip", "Omit debug information") orelse false;
 
@@ -149,16 +164,17 @@ pub fn build(b: *Builder) !void {
     exe_options.addOption(bool, "llvm_has_csky", llvm_has_csky);
     exe_options.addOption(bool, "llvm_has_ve", llvm_has_ve);
     exe_options.addOption(bool, "llvm_has_arc", llvm_has_arc);
+    exe_options.addOption(bool, "force_gpa", force_gpa);
 
     if (enable_llvm) {
         const cmake_cfg = if (static_llvm) null else findAndParseConfigH(b, config_h_path_option);
 
         if (is_stage1) {
-            exe.addIncludeDir("src");
-            exe.addIncludeDir("deps/SoftFloat-3e/source/include");
+            exe.addIncludePath("src");
+            exe.addIncludePath("deps/SoftFloat-3e/source/include");
 
-            test_stage2.addIncludeDir("src");
-            test_stage2.addIncludeDir("deps/SoftFloat-3e/source/include");
+            test_stage2.addIncludePath("src");
+            test_stage2.addIncludePath("deps/SoftFloat-3e/source/include");
             // This is intentionally a dummy path. stage1.zig tries to @import("compiler_rt") in case
             // of being built by cmake. But when built by zig it's gonna get a compiler_rt so that
             // is pointless.
@@ -169,9 +185,9 @@ pub fn build(b: *Builder) !void {
             const softfloat = b.addStaticLibrary("softfloat", null);
             softfloat.setBuildMode(.ReleaseFast);
             softfloat.setTarget(target);
-            softfloat.addIncludeDir("deps/SoftFloat-3e-prebuilt");
-            softfloat.addIncludeDir("deps/SoftFloat-3e/source/8086");
-            softfloat.addIncludeDir("deps/SoftFloat-3e/source/include");
+            softfloat.addIncludePath("deps/SoftFloat-3e-prebuilt");
+            softfloat.addIncludePath("deps/SoftFloat-3e/source/8086");
+            softfloat.addIncludePath("deps/SoftFloat-3e/source/include");
             softfloat.addCSourceFiles(&softfloat_sources, &[_][]const u8{ "-std=c99", "-O3" });
             softfloat.single_threaded = single_threaded;
 
@@ -205,13 +221,18 @@ pub fn build(b: *Builder) !void {
         test_stage2.linkLibC();
     }
 
-    const enable_logging = b.option(bool, "log", "Whether to enable logging") orelse false;
+    const is_debug = mode == .Debug;
+    const enable_logging = b.option(bool, "log", "Enable debug logging with --debug-log") orelse is_debug;
     const enable_link_snapshots = b.option(bool, "link-snapshot", "Whether to enable linker state snapshots") orelse false;
 
     const opt_version_string = b.option([]const u8, "version-string", "Override Zig version string. Default is to find out with git.");
     const version = if (opt_version_string) |version| version else v: {
         const version_string = b.fmt("{d}.{d}.{d}", .{ zig_version.major, zig_version.minor, zig_version.patch });
 
+        if (!std.process.can_spawn) {
+            std.debug.print("error: version info cannot be retrieved from git. Zig version must be provided using -Dversion-string\n", .{});
+            std.process.exit(1);
+        }
         var code: u8 = undefined;
         const git_describe_untrimmed = b.execAllowFail(&[_][]const u8{
             "git", "-C", b.build_root, "describe", "--match", "*.*.*", "--tags",
@@ -281,7 +302,7 @@ pub fn build(b: *Builder) !void {
         else
             &[_][]const u8{ "-DTRACY_ENABLE=1", "-fno-sanitize=undefined" };
 
-        exe.addIncludeDir(tracy_path);
+        exe.addIncludePath(tracy_path);
         exe.addCSourceFile(client_cpp, tracy_c_flags);
         if (!enable_llvm) {
             exe.linkSystemLibraryName("c++");
@@ -444,7 +465,7 @@ fn addCmakeCfgOptionsToExe(
         b.fmt("{s}{s}{s}", .{ exe.target.libPrefix(), "zigcpp", exe.target.staticLibSuffix() }),
     }) catch unreachable);
     assert(cfg.lld_include_dir.len != 0);
-    exe.addIncludeDir(cfg.lld_include_dir);
+    exe.addIncludePath(cfg.lld_include_dir);
     addCMakeLibraryList(exe, cfg.clang_libraries);
     addCMakeLibraryList(exe, cfg.lld_libraries);
     addCMakeLibraryList(exe, cfg.llvm_libraries);
@@ -525,6 +546,9 @@ fn addCxxKnownPath(
     errtxt: ?[]const u8,
     need_cpp_includes: bool,
 ) !void {
+    if (!std.process.can_spawn)
+        return error.RequiredLibraryNotFound;
+
     const path_padded = try b.exec(&[_][]const u8{
         ctx.cxx_compiler,
         b.fmt("-print-file-name={s}", .{objname}),
@@ -545,9 +569,9 @@ fn addCxxKnownPath(
     if (need_cpp_includes) {
         // I used these temporarily for testing something but we obviously need a
         // more general purpose solution here.
-        //exe.addIncludeDir("/nix/store/fvf3qjqa5qpcjjkq37pb6ypnk1mzhf5h-gcc-9.3.0/lib/gcc/x86_64-unknown-linux-gnu/9.3.0/../../../../include/c++/9.3.0");
-        //exe.addIncludeDir("/nix/store/fvf3qjqa5qpcjjkq37pb6ypnk1mzhf5h-gcc-9.3.0/lib/gcc/x86_64-unknown-linux-gnu/9.3.0/../../../../include/c++/9.3.0/x86_64-unknown-linux-gnu");
-        //exe.addIncludeDir("/nix/store/fvf3qjqa5qpcjjkq37pb6ypnk1mzhf5h-gcc-9.3.0/lib/gcc/x86_64-unknown-linux-gnu/9.3.0/../../../../include/c++/9.3.0/backward");
+        //exe.addIncludePath("/nix/store/fvf3qjqa5qpcjjkq37pb6ypnk1mzhf5h-gcc-9.3.0/lib/gcc/x86_64-unknown-linux-gnu/9.3.0/../../../../include/c++/9.3.0");
+        //exe.addIncludePath("/nix/store/fvf3qjqa5qpcjjkq37pb6ypnk1mzhf5h-gcc-9.3.0/lib/gcc/x86_64-unknown-linux-gnu/9.3.0/../../../../include/c++/9.3.0/x86_64-unknown-linux-gnu");
+        //exe.addIncludePath("/nix/store/fvf3qjqa5qpcjjkq37pb6ypnk1mzhf5h-gcc-9.3.0/lib/gcc/x86_64-unknown-linux-gnu/9.3.0/../../../../include/c++/9.3.0/backward");
     }
 }
 

@@ -72,21 +72,6 @@ test "zig fmt: rewrite callconv(.Inline) to the inline keyword" {
     );
 }
 
-// TODO Remove this after zig 0.9.0 is released.
-test "zig fmt: rewrite @byteOffsetOf to @offsetOf" {
-    try testTransform(
-        \\fn foo() void {
-        \\    @byteOffsetOf(Foo, "bar");
-        \\}
-        \\
-    ,
-        \\fn foo() void {
-        \\    @offsetOf(Foo, "bar");
-        \\}
-        \\
-    );
-}
-
 // TODO Remove this after zig 0.10.0 is released.
 test "zig fmt: rewrite c_void to anyopaque" {
     try testTransform(
@@ -248,7 +233,7 @@ test "zig fmt: eof after missing comma" {
     try testError(
         \\foo()
     , &[_]Error{
-        .expected_token,
+        .expected_comma_after_field,
     });
 }
 
@@ -391,6 +376,25 @@ test "zig fmt: container declaration, multiline string, add trailing comma" {
         \\        \\ foo
         \\    ,
         \\    bar: i8,
+        \\};
+        \\
+    );
+}
+
+test "zig fmt: container declaration, doc comment on member, add trailing comma" {
+    try testTransform(
+        \\pub const Pos = struct {
+        \\    /// X-axis.
+        \\    x: u32,
+        \\    /// Y-axis.
+        \\    y: u32
+        \\};
+    ,
+        \\pub const Pos = struct {
+        \\    /// X-axis.
+        \\    x: u32,
+        \\    /// Y-axis.
+        \\    y: u32,
         \\};
         \\
     );
@@ -577,15 +581,6 @@ test "zig fmt: asm expression with comptime content" {
         \\        : "h", "e", "l", "l", "o"
         \\    );
         \\}
-        \\
-    );
-}
-
-test "zig fmt: anytype struct field" {
-    try testCanonical(
-        \\pub const Pointer = struct {
-        \\    sentinel: anytype,
-        \\};
         \\
     );
 }
@@ -4144,6 +4139,17 @@ test "zig fmt: container doc comments" {
     );
 }
 
+test "zig fmt: anytype struct field" {
+    try testError(
+        \\pub const Pointer = struct {
+        \\    sentinel: anytype,
+        \\};
+        \\
+    , &[_]Error{
+        .expected_type_expr,
+    });
+}
+
 test "zig fmt: extern without container keyword returns error" {
     try testError(
         \\const container = extern {};
@@ -5068,8 +5074,8 @@ test "recovery: missing comma" {
         \\    }
         \\}
     , &[_]Error{
-        .expected_token,
-        .expected_token,
+        .expected_comma_after_switch_prong,
+        .expected_comma_after_switch_prong,
         .invalid_token,
     });
 }
@@ -5150,10 +5156,10 @@ test "recovery: missing semicolon" {
         \\    @foo
         \\}
     , &[_]Error{
-        .expected_token,
-        .expected_token,
+        .expected_semi_after_stmt,
+        .expected_semi_after_stmt,
         .expected_param_list,
-        .expected_token,
+        .expected_semi_after_stmt,
     });
 }
 
@@ -5168,9 +5174,9 @@ test "recovery: invalid container members" {
         \\}
     , &[_]Error{
         .expected_expr,
-        .expected_token,
+        .expected_comma_after_field,
         .expected_container_members,
-        .expected_token,
+        .expected_semi_after_stmt,
     });
 }
 
@@ -5195,7 +5201,7 @@ test "recovery: mismatched bracket at top level" {
         \\    arr: 128]?G
         \\};
     , &[_]Error{
-        .expected_token,
+        .expected_comma_after_field,
     });
 }
 
@@ -5251,9 +5257,6 @@ test "recovery: invalid comptime" {
 }
 
 test "recovery: missing block after suspend" {
-    // TODO Enable this after zig 0.9.0 is released.
-    if (true) return error.SkipZigTest;
-
     try testError(
         \\fn foo() void {
         \\    suspend;
@@ -5298,9 +5301,9 @@ test "recovery: missing comma in params" {
         \\fn bar(a: i32, b: i32 c) void { }
         \\
     , &[_]Error{
-        .expected_token,
-        .expected_token,
-        .expected_token,
+        .expected_comma_after_param,
+        .expected_comma_after_param,
+        .expected_comma_after_param,
     });
 }
 

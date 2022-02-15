@@ -6,6 +6,26 @@ const native_arch = builtin.target.cpu.arch;
 const maxInt = std.math.maxInt;
 const iovec_const = std.os.iovec_const;
 
+const arch_bits = switch (native_arch) {
+    .aarch64 => @import("darwin/aarch64.zig"),
+    .x86_64 => @import("darwin/x86_64.zig"),
+    else => struct {},
+};
+
+pub const ucontext_t = extern struct {
+    onstack: c_int,
+    sigmask: sigset_t,
+    stack: stack_t,
+    link: ?*ucontext_t,
+    mcsize: u64,
+    mcontext: *mcontext_t,
+};
+
+pub const mcontext_t = extern struct {
+    es: arch_bits.exception_state,
+    ss: arch_bits.thread_state,
+};
+
 extern "c" fn __error() *c_int;
 pub extern "c" fn NSVersionOfRunTimeLibrary(library_name: [*:0]const u8) u32;
 pub extern "c" fn _NSGetExecutablePath(buf: [*:0]u8, bufsize: *u32) c_int;
@@ -107,6 +127,8 @@ pub fn sigaddset(set: *sigset_t, signo: u5) void {
 }
 
 pub extern "c" fn sigaltstack(ss: ?*stack_t, old_ss: ?*stack_t) c_int;
+
+pub const IFNAMESIZE = 16;
 
 pub const AI = struct {
     /// get address to use bind()
@@ -350,14 +372,10 @@ pub const Stat = extern struct {
     uid: uid_t,
     gid: gid_t,
     rdev: i32,
-    atimesec: isize,
-    atimensec: isize,
-    mtimesec: isize,
-    mtimensec: isize,
-    ctimesec: isize,
-    ctimensec: isize,
-    birthtimesec: isize,
-    birthtimensec: isize,
+    atimespec: timespec,
+    mtimespec: timespec,
+    ctimespec: timespec,
+    birthtimespec: timespec,
     size: off_t,
     blocks: i64,
     blksize: i32,
@@ -367,24 +385,19 @@ pub const Stat = extern struct {
     qspare: [2]i64,
 
     pub fn atime(self: @This()) timespec {
-        return timespec{
-            .tv_sec = self.atimesec,
-            .tv_nsec = self.atimensec,
-        };
+        return self.atimespec;
     }
 
     pub fn mtime(self: @This()) timespec {
-        return timespec{
-            .tv_sec = self.mtimesec,
-            .tv_nsec = self.mtimensec,
-        };
+        return self.mtimespec;
     }
 
     pub fn ctime(self: @This()) timespec {
-        return timespec{
-            .tv_sec = self.ctimesec,
-            .tv_nsec = self.ctimensec,
-        };
+        return self.ctimespec;
+    }
+
+    pub fn birthtime(self: @This()) timespec {
+        return self.birthtimespec;
     }
 };
 
@@ -612,6 +625,12 @@ pub const MAP = struct {
     /// don't reserve needed swap area
     pub const NORESERVE = 0x0040;
     pub const FAILED = @intToPtr(*anyopaque, maxInt(usize));
+};
+
+pub const MSF = struct {
+    pub const ASYNC = 1;
+    pub const INVALIDATE = 2;
+    pub const SYNC = 4;
 };
 
 pub const SA = struct {

@@ -625,10 +625,14 @@ pub const Inst = struct {
         switch_cond_ref,
         /// Produces the capture value for a switch prong.
         /// Uses the `switch_capture` field.
+        /// If the `prong_index` field is max int, it means this is the capture
+        /// for the else/`_` prong.
         switch_capture,
         /// Produces the capture value for a switch prong.
         /// Result is a pointer to the value.
         /// Uses the `switch_capture` field.
+        /// If the `prong_index` field is max int, it means this is the capture
+        /// for the else/`_` prong.
         switch_capture_ref,
         /// Produces the capture value for a switch prong.
         /// The prong is one of the multi cases.
@@ -639,13 +643,6 @@ pub const Inst = struct {
         /// Result is a pointer to the value.
         /// Uses the `switch_capture` field.
         switch_capture_multi_ref,
-        /// Produces the capture value for the else/'_' switch prong.
-        /// Uses the `switch_capture` field.
-        switch_capture_else,
-        /// Produces the capture value for the else/'_' switch prong.
-        /// Result is a pointer to the value.
-        /// Uses the `switch_capture` field.
-        switch_capture_else_ref,
         /// Given a set of `field_ptr` instructions, assumes they are all part of a struct
         /// initialization expression, and emits compile errors for duplicate fields
         /// as well as missing fields, if applicable.
@@ -653,6 +650,9 @@ pub const Inst = struct {
         /// because it must use one of them to find out the struct type.
         /// Uses the `pl_node` field. Payload is `Block`.
         validate_struct_init,
+        /// Same as `validate_struct_init` but additionally communicates that the
+        /// resulting struct initialization value is within a comptime scope.
+        validate_struct_init_comptime,
         /// Given a set of `elem_ptr_imm` instructions, assumes they are all part of an
         /// array initialization expression, and emits a compile error if the number of
         /// elements does not match the array type.
@@ -660,6 +660,9 @@ pub const Inst = struct {
         /// because it must use one of them to find out the array type.
         /// Uses the `pl_node` field. Payload is `Block`.
         validate_array_init,
+        /// Same as `validate_array_init` but additionally communicates that the
+        /// resulting array initialization value is within a comptime scope.
+        validate_array_init_comptime,
         /// A struct literal with a specified type, with no fields.
         /// Uses the `un_node` field.
         struct_init_empty,
@@ -906,14 +909,18 @@ pub const Inst = struct {
         /// Allocates comptime-mutable memory.
         /// Uses the `un_node` union field. The operand is the type of the allocated object.
         /// The node source location points to a var decl node.
-        alloc_comptime,
+        alloc_comptime_mut,
         /// Same as `alloc` except the type is inferred.
         /// Uses the `node` union field.
         alloc_inferred,
         /// Same as `alloc_inferred` except mutable.
         alloc_inferred_mut,
-        /// Same as `alloc_comptime` except the type is inferred.
+        /// Allocates comptime const memory.
+        /// Uses the `node` union field. The type of the allocated object is inferred.
+        /// The node source location points to a var decl node.
         alloc_inferred_comptime,
+        /// Same as `alloc_comptime_mut` except the type is inferred.
+        alloc_inferred_comptime_mut,
         /// Each `store_to_inferred_ptr` puts the type of the stored value into a set,
         /// and then `resolve_inferred_alloc` triggers peer type resolution on the set.
         /// The operand is a `alloc_inferred` or `alloc_inferred_mut` instruction, which
@@ -954,10 +961,11 @@ pub const Inst = struct {
                 .add_sat,
                 .alloc,
                 .alloc_mut,
-                .alloc_comptime,
+                .alloc_comptime_mut,
                 .alloc_inferred,
                 .alloc_inferred_mut,
                 .alloc_inferred_comptime,
+                .alloc_inferred_comptime_mut,
                 .array_cat,
                 .array_mul,
                 .array_type,
@@ -1076,13 +1084,13 @@ pub const Inst = struct {
                 .switch_capture_ref,
                 .switch_capture_multi,
                 .switch_capture_multi_ref,
-                .switch_capture_else,
-                .switch_capture_else_ref,
                 .switch_block,
                 .switch_cond,
                 .switch_cond_ref,
                 .validate_struct_init,
+                .validate_struct_init_comptime,
                 .validate_array_init,
+                .validate_array_init_comptime,
                 .struct_init_empty,
                 .struct_init,
                 .struct_init_ref,
@@ -1332,10 +1340,10 @@ pub const Inst = struct {
                 .switch_capture_ref = .switch_capture,
                 .switch_capture_multi = .switch_capture,
                 .switch_capture_multi_ref = .switch_capture,
-                .switch_capture_else = .switch_capture,
-                .switch_capture_else_ref = .switch_capture,
                 .validate_struct_init = .pl_node,
+                .validate_struct_init_comptime = .pl_node,
                 .validate_array_init = .pl_node,
+                .validate_array_init_comptime = .pl_node,
                 .struct_init_empty = .un_node,
                 .field_type = .pl_node,
                 .field_type_ref = .pl_node,
@@ -1443,10 +1451,11 @@ pub const Inst = struct {
 
                 .alloc = .un_node,
                 .alloc_mut = .un_node,
-                .alloc_comptime = .un_node,
+                .alloc_comptime_mut = .un_node,
                 .alloc_inferred = .node,
                 .alloc_inferred_mut = .node,
                 .alloc_inferred_comptime = .node,
+                .alloc_inferred_comptime_mut = .node,
                 .resolve_inferred_alloc = .un_node,
 
                 .@"resume" = .un_node,
@@ -1459,6 +1468,11 @@ pub const Inst = struct {
                 .extended = .extended,
             });
         };
+
+        // Uncomment to view how many tag slots are available.
+        //comptime {
+        //    @compileLog("ZIR tags left: ", 256 - @typeInfo(Tag).Enum.fields.len);
+        //}
     };
 
     /// Rarer instructions are here; ones that do not fit in the 8-bit `Tag` enum.
@@ -1505,7 +1519,7 @@ pub const Inst = struct {
         /// `operand` is `src_node: i32`.
         ret_addr,
         /// Implements the `@src` builtin.
-        /// `operand` is `src_node: i32`.
+        /// `operand` is payload index to `ColumnLine`.
         builtin_src,
         /// Implements the `@errorReturnTrace` builtin.
         /// `operand` is `src_node: i32`.
@@ -1631,6 +1645,7 @@ pub const Inst = struct {
         f16_type,
         f32_type,
         f64_type,
+        f80_type,
         f128_type,
         anyopaque_type,
         bool_type,
@@ -1800,6 +1815,10 @@ pub const Inst = struct {
             .f64_type = .{
                 .ty = Type.initTag(.type),
                 .val = Value.initTag(.f64_type),
+            },
+            .f80_type = .{
+                .ty = Type.initTag(.type),
+                .val = Value.initTag(.f80_type),
             },
             .f128_type = .{
                 .ty = Type.initTag(.type),
@@ -2155,10 +2174,7 @@ pub const Inst = struct {
             switch_inst: Index,
             prong_index: u32,
         },
-        dbg_stmt: struct {
-            line: u32,
-            column: u32,
-        },
+        dbg_stmt: LineColumn,
         /// Used for unary operators which reference an inst,
         /// with an AST node source location.
         inst_node: struct {
@@ -2299,9 +2315,9 @@ pub const Inst = struct {
         body_len: u32,
 
         pub const SrcLocs = struct {
-            /// Absolute line index in the source file.
+            /// Line index in the source file relative to the parent decl.
             lbrace_line: u32,
-            /// Absolute line index in the source file.
+            /// Line index in the source file relative to the parent decl.
             rbrace_line: u32,
             /// lbrace_column is least significant bits u16
             /// rbrace_column is most significant bits u16
@@ -2563,9 +2579,11 @@ pub const Inst = struct {
     ///        - 0 means comptime or usingnamespace decl.
     ///          - if name == 0 `is_exported` determines which one: 0=comptime,1=usingnamespace
     ///        - 1 means test decl with no name.
+    ///        - 2 means that the test is a decltest, doc_comment gives the name of the identifier
     ///        - if there is a 0 byte at the position `name` indexes, it indicates
     ///          this is a test decl, and the name starts at `name+1`.
     ///        value: Index,
+    ///        doc_comment: u32, 0 if no doc comment, if this is a decltest, doc_comment references the decl name in the string table
     ///        align: Ref, // if corresponding bit is set
     ///        link_section_or_address_space: { // if corresponding bit is set.
     ///            link_section: Ref,
@@ -2583,6 +2601,7 @@ pub const Inst = struct {
     ///        field_name: u32,
     ///        field_type: Ref,
     ///        - if none, means `anytype`.
+    ///        doc_comment: u32, // 0 if no doc comment
     ///        align: Ref, // if corresponding bit is set
     ///        default_value: Ref, // if corresponding bit is set
     ///    }
@@ -2592,10 +2611,11 @@ pub const Inst = struct {
             has_body_len: bool,
             has_fields_len: bool,
             has_decls_len: bool,
-            known_has_bits: bool,
+            known_non_opv: bool,
+            known_comptime_only: bool,
             name_strategy: NameStrategy,
             layout: std.builtin.TypeInfo.ContainerLayout,
-            _: u7 = undefined,
+            _: u6 = undefined,
         };
     };
 
@@ -2633,6 +2653,7 @@ pub const Inst = struct {
     ///        - if there is a 0 byte at the position `name` indexes, it indicates
     ///          this is a test decl, and the name starts at `name+1`.
     ///        value: Index,
+    ///        doc_comment: u32, // 0 if no doc_comment
     ///        align: Ref, // if corresponding bit is set
     ///        link_section_or_address_space: { // if corresponding bit is set.
     ///            link_section: Ref,
@@ -2644,6 +2665,7 @@ pub const Inst = struct {
     ///    - the bit is whether corresponding field has an value expression
     /// 9. fields: { // for every fields_len
     ///        field_name: u32,
+    ///        doc_comment: u32, // 0 if no doc_comment
     ///        value: Ref, // if corresponding bit is set
     ///    }
     pub const EnumDecl = struct {
@@ -2681,6 +2703,7 @@ pub const Inst = struct {
     ///        - if there is a 0 byte at the position `name` indexes, it indicates
     ///          this is a test decl, and the name starts at `name+1`.
     ///        value: Index,
+    ///        doc_comment: u32, // 0 if no doc comment
     ///        align: Ref, // if corresponding bit is set
     ///        link_section_or_address_space: { // if corresponding bit is set.
     ///            link_section: Ref,
@@ -2696,6 +2719,7 @@ pub const Inst = struct {
     ///      0bX000: unused
     /// 9. fields: { // for every fields_len
     ///        field_name: u32, // null terminated string index
+    ///        doc_comment: u32, // 0 if no doc comment
     ///        field_type: Ref, // if corresponding bit is set
     ///        - if none, means `anytype`.
     ///        align: Ref, // if corresponding bit is set
@@ -2740,6 +2764,7 @@ pub const Inst = struct {
     ///        - if there is a 0 byte at the position `name` indexes, it indicates
     ///          this is a test decl, and the name starts at `name+1`.
     ///        value: Index,
+    ///        doc_comment: u32, // 0 if no doc comment,
     ///        align: Ref, // if corresponding bit is set
     ///        link_section_or_address_space: { // if corresponding bit is set.
     ///            link_section: Ref,
@@ -2755,7 +2780,11 @@ pub const Inst = struct {
         };
     };
 
-    /// Trailing: field_name: u32 // for every field: null terminated string index
+    /// Trailing:
+    /// { // for every fields_len
+    ///      field_name: u32 // null terminated string index
+    ///     doc_comment: u32 // null terminated string index
+    /// }
     pub const ErrorSetDecl = struct {
         fields_len: u32,
     };
@@ -2894,6 +2923,8 @@ pub const Inst = struct {
     pub const Param = struct {
         /// Null-terminated string index.
         name: u32,
+        /// 0 if no doc comment
+        doc_comment: u32,
         /// The body contains the type of the parameter.
         body_len: u32,
     };
@@ -2959,6 +2990,11 @@ pub const Inst = struct {
             token: Ast.TokenIndex,
         };
     };
+
+    pub const LineColumn = struct {
+        line: u32,
+        column: u32,
+    };
 };
 
 pub const SpecialProng = enum { none, @"else", under };
@@ -2991,7 +3027,7 @@ pub const DeclIterator = struct {
         const sub_index = @intCast(u32, it.extra_index);
         it.extra_index += 5; // src_hash(4) + line(1)
         const name = it.zir.nullTerminatedString(it.zir.extra[it.extra_index]);
-        it.extra_index += 2; // name(1) + value(1)
+        it.extra_index += 3; // name(1) + value(1) + doc_comment(1)
         it.extra_index += @truncate(u1, flags >> 2);
         it.extra_index += @truncate(u1, flags >> 3);
 
@@ -3250,6 +3286,7 @@ fn findDeclsBody(
 
 pub const FnInfo = struct {
     param_body: []const Inst.Index,
+    param_body_inst: Inst.Index,
     ret_ty_body: []const Inst.Index,
     body: []const Inst.Index,
     total_params_len: u32,
@@ -3315,6 +3352,7 @@ pub fn getFnInfo(zir: Zir, fn_inst: Inst.Index) FnInfo {
     }
     return .{
         .param_body = param_body,
+        .param_body_inst = info.param_block,
         .ret_ty_body = info.ret_ty_body,
         .body = info.body,
         .total_params_len = total_params_len,

@@ -590,8 +590,9 @@ test "big.int addWrap single-single, unsigned" {
     var b = try Managed.initSet(testing.allocator, 10);
     defer b.deinit();
 
-    try a.addWrap(a.toConst(), b.toConst(), .unsigned, 17);
+    const wrapped = try a.addWrap(a.toConst(), b.toConst(), .unsigned, 17);
 
+    try testing.expect(wrapped);
     try testing.expect((try a.to(u17)) == 9);
 }
 
@@ -602,8 +603,9 @@ test "big.int subWrap single-single, unsigned" {
     var b = try Managed.initSet(testing.allocator, maxInt(u17));
     defer b.deinit();
 
-    try a.subWrap(a.toConst(), b.toConst(), .unsigned, 17);
+    const wrapped = try a.subWrap(a.toConst(), b.toConst(), .unsigned, 17);
 
+    try testing.expect(wrapped);
     try testing.expect((try a.to(u17)) == 1);
 }
 
@@ -614,8 +616,9 @@ test "big.int addWrap multi-multi, unsigned, limb aligned" {
     var b = try Managed.initSet(testing.allocator, maxInt(DoubleLimb));
     defer b.deinit();
 
-    try a.addWrap(a.toConst(), b.toConst(), .unsigned, @bitSizeOf(DoubleLimb));
+    const wrapped = try a.addWrap(a.toConst(), b.toConst(), .unsigned, @bitSizeOf(DoubleLimb));
 
+    try testing.expect(wrapped);
     try testing.expect((try a.to(DoubleLimb)) == maxInt(DoubleLimb) - 1);
 }
 
@@ -626,8 +629,9 @@ test "big.int subWrap single-multi, unsigned, limb aligned" {
     var b = try Managed.initSet(testing.allocator, maxInt(DoubleLimb) + 100);
     defer b.deinit();
 
-    try a.subWrap(a.toConst(), b.toConst(), .unsigned, @bitSizeOf(DoubleLimb));
+    const wrapped = try a.subWrap(a.toConst(), b.toConst(), .unsigned, @bitSizeOf(DoubleLimb));
 
+    try testing.expect(wrapped);
     try testing.expect((try a.to(DoubleLimb)) == maxInt(DoubleLimb) - 88);
 }
 
@@ -638,8 +642,9 @@ test "big.int addWrap single-single, signed" {
     var b = try Managed.initSet(testing.allocator, 1 + 1 + maxInt(u21));
     defer b.deinit();
 
-    try a.addWrap(a.toConst(), b.toConst(), .signed, @bitSizeOf(i21));
+    const wrapped = try a.addWrap(a.toConst(), b.toConst(), .signed, @bitSizeOf(i21));
 
+    try testing.expect(wrapped);
     try testing.expect((try a.to(i21)) == minInt(i21));
 }
 
@@ -650,8 +655,9 @@ test "big.int subWrap single-single, signed" {
     var b = try Managed.initSet(testing.allocator, 1);
     defer b.deinit();
 
-    try a.subWrap(a.toConst(), b.toConst(), .signed, @bitSizeOf(i21));
+    const wrapped = try a.subWrap(a.toConst(), b.toConst(), .signed, @bitSizeOf(i21));
 
+    try testing.expect(wrapped);
     try testing.expect((try a.to(i21)) == maxInt(i21));
 }
 
@@ -662,8 +668,9 @@ test "big.int addWrap multi-multi, signed, limb aligned" {
     var b = try Managed.initSet(testing.allocator, maxInt(SignedDoubleLimb));
     defer b.deinit();
 
-    try a.addWrap(a.toConst(), b.toConst(), .signed, @bitSizeOf(SignedDoubleLimb));
+    const wrapped = try a.addWrap(a.toConst(), b.toConst(), .signed, @bitSizeOf(SignedDoubleLimb));
 
+    try testing.expect(wrapped);
     try testing.expect((try a.to(SignedDoubleLimb)) == -2);
 }
 
@@ -674,8 +681,9 @@ test "big.int subWrap single-multi, signed, limb aligned" {
     var b = try Managed.initSet(testing.allocator, 1);
     defer b.deinit();
 
-    try a.subWrap(a.toConst(), b.toConst(), .signed, @bitSizeOf(SignedDoubleLimb));
+    const wrapped = try a.subWrap(a.toConst(), b.toConst(), .signed, @bitSizeOf(SignedDoubleLimb));
 
+    try testing.expect(wrapped);
     try testing.expect((try a.to(SignedDoubleLimb)) == maxInt(SignedDoubleLimb));
 }
 
@@ -1056,7 +1064,7 @@ test "big.int mulWrap large" {
     try testing.expect(b.eq(c));
 }
 
-test "big.int div single-single no rem" {
+test "big.int div single-half no rem" {
     var a = try Managed.initSet(testing.allocator, 50);
     defer a.deinit();
     var b = try Managed.initSet(testing.allocator, 5);
@@ -1072,7 +1080,7 @@ test "big.int div single-single no rem" {
     try testing.expect((try r.to(u32)) == 0);
 }
 
-test "big.int div single-single with rem" {
+test "big.int div single-half with rem" {
     var a = try Managed.initSet(testing.allocator, 49);
     defer a.deinit();
     var b = try Managed.initSet(testing.allocator, 5);
@@ -1086,6 +1094,39 @@ test "big.int div single-single with rem" {
 
     try testing.expect((try q.to(u32)) == 9);
     try testing.expect((try r.to(u32)) == 4);
+}
+
+test "big.int div single-single no rem" {
+    // assumes usize is <= 64 bits.
+    var a = try Managed.initSet(testing.allocator, 1 << 52);
+    defer a.deinit();
+    var b = try Managed.initSet(testing.allocator, 1 << 35);
+    defer b.deinit();
+
+    var q = try Managed.init(testing.allocator);
+    defer q.deinit();
+    var r = try Managed.init(testing.allocator);
+    defer r.deinit();
+    try Managed.divTrunc(&q, &r, a.toConst(), b.toConst());
+
+    try testing.expect((try q.to(u32)) == 131072);
+    try testing.expect((try r.to(u32)) == 0);
+}
+
+test "big.int div single-single with rem" {
+    var a = try Managed.initSet(testing.allocator, (1 << 52) | (1 << 33));
+    defer a.deinit();
+    var b = try Managed.initSet(testing.allocator, (1 << 35));
+    defer b.deinit();
+
+    var q = try Managed.init(testing.allocator);
+    defer q.deinit();
+    var r = try Managed.init(testing.allocator);
+    defer r.deinit();
+    try Managed.divTrunc(&q, &r, a.toConst(), b.toConst());
+
+    try testing.expect((try q.to(u64)) == 131072);
+    try testing.expect((try r.to(u64)) == 8589934592);
 }
 
 test "big.int div multi-single no rem" {

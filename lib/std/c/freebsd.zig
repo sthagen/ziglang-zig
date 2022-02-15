@@ -283,6 +283,10 @@ pub const Stat = extern struct {
     pub fn ctime(self: @This()) timespec {
         return self.ctim;
     }
+
+    pub fn birthtime(self: @This()) timespec {
+        return self.birthtim;
+    }
 };
 
 pub const timespec = extern struct {
@@ -408,6 +412,12 @@ pub const MAP = struct {
     pub const NOCORE = 0x00020000;
     pub const PREFAULT_READ = 0x00040000;
     pub const @"32BIT" = 0x00080000;
+};
+
+pub const MSF = struct {
+    pub const ASYNC = 1;
+    pub const INVALIDATE = 2;
+    pub const SYNC = 4;
 };
 
 pub const W = struct {

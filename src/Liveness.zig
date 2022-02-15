@@ -26,7 +26,8 @@ tomb_bits: []usize,
 /// array. The meaning of the data depends on the AIR tag.
 ///  * `cond_br` - points to a `CondBr` in `extra` at this index.
 ///  * `switch_br` - points to a `SwitchBr` in `extra` at this index.
-///  * `asm`, `call` - the value is a set of bits which are the extra tomb bits of operands.
+///  * `asm`, `call`, `vector_init` - the value is a set of bits which are the extra tomb
+///    bits of operands.
 ///    The main tomb bits are still used and the extra ones are starting with the lsb of the
 ///    value here.
 special: std.AutoHashMapUnmanaged(Air.Inst.Index, u32),
@@ -260,6 +261,7 @@ fn analyzeInst(
         .shl_exact,
         .shl_sat,
         .shr,
+        .shr_exact,
         .atomic_store_unordered,
         .atomic_store_monotonic,
         .atomic_store_release,
@@ -281,6 +283,7 @@ fn analyzeInst(
         .dbg_stmt,
         .unreach,
         .fence,
+        .ret_addr,
         => return trackOperands(a, new_set, inst, main_tomb, .{ .none, .none, .none }),
 
         .not,
@@ -315,6 +318,7 @@ fn analyzeInst(
         .clz,
         .ctz,
         .popcount,
+        .splat,
         => {
             const o = inst_datas[inst].ty_op;
             return trackOperands(a, new_set, inst, main_tomb, .{ o.operand, .none, .none });
@@ -332,9 +336,29 @@ fn analyzeInst(
         .bool_to_int,
         .ret,
         .ret_load,
+        .tag_name,
+        .error_name,
+        .sqrt,
+        .sin,
+        .cos,
+        .exp,
+        .exp2,
+        .log,
+        .log2,
+        .log10,
+        .fabs,
+        .floor,
+        .ceil,
+        .round,
+        .trunc_float,
         => {
             const operand = inst_datas[inst].un_op;
             return trackOperands(a, new_set, inst, main_tomb, .{ operand, .none, .none });
+        },
+
+        .prefetch => {
+            const prefetch = inst_datas[inst].prefetch;
+            return trackOperands(a, new_set, inst, main_tomb, .{ prefetch.ptr, .none, .none });
         },
 
         .call => {
@@ -342,7 +366,7 @@ fn analyzeInst(
             const callee = inst_data.operand;
             const extra = a.air.extraData(Air.Call, inst_data.payload);
             const args = @bitCast([]const Air.Inst.Ref, a.air.extra[extra.end..][0..extra.data.args_len]);
-            if (args.len <= bpi - 2) {
+            if (args.len + 1 <= bpi - 1) {
                 var buf = [1]Air.Inst.Ref{.none} ** (bpi - 1);
                 buf[0] = callee;
                 std.mem.copy(Air.Inst.Ref, buf[1..], args);
@@ -357,6 +381,28 @@ fn analyzeInst(
             try extra_tombs.feed(callee);
             for (args) |arg| {
                 try extra_tombs.feed(arg);
+            }
+            return extra_tombs.finish();
+        },
+        .vector_init => {
+            const ty_pl = inst_datas[inst].ty_pl;
+            const vector_ty = a.air.getRefType(ty_pl.ty);
+            const len = @intCast(usize, vector_ty.arrayLen());
+            const elements = @bitCast([]const Air.Inst.Ref, a.air.extra[ty_pl.payload..][0..len]);
+
+            if (elements.len <= bpi - 1) {
+                var buf = [1]Air.Inst.Ref{.none} ** (bpi - 1);
+                std.mem.copy(Air.Inst.Ref, &buf, elements);
+                return trackOperands(a, new_set, inst, main_tomb, buf);
+            }
+            var extra_tombs: ExtraTombs = .{
+                .analysis = a,
+                .new_set = new_set,
+                .inst = inst,
+                .main_tomb = main_tomb,
+            };
+            for (elements) |elem| {
+                try extra_tombs.feed(elem);
             }
             return extra_tombs.finish();
         },
@@ -381,7 +427,13 @@ fn analyzeInst(
             const extra = a.air.extraData(Air.AtomicRmw, pl_op.payload).data;
             return trackOperands(a, new_set, inst, main_tomb, .{ pl_op.operand, extra.operand, .none });
         },
-        .memset, .memcpy => {
+        .memset,
+        .memcpy,
+        .add_with_overflow,
+        .sub_with_overflow,
+        .mul_with_overflow,
+        .shl_with_overflow,
+        => {
             const pl_op = inst_datas[inst].pl_op;
             const extra = a.air.extraData(Air.Bin, pl_op.payload).data;
             return trackOperands(a, new_set, inst, main_tomb, .{ pl_op.operand, extra.lhs, extra.rhs });

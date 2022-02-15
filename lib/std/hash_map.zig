@@ -131,7 +131,13 @@ pub const default_max_load_percentage = 80;
 /// If you are passing a context to a *Adapted function, PseudoKey is the type
 /// of the key parameter.  Otherwise, when creating a HashMap or HashMapUnmanaged
 /// type, PseudoKey = Key = K.
-pub fn verifyContext(comptime RawContext: type, comptime PseudoKey: type, comptime Key: type, comptime Hash: type) void {
+pub fn verifyContext(
+    comptime RawContext: type,
+    comptime PseudoKey: type,
+    comptime Key: type,
+    comptime Hash: type,
+    comptime is_array: bool,
+) void {
     comptime {
         var allow_const_ptr = false;
         var allow_mutable_ptr = false;
@@ -166,7 +172,9 @@ pub fn verifyContext(comptime RawContext: type, comptime PseudoKey: type, compti
             const prefix = "\n  ";
             const deep_prefix = prefix ++ "  ";
             const hash_signature = "fn (self, " ++ @typeName(PseudoKey) ++ ") " ++ @typeName(Hash);
-            const eql_signature = "fn (self, " ++ @typeName(PseudoKey) ++ ", " ++ @typeName(Key) ++ ") bool";
+            const index_param = if (is_array) ", b_index: usize" else "";
+            const eql_signature = "fn (self, " ++ @typeName(PseudoKey) ++ ", " ++
+                @typeName(Key) ++ index_param ++ ") bool";
             const err_invalid_hash_signature = prefix ++ @typeName(Context) ++ ".hash must be " ++ hash_signature ++
                 deep_prefix ++ "but is actually " ++ @typeName(@TypeOf(Context.hash));
             const err_invalid_eql_signature = prefix ++ @typeName(Context) ++ ".eql must be " ++ eql_signature ++
@@ -255,7 +263,8 @@ pub fn verifyContext(comptime RawContext: type, comptime PseudoKey: type, compti
             const info = @typeInfo(@TypeOf(eql));
             if (info == .Fn) {
                 const func = info.Fn;
-                if (func.args.len != 3) {
+                const args_len = if (is_array) 4 else 3;
+                if (func.args.len != args_len) {
                     errors = errors ++ lazy.err_invalid_eql_signature;
                 } else {
                     var emitted_signature = false;
@@ -360,7 +369,7 @@ pub fn HashMap(
     comptime Context: type,
     comptime max_load_percentage: u64,
 ) type {
-    comptime verifyContext(Context, K, K, u64);
+    comptime verifyContext(Context, K, K, u64, false);
     return struct {
         unmanaged: Unmanaged,
         allocator: Allocator,
@@ -629,6 +638,13 @@ pub fn HashMap(
             return self.unmanaged.removeAdapted(key, ctx);
         }
 
+        /// Delete the entry with key pointed to by keyPtr from the hash map.
+        /// keyPtr is assumed to be a valid pointer to a key that is present
+        /// in the hash map.
+        pub fn removeByPtr(self: *Self, keyPtr: *K) void {
+            self.unmanaged.removeByPtr(keyPtr);
+        }
+
         /// Creates a copy of this map, using the same allocator
         pub fn clone(self: Self) !Self {
             var other = try self.unmanaged.cloneContext(self.allocator, self.ctx);
@@ -676,7 +692,7 @@ pub fn HashMapUnmanaged(
 ) type {
     if (max_load_percentage <= 0 or max_load_percentage >= 100)
         @compileError("max_load_percentage must be between 0 and 100.");
-    comptime verifyContext(Context, K, K, u64);
+    comptime verifyContext(Context, K, K, u64, false);
 
     return struct {
         const Self = @This();
@@ -750,12 +766,19 @@ pub fn HashMapUnmanaged(
             fingerprint: FingerPrint = free,
             used: u1 = 0,
 
+            const slot_free = @bitCast(u8, Metadata{ .fingerprint = free });
+            const slot_tombstone = @bitCast(u8, Metadata{ .fingerprint = tombstone });
+
             pub fn isUsed(self: Metadata) bool {
                 return self.used == 1;
             }
 
             pub fn isTombstone(self: Metadata) bool {
-                return !self.isUsed() and self.fingerprint == tombstone;
+                return @bitCast(u8, self) == slot_tombstone;
+            }
+
+            pub fn isFree(self: Metadata) bool {
+                return @bitCast(u8, self) == slot_free;
             }
 
             pub fn takeFingerprint(hash: Hash) FingerPrint {
@@ -1094,7 +1117,7 @@ pub fn HashMapUnmanaged(
         /// from this function.  To encourage that, this function is
         /// marked as inline.
         inline fn getIndex(self: Self, key: anytype, ctx: anytype) ?usize {
-            comptime verifyContext(@TypeOf(ctx), @TypeOf(key), K, Hash);
+            comptime verifyContext(@TypeOf(ctx), @TypeOf(key), K, Hash, false);
 
             if (self.size == 0) {
                 return null;
@@ -1115,7 +1138,7 @@ pub fn HashMapUnmanaged(
             var idx = @truncate(usize, hash & mask);
 
             var metadata = self.metadata.? + idx;
-            while ((metadata[0].isUsed() or metadata[0].isTombstone()) and limit != 0) {
+            while (!metadata[0].isFree() and limit != 0) {
                 if (metadata[0].isUsed() and metadata[0].fingerprint == fingerprint) {
                     const test_key = &self.keys()[idx];
                     // If you get a compile error on this line, it means that your generic eql
@@ -1277,7 +1300,7 @@ pub fn HashMapUnmanaged(
             return result;
         }
         pub fn getOrPutAssumeCapacityAdapted(self: *Self, key: anytype, ctx: anytype) GetOrPutResult {
-            comptime verifyContext(@TypeOf(ctx), @TypeOf(key), K, Hash);
+            comptime verifyContext(@TypeOf(ctx), @TypeOf(key), K, Hash, false);
 
             // If you get a compile error on this line, it means that your generic hash
             // function is invalid for these parameters.
@@ -1294,7 +1317,7 @@ pub fn HashMapUnmanaged(
 
             var first_tombstone_idx: usize = self.capacity(); // invalid index
             var metadata = self.metadata.? + idx;
-            while ((metadata[0].isUsed() or metadata[0].isTombstone()) and limit != 0) {
+            while (!metadata[0].isFree() and limit != 0) {
                 if (metadata[0].isUsed() and metadata[0].fingerprint == fingerprint) {
                     const test_key = &self.keys()[idx];
                     // If you get a compile error on this line, it means that your generic eql
@@ -1370,6 +1393,14 @@ pub fn HashMapUnmanaged(
             return self.getIndex(key, ctx) != null;
         }
 
+        fn removeByIndex(self: *Self, idx: usize) void {
+            self.metadata.?[idx].remove();
+            self.keys()[idx] = undefined;
+            self.values()[idx] = undefined;
+            self.size -= 1;
+            self.available += 1;
+        }
+
         /// If there is an `Entry` with a matching key, it is deleted from
         /// the hash map, and this function returns true.  Otherwise this
         /// function returns false.
@@ -1383,15 +1414,27 @@ pub fn HashMapUnmanaged(
         }
         pub fn removeAdapted(self: *Self, key: anytype, ctx: anytype) bool {
             if (self.getIndex(key, ctx)) |idx| {
-                self.metadata.?[idx].remove();
-                self.keys()[idx] = undefined;
-                self.values()[idx] = undefined;
-                self.size -= 1;
-                self.available += 1;
+                self.removeByIndex(idx);
                 return true;
             }
 
             return false;
+        }
+
+        /// Delete the entry with key pointed to by keyPtr from the hash map.
+        /// keyPtr is assumed to be a valid pointer to a key that is present
+        /// in the hash map.
+        pub fn removeByPtr(self: *Self, keyPtr: *K) void {
+            // TODO: replace with pointer subtraction once supported by zig
+            // if @sizeOf(K) == 0 then there is at most one item in the hash
+            // map, which is assumed to exist as keyPtr must be valid.  This
+            // item must be at index 0.
+            const idx = if (@sizeOf(K) > 0)
+                (@ptrToInt(keyPtr) - @ptrToInt(self.keys())) / @sizeOf(K)
+            else
+                0;
+
+            self.removeByIndex(idx);
         }
 
         fn initMetadatas(self: *Self) void {
@@ -2074,4 +2117,48 @@ test "std.hash_map ensureUnusedCapacity" {
     // Repeated ensureUnusedCapacity() calls with no insertions between
     // should not change the capacity.
     try testing.expectEqual(capacity, map.capacity());
+}
+
+test "std.hash_map removeByPtr" {
+    var map = AutoHashMap(i32, u64).init(testing.allocator);
+    defer map.deinit();
+
+    var i: i32 = undefined;
+
+    i = 0;
+    while (i < 10) : (i += 1) {
+        try map.put(i, 0);
+    }
+
+    try testing.expect(map.count() == 10);
+
+    i = 0;
+    while (i < 10) : (i += 1) {
+        const keyPtr = map.getKeyPtr(i);
+        try testing.expect(keyPtr != null);
+
+        if (keyPtr) |ptr| {
+            map.removeByPtr(ptr);
+        }
+    }
+
+    try testing.expect(map.count() == 0);
+}
+
+test "std.hash_map removeByPtr 0 sized key" {
+    var map = AutoHashMap(u0, u64).init(testing.allocator);
+    defer map.deinit();
+
+    try map.put(0, 0);
+
+    try testing.expect(map.count() == 1);
+
+    const keyPtr = map.getKeyPtr(0);
+    try testing.expect(keyPtr != null);
+
+    if (keyPtr) |ptr| {
+        map.removeByPtr(ptr);
+    }
+
+    try testing.expect(map.count() == 0);
 }

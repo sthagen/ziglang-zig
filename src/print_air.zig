@@ -138,6 +138,7 @@ const Writer = struct {
             .shl_exact,
             .shl_sat,
             .shr,
+            .shr_exact,
             .set_union_tag,
             .min,
             .max,
@@ -155,10 +156,26 @@ const Writer = struct {
             .bool_to_int,
             .ret,
             .ret_load,
+            .tag_name,
+            .error_name,
+            .sqrt,
+            .sin,
+            .cos,
+            .exp,
+            .exp2,
+            .log,
+            .log2,
+            .log10,
+            .fabs,
+            .floor,
+            .ceil,
+            .round,
+            .trunc_float,
             => try w.writeUnOp(s, inst),
 
             .breakpoint,
             .unreach,
+            .ret_addr,
             => try w.writeNoOp(s, inst),
 
             .const_ty,
@@ -193,6 +210,7 @@ const Writer = struct {
             .struct_field_ptr_index_3,
             .array_to_slice,
             .int_to_float,
+            .splat,
             .float_to_int,
             .get_union_tag,
             .clz,
@@ -215,12 +233,14 @@ const Writer = struct {
             .assembly => try w.writeAssembly(s, inst),
             .dbg_stmt => try w.writeDbgStmt(s, inst),
             .call => try w.writeCall(s, inst),
+            .vector_init => try w.writeVectorInit(s, inst),
             .br => try w.writeBr(s, inst),
             .cond_br => try w.writeCondBr(s, inst),
             .switch_br => try w.writeSwitchBr(s, inst),
             .cmpxchg_weak, .cmpxchg_strong => try w.writeCmpxchg(s, inst),
             .fence => try w.writeFence(s, inst),
             .atomic_load => try w.writeAtomicLoad(s, inst),
+            .prefetch => try w.writePrefetch(s, inst),
             .atomic_store_unordered => try w.writeAtomicStore(s, inst, .Unordered),
             .atomic_store_monotonic => try w.writeAtomicStore(s, inst, .Monotonic),
             .atomic_store_release => try w.writeAtomicStore(s, inst, .Release),
@@ -228,6 +248,12 @@ const Writer = struct {
             .atomic_rmw => try w.writeAtomicRmw(s, inst),
             .memcpy => try w.writeMemcpy(s, inst),
             .memset => try w.writeMemset(s, inst),
+
+            .add_with_overflow,
+            .sub_with_overflow,
+            .mul_with_overflow,
+            .shl_with_overflow,
+            => try w.writeOverflow(s, inst),
         }
     }
 
@@ -281,6 +307,20 @@ const Writer = struct {
         try s.writeAll("}");
     }
 
+    fn writeVectorInit(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {
+        const ty_pl = w.air.instructions.items(.data)[inst].ty_pl;
+        const vector_ty = w.air.getRefType(ty_pl.ty);
+        const len = @intCast(usize, vector_ty.arrayLen());
+        const elements = @bitCast([]const Air.Inst.Ref, w.air.extra[ty_pl.payload..][0..len]);
+
+        try s.print("{}, [", .{vector_ty});
+        for (elements) |elem, i| {
+            if (i != 0) try s.writeAll(", ");
+            try w.writeOperand(s, inst, i, elem);
+        }
+        try s.writeAll("]");
+    }
+
     fn writeStructField(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {
         const ty_pl = w.air.instructions.items(.data)[inst].ty_pl;
         const extra = w.air.extraData(Air.StructField, ty_pl.payload).data;
@@ -325,6 +365,15 @@ const Writer = struct {
         try s.print(", {s}", .{@tagName(atomic_load.order)});
     }
 
+    fn writePrefetch(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {
+        const prefetch = w.air.instructions.items(.data)[inst].prefetch;
+
+        try w.writeOperand(s, inst, 0, prefetch.ptr);
+        try s.print(", {s}, {d}, {s}", .{
+            @tagName(prefetch.rw), prefetch.locality, @tagName(prefetch.cache),
+        });
+    }
+
     fn writeAtomicStore(
         w: *Writer,
         s: anytype,
@@ -346,6 +395,17 @@ const Writer = struct {
         try s.writeAll(", ");
         try w.writeOperand(s, inst, 1, extra.operand);
         try s.print(", {s}, {s}", .{ @tagName(extra.op()), @tagName(extra.ordering()) });
+    }
+
+    fn writeOverflow(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {
+        const pl_op = w.air.instructions.items(.data)[inst].pl_op;
+        const extra = w.air.extraData(Air.Bin, pl_op.payload).data;
+
+        try w.writeOperand(s, inst, 0, pl_op.operand);
+        try s.writeAll(", ");
+        try w.writeOperand(s, inst, 1, extra.lhs);
+        try s.writeAll(", ");
+        try w.writeOperand(s, inst, 2, extra.rhs);
     }
 
     fn writeMemset(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {

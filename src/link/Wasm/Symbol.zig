@@ -25,6 +25,9 @@ pub const Tag = enum {
     section,
     event,
     table,
+    /// synthetic kind used by the wasm linker during incremental compilation
+    /// to notate a symbol has been freed, but still lives in the symbol list.
+    dead,
 
     /// From a given symbol tag, returns the `ExternalType`
     /// Asserts the given tag can be represented as an external type.
@@ -139,19 +142,20 @@ pub fn format(self: Symbol, comptime fmt: []const u8, options: std.fmt.FormatOpt
     _ = fmt;
     _ = options;
 
-    const kind_fmt: u8 = switch (self.kind) {
+    const kind_fmt: u8 = switch (self.tag) {
         .function => 'F',
         .data => 'D',
         .global => 'G',
         .section => 'S',
         .event => 'E',
         .table => 'T',
+        .dead => '-',
     };
     const visible: []const u8 = if (self.isVisible()) "yes" else "no";
     const binding: []const u8 = if (self.isLocal()) "local" else "global";
 
     try writer.print(
         "{c} binding={s} visible={s} id={d} name={s}",
-        .{ kind_fmt, binding, visible, self.index(), self.name },
+        .{ kind_fmt, binding, visible, self.index, self.name },
     );
 }
