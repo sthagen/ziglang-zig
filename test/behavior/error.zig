@@ -6,12 +6,16 @@ const expectEqual = std.testing.expectEqual;
 const mem = std.mem;
 
 test "error values" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     const a = @errorToInt(error.err1);
     const b = @errorToInt(error.err2);
     try expect(a != b);
 }
 
 test "redefinition of error values allowed" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     shouldBeNotEqual(error.AnError, error.SecondError);
 }
 fn shouldBeNotEqual(a: anyerror, b: anyerror) void {
@@ -19,6 +23,10 @@ fn shouldBeNotEqual(a: anyerror, b: anyerror) void {
 }
 
 test "error binary operator" {
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     const a = errBinaryOperatorG(true) catch 3;
     const b = errBinaryOperatorG(false) catch 3;
     try expect(a == 3);
@@ -29,6 +37,8 @@ fn errBinaryOperatorG(x: bool) anyerror!isize {
 }
 
 test "empty error union" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     const x = error{} || error{};
     _ = x;
 }
@@ -48,10 +58,18 @@ pub fn baz() anyerror!i32 {
 }
 
 test "error wrapping" {
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     try expect((baz() catch unreachable) == 15);
 }
 
 test "unwrap simple value from error" {
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     const i = unwrapSimpleValueFromErrorDo() catch unreachable;
     try expect(i == 13);
 }
@@ -60,6 +78,10 @@ fn unwrapSimpleValueFromErrorDo() anyerror!isize {
 }
 
 test "error return in assignment" {
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     doErrReturnInAssignment() catch unreachable;
 }
 
@@ -73,12 +95,18 @@ fn makeANonErr() anyerror!i32 {
 }
 
 test "syntax: optional operator in front of error union operator" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     comptime {
         try expect(?(anyerror!i32) == ?(anyerror!i32));
     }
 }
 
 test "widen cast integer payload of error union function call" {
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     const S = struct {
         fn errorable() !u64 {
             var x = @as(u64, try number());
@@ -93,12 +121,19 @@ test "widen cast integer payload of error union function call" {
 }
 
 test "debug info for optional error set" {
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     const SomeError = error{Hello};
     var a_local_variable: ?SomeError = null;
     _ = a_local_variable;
 }
 
 test "implicit cast to optional to error union to return result loc" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     const S = struct {
         fn entry() !void {
             var x: Foo = undefined;
@@ -118,6 +153,8 @@ test "implicit cast to optional to error union to return result loc" {
 }
 
 test "error: fn returning empty error set can be passed as fn returning any error" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     entry();
     comptime entry();
 }
@@ -134,7 +171,10 @@ fn foo2(f: fn () anyerror!void) void {
 fn bar2() (error{}!void) {}
 
 test "error union type " {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
 
     try testErrorUnionType();
     comptime try testErrorUnionType();
@@ -149,7 +189,10 @@ fn testErrorUnionType() !void {
 }
 
 test "error set type" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
 
     try testErrorSetType();
     comptime try testErrorSetType();
@@ -252,10 +295,11 @@ fn quux_1() !i32 {
 }
 
 test "error: Zero sized error set returned with value payload crash" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
 
-    _ = foo3(0) catch {};
-    _ = comptime foo3(0) catch {};
+    _ = try foo3(0);
+    _ = comptime try foo3(0);
 }
 
 const Error = error{};
@@ -264,7 +308,11 @@ fn foo3(b: usize) Error!usize {
 }
 
 test "error: Infer error set from literals" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
 
     _ = nullLiteral("n") catch |err| handleErrors(err);
     _ = floatLiteral("n") catch |err| handleErrors(err);
@@ -482,6 +530,9 @@ test "error union comptime caching" {
 test "@errorName" {
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
 
     try expect(mem.eql(u8, @errorName(error.AnError), "AnError"));
     try expect(mem.eql(u8, @errorName(error.ALongerErrorName), "ALongerErrorName"));
@@ -494,6 +545,9 @@ fn gimmeItBroke() anyerror {
 test "@errorName sentinel length matches slice length" {
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
 
     const name = testBuiltinErrorName(error.FooBar);
     const length: usize = 6;

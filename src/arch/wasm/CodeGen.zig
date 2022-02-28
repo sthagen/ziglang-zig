@@ -645,31 +645,8 @@ fn resolveInst(self: *Self, ref: Air.Inst.Ref) InnerError!WValue {
     // In the other cases, we will simply lower the constant to a value that fits
     // into a single local (such as a pointer, integer, bool, etc).
     const result = if (isByRef(ty, self.target)) blk: {
-        var value_bytes = std.ArrayList(u8).init(self.gpa);
-        defer value_bytes.deinit();
-
-        var decl_gen: DeclGen = .{
-            .bin_file = self.bin_file,
-            .decl = self.decl,
-            .err_msg = undefined,
-            .gpa = self.gpa,
-            .module = self.module,
-            .code = &value_bytes,
-            .symbol_index = try self.bin_file.createLocalSymbol(self.decl, ty),
-        };
-        const result = decl_gen.genTypedValue(ty, val) catch |err| {
-            // When a codegen error occured, take ownership of the error message
-            if (err == error.CodegenFail) {
-                self.err_msg = decl_gen.err_msg;
-            }
-            return err;
-        };
-        const code = switch (result) {
-            .appended => value_bytes.items,
-            .externally_managed => |data| data,
-        };
-        try self.bin_file.updateLocalSymbolCode(self.decl, decl_gen.symbol_index, code);
-        break :blk WValue{ .memory = decl_gen.symbol_index };
+        const sym_index = try self.bin_file.lowerUnnamedConst(self.decl, .{ .ty = ty, .val = val });
+        break :blk WValue{ .memory = sym_index };
     } else try self.lowerConstant(val, ty);
 
     gop.value_ptr.* = result;
@@ -986,7 +963,7 @@ pub const DeclGen = struct {
     }
 
     /// Generates the wasm bytecode for the declaration belonging to `Context`
-    fn genTypedValue(self: *DeclGen, ty: Type, val: Value) InnerError!Result {
+    pub fn genTypedValue(self: *DeclGen, ty: Type, val: Value) InnerError!Result {
         log.debug("genTypedValue: ty = {}, val = {}", .{ ty, val });
 
         const writer = self.code.writer();
@@ -1240,18 +1217,36 @@ pub const DeclGen = struct {
                 const error_ty = ty.errorUnionSet();
                 const payload_ty = ty.errorUnionPayload();
                 const is_pl = val.errorUnionIsPayload();
+                const abi_align = ty.abiAlignment(self.target());
 
-                const err_val = if (!is_pl) val else Value.initTag(.zero);
-                switch (try self.genTypedValue(error_ty, err_val)) {
-                    .externally_managed => |data| try writer.writeAll(data),
-                    .appended => {},
+                {
+                    const err_val = if (!is_pl) val else Value.initTag(.zero);
+                    const start = self.code.items.len;
+                    switch (try self.genTypedValue(error_ty, err_val)) {
+                        .externally_managed => |data| try writer.writeAll(data),
+                        .appended => {},
+                    }
+                    const unpadded_end = self.code.items.len - start;
+                    const padded_end = mem.alignForwardGeneric(usize, unpadded_end, abi_align);
+                    const padding = padded_end - unpadded_end;
+                    if (padding > 0) {
+                        try writer.writeByteNTimes(0, padding);
+                    }
                 }
 
                 if (payload_ty.hasRuntimeBits()) {
+                    const start = self.code.items.len;
                     const pl_val = if (val.castTag(.eu_payload)) |pl| pl.data else Value.initTag(.undef);
                     switch (try self.genTypedValue(payload_ty, pl_val)) {
                         .externally_managed => |data| try writer.writeAll(data),
                         .appended => {},
+                    }
+
+                    const unpadded_end = self.code.items.len - start;
+                    const padded_end = mem.alignForwardGeneric(usize, unpadded_end, abi_align);
+                    const padding = padded_end - unpadded_end;
+                    if (padding > 0) {
+                        try writer.writeByteNTimes(0, padding);
                     }
                 }
 
@@ -1320,14 +1315,17 @@ pub const DeclGen = struct {
         }
 
         decl.markAlive();
-        try writer.writeIntLittle(u32, try self.bin_file.getDeclVAddr(
-            self.decl, // The decl containing the source symbol index
-            decl.ty, // type we generate the address of
-            self.symbol_index, // source symbol index
-            decl.link.wasm.sym_index, // target symbol index
-            @intCast(u32, self.code.items.len), // offset
-            @intCast(u32, offset), // addend
-        ));
+        if (decl.link.wasm.sym_index == 0) {
+            try writer.writeIntLittle(u32, 0);
+        } else {
+            try writer.writeIntLittle(u32, try self.bin_file.getDeclVAddr(
+                self.decl, // parent decl that owns the atom of the symbol
+                self.symbol_index, // source symbol index
+                decl, // target decl that contains the target symbol
+                @intCast(u32, self.code.items.len), // offset
+                @intCast(u32, offset), // addend
+            ));
+        }
         return Result{ .appended = {} };
     }
 };
@@ -1644,7 +1642,8 @@ fn genInst(self: *Self, inst: Air.Inst.Index) !WValue {
         .ret_ptr => self.airRetPtr(inst),
         .ret_load => self.airRetLoad(inst),
         .splat => self.airSplat(inst),
-        .vector_init => self.airVectorInit(inst),
+        .aggregate_init => self.airAggregateInit(inst),
+        .union_init => self.airUnionInit(inst),
         .prefetch => self.airPrefetch(inst),
 
         .slice => self.airSlice(inst),
@@ -1687,6 +1686,8 @@ fn genInst(self: *Self, inst: Air.Inst.Index) !WValue {
         .clz,
         .ctz,
         .popcount,
+        .byte_swap,
+        .bit_reverse,
         .is_err_ptr,
         .is_non_err_ptr,
         .fptrunc,
@@ -1723,6 +1724,8 @@ fn genInst(self: *Self, inst: Air.Inst.Index) !WValue {
         .atomic_rmw,
         .tag_name,
         .error_name,
+        .errunion_payload_ptr_set,
+        .field_parent_ptr,
 
         // For these 4, probably best to wait until https://github.com/ziglang/zig/issues/10248
         // is implemented in the frontend before implementing them here in the wasm backend.
@@ -2081,15 +2084,7 @@ fn lowerConstant(self: *Self, val: Value, ty: Type) InnerError!WValue {
         decl.markAlive();
         const target_sym_index = decl.link.wasm.sym_index;
         if (ty.isSlice()) {
-            var slice_len: Value.Payload.U64 = .{
-                .base = .{ .tag = .int_u64 },
-                .data = val.sliceLen(),
-            };
-            var slice_val: Value.Payload.Slice = .{
-                .base = .{ .tag = .slice },
-                .data = .{ .ptr = val.slicePtr(), .len = Value.initPayload(&slice_len.base) },
-            };
-            return self.lowerConstant(Value.initPayload(&slice_val.base), ty);
+            return WValue{ .memory = try self.bin_file.lowerUnnamedConst(self.decl, .{ .ty = ty, .val = val }) };
         } else if (decl.ty.zigTypeTag() == .Fn) {
             try self.bin_file.addTableFunction(target_sym_index);
             return WValue{ .function_index = target_sym_index };
@@ -2718,11 +2713,13 @@ fn airUnwrapErrUnionPayload(self: *Self, inst: Air.Inst.Index) InnerError!WValue
     const err_ty = self.air.typeOf(ty_op.operand);
     const payload_ty = err_ty.errorUnionPayload();
     if (!payload_ty.hasRuntimeBits()) return WValue{ .none = {} };
-    const offset = @intCast(u32, err_ty.errorUnionSet().abiSize(self.target));
+    const err_align = err_ty.abiAlignment(self.target);
+    const set_size = err_ty.errorUnionSet().abiSize(self.target);
+    const offset = mem.alignForwardGeneric(u64, set_size, err_align);
     if (isByRef(payload_ty, self.target)) {
         return self.buildPointerOffset(operand, offset, .new);
     }
-    return self.load(operand, payload_ty, offset);
+    return self.load(operand, payload_ty, @intCast(u32, offset));
 }
 
 fn airUnwrapErrUnionError(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
@@ -2748,7 +2745,9 @@ fn airWrapErrUnionPayload(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     const op_ty = self.air.typeOf(ty_op.operand);
     if (!op_ty.hasRuntimeBits()) return operand;
     const err_ty = self.air.getRefType(ty_op.ty);
-    const offset = err_ty.errorUnionSet().abiSize(self.target);
+    const err_align = err_ty.abiAlignment(self.target);
+    const set_size = err_ty.errorUnionSet().abiSize(self.target);
+    const offset = mem.alignForwardGeneric(u64, set_size, err_align);
 
     const err_union = try self.allocStack(err_ty);
     const payload_ptr = try self.buildPointerOffset(err_union, offset, .new);
@@ -3352,7 +3351,7 @@ fn airSplat(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     return self.fail("TODO: Implement wasm airSplat", .{});
 }
 
-fn airVectorInit(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
+fn airAggregateInit(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
 
     const vector_ty = self.air.typeOfIndex(inst);
@@ -3361,7 +3360,7 @@ fn airVectorInit(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     const elements = @bitCast([]const Air.Inst.Ref, self.air.extra[ty_pl.payload..][0..len]);
 
     switch (vector_ty.zigTypeTag()) {
-        .Vector => return self.fail("TODO: Wasm backend: implement airVectorInit for vectors", .{}),
+        .Vector => return self.fail("TODO: Wasm backend: implement airAggregateInit for vectors", .{}),
         .Array => {
             const result = try self.allocStack(vector_ty);
             const elem_ty = vector_ty.childType();
@@ -3413,6 +3412,11 @@ fn airVectorInit(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
         },
         else => unreachable,
     }
+}
+
+fn airUnionInit(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
+    if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
+    return self.fail("TODO: Wasm backend: implement airUnionInit", .{});
 }
 
 fn airPrefetch(self: *Self, inst: Air.Inst.Index) InnerError!WValue {

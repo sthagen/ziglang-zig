@@ -886,15 +886,6 @@ pub const Struct = struct {
         offset: u32,
         is_comptime: bool,
 
-        /// Returns the field alignment, assuming the struct is packed.
-        pub fn packedAlignment(field: Field) u32 {
-            if (field.abi_align.tag() == .abi_align_default) {
-                return 0;
-            } else {
-                return @intCast(u32, field.abi_align.toUnsignedInt());
-            }
-        }
-
         /// Returns the field alignment, assuming the struct is not packed.
         pub fn normalAlignment(field: Field, target: Target) u32 {
             if (field.abi_align.tag() == .abi_align_default) {
@@ -984,6 +975,31 @@ pub const Struct = struct {
             .fully_resolved,
             => true,
         };
+    }
+
+    pub fn packedFieldBitOffset(s: Struct, target: Target, index: usize) u16 {
+        assert(s.layout == .Packed);
+        assert(s.haveFieldTypes());
+        var bit_sum: u64 = 0;
+        for (s.fields.values()) |field, i| {
+            if (i == index) {
+                return @intCast(u16, bit_sum);
+            }
+            bit_sum += field.ty.bitSize(target);
+        }
+        return @intCast(u16, bit_sum);
+    }
+
+    pub fn packedIntegerBits(s: Struct, target: Target) u16 {
+        return s.packedFieldBitOffset(target, s.fields.count());
+    }
+
+    pub fn packedIntegerType(s: Struct, target: Target, buf: *Type.Payload.Bits) Type {
+        buf.* = .{
+            .base = .{ .tag = .int_unsigned },
+            .data = s.packedIntegerBits(target),
+        };
+        return Type.initPayload(&buf.base);
     }
 };
 
@@ -1107,6 +1123,17 @@ pub const Union = struct {
         /// undefined until `status` is `have_field_types` or `have_layout`.
         ty: Type,
         abi_align: Value,
+
+        /// Returns the field alignment, assuming the union is not packed.
+        /// Keep implementation in sync with `Sema.unionFieldAlignment`.
+        /// Prefer to call that function instead of this one during Sema.
+        pub fn normalAlignment(field: Field, target: Target) u32 {
+            if (field.abi_align.tag() == .abi_align_default) {
+                return field.ty.abiAlignment(target);
+            } else {
+                return @intCast(u32, field.abi_align.toUnsignedInt());
+            }
+        }
     };
 
     pub const Fields = std.StringArrayHashMapUnmanaged(Field);
@@ -1194,6 +1221,7 @@ pub const Union = struct {
         return @intCast(u32, most_index);
     }
 
+    /// Returns 0 if the union is represented with 0 bits at runtime.
     pub fn abiAlignment(u: Union, target: Target, have_tag: bool) u32 {
         var max_align: u32 = 0;
         if (have_tag) max_align = u.tag_ty.abiAlignment(target);
@@ -1209,7 +1237,6 @@ pub const Union = struct {
             };
             max_align = @maximum(max_align, field_align);
         }
-        assert(max_align != 0);
         return max_align;
     }
 
@@ -1370,6 +1397,14 @@ pub const Fn = struct {
     /// ZIR instruction.
     zir_body_inst: Zir.Inst.Index,
 
+    /// Prefer to use `getParamName` to access this because of the future improvement
+    /// we want to do mentioned in the TODO below.
+    /// Stored in gpa.
+    /// TODO: change param ZIR instructions to be embedded inside the function
+    /// ZIR instruction instead of before it, so that `zir_body_inst` can be used to
+    /// determine param names rather than redundantly storing them here.
+    param_names: []const [:0]const u8,
+
     /// Relative to owner Decl.
     lbrace_line: u32,
     /// Relative to owner Decl.
@@ -1411,7 +1446,7 @@ pub const Fn = struct {
         /// All currently known errors that this error set contains. This includes direct additions
         /// via `return error.Foo;`, and possibly also errors that are returned from any dependent functions.
         /// When the inferred error set is fully resolved, this map contains all the errors that the function might return.
-        errors: std.StringHashMapUnmanaged(void) = .{},
+        errors: ErrorSet.NameMap = .{},
 
         /// Other inferred error sets which this inferred error set should include.
         inferred_error_sets: std.AutoHashMapUnmanaged(*InferredErrorSet, void) = .{},
@@ -1466,6 +1501,18 @@ pub const Fn = struct {
             gpa.destroy(node);
             it = next;
         }
+
+        for (func.param_names) |param_name| {
+            gpa.free(param_name);
+        }
+        gpa.free(func.param_names);
+    }
+
+    pub fn getParamName(func: Fn, index: u32) [:0]const u8 {
+        // TODO rework ZIR of parameters so that this function looks up
+        // param names in ZIR instead of redundantly saving them into Fn.
+        // const zir = func.owner_decl.getFileScope().zir;
+        return func.param_names[index];
     }
 };
 
@@ -2995,7 +3042,7 @@ pub fn astGenFile(mod: *Module, file: *File) !void {
         const token_starts = file.tree.tokens.items(.start);
         const token_tags = file.tree.tokens.items(.tag);
 
-        const extra_offset = file.tree.errorOffset(parse_err.tag, parse_err.token);
+        const extra_offset = file.tree.errorOffset(parse_err);
         try file.tree.renderError(parse_err, msg.writer());
         const err_msg = try gpa.create(ErrorMsg);
         err_msg.* = .{
@@ -3006,14 +3053,25 @@ pub fn astGenFile(mod: *Module, file: *File) !void {
             },
             .msg = msg.toOwnedSlice(),
         };
-        if (token_tags[parse_err.token] == .invalid) {
-            const bad_off = @intCast(u32, file.tree.tokenSlice(parse_err.token).len);
-            const byte_abs = token_starts[parse_err.token] + bad_off;
+        if (token_tags[parse_err.token + @boolToInt(parse_err.token_is_prev)] == .invalid) {
+            const bad_off = @intCast(u32, file.tree.tokenSlice(parse_err.token + @boolToInt(parse_err.token_is_prev)).len);
+            const byte_abs = token_starts[parse_err.token + @boolToInt(parse_err.token_is_prev)] + bad_off;
             try mod.errNoteNonLazy(.{
                 .file_scope = file,
                 .parent_decl_node = 0,
                 .lazy = .{ .byte_abs = byte_abs },
             }, err_msg, "invalid byte: '{'}'", .{std.zig.fmtEscapes(source[byte_abs..][0..1])});
+        } else if (parse_err.tag == .decl_between_fields) {
+            try mod.errNoteNonLazy(.{
+                .file_scope = file,
+                .parent_decl_node = 0,
+                .lazy = .{ .byte_abs = token_starts[file.tree.errors[1].token] },
+            }, err_msg, "field before declarations here", .{});
+            try mod.errNoteNonLazy(.{
+                .file_scope = file,
+                .parent_decl_node = 0,
+                .lazy = .{ .byte_abs = token_starts[file.tree.errors[2].token] },
+            }, err_msg, "field after declarations here", .{});
         }
 
         {
@@ -3706,7 +3764,7 @@ fn semaDecl(mod: *Module, decl: *Decl) !bool {
     // Note this resolves the type of the Decl, not the value; if this Decl
     // is a struct, for example, this resolves `type` (which needs no resolution),
     // not the struct itself.
-    try sema.resolveTypeLayout(&block_scope, src, decl_tv.ty);
+    try sema.resolveTypeFully(&block_scope, src, decl_tv.ty);
 
     const decl_arena_state = try decl_arena_allocator.create(std.heap.ArenaAllocator.State);
 
@@ -4485,6 +4543,9 @@ fn deleteDeclExports(mod: *Module, decl: *Decl) void {
         if (mod.comp.bin_file.cast(link.File.MachO)) |macho| {
             macho.deleteExport(exp.link.macho);
         }
+        if (mod.comp.bin_file.cast(link.File.Wasm)) |wasm| {
+            wasm.deleteExport(exp.link.wasm);
+        }
         if (mod.failed_exports.fetchSwapRemove(exp)) |failed_kv| {
             failed_kv.value.destroy(mod.gpa);
         }
@@ -4595,15 +4656,11 @@ pub fn analyzeFnBody(mod: *Module, decl: *Decl, func: *Fn, arena: Allocator) Sem
             runtime_param_index += 1;
             continue;
         }
-        const ty_ref = try sema.addType(param_type);
         const arg_index = @intCast(u32, sema.air_instructions.len);
         inner_block.instructions.appendAssumeCapacity(arg_index);
         sema.air_instructions.appendAssumeCapacity(.{
             .tag = .arg,
-            .data = .{ .ty_str = .{
-                .ty = ty_ref,
-                .str = param.name,
-            } },
+            .data = .{ .ty = param_type },
         });
         sema.inst_map.putAssumeCapacityNoClobber(inst, Air.indexToRef(arg_index));
         total_param_index += 1;
@@ -5266,7 +5323,11 @@ pub fn populateTestFunctions(mod: *Module) !void {
 }
 
 pub fn linkerUpdateDecl(mod: *Module, decl: *Decl) !void {
-    mod.comp.bin_file.updateDecl(mod, decl) catch |err| switch (err) {
+    const comp = mod.comp;
+
+    if (comp.bin_file.options.emit == null) return;
+
+    comp.bin_file.updateDecl(mod, decl) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.AnalysisFail => {
             decl.analysis = .codegen_failure;

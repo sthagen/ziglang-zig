@@ -77,7 +77,6 @@ pub fn format(
 ) !void {
     const ArgsType = @TypeOf(args);
     const args_type_info = @typeInfo(ArgsType);
-    // XXX: meta.trait.is(.Struct)(ArgsType) doesn't seem to work...
     if (args_type_info != .Struct) {
         @compileError("Expected tuple or struct argument, found " ++ @typeName(ArgsType));
     }
@@ -1716,14 +1715,17 @@ test "parseInt" {
     try std.testing.expect((try parseInt(i32, "1_1_1", 0)) == 111);
     try std.testing.expect((try parseInt(i32, "1_1_1", 0)) == 111);
     try std.testing.expect((try parseInt(i32, "+0b111", 0)) == 7);
+    try std.testing.expect((try parseInt(i32, "+0B111", 0)) == 7);
     try std.testing.expect((try parseInt(i32, "+0b1_11", 0)) == 7);
     try std.testing.expect((try parseInt(i32, "+0o111", 0)) == 73);
+    try std.testing.expect((try parseInt(i32, "+0O111", 0)) == 73);
     try std.testing.expect((try parseInt(i32, "+0o11_1", 0)) == 73);
     try std.testing.expect((try parseInt(i32, "+0x111", 0)) == 273);
     try std.testing.expect((try parseInt(i32, "-0b111", 0)) == -7);
     try std.testing.expect((try parseInt(i32, "-0b11_1", 0)) == -7);
     try std.testing.expect((try parseInt(i32, "-0o111", 0)) == -73);
     try std.testing.expect((try parseInt(i32, "-0x111", 0)) == -273);
+    try std.testing.expect((try parseInt(i32, "-0X111", 0)) == -273);
     try std.testing.expect((try parseInt(i32, "-0x1_11", 0)) == -273);
 
     // bare binary/octal/decimal prefix is invalid
@@ -1747,7 +1749,7 @@ fn parseWithSign(
         buf_radix = 10;
         // Detect the radix by looking at buf prefix.
         if (buf.len > 2 and buf[0] == '0') {
-            switch (buf[1]) {
+            switch (std.ascii.toLower(buf[1])) {
                 'b' => {
                     buf_radix = 2;
                     buf_start = buf[2..];

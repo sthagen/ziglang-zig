@@ -150,7 +150,6 @@ const Writer = struct {
             .store,
             .store_to_block_ptr,
             .store_to_inferred_ptr,
-            .field_ptr_type,
             => try self.writeBin(stream, inst),
 
             .alloc,
@@ -235,6 +234,10 @@ const Writer = struct {
             .fence,
             .switch_cond,
             .switch_cond_ref,
+            .array_base_ptr,
+            .field_base_ptr,
+            .validate_array_init_ty,
+            .validate_struct_init_ty,
             => try self.writeUnNode(stream, inst),
 
             .ref,
@@ -270,7 +273,7 @@ const Writer = struct {
             .slice_end => try self.writeSliceEnd(stream, inst),
             .slice_sentinel => try self.writeSliceSentinel(stream, inst),
 
-            .union_init_ptr => try self.writeUnionInitPtr(stream, inst),
+            .union_init => try self.writeUnionInit(stream, inst),
 
             .struct_init,
             .struct_init_ref,
@@ -371,6 +374,7 @@ const Writer = struct {
             .validate_array_init,
             .validate_array_init_comptime,
             .c_import,
+            .typeof_builtin,
             => try self.writePlNodeBlock(stream, inst),
 
             .condbr,
@@ -455,9 +459,8 @@ const Writer = struct {
             .variable => try self.writeVarExtended(stream, extended),
             .alloc => try self.writeAllocExtended(stream, extended),
 
-            .compile_log,
-            .typeof_peer,
-            => try self.writeNodeMultiOp(stream, extended),
+            .compile_log => try self.writeNodeMultiOp(stream, extended),
+            .typeof_peer => try self.writeTypeofPeer(stream, extended),
 
             .add_with_overflow,
             .sub_with_overflow,
@@ -689,14 +692,14 @@ const Writer = struct {
         try self.writeSrc(stream, inst_data.src());
     }
 
-    fn writeUnionInitPtr(self: *Writer, stream: anytype, inst: Zir.Inst.Index) !void {
+    fn writeUnionInit(self: *Writer, stream: anytype, inst: Zir.Inst.Index) !void {
         const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Zir.Inst.UnionInitPtr, inst_data.payload_index).data;
-        try self.writeInstRef(stream, extra.result_ptr);
-        try stream.writeAll(", ");
+        const extra = self.code.extraData(Zir.Inst.UnionInit, inst_data.payload_index).data;
         try self.writeInstRef(stream, extra.union_type);
         try stream.writeAll(", ");
         try self.writeInstRef(stream, extra.field_name);
+        try stream.writeAll(", ");
+        try self.writeInstRef(stream, extra.init);
         try stream.writeAll(") ");
         try self.writeSrc(stream, inst_data.src());
     }
@@ -1961,6 +1964,19 @@ const Writer = struct {
         try self.writeOptionalInstRef(stream, ",align=", align_inst);
         try stream.writeAll(")) ");
         try self.writeSrc(stream, src);
+    }
+
+    fn writeTypeofPeer(self: *Writer, stream: anytype, extended: Zir.Inst.Extended.InstData) !void {
+        const extra = self.code.extraData(Zir.Inst.TypeOfPeer, extended.operand);
+        const body = self.code.extra[extra.data.body_index..][0..extra.data.body_len];
+        try self.writeBracedBody(stream, body);
+        try stream.writeAll(",[");
+        const args = self.code.refSlice(extra.end, extended.small);
+        for (args) |arg, i| {
+            if (i != 0) try stream.writeAll(", ");
+            try self.writeInstRef(stream, arg);
+        }
+        try stream.writeAll("])");
     }
 
     fn writeBoolBr(self: *Writer, stream: anytype, inst: Zir.Inst.Index) !void {

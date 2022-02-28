@@ -220,10 +220,21 @@ pub const Inst = struct {
         sar_mem_index_imm,
 
         /// ops flags: form:
-        ///      0bX0  reg1
-        ///      0bX1  [reg1 + imm32]
+        ///      0b00  reg1
+        ///      0b00  byte ptr [reg2 + imm32]
+        ///      0b01  word ptr [reg2 + imm32]
+        ///      0b10  dword ptr [reg2 + imm32]
+        ///      0b11  qword ptr [reg2 + imm32]
         imul,
         idiv,
+        div,
+
+        /// ops flags: form:
+        ///      0b00  AX      <- AL
+        ///      0b01  DX:AX   <- AX
+        ///      0b10  EDX:EAX <- EAX
+        ///      0b11  RDX:RAX <- RAX
+        cwd,
 
         /// ops flags:  form:
         ///      0b00  reg1, reg2
@@ -275,6 +286,15 @@ pub const Inst = struct {
         cond_jmp_eq_ne,
         cond_set_byte_eq_ne,
 
+        /// ops flags:
+        ///     0b00 reg1, reg2,
+        ///     0b01 reg1, word ptr  [reg2 + imm]
+        ///     0b10 reg1, dword ptr [reg2 + imm]
+        ///     0b11 reg1, qword ptr [reg2 + imm]
+        cond_mov_eq,
+        cond_mov_lt,
+        cond_mov_below,
+
         /// ops flags:  form:
         ///       0b00   reg1
         ///       0b01   [reg1 + imm32]
@@ -296,7 +316,8 @@ pub const Inst = struct {
         syscall,
 
         /// ops flags:  form:
-        ///       0b00  reg1, imm32
+        ///       0b00  reg1, imm32 if reg2 == .none
+        ///       0b00  reg1, reg2
         /// TODO handle more cases
         @"test",
 
@@ -413,6 +434,7 @@ pub const DbgLineColumn = struct {
 pub const ArgDbgInfo = struct {
     air_inst: Air.Inst.Index,
     arg_index: u32,
+    max_stack: u32,
 };
 
 pub fn deinit(mir: *Mir, gpa: std.mem.Allocator) void {

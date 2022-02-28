@@ -518,11 +518,14 @@ pub const Inst = struct {
         /// Same as `store` except provides a source location.
         /// Uses the `pl_node` union field. Payload is `Bin`.
         store_node,
-        /// Same as `store` but the type of the value being stored will be used to infer
-        /// the block type. The LHS is the pointer to store to.
-        /// Uses the `bin` union field.
-        /// If the pointer is none, it means this instruction has been elided in
-        /// AstGen, but AstGen was unable to actually omit it from the ZIR code.
+        /// This instruction is not really supposed to be emitted from AstGen; nevetheless it
+        /// is sometimes emitted due to deficiencies in AstGen. When Sema sees this instruction,
+        /// it must clean up after AstGen's mess by looking at various context clues and
+        /// then treating it as one of the following:
+        ///  * no-op
+        ///  * store_to_inferred_ptr
+        ///  * store
+        /// Uses the `bin` union field with LHS as the pointer to store to.
         store_to_block_ptr,
         /// Same as `store` but the type of the value being stored will be used to infer
         /// the pointer type.
@@ -544,6 +547,9 @@ pub const Inst = struct {
         /// Returns the type of a value.
         /// Uses the `un_node` field.
         typeof,
+        /// Implements `@TypeOf` for one operand.
+        /// Uses the `pl_node` field.
+        typeof_builtin,
         /// Given a value, look at the type of it, which must be an integer type.
         /// Returns the integer type for the RHS of a shift operation.
         /// Uses the `un_node` field.
@@ -643,6 +649,24 @@ pub const Inst = struct {
         /// Result is a pointer to the value.
         /// Uses the `switch_capture` field.
         switch_capture_multi_ref,
+        /// Given a
+        ///   *A returns *A
+        ///   *E!A returns *A
+        ///   *?A returns *A
+        /// Uses the `un_node` field.
+        array_base_ptr,
+        /// Given a
+        ///   *S returns *S
+        ///   *E!S returns *S
+        ///   *?S returns *S
+        /// Uses the `un_node` field.
+        field_base_ptr,
+        /// Checks that the type supports array init syntax.
+        /// Uses the `un_node` field.
+        validate_array_init_ty,
+        /// Checks that the type supports struct init syntax.
+        /// Uses the `un_node` field.
+        validate_struct_init_ty,
         /// Given a set of `field_ptr` instructions, assumes they are all part of a struct
         /// initialization expression, and emits compile errors for duplicate fields
         /// as well as missing fields, if applicable.
@@ -697,10 +721,9 @@ pub const Inst = struct {
         /// Anonymous array initialization syntax, make the result a pointer.
         /// Uses the `pl_node` field. Payload is `MultiOp`.
         array_init_anon_ref,
-        /// Given a pointer to a union and a comptime known field name, activates that field
-        /// and returns a pointer to it.
-        /// Uses the `pl_node` field. Payload is `UnionInitPtr`.
-        union_init_ptr,
+        /// Implements the `@unionInit` builtin.
+        /// Uses the `pl_node` field. Payload is `UnionInit`.
+        union_init,
         /// Implements the `@typeInfo` builtin. Uses `un_node`.
         type_info,
         /// Implements the `@sizeOf` builtin. Uses `un_node`.
@@ -874,10 +897,6 @@ pub const Inst = struct {
         /// Implements the `@call` builtin.
         /// Uses the `pl_node` union field with payload `BuiltinCall`.
         builtin_call,
-        /// Given a type and a field name, returns a pointer to the field type.
-        /// Assumed to be part of a `@fieldParentPtr` builtin call.
-        /// Uses the `bin` union field. LHS is type, RHS is field name.
-        field_ptr_type,
         /// Implements the `@fieldParentPtr` builtin.
         /// Uses the `pl_node` union field with payload `FieldParentPtr`.
         field_parent_ptr,
@@ -1050,6 +1069,7 @@ pub const Inst = struct {
                 .negate,
                 .negate_wrap,
                 .typeof,
+                .typeof_builtin,
                 .xor,
                 .optional_type,
                 .optional_payload_safe,
@@ -1087,6 +1107,10 @@ pub const Inst = struct {
                 .switch_block,
                 .switch_cond,
                 .switch_cond_ref,
+                .array_base_ptr,
+                .field_base_ptr,
+                .validate_array_init_ty,
+                .validate_struct_init_ty,
                 .validate_struct_init,
                 .validate_struct_init_comptime,
                 .validate_array_init,
@@ -1100,7 +1124,7 @@ pub const Inst = struct {
                 .array_init_anon,
                 .array_init_ref,
                 .array_init_anon_ref,
-                .union_init_ptr,
+                .union_init,
                 .field_type,
                 .field_type_ref,
                 .int_to_enum,
@@ -1170,7 +1194,6 @@ pub const Inst = struct {
                 .atomic_store,
                 .mul_add,
                 .builtin_call,
-                .field_ptr_type,
                 .field_parent_ptr,
                 .maximum,
                 .memcpy,
@@ -1340,6 +1363,10 @@ pub const Inst = struct {
                 .switch_capture_ref = .switch_capture,
                 .switch_capture_multi = .switch_capture,
                 .switch_capture_multi_ref = .switch_capture,
+                .array_base_ptr = .un_node,
+                .field_base_ptr = .un_node,
+                .validate_array_init_ty = .un_node,
+                .validate_struct_init_ty = .un_node,
                 .validate_struct_init = .pl_node,
                 .validate_struct_init_comptime = .pl_node,
                 .validate_array_init = .pl_node,
@@ -1355,7 +1382,7 @@ pub const Inst = struct {
                 .array_init_anon = .pl_node,
                 .array_init_ref = .pl_node,
                 .array_init_anon_ref = .pl_node,
-                .union_init_ptr = .pl_node,
+                .union_init = .pl_node,
                 .type_info = .un_node,
                 .size_of = .un_node,
                 .bit_size_of = .un_node,
@@ -1405,6 +1432,7 @@ pub const Inst = struct {
                 .ptr_cast = .pl_node,
                 .truncate = .pl_node,
                 .align_cast = .pl_node,
+                .typeof_builtin = .pl_node,
 
                 .has_decl = .pl_node,
                 .has_field = .pl_node,
@@ -1440,7 +1468,6 @@ pub const Inst = struct {
                 .atomic_store = .pl_node,
                 .mul_add = .pl_node,
                 .builtin_call = .pl_node,
-                .field_ptr_type = .bin,
                 .field_parent_ptr = .pl_node,
                 .maximum = .pl_node,
                 .memcpy = .pl_node,
@@ -2368,6 +2395,12 @@ pub const Inst = struct {
         };
     };
 
+    pub const TypeOfPeer = struct {
+        src_node: i32,
+        body_len: u32,
+        body_index: u32,
+    };
+
     pub const BuiltinCall = struct {
         options: Ref,
         callee: Ref,
@@ -2389,7 +2422,7 @@ pub const Inst = struct {
     /// 1. align: Ref // if `has_align` flag is set
     /// 2. address_space: Ref // if `has_addrspace` flag is set
     /// 3. bit_start: Ref // if `has_bit_range` flag is set
-    /// 4. bit_end: Ref // if `has_bit_range` flag is set
+    /// 4. host_size: Ref // if `has_bit_range` flag is set
     pub const PtrType = struct {
         elem_type: Ref,
     };
@@ -2862,10 +2895,10 @@ pub const Inst = struct {
         ordering: Ref,
     };
 
-    pub const UnionInitPtr = struct {
-        result_ptr: Ref,
+    pub const UnionInit = struct {
         union_type: Ref,
         field_name: Ref,
+        init: Ref,
     };
 
     pub const AtomicStore = struct {

@@ -244,8 +244,12 @@ pub const ResultLoc = union(enum) {
     fn strategy(rl: ResultLoc, block_scope: *GenZir) Strategy {
         switch (rl) {
             // In this branch there will not be any store_to_block_ptr instructions.
-            .discard, .none, .ty, .coerced_ty, .ref => return .{
+            .none, .ty, .coerced_ty, .ref => return .{
                 .tag = .break_operand,
+                .elide_store_to_block_ptr_instructions = false,
+            },
+            .discard => return .{
+                .tag = .break_void,
                 .elide_store_to_block_ptr_instructions = false,
             },
             // The pointer got passed through to the sub-expressions, so we will use
@@ -319,6 +323,21 @@ fn reachableExpr(
     node: Ast.Node.Index,
     reachable_node: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
+    return reachableExprComptime(gz, scope, rl, node, reachable_node, false);
+}
+
+fn reachableExprComptime(
+    gz: *GenZir,
+    scope: *Scope,
+    rl: ResultLoc,
+    node: Ast.Node.Index,
+    reachable_node: Ast.Node.Index,
+    force_comptime: bool,
+) InnerError!Zir.Inst.Ref {
+    const prev_force_comptime = gz.force_comptime;
+    gz.force_comptime = prev_force_comptime or force_comptime;
+    defer gz.force_comptime = prev_force_comptime;
+
     const result_inst = try expr(gz, scope, rl, node);
     if (gz.refIsNoReturn(result_inst)) {
         try gz.astgen.appendErrorNodeNotes(reachable_node, "unreachable code", .{}, &[_]u32{
@@ -1282,6 +1301,7 @@ fn arrayInitExpr(
             }
         }
         const array_type_inst = try typeExpr(gz, scope, array_init.ast.type_expr);
+        _ = try gz.addUnNode(.validate_array_init_ty, array_type_inst, node);
         const elem_type = try gz.addUnNode(.elem_type, array_type_inst, array_init.ast.type_expr);
         break :inst .{
             .array = array_type_inst,
@@ -1384,7 +1404,8 @@ fn arrayInitExprRlPtr(
     array_ty: Zir.Inst.Ref,
 ) InnerError!Zir.Inst.Ref {
     if (array_ty == .none) {
-        return arrayInitExprRlPtrInner(gz, scope, node, result_ptr, elements);
+        const base_ptr = try gz.addUnNode(.array_base_ptr, result_ptr, node);
+        return arrayInitExprRlPtrInner(gz, scope, node, base_ptr, elements);
     }
 
     var as_scope = try gz.makeCoercionScope(scope, array_ty, result_ptr);
@@ -1493,8 +1514,11 @@ fn structInitExpr(
 
     switch (rl) {
         .discard => {
-            if (struct_init.ast.type_expr != 0)
-                _ = try typeExpr(gz, scope, struct_init.ast.type_expr);
+            // TODO if a type expr is given the fields should be validated for that type
+            if (struct_init.ast.type_expr != 0) {
+                const ty_inst = try typeExpr(gz, scope, struct_init.ast.type_expr);
+                _ = try gz.addUnNode(.validate_struct_init_ty, ty_inst, node);
+            }
             for (struct_init.ast.fields) |field_init| {
                 _ = try expr(gz, scope, .discard, field_init);
             }
@@ -1503,6 +1527,7 @@ fn structInitExpr(
         .ref => {
             if (struct_init.ast.type_expr != 0) {
                 const ty_inst = try typeExpr(gz, scope, struct_init.ast.type_expr);
+                _ = try gz.addUnNode(.validate_struct_init_ty, ty_inst, node);
                 return structInitExprRlTy(gz, scope, node, struct_init, ty_inst, .struct_init_ref);
             } else {
                 return structInitExprRlNone(gz, scope, node, struct_init, .struct_init_anon_ref);
@@ -1511,6 +1536,7 @@ fn structInitExpr(
         .none => {
             if (struct_init.ast.type_expr != 0) {
                 const ty_inst = try typeExpr(gz, scope, struct_init.ast.type_expr);
+                _ = try gz.addUnNode(.validate_struct_init_ty, ty_inst, node);
                 return structInitExprRlTy(gz, scope, node, struct_init, ty_inst, .struct_init);
             } else {
                 return structInitExprRlNone(gz, scope, node, struct_init, .struct_init_anon);
@@ -1521,6 +1547,7 @@ fn structInitExpr(
                 return structInitExprRlTy(gz, scope, node, struct_init, ty_inst, .struct_init);
             }
             const inner_ty_inst = try typeExpr(gz, scope, struct_init.ast.type_expr);
+            _ = try gz.addUnNode(.validate_struct_init_ty, inner_ty_inst, node);
             const result = try structInitExprRlTy(gz, scope, node, struct_init, inner_ty_inst, .struct_init);
             return rvalue(gz, rl, result, node);
         },
@@ -1567,9 +1594,11 @@ fn structInitExprRlPtr(
     result_ptr: Zir.Inst.Ref,
 ) InnerError!Zir.Inst.Ref {
     if (struct_init.ast.type_expr == 0) {
-        return structInitExprRlPtrInner(gz, scope, node, struct_init, result_ptr);
+        const base_ptr = try gz.addUnNode(.field_base_ptr, result_ptr, node);
+        return structInitExprRlPtrInner(gz, scope, node, struct_init, base_ptr);
     }
     const ty_inst = try typeExpr(gz, scope, struct_init.ast.type_expr);
+    _ = try gz.addUnNode(.validate_struct_init_ty, ty_inst, node);
 
     var as_scope = try gz.makeCoercionScope(scope, ty_inst, result_ptr);
     defer as_scope.unstack();
@@ -1714,8 +1743,10 @@ fn breakExpr(parent_gz: *GenZir, parent_scope: *Scope, node: Ast.Node.Index) Inn
                     continue;
                 };
 
+                const break_tag: Zir.Inst.Tag = if (block_gz.is_inline) .break_inline else .@"break";
+
                 if (rhs == 0) {
-                    _ = try parent_gz.addBreak(.@"break", block_inst, .void_value);
+                    _ = try parent_gz.addBreak(break_tag, block_inst, .void_value);
                     return Zir.Inst.Ref.unreachable_value;
                 }
                 block_gz.break_count += 1;
@@ -1731,29 +1762,19 @@ fn breakExpr(parent_gz: *GenZir, parent_scope: *Scope, node: Ast.Node.Index) Inn
 
                 switch (block_gz.break_result_loc) {
                     .block_ptr => {
-                        const br = try parent_gz.addBreak(.@"break", block_inst, operand);
+                        const br = try parent_gz.addBreak(break_tag, block_inst, operand);
                         try block_gz.labeled_breaks.append(astgen.gpa, br);
-
-                        // if list grew as much as rvalue_rl_count, then a break
-                        // inside operand already saved the store_to_block_ptr
-                        const have_store_to_block = block_gz.rvalue_rl_count >
-                            block_gz.labeled_store_to_block_ptr_list.items.len;
-                        if (have_store_to_block) {
-                            const zir_tags = parent_gz.astgen.instructions.items(.tag);
-                            const zir_datas = parent_gz.astgen.instructions.items(.data);
-                            const store_inst = @intCast(u32, zir_tags.len - 2);
-                            assert(zir_tags[store_inst] == .store_to_block_ptr);
-                            assert(zir_datas[store_inst].bin.lhs == block_gz.rl_ptr);
-                            try block_gz.labeled_store_to_block_ptr_list.append(astgen.gpa, store_inst);
-                        }
                     },
                     .ptr => {
                         // In this case we don't have any mechanism to intercept it;
                         // we assume the result location is written, and we break with void.
-                        _ = try parent_gz.addBreak(.@"break", block_inst, .void_value);
+                        _ = try parent_gz.addBreak(break_tag, block_inst, .void_value);
+                    },
+                    .discard => {
+                        _ = try parent_gz.addBreak(break_tag, block_inst, .void_value);
                     },
                     else => {
-                        _ = try parent_gz.addBreak(.@"break", block_inst, operand);
+                        _ = try parent_gz.addBreak(break_tag, block_inst, operand);
                     },
                 }
                 return Zir.Inst.Ref.unreachable_value;
@@ -1928,7 +1949,6 @@ fn labeledBlockExpr(
     block_scope.setBreakResultLoc(rl);
     defer block_scope.unstack();
     defer block_scope.labeled_breaks.deinit(astgen.gpa);
-    defer block_scope.labeled_store_to_block_ptr_list.deinit(astgen.gpa);
 
     try blockExprStmts(&block_scope, &block_scope.base, statements);
 
@@ -1936,9 +1956,7 @@ fn labeledBlockExpr(
         try astgen.appendErrorTok(label_token, "unused block label", .{});
     }
 
-    const zir_tags = gz.astgen.instructions.items(.tag);
     const zir_datas = gz.astgen.instructions.items(.data);
-
     const strat = rl.strategy(&block_scope);
     switch (strat.tag) {
         .break_void => {
@@ -1953,16 +1971,7 @@ fn labeledBlockExpr(
         },
         .break_operand => {
             // All break operands are values that did not use the result location pointer.
-            if (strat.elide_store_to_block_ptr_instructions) {
-                for (block_scope.labeled_store_to_block_ptr_list.items) |inst| {
-                    // Mark as elided for removal below.
-                    assert(zir_tags[inst] == .store_to_block_ptr);
-                    zir_datas[inst].bin.lhs = .none;
-                }
-                try block_scope.setBlockBodyEliding(block_inst);
-            } else {
-                try block_scope.setBlockBody(block_inst);
-            }
+            try block_scope.setBlockBody(block_inst);
             const block_ref = indexToRef(block_inst);
             switch (rl) {
                 .ref => return block_ref,
@@ -2050,8 +2059,8 @@ fn unusedResultDeferExpr(gz: *GenZir, defer_scope: *Scope.Defer, expr_scope: *Sc
     _ = try unusedResultExpr(gz, expr_scope, expr_node);
 }
 
-/// Returns AST source node of the thing that is noreturn if the statement is definitely `noreturn`.
-/// Otherwise returns 0.
+/// Returns AST source node of the thing that is noreturn if the statement is
+/// definitely `noreturn`. Otherwise returns 0.
 fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) InnerError!Ast.Node.Index {
     try emitDbgNode(gz, statement);
     // We need to emit an error if the result is not `noreturn` or `void`, but
@@ -2157,6 +2166,7 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
             .negate,
             .negate_wrap,
             .typeof,
+            .typeof_builtin,
             .xor,
             .optional_type,
             .optional_payload_safe,
@@ -2198,7 +2208,7 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
             .array_init_anon,
             .array_init_ref,
             .array_init_anon_ref,
-            .union_init_ptr,
+            .union_init,
             .field_type,
             .field_type_ref,
             .error_set_decl,
@@ -2269,7 +2279,6 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
             .atomic_rmw,
             .mul_add,
             .builtin_call,
-            .field_ptr_type,
             .field_parent_ptr,
             .maximum,
             .minimum,
@@ -2281,6 +2290,8 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
             .ret_err_value_code,
             .extended,
             .closure_get,
+            .array_base_ptr,
+            .field_base_ptr,
             => break :b false,
 
             // ZIR instructions that are always `noreturn`.
@@ -2329,6 +2340,8 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
             .closure_capture,
             .memcpy,
             .memset,
+            .validate_array_init_ty,
+            .validate_struct_init_ty,
             => break :b true,
         }
     } else switch (maybe_unused_result) {
@@ -2758,7 +2771,7 @@ fn varDecl(
                 resolve_inferred_alloc = alloc;
                 break :a .{ .alloc = alloc, .result_loc = .{ .inferred_ptr = alloc } };
             };
-            _ = try reachableExpr(gz, scope, var_data.result_loc, var_decl.ast.init_node, node);
+            _ = try reachableExprComptime(gz, scope, var_data.result_loc, var_decl.ast.init_node, node, is_comptime);
             if (resolve_inferred_alloc != .none) {
                 _ = try gz.addUnNode(.resolve_inferred_alloc, resolve_inferred_alloc, node);
             }
@@ -3971,6 +3984,9 @@ fn structDeclInner(
         wip_members.nextField(bits_per_field, .{ have_align, have_value, is_comptime, unused });
 
         if (have_align) {
+            if (layout == .Packed) {
+                try astgen.appendErrorNode(member.ast.align_expr, "unable to override alignment of packed struct fields", .{});
+            }
             const align_inst = try expr(&block_scope, &namespace.base, align_rl, member.ast.align_expr);
             wip_members.appendToField(@enumToInt(align_inst));
         }
@@ -5285,10 +5301,10 @@ fn whileExpr(
     try parent_gz.instructions.append(astgen.gpa, loop_block);
 
     var loop_scope = parent_gz.makeSubBlock(scope);
+    loop_scope.is_inline = is_inline;
     loop_scope.setBreakResultLoc(rl);
     defer loop_scope.unstack();
     defer loop_scope.labeled_breaks.deinit(astgen.gpa);
-    defer loop_scope.labeled_store_to_block_ptr_list.deinit(astgen.gpa);
 
     var continue_scope = parent_gz.makeSubBlock(&loop_scope.base);
     defer continue_scope.unstack();
@@ -5535,10 +5551,10 @@ fn forExpr(
     try parent_gz.instructions.append(astgen.gpa, loop_block);
 
     var loop_scope = parent_gz.makeSubBlock(scope);
+    loop_scope.is_inline = is_inline;
     loop_scope.setBreakResultLoc(rl);
     defer loop_scope.unstack();
     defer loop_scope.labeled_breaks.deinit(astgen.gpa);
-    defer loop_scope.labeled_store_to_block_ptr_list.deinit(astgen.gpa);
 
     var cond_scope = parent_gz.makeSubBlock(&loop_scope.base);
     defer cond_scope.unstack();
@@ -6793,40 +6809,17 @@ fn unionInit(
 ) InnerError!Zir.Inst.Ref {
     const union_type = try typeExpr(gz, scope, params[0]);
     const field_name = try comptimeExpr(gz, scope, .{ .ty = .const_slice_u8_type }, params[1]);
-    switch (rl) {
-        .none, .discard, .ref, .ty, .coerced_ty, .inferred_ptr => {
-            _ = try gz.addPlNode(.field_type_ref, params[1], Zir.Inst.FieldTypeRef{
-                .container_type = union_type,
-                .field_name = field_name,
-            });
-            const result = try expr(gz, scope, .{ .ty = union_type }, params[2]);
-            return rvalue(gz, rl, result, node);
-        },
-        .ptr => |result_ptr| {
-            return unionInitRlPtr(gz, scope, node, result_ptr, params[2], union_type, field_name);
-        },
-        .block_ptr => |block_scope| {
-            return unionInitRlPtr(gz, scope, node, block_scope.rl_ptr, params[2], union_type, field_name);
-        },
-    }
-}
-
-fn unionInitRlPtr(
-    parent_gz: *GenZir,
-    scope: *Scope,
-    node: Ast.Node.Index,
-    result_ptr: Zir.Inst.Ref,
-    expr_node: Ast.Node.Index,
-    union_type: Zir.Inst.Ref,
-    field_name: Zir.Inst.Ref,
-) InnerError!Zir.Inst.Ref {
-    const union_init_ptr = try parent_gz.addPlNode(.union_init_ptr, node, Zir.Inst.UnionInitPtr{
-        .result_ptr = result_ptr,
-        .union_type = union_type,
+    const field_type = try gz.addPlNode(.field_type_ref, params[1], Zir.Inst.FieldTypeRef{
+        .container_type = union_type,
         .field_name = field_name,
     });
-    // TODO check if we need to do the elision like below in asRlPtr
-    return expr(parent_gz, scope, .{ .ptr = union_init_ptr }, expr_node);
+    const init = try reachableExpr(gz, scope, .{ .ty = field_type }, params[2], node);
+    const result = try gz.addPlNode(.union_init, node, Zir.Inst.UnionInit{
+        .union_type = union_type,
+        .init = init,
+        .field_name = field_name,
+    });
+    return rvalue(gz, rl, result, node);
 }
 
 fn asRlPtr(
@@ -6867,29 +6860,54 @@ fn typeOf(
     scope: *Scope,
     rl: ResultLoc,
     node: Ast.Node.Index,
-    params: []const Ast.Node.Index,
+    args: []const Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
-    if (params.len < 1) {
+    if (args.len < 1) {
         return gz.astgen.failNode(node, "expected at least 1 argument, found 0", .{});
     }
-    if (params.len == 1) {
-        const expr_result = try reachableExpr(gz, scope, .none, params[0], node);
-        const result = try gz.addUnNode(.typeof, expr_result, node);
-        return rvalue(gz, rl, result, node);
-    }
+    const gpa = gz.astgen.gpa;
+    if (args.len == 1) {
+        const typeof_inst = try gz.makeBlockInst(.typeof_builtin, node);
 
-    const payload_index = try addExtra(gz.astgen, Zir.Inst.NodeMultiOp{
+        var typeof_scope = gz.makeSubBlock(scope);
+        typeof_scope.force_comptime = false;
+        defer typeof_scope.unstack();
+
+        const ty_expr = try reachableExpr(&typeof_scope, &typeof_scope.base, .none, args[0], node);
+        if (!gz.refIsNoReturn(ty_expr)) {
+            _ = try typeof_scope.addBreak(.break_inline, typeof_inst, ty_expr);
+        }
+        try typeof_scope.setBlockBody(typeof_inst);
+
+        // typeof_scope unstacked now, can add new instructions to gz
+        try gz.instructions.append(gpa, typeof_inst);
+        return rvalue(gz, rl, indexToRef(typeof_inst), node);
+    }
+    const payload_size: u32 = std.meta.fields(Zir.Inst.TypeOfPeer).len;
+    const payload_index = try reserveExtra(gz.astgen, payload_size + args.len);
+    var args_index = payload_index + payload_size;
+
+    const typeof_inst = try gz.addExtendedMultiOpPayloadIndex(.typeof_peer, payload_index, args.len);
+
+    var typeof_scope = gz.makeSubBlock(scope);
+    typeof_scope.force_comptime = false;
+
+    for (args) |arg, i| {
+        const param_ref = try reachableExpr(&typeof_scope, &typeof_scope.base, .none, arg, node);
+        gz.astgen.extra.items[args_index + i] = @enumToInt(param_ref);
+    }
+    _ = try typeof_scope.addBreak(.break_inline, refToIndex(typeof_inst).?, .void_value);
+
+    const body = typeof_scope.instructionsSlice();
+    gz.astgen.setExtra(payload_index, Zir.Inst.TypeOfPeer{
+        .body_len = @intCast(u32, body.len),
+        .body_index = @intCast(u32, gz.astgen.extra.items.len),
         .src_node = gz.nodeIndexToRelative(node),
     });
-    var extra_index = try reserveExtra(gz.astgen, params.len);
-    for (params) |param| {
-        const param_ref = try reachableExpr(gz, scope, .none, param, node);
-        gz.astgen.extra.items[extra_index] = @enumToInt(param_ref);
-        extra_index += 1;
-    }
+    try gz.astgen.extra.appendSlice(gpa, body);
+    typeof_scope.unstack();
 
-    const result = try gz.addExtendedMultiOpPayloadIndex(.typeof_peer, payload_index, params.len);
-    return rvalue(gz, rl, result, node);
+    return rvalue(gz, rl, typeof_inst, node);
 }
 
 fn builtinCall(
@@ -7367,11 +7385,10 @@ fn builtinCall(
         .field_parent_ptr => {
             const parent_type = try typeExpr(gz, scope, params[0]);
             const field_name = try comptimeExpr(gz, scope, .{ .ty = .const_slice_u8_type }, params[1]);
-            const field_ptr_type = try gz.addBin(.field_ptr_type, parent_type, field_name);
             const result = try gz.addPlNode(.field_parent_ptr, node, Zir.Inst.FieldParentPtr{
                 .parent_type = parent_type,
                 .field_name = field_name,
-                .field_ptr = try expr(gz, scope, .{ .ty = field_ptr_type }, params[2]),
+                .field_ptr = try expr(gz, scope, .none, params[2]),
             });
             return rvalue(gz, rl, result, node);
         },
@@ -9477,6 +9494,8 @@ const GenZir = struct {
     const base_tag: Scope.Tag = .gen_zir;
     base: Scope = Scope{ .tag = base_tag },
     force_comptime: bool,
+    /// This is set to true for inline loops; false otherwise.
+    is_inline: bool = false,
     in_defer: bool,
     c_import: bool = false,
     /// How decls created in this scope should be named.
@@ -9517,10 +9536,6 @@ const GenZir = struct {
     /// Tracks `break :foo bar` instructions so they can possibly be elided later if
     /// the labeled block ends up not needing a result location pointer.
     labeled_breaks: ArrayListUnmanaged(Zir.Inst.Index) = .{},
-    /// Tracks `store_to_block_ptr` instructions that correspond to break instructions
-    /// so they can possibly be elided later if the labeled block ends up not needing
-    /// a result location pointer.
-    labeled_store_to_block_ptr_list: ArrayListUnmanaged(Zir.Inst.Index) = .{},
 
     suspend_node: Ast.Node.Index = 0,
     nosuspend_node: Ast.Node.Index = 0,
@@ -9722,32 +9737,6 @@ const GenZir = struct {
             Zir.Inst.Block{ .body_len = @intCast(u32, body.len) },
         );
         gz.astgen.extra.appendSliceAssumeCapacity(body);
-        gz.unstack();
-    }
-
-    /// Same as `setBlockBody` except we don't copy instructions which are
-    /// `store_to_block_ptr` instructions with lhs set to .none.
-    /// Assumes nothing stacked on `gz`. Unstacks `gz`.
-    fn setBlockBodyEliding(gz: *GenZir, inst: Zir.Inst.Index) !void {
-        const gpa = gz.astgen.gpa;
-        const body = gz.instructionsSlice();
-        try gz.astgen.extra.ensureUnusedCapacity(gpa, @typeInfo(Zir.Inst.Block).Struct.fields.len + body.len);
-        const zir_datas = gz.astgen.instructions.items(.data);
-        const zir_tags = gz.astgen.instructions.items(.tag);
-        const block_pl_index = gz.astgen.addExtraAssumeCapacity(Zir.Inst.Block{
-            .body_len = @intCast(u32, body.len),
-        });
-        zir_datas[inst].pl_node.payload_index = block_pl_index;
-        for (body) |sub_inst| {
-            if (zir_tags[sub_inst] == .store_to_block_ptr and
-                zir_datas[sub_inst].bin.lhs == .none)
-            {
-                // Decrement `body_len`.
-                gz.astgen.extra.items[block_pl_index] -= 1;
-                continue;
-            }
-            gz.astgen.extra.appendAssumeCapacity(sub_inst);
-        }
         gz.unstack();
     }
 

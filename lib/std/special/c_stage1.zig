@@ -613,19 +613,6 @@ export fn fmod(x: f64, y: f64) f64 {
     return generic_fmod(f64, x, y);
 }
 
-export fn ceilf(x: f32) f32 {
-    return math.ceil(x);
-}
-export fn ceil(x: f64) f64 {
-    return math.ceil(x);
-}
-export fn ceill(x: c_longdouble) c_longdouble {
-    if (!long_double_is_f128) {
-        @panic("TODO implement this");
-    }
-    return math.ceil(x);
-}
-
 export fn fmaf(a: f32, b: f32, c: f32) f32 {
     return math.fma(f32, a, b, c);
 }
@@ -640,22 +627,6 @@ export fn fmal(a: c_longdouble, b: c_longdouble, c: c_longdouble) c_longdouble {
     return math.fma(c_longdouble, a, b, c);
 }
 
-export fn sin(a: f64) f64 {
-    return math.sin(a);
-}
-
-export fn sinf(a: f32) f32 {
-    return math.sin(a);
-}
-
-export fn cos(a: f64) f64 {
-    return math.cos(a);
-}
-
-export fn cosf(a: f32) f32 {
-    return math.cos(a);
-}
-
 export fn sincos(a: f64, r_sin: *f64, r_cos: *f64) void {
     r_sin.* = math.sin(a);
     r_cos.* = math.cos(a);
@@ -664,38 +635,6 @@ export fn sincos(a: f64, r_sin: *f64, r_cos: *f64) void {
 export fn sincosf(a: f32, r_sin: *f32, r_cos: *f32) void {
     r_sin.* = math.sin(a);
     r_cos.* = math.cos(a);
-}
-
-export fn exp(a: f64) f64 {
-    return math.exp(a);
-}
-
-export fn expf(a: f32) f32 {
-    return math.exp(a);
-}
-
-export fn exp2(a: f64) f64 {
-    return math.exp2(a);
-}
-
-export fn exp2f(a: f32) f32 {
-    return math.exp2(a);
-}
-
-export fn log2(a: f64) f64 {
-    return math.log2(a);
-}
-
-export fn log2f(a: f32) f32 {
-    return math.log2(a);
-}
-
-export fn log10(a: f64) f64 {
-    return math.log10(a);
-}
-
-export fn log10f(a: f32) f32 {
-    return math.log10(a);
 }
 
 export fn fabs(a: f64) f64 {

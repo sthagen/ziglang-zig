@@ -438,6 +438,7 @@ const usage_build_generic =
     \\  --export-table                 (WebAssembly) export function table to the host environment
     \\  --initial-memory=[bytes]       (WebAssembly) initial size of the linear memory
     \\  --max-memory=[bytes]           (WebAssembly) maximum size of the linear memory
+    \\  --shared-memory                (WebAssembly) use shared linear memory
     \\  --global-base=[addr]           (WebAssembly) where to start to place global data
     \\  --export=[value]               (WebAssembly) Force a symbol to be exported
     \\
@@ -635,6 +636,7 @@ fn buildOutputType(
     var linker_export_table: bool = false;
     var linker_initial_memory: ?u64 = null;
     var linker_max_memory: ?u64 = null;
+    var linker_shared_memory: bool = false;
     var linker_global_base: ?u64 = null;
     var linker_z_nodelete = false;
     var linker_z_notext = false;
@@ -711,6 +713,14 @@ fn buildOutputType(
 
     var link_objects = std.ArrayList(Compilation.LinkObject).init(gpa);
     defer link_objects.deinit();
+
+    // This map is a flag per link_objects item, used to represent the
+    // `-l :file.so` syntax from gcc/clang.
+    // This is only exposed from the `zig cc` interface. It means that the `path`
+    // field from the corresponding `link_objects` element is a suffix, and is
+    // to be tried against each library path as a prefix until an existing file is found.
+    // This map remains empty for the main CLI.
+    var link_objects_lib_search_paths: std.AutoHashMapUnmanaged(u32, void) = .{};
 
     var framework_dirs = std.ArrayList([]const u8).init(gpa);
     defer framework_dirs.deinit();
@@ -1199,6 +1209,8 @@ fn buildOutputType(
                         linker_initial_memory = parseIntSuffix(arg, "--initial-memory=".len);
                     } else if (mem.startsWith(u8, arg, "--max-memory=")) {
                         linker_max_memory = parseIntSuffix(arg, "--max-memory=".len);
+                    } else if (mem.startsWith(u8, arg, "--shared-memory")) {
+                        linker_shared_memory = true;
                     } else if (mem.startsWith(u8, arg, "--global-base=")) {
                         linker_global_base = parseIntSuffix(arg, "--global-base=".len);
                     } else if (mem.startsWith(u8, arg, "--export=")) {
@@ -1338,7 +1350,16 @@ fn buildOutputType(
                         // -l
                         // We don't know whether this library is part of libc or libc++ until
                         // we resolve the target, so we simply append to the list for now.
-                        if (force_static_libs) {
+                        if (mem.startsWith(u8, it.only_arg, ":")) {
+                            // This "feature" of gcc/clang means to treat this as a positional
+                            // link object, but using the library search directories as a prefix.
+                            try link_objects.append(.{
+                                .path = it.only_arg[1..],
+                                .must_link = must_link,
+                            });
+                            const index = @intCast(u32, link_objects.items.len - 1);
+                            try link_objects_lib_search_paths.put(arena, index, {});
+                        } else if (force_static_libs) {
                             try static_libs.append(it.only_arg);
                         } else {
                             try system_libs.put(it.only_arg, .{ .needed = needed });
@@ -1510,7 +1531,9 @@ fn buildOutputType(
             var i: usize = 0;
             while (i < linker_args.items.len) : (i += 1) {
                 const arg = linker_args.items[i];
-                if (mem.eql(u8, arg, "-soname")) {
+                if (mem.eql(u8, arg, "-soname") or
+                    mem.eql(u8, arg, "--soname"))
+                {
                     i += 1;
                     if (i >= linker_args.items.len) {
                         fatal("expected linker arg after '{s}'", .{arg});
@@ -1604,6 +1627,8 @@ fn buildOutputType(
                     linker_initial_memory = parseIntSuffix(arg, "--initial-memory=".len);
                 } else if (mem.startsWith(u8, arg, "--max-memory=")) {
                     linker_max_memory = parseIntSuffix(arg, "--max-memory=".len);
+                } else if (mem.startsWith(u8, arg, "--shared-memory")) {
+                    linker_shared_memory = true;
                 } else if (mem.startsWith(u8, arg, "--global-base=")) {
                     linker_global_base = parseIntSuffix(arg, "--global-base=".len);
                 } else if (mem.startsWith(u8, arg, "--export=")) {
@@ -1987,44 +2012,89 @@ fn buildOutputType(
             link_libcpp = true;
     }
 
+    if (target_info.target.cpu.arch.isWasm() and linker_shared_memory) {
+        if (output_mode == .Obj) {
+            fatal("shared memory is not allowed in object files", .{});
+        }
+
+        if (!target_info.target.cpu.features.isEnabled(@enumToInt(std.Target.wasm.Feature.atomics)) or
+            !target_info.target.cpu.features.isEnabled(@enumToInt(std.Target.wasm.Feature.bulk_memory)))
+        {
+            fatal("'atomics' and 'bulk-memory' features must be enabled to use shared memory", .{});
+        }
+    }
+
     // Now that we have target info, we can find out if any of the system libraries
     // are part of libc or libc++. We remove them from the list and communicate their
     // existence via flags instead.
     {
+        // Similarly, if any libs in this list are statically provided, we remove
+        // them from this list and populate the link_objects array instead.
+        const sep = fs.path.sep_str;
+        var test_path = std.ArrayList(u8).init(gpa);
+        defer test_path.deinit();
+
         var i: usize = 0;
-        while (i < system_libs.count()) {
+        syslib: while (i < system_libs.count()) {
             const lib_name = system_libs.keys()[i];
 
             if (target_util.is_libc_lib_name(target_info.target, lib_name)) {
                 link_libc = true;
-                _ = system_libs.orderedRemove(lib_name);
+                system_libs.orderedRemoveAt(i);
                 continue;
             }
             if (target_util.is_libcpp_lib_name(target_info.target, lib_name)) {
                 link_libcpp = true;
-                _ = system_libs.orderedRemove(lib_name);
+                system_libs.orderedRemoveAt(i);
                 continue;
             }
-            if (mem.eql(u8, lib_name, "unwind")) {
-                link_libunwind = true;
-                _ = system_libs.orderedRemove(lib_name);
-                continue;
+            switch (target_util.classifyCompilerRtLibName(target_info.target, lib_name)) {
+                .none => {},
+                .only_libunwind, .both => {
+                    link_libunwind = true;
+                    system_libs.orderedRemoveAt(i);
+                    continue;
+                },
+                .only_compiler_rt => {
+                    std.log.warn("ignoring superfluous library '{s}': this dependency is fulfilled instead by compiler-rt which zig unconditionally provides", .{lib_name});
+                    system_libs.orderedRemoveAt(i);
+                    continue;
+                },
             }
-            if (target_util.is_compiler_rt_lib_name(target_info.target, lib_name)) {
-                std.log.warn("ignoring superfluous library '{s}': this dependency is fulfilled instead by compiler-rt which zig unconditionally provides", .{lib_name});
-                _ = system_libs.orderedRemove(lib_name);
-                continue;
-            }
+
             if (std.fs.path.isAbsolute(lib_name)) {
                 fatal("cannot use absolute path as a system library: {s}", .{lib_name});
             }
+
             if (target_info.target.os.tag == .wasi) {
                 if (wasi_libc.getEmulatedLibCRTFile(lib_name)) |crt_file| {
                     try wasi_emulated_libs.append(crt_file);
-                    _ = system_libs.orderedRemove(lib_name);
+                    system_libs.orderedRemoveAt(i);
                     continue;
                 }
             }
+
+            for (lib_dirs.items) |lib_dir_path| {
+                test_path.clearRetainingCapacity();
+                try test_path.writer().print("{s}" ++ sep ++ "{s}{s}{s}", .{
+                    lib_dir_path,
+                    target_info.target.libPrefix(),
+                    lib_name,
+                    target_info.target.staticLibSuffix(),
+                });
+                fs.cwd().access(test_path.items, .{}) catch |err| switch (err) {
+                    error.FileNotFound => continue,
+                    else => |e| fatal("unable to search for static library '{s}': {s}", .{
+                        test_path.items, @errorName(e),
+                    }),
+                };
+                try link_objects.append(.{ .path = try arena.dupe(u8, test_path.items) });
+                system_libs.orderedRemoveAt(i);
+                continue :syslib;
+            }
+
+            std.log.scoped(.cli).debug("depending on system for -l{s}", .{lib_name});
+
             i += 1;
         }
     }
@@ -2051,7 +2121,9 @@ fn buildOutputType(
             want_native_include_dirs = true;
     }
 
-    if (sysroot == null and cross_target.isNativeOs() and (system_libs.count() != 0 or want_native_include_dirs)) {
+    if (sysroot == null and cross_target.isNativeOs() and
+        (system_libs.count() != 0 or want_native_include_dirs))
+    {
         const paths = std.zig.system.NativePaths.detect(arena, target_info) catch |err| {
             fatal("unable to detect native system paths: {s}", .{@errorName(err)});
         };
@@ -2133,6 +2205,30 @@ fn buildOutputType(
                 fatal("static library '{s}' not found. search paths: {s}", .{
                     static_lib, search_paths.items,
                 });
+            }
+        }
+    }
+
+    // Resolve `-l :file.so` syntax from `zig cc`. We use a separate map for this data
+    // since this is an uncommon case.
+    {
+        var it = link_objects_lib_search_paths.iterator();
+        while (it.next()) |item| {
+            const link_object_i = item.key_ptr.*;
+            const suffix = link_objects.items[link_object_i].path;
+
+            for (lib_dirs.items) |lib_dir_path| {
+                const test_path = try fs.path.join(arena, &.{ lib_dir_path, suffix });
+                fs.cwd().access(test_path, .{}) catch |err| switch (err) {
+                    error.FileNotFound => continue,
+                    else => |e| fatal("unable to search for library '{s}': {s}", .{
+                        test_path, @errorName(e),
+                    }),
+                };
+                link_objects.items[link_object_i].path = test_path;
+                break;
+            } else {
+                fatal("library '{s}' not found", .{suffix});
             }
         }
     }
@@ -2547,6 +2643,7 @@ fn buildOutputType(
         .linker_export_table = linker_export_table,
         .linker_initial_memory = linker_initial_memory,
         .linker_max_memory = linker_max_memory,
+        .linker_shared_memory = linker_shared_memory,
         .linker_global_base = linker_global_base,
         .linker_export_symbol_names = linker_export_symbol_names.items,
         .linker_z_nodelete = linker_z_nodelete,
@@ -3728,9 +3825,7 @@ pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void 
         };
         defer tree.deinit(gpa);
 
-        for (tree.errors) |parse_error| {
-            try printErrMsgToStdErr(gpa, arena, parse_error, tree, "<stdin>", color);
-        }
+        try printErrsMsgToStdErr(gpa, arena, tree.errors, tree, "<stdin>", color);
         var has_ast_error = false;
         if (check_ast_flag) {
             const Module = @import("Module.zig");
@@ -3918,9 +4013,7 @@ fn fmtPathFile(
     var tree = try std.zig.parse(fmt.gpa, source_code);
     defer tree.deinit(fmt.gpa);
 
-    for (tree.errors) |parse_error| {
-        try printErrMsgToStdErr(fmt.gpa, fmt.arena, parse_error, tree, file_path, fmt.color);
-    }
+    try printErrsMsgToStdErr(fmt.gpa, fmt.arena, tree.errors, tree, file_path, fmt.color);
     if (tree.errors.len != 0) {
         fmt.any_error = true;
         return;
@@ -4000,66 +4093,95 @@ fn fmtPathFile(
     }
 }
 
-fn printErrMsgToStdErr(
+fn printErrsMsgToStdErr(
     gpa: mem.Allocator,
     arena: mem.Allocator,
-    parse_error: Ast.Error,
+    parse_errors: []const Ast.Error,
     tree: Ast,
     path: []const u8,
     color: Color,
 ) !void {
-    const lok_token = parse_error.token;
-    const token_tags = tree.tokens.items(.tag);
-    const start_loc = tree.tokenLocation(0, lok_token);
-    const source_line = tree.source[start_loc.line_start..start_loc.line_end];
+    var i: usize = 0;
+    while (i < parse_errors.len) : (i += 1) {
+        const parse_error = parse_errors[i];
+        const lok_token = parse_error.token;
+        const token_tags = tree.tokens.items(.tag);
+        const start_loc = tree.tokenLocation(0, lok_token);
+        const source_line = tree.source[start_loc.line_start..start_loc.line_end];
 
-    var text_buf = std.ArrayList(u8).init(gpa);
-    defer text_buf.deinit();
-    const writer = text_buf.writer();
-    try tree.renderError(parse_error, writer);
-    const text = text_buf.items;
+        var text_buf = std.ArrayList(u8).init(gpa);
+        defer text_buf.deinit();
+        const writer = text_buf.writer();
+        try tree.renderError(parse_error, writer);
+        const text = text_buf.items;
 
-    var notes_buffer: [1]Compilation.AllErrors.Message = undefined;
-    var notes_len: usize = 0;
+        var notes_buffer: [2]Compilation.AllErrors.Message = undefined;
+        var notes_len: usize = 0;
 
-    if (token_tags[parse_error.token] == .invalid) {
-        const bad_off = @intCast(u32, tree.tokenSlice(parse_error.token).len);
-        const byte_offset = @intCast(u32, start_loc.line_start) + bad_off;
-        notes_buffer[notes_len] = .{
+        if (token_tags[parse_error.token + @boolToInt(parse_error.token_is_prev)] == .invalid) {
+            const bad_off = @intCast(u32, tree.tokenSlice(parse_error.token + @boolToInt(parse_error.token_is_prev)).len);
+            const byte_offset = @intCast(u32, start_loc.line_start) + @intCast(u32, start_loc.column) + bad_off;
+            notes_buffer[notes_len] = .{
+                .src = .{
+                    .src_path = path,
+                    .msg = try std.fmt.allocPrint(arena, "invalid byte: '{'}'", .{
+                        std.zig.fmtEscapes(tree.source[byte_offset..][0..1]),
+                    }),
+                    .byte_offset = byte_offset,
+                    .line = @intCast(u32, start_loc.line),
+                    .column = @intCast(u32, start_loc.column) + bad_off,
+                    .source_line = source_line,
+                },
+            };
+            notes_len += 1;
+        } else if (parse_error.tag == .decl_between_fields) {
+            const prev_loc = tree.tokenLocation(0, parse_errors[i + 1].token);
+            notes_buffer[0] = .{
+                .src = .{
+                    .src_path = path,
+                    .msg = "field before declarations here",
+                    .byte_offset = @intCast(u32, prev_loc.line_start),
+                    .line = @intCast(u32, prev_loc.line),
+                    .column = @intCast(u32, prev_loc.column),
+                    .source_line = tree.source[prev_loc.line_start..prev_loc.line_end],
+                },
+            };
+            const next_loc = tree.tokenLocation(0, parse_errors[i + 2].token);
+            notes_buffer[1] = .{
+                .src = .{
+                    .src_path = path,
+                    .msg = "field after declarations here",
+                    .byte_offset = @intCast(u32, next_loc.line_start),
+                    .line = @intCast(u32, next_loc.line),
+                    .column = @intCast(u32, next_loc.column),
+                    .source_line = tree.source[next_loc.line_start..next_loc.line_end],
+                },
+            };
+            notes_len = 2;
+            i += 2;
+        }
+
+        const extra_offset = tree.errorOffset(parse_error);
+        const message: Compilation.AllErrors.Message = .{
             .src = .{
                 .src_path = path,
-                .msg = try std.fmt.allocPrint(arena, "invalid byte: '{'}'", .{
-                    std.zig.fmtEscapes(tree.source[byte_offset..][0..1]),
-                }),
-                .byte_offset = byte_offset,
+                .msg = text,
+                .byte_offset = @intCast(u32, start_loc.line_start) + extra_offset,
                 .line = @intCast(u32, start_loc.line),
-                .column = @intCast(u32, start_loc.column) + bad_off,
+                .column = @intCast(u32, start_loc.column) + extra_offset,
                 .source_line = source_line,
+                .notes = notes_buffer[0..notes_len],
             },
         };
-        notes_len += 1;
+
+        const ttyconf: std.debug.TTY.Config = switch (color) {
+            .auto => std.debug.detectTTYConfig(),
+            .on => .escape_codes,
+            .off => .no_color,
+        };
+
+        message.renderToStdErr(ttyconf);
     }
-
-    const extra_offset = tree.errorOffset(parse_error.tag, parse_error.token);
-    const message: Compilation.AllErrors.Message = .{
-        .src = .{
-            .src_path = path,
-            .msg = text,
-            .byte_offset = @intCast(u32, start_loc.line_start) + extra_offset,
-            .line = @intCast(u32, start_loc.line),
-            .column = @intCast(u32, start_loc.column) + extra_offset,
-            .source_line = source_line,
-            .notes = notes_buffer[0..notes_len],
-        },
-    };
-
-    const ttyconf: std.debug.TTY.Config = switch (color) {
-        .auto => std.debug.detectTTYConfig(),
-        .on => .escape_codes,
-        .off => .no_color,
-    };
-
-    message.renderToStdErr(ttyconf);
 }
 
 pub const info_zen =
@@ -4617,9 +4739,7 @@ pub fn cmdAstCheck(
     file.tree_loaded = true;
     defer file.tree.deinit(gpa);
 
-    for (file.tree.errors) |parse_error| {
-        try printErrMsgToStdErr(gpa, arena, parse_error, file.tree, file.sub_file_path, color);
-    }
+    try printErrsMsgToStdErr(gpa, arena, file.tree.errors, file.tree, file.sub_file_path, color);
     if (file.tree.errors.len != 0) {
         process.exit(1);
     }
@@ -4745,9 +4865,7 @@ pub fn cmdChangelist(
     file.tree_loaded = true;
     defer file.tree.deinit(gpa);
 
-    for (file.tree.errors) |parse_error| {
-        try printErrMsgToStdErr(gpa, arena, parse_error, file.tree, old_source_file, .auto);
-    }
+    try printErrsMsgToStdErr(gpa, arena, file.tree.errors, file.tree, old_source_file, .auto);
     if (file.tree.errors.len != 0) {
         process.exit(1);
     }
@@ -4784,9 +4902,7 @@ pub fn cmdChangelist(
     var new_tree = try std.zig.parse(gpa, new_source);
     defer new_tree.deinit(gpa);
 
-    for (new_tree.errors) |parse_error| {
-        try printErrMsgToStdErr(gpa, arena, parse_error, new_tree, new_source_file, .auto);
-    }
+    try printErrsMsgToStdErr(gpa, arena, new_tree.errors, new_tree, new_source_file, .auto);
     if (new_tree.errors.len != 0) {
         process.exit(1);
     }

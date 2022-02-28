@@ -32,8 +32,7 @@ pub const Inst = struct {
         /// The first N instructions in the main block must be one arg instruction per
         /// function parameter. This makes function parameters participate in
         /// liveness analysis without any special handling.
-        /// Uses the `ty_str` field.
-        /// The string is the parameter name.
+        /// Uses the `ty` field.
         arg,
         /// Float or integer addition. For integers, wrapping is undefined behavior.
         /// Both operands are guaranteed to be the same type, and the result type
@@ -236,6 +235,12 @@ pub const Inst = struct {
         /// Result type will always be an unsigned integer big enough to fit the answer.
         /// Uses the `ty_op` field.
         popcount,
+        /// Reverse the bytes in an integer according to its representation in twos complement.
+        /// Uses the `ty_op` field.
+        byte_swap,
+        /// Reverse the bits in an integer according to its representation in twos complement.
+        /// Uses the `ty_op` field.
+        bit_reverse,
 
         /// Square root of a floating point number.
         /// Uses the `un_op` field.
@@ -424,6 +429,9 @@ pub const Inst = struct {
         /// *(E!T) -> E. If the value is not an error, undefined behavior.
         /// Uses the `ty_op` field.
         unwrap_errunion_err_ptr,
+        /// *(E!T) => *T. Sets the value to non-error with an undefined payload value.
+        /// Uses the `ty_op` field.
+        errunion_payload_ptr_set,
         /// wrap from T to E!T
         /// Uses the `ty_op` field.
         wrap_errunion_payload,
@@ -553,18 +561,24 @@ pub const Inst = struct {
         /// Uses the `un_op` field.
         error_name,
 
-        /// Constructs a vector, tuple, or array value out of runtime-known elements.
+        /// Constructs a vector, tuple, struct, or array value out of runtime-known elements.
         /// Some of the elements may be comptime-known.
         /// Uses the `ty_pl` field, payload is index of an array of elements, each of which
         /// is a `Ref`. Length of the array is given by the vector type.
-        /// TODO rename this to `aggregate_init` and make it support array values and
-        /// struct values too.
-        vector_init,
+        aggregate_init,
+
+        /// Constructs a union from a field index and a runtime-known init value.
+        /// Uses the `ty_pl` field with payload `UnionInit`.
+        union_init,
 
         /// Communicates an intent to load memory.
         /// Result is always unused.
         /// Uses the `prefetch` field.
         prefetch,
+
+        /// Implements @fieldParentPtr builtin.
+        /// Uses the `ty_pl` field.
+        field_parent_ptr,
 
         pub fn fromCmpOp(op: std.math.CompareOperator) Tag {
             return switch (op) {
@@ -614,11 +628,6 @@ pub const Inst = struct {
             ty: Ref,
             // Index into a different array.
             payload: u32,
-        },
-        ty_str: struct {
-            ty: Ref,
-            // ZIR string table index.
-            str: u32,
         },
         br: struct {
             block_inst: Index,
@@ -700,14 +709,33 @@ pub const Bin = struct {
     rhs: Inst.Ref,
 };
 
+pub const FieldParentPtr = struct {
+    field_ptr: Inst.Ref,
+    field_index: u32,
+};
+
 /// Trailing:
 /// 0. `Inst.Ref` for every outputs_len
 /// 1. `Inst.Ref` for every inputs_len
+/// 2. for every outputs_len
+///    - constraint: memory at this position is reinterpreted as a null
+///      terminated string. pad to the next u32 after the null byte.
+/// 3. for every inputs_len
+///    - constraint: memory at this position is reinterpreted as a null
+///      terminated string. pad to the next u32 after the null byte.
+/// 4. for every clobbers_len
+///    - clobber_name: memory at this position is reinterpreted as a null
+///      terminated string. pad to the next u32 after the null byte.
+/// 5. A number of u32 elements follow according to the equation `(source_len + 3) / 4`.
+///    Memory starting at this position is reinterpreted as the source bytes.
 pub const Asm = struct {
-    /// Index to the corresponding ZIR instruction.
-    /// `asm_source`, `outputs_len`, `inputs_len`, `clobbers_len`, `is_volatile`, and
-    /// clobbers are found via here.
-    zir_index: u32,
+    /// Length of the assembly source in bytes.
+    source_len: u32,
+    outputs_len: u32,
+    inputs_len: u32,
+    /// The MSB is `is_volatile`.
+    /// The rest of the bits are `clobbers_len`.
+    flags: u32,
 };
 
 pub const Cmpxchg = struct {
@@ -742,6 +770,11 @@ pub const AtomicRmw = struct {
     }
 };
 
+pub const UnionInit = struct {
+    field_index: u32,
+    init: Inst.Ref,
+};
+
 pub fn getMainBody(air: Air) []const Air.Inst.Index {
     const body_index = air.extra[@enumToInt(ExtraIndex.main_block)];
     const extra = air.extraData(Block, body_index);
@@ -759,8 +792,6 @@ pub fn typeOf(air: Air, inst: Air.Inst.Ref) Type {
 pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
     const datas = air.instructions.items(.data);
     switch (air.instructions.items(.tag)[inst]) {
-        .arg => return air.getRefType(datas[inst].ty_str.ty),
-
         .add,
         .addwrap,
         .add_sat,
@@ -827,6 +858,7 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
 
         .alloc,
         .ret_ptr,
+        .arg,
         => return datas[inst].ty,
 
         .assembly,
@@ -839,7 +871,9 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .cmpxchg_weak,
         .cmpxchg_strong,
         .slice,
-        .vector_init,
+        .aggregate_init,
+        .union_init,
+        .field_parent_ptr,
         => return air.getRefType(datas[inst].ty_pl.ty),
 
         .not,
@@ -852,6 +886,7 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .optional_payload,
         .optional_payload_ptr,
         .optional_payload_ptr_set,
+        .errunion_payload_ptr_set,
         .wrap_optional,
         .unwrap_errunion_payload,
         .unwrap_errunion_err,
@@ -874,6 +909,8 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .clz,
         .ctz,
         .popcount,
+        .byte_swap,
+        .bit_reverse,
         => return air.getRefType(datas[inst].ty_op.ty),
 
         .loop,

@@ -757,6 +757,7 @@ pub const InitOptions = struct {
     linker_export_table: bool = false,
     linker_initial_memory: ?u64 = null,
     linker_max_memory: ?u64 = null,
+    linker_shared_memory: bool = false,
     linker_global_base: ?u64 = null,
     linker_export_symbol_names: []const []const u8 = &.{},
     each_lib_rpath: ?bool = null,
@@ -961,7 +962,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
         const tsan = options.want_tsan orelse false;
         // TSAN is implemented in C++ so it requires linking libc++.
         const link_libcpp = options.link_libcpp or tsan;
-        const link_libc = link_libcpp or options.link_libc or
+        const link_libc = link_libcpp or options.link_libc or options.link_libunwind or
             target_util.osRequiresLibC(options.target);
 
         const link_libunwind = options.link_libunwind or
@@ -1560,6 +1561,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .export_table = options.linker_export_table,
             .initial_memory = options.linker_initial_memory,
             .max_memory = options.linker_max_memory,
+            .shared_memory = options.linker_shared_memory,
             .global_base = options.linker_global_base,
             .export_symbol_names = options.linker_export_symbol_names,
             .z_nodelete = options.linker_z_nodelete,
@@ -2337,6 +2339,7 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
     man.hash.add(comp.bin_file.options.import_memory);
     man.hash.addOptional(comp.bin_file.options.initial_memory);
     man.hash.addOptional(comp.bin_file.options.max_memory);
+    man.hash.add(comp.bin_file.options.shared_memory);
     man.hash.addOptional(comp.bin_file.options.global_base);
 
     // Mach-O specific stuff
@@ -2771,12 +2774,14 @@ fn processOneJob(comp: *Compilation, job: Job, main_progress_node: *std.Progress
                 sema_frame.end();
                 sema_frame_ended = true;
 
+                if (comp.bin_file.options.emit == null) return;
+
                 const liveness_frame = tracy.namedFrame("liveness");
                 var liveness_frame_ended = false;
                 errdefer if (!liveness_frame_ended) liveness_frame.end();
 
                 log.debug("analyze liveness of {s}", .{decl.name});
-                var liveness = try Liveness.analyze(gpa, air, decl.getFileScope().zir);
+                var liveness = try Liveness.analyze(gpa, air);
                 defer liveness.deinit(gpa);
 
                 liveness_frame.end();
@@ -2784,7 +2789,7 @@ fn processOneJob(comp: *Compilation, job: Job, main_progress_node: *std.Progress
 
                 if (builtin.mode == .Debug and comp.verbose_air) {
                     std.debug.print("# Begin Function AIR: {s}:\n", .{decl.name});
-                    @import("print_air.zig").dump(gpa, air, decl.getFileScope().zir, liveness);
+                    @import("print_air.zig").dump(gpa, air, liveness);
                     std.debug.print("# End Function AIR: {s}\n\n", .{decl.name});
                 }
 

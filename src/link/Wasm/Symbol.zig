@@ -38,6 +38,7 @@ pub const Tag = enum {
             .data => .memory,
             .section => unreachable, // Not an external type
             .event => unreachable, // Not an external type
+            .dead => unreachable, // Dead symbols should not be referenced
             .table => .table,
         };
     }
@@ -77,7 +78,7 @@ pub const Flag = enum(u32) {
 pub fn requiresImport(self: Symbol) bool {
     if (!self.isUndefined()) return false;
     if (self.isWeak()) return false;
-    if (self.kind == .data) return false;
+    if (self.tag == .data) return false;
     // if (self.isDefined() and self.isWeak()) return true; //TODO: Only when building shared lib
 
     return true;
@@ -100,6 +101,14 @@ pub fn setUndefined(self: *Symbol, is_undefined: bool) void {
         self.setFlag(.WASM_SYM_UNDEFINED);
     } else {
         self.flags &= ~@enumToInt(Flag.WASM_SYM_UNDEFINED);
+    }
+}
+
+pub fn setGlobal(self: *Symbol, is_global: bool) void {
+    if (is_global) {
+        self.flags &= ~@enumToInt(Flag.WASM_SYM_BINDING_LOCAL);
+    } else {
+        self.setFlag(.WASM_SYM_BINDING_LOCAL);
     }
 }
 

@@ -791,17 +791,22 @@ pub const Value = extern union {
                 return decl_val.toAllocatedBytes(decl.ty, allocator);
             },
             .the_only_possible_value => return &[_]u8{},
-            .slice => return toAllocatedBytes(val.castTag(.slice).?.data.ptr, ty, allocator),
-            else => {
-                const result = try allocator.alloc(u8, @intCast(usize, ty.arrayLen()));
-                var elem_value_buf: ElemValueBuffer = undefined;
-                for (result) |*elem, i| {
-                    const elem_val = val.elemValueBuffer(i, &elem_value_buf);
-                    elem.* = @intCast(u8, elem_val.toUnsignedInt());
-                }
-                return result;
+            .slice => {
+                const slice = val.castTag(.slice).?.data;
+                return arrayToAllocatedBytes(slice.ptr, slice.len.toUnsignedInt(), allocator);
             },
+            else => return arrayToAllocatedBytes(val, ty.arrayLen(), allocator),
         }
+    }
+
+    fn arrayToAllocatedBytes(val: Value, len: u64, allocator: Allocator) ![]u8 {
+        const result = try allocator.alloc(u8, @intCast(usize, len));
+        var elem_value_buf: ElemValueBuffer = undefined;
+        for (result) |*elem, i| {
+            const elem_val = val.elemValueBuffer(i, &elem_value_buf);
+            elem.* = @intCast(u8, elem_val.toUnsignedInt());
+        }
+        return result;
     }
 
     pub const ToTypeBuffer = Type.Payload.Bits;
@@ -1046,7 +1051,8 @@ pub const Value = extern union {
                 var bigint_buffer: BigIntSpace = undefined;
                 const bigint = val.toBigInt(&bigint_buffer);
                 const bits = ty.intInfo(target).bits;
-                bigint.writeTwosComplement(buffer, bits, target.cpu.arch.endian());
+                const abi_size = @intCast(usize, ty.abiSize(target));
+                bigint.writeTwosComplement(buffer, bits, abi_size, target.cpu.arch.endian());
             },
             .Enum => {
                 var enum_buffer: Payload.U64 = undefined;
@@ -1054,7 +1060,8 @@ pub const Value = extern union {
                 var bigint_buffer: BigIntSpace = undefined;
                 const bigint = int_val.toBigInt(&bigint_buffer);
                 const bits = ty.intInfo(target).bits;
-                bigint.writeTwosComplement(buffer, bits, target.cpu.arch.endian());
+                const abi_size = @intCast(usize, ty.abiSize(target));
+                bigint.writeTwosComplement(buffer, bits, abi_size, target.cpu.arch.endian());
             },
             .Float => switch (ty.floatBits(target)) {
                 16 => return floatWriteToMemory(f16, val.toFloat(f16), target, buffer),
@@ -1076,27 +1083,88 @@ pub const Value = extern union {
                     buf_off += elem_size;
                 }
             },
-            .Struct => {
-                const fields = ty.structFields().values();
-                const field_vals = val.castTag(.@"struct").?.data;
-                for (fields) |field, i| {
-                    const off = @intCast(usize, ty.structFieldOffset(i, target));
-                    writeToMemory(field_vals[i], field.ty, target, buffer[off..]);
-                }
+            .Struct => switch (ty.containerLayout()) {
+                .Auto => unreachable, // Sema is supposed to have emitted a compile error already
+                .Extern => {
+                    const fields = ty.structFields().values();
+                    const field_vals = val.castTag(.@"struct").?.data;
+                    for (fields) |field, i| {
+                        const off = @intCast(usize, ty.structFieldOffset(i, target));
+                        writeToMemory(field_vals[i], field.ty, target, buffer[off..]);
+                    }
+                },
+                .Packed => {
+                    // TODO allocate enough heap space instead of using this buffer
+                    // on the stack.
+                    var buf: [16]std.math.big.Limb = undefined;
+                    const host_int = packedStructToInt(val, ty, target, &buf);
+                    const abi_size = @intCast(usize, ty.abiSize(target));
+                    const bit_size = @intCast(usize, ty.bitSize(target));
+                    host_int.writeTwosComplement(buffer, bit_size, abi_size, target.cpu.arch.endian());
+                },
             },
             else => @panic("TODO implement writeToMemory for more types"),
         }
     }
 
-    pub fn readFromMemory(ty: Type, target: Target, buffer: []const u8, arena: Allocator) !Value {
+    fn packedStructToInt(val: Value, ty: Type, target: Target, buf: []std.math.big.Limb) BigIntConst {
+        var bigint = BigIntMutable.init(buf, 0);
+        const fields = ty.structFields().values();
+        const field_vals = val.castTag(.@"struct").?.data;
+        var bits: u16 = 0;
+        // TODO allocate enough heap space instead of using this buffer
+        // on the stack.
+        var field_buf: [16]std.math.big.Limb = undefined;
+        var field_space: BigIntSpace = undefined;
+        var field_buf2: [16]std.math.big.Limb = undefined;
+        for (fields) |field, i| {
+            const field_val = field_vals[i];
+            const field_bigint_const = switch (field.ty.zigTypeTag()) {
+                .Float => switch (field.ty.floatBits(target)) {
+                    16 => bitcastFloatToBigInt(f16, val.toFloat(f16), &field_buf),
+                    32 => bitcastFloatToBigInt(f32, val.toFloat(f32), &field_buf),
+                    64 => bitcastFloatToBigInt(f64, val.toFloat(f64), &field_buf),
+                    80 => bitcastFloatToBigInt(f80, val.toFloat(f80), &field_buf),
+                    128 => bitcastFloatToBigInt(f128, val.toFloat(f128), &field_buf),
+                    else => unreachable,
+                },
+                .Int, .Bool => field_val.toBigInt(&field_space),
+                .Struct => packedStructToInt(field_val, field.ty, target, &field_buf),
+                else => unreachable,
+            };
+            var field_bigint = BigIntMutable.init(&field_buf2, 0);
+            field_bigint.shiftLeft(field_bigint_const, bits);
+            bits += @intCast(u16, field.ty.bitSize(target));
+            bigint.bitOr(bigint.toConst(), field_bigint.toConst());
+        }
+        return bigint.toConst();
+    }
+
+    fn bitcastFloatToBigInt(comptime F: type, f: F, buf: []std.math.big.Limb) BigIntConst {
+        const Int = @Type(.{ .Int = .{
+            .signedness = .unsigned,
+            .bits = @typeInfo(F).Float.bits,
+        } });
+        const int = @bitCast(Int, f);
+        return BigIntMutable.init(buf, int).toConst();
+    }
+
+    pub fn readFromMemory(
+        ty: Type,
+        target: Target,
+        buffer: []const u8,
+        arena: Allocator,
+    ) Allocator.Error!Value {
         switch (ty.zigTypeTag()) {
             .Int => {
                 const int_info = ty.intInfo(target);
                 const endian = target.cpu.arch.endian();
-                // TODO use a correct amount of limbs
-                const limbs_buffer = try arena.alloc(std.math.big.Limb, 2);
+                const Limb = std.math.big.Limb;
+                const limb_count = (buffer.len + @sizeOf(Limb) - 1) / @sizeOf(Limb);
+                const limbs_buffer = try arena.alloc(Limb, limb_count);
+                const abi_size = @intCast(usize, ty.abiSize(target));
                 var bigint = BigIntMutable.init(limbs_buffer, 0);
-                bigint.readTwosComplement(buffer, int_info.bits, endian, int_info.signedness);
+                bigint.readTwosComplement(buffer, int_info.bits, abi_size, endian, int_info.signedness);
                 return fromBigInt(arena, bigint.toConst());
             },
             .Float => switch (ty.floatBits(target)) {
@@ -1107,8 +1175,99 @@ pub const Value = extern union {
                 128 => return Value.Tag.float_128.create(arena, floatReadFromMemory(f128, target, buffer)),
                 else => unreachable,
             },
+            .Array => {
+                const elem_ty = ty.childType();
+                const elem_size = elem_ty.abiSize(target);
+                const elems = try arena.alloc(Value, @intCast(usize, ty.arrayLen()));
+                var offset: usize = 0;
+                for (elems) |*elem| {
+                    elem.* = try readFromMemory(elem_ty, target, buffer[offset..], arena);
+                    offset += @intCast(usize, elem_size);
+                }
+                return Tag.array.create(arena, elems);
+            },
+            .Struct => switch (ty.containerLayout()) {
+                .Auto => unreachable, // Sema is supposed to have emitted a compile error already
+                .Extern => {
+                    const fields = ty.structFields().values();
+                    const field_vals = try arena.alloc(Value, fields.len);
+                    for (fields) |field, i| {
+                        const off = @intCast(usize, ty.structFieldOffset(i, target));
+                        field_vals[i] = try readFromMemory(field.ty, target, buffer[off..], arena);
+                    }
+                    return Tag.@"struct".create(arena, field_vals);
+                },
+                .Packed => {
+                    const endian = target.cpu.arch.endian();
+                    const Limb = std.math.big.Limb;
+                    const abi_size = @intCast(usize, ty.abiSize(target));
+                    const bit_size = @intCast(usize, ty.bitSize(target));
+                    const limb_count = (buffer.len + @sizeOf(Limb) - 1) / @sizeOf(Limb);
+                    const limbs_buffer = try arena.alloc(Limb, limb_count);
+                    var bigint = BigIntMutable.init(limbs_buffer, 0);
+                    bigint.readTwosComplement(buffer, bit_size, abi_size, endian, .unsigned);
+                    return intToPackedStruct(ty, target, bigint.toConst(), arena);
+                },
+            },
             else => @panic("TODO implement readFromMemory for more types"),
         }
+    }
+
+    fn intToPackedStruct(
+        ty: Type,
+        target: Target,
+        bigint: BigIntConst,
+        arena: Allocator,
+    ) Allocator.Error!Value {
+        const limbs_buffer = try arena.alloc(std.math.big.Limb, bigint.limbs.len);
+        var bigint_mut = bigint.toMutable(limbs_buffer);
+        const fields = ty.structFields().values();
+        const field_vals = try arena.alloc(Value, fields.len);
+        var bits: u16 = 0;
+        for (fields) |field, i| {
+            const field_bits = @intCast(u16, field.ty.bitSize(target));
+            bigint_mut.shiftRight(bigint, bits);
+            bigint_mut.truncate(bigint_mut.toConst(), .unsigned, field_bits);
+            bits += field_bits;
+            const field_bigint = bigint_mut.toConst();
+
+            field_vals[i] = switch (field.ty.zigTypeTag()) {
+                .Float => switch (field.ty.floatBits(target)) {
+                    16 => try bitCastBigIntToFloat(f16, .float_16, field_bigint, arena),
+                    32 => try bitCastBigIntToFloat(f32, .float_32, field_bigint, arena),
+                    64 => try bitCastBigIntToFloat(f64, .float_64, field_bigint, arena),
+                    80 => try bitCastBigIntToFloat(f80, .float_80, field_bigint, arena),
+                    128 => try bitCastBigIntToFloat(f128, .float_128, field_bigint, arena),
+                    else => unreachable,
+                },
+                .Bool => makeBool(!field_bigint.eqZero()),
+                .Int => try Tag.int_big_positive.create(
+                    arena,
+                    try arena.dupe(std.math.big.Limb, field_bigint.limbs),
+                ),
+                .Struct => try intToPackedStruct(field.ty, target, field_bigint, arena),
+                else => unreachable,
+            };
+        }
+        return Tag.@"struct".create(arena, field_vals);
+    }
+
+    fn bitCastBigIntToFloat(
+        comptime F: type,
+        comptime float_tag: Tag,
+        bigint: BigIntConst,
+        arena: Allocator,
+    ) !Value {
+        const Int = @Type(.{ .Int = .{
+            .signedness = .unsigned,
+            .bits = @typeInfo(F).Float.bits,
+        } });
+        const int = bigint.to(Int) catch |err| switch (err) {
+            error.NegativeIntoUnsigned => unreachable,
+            error.TargetTooSmall => unreachable,
+        };
+        const f = @bitCast(F, int);
+        return float_tag.create(arena, f);
     }
 
     fn floatWriteToMemory(comptime F: type, f: F, target: Target, buffer: []u8) void {
@@ -1328,6 +1487,45 @@ pub const Value = extern union {
                 return result_bigint.toConst().to(u64) catch unreachable;
             },
         }
+    }
+
+    pub fn bitReverse(val: Value, ty: Type, target: Target, arena: Allocator) !Value {
+        assert(!val.isUndef());
+
+        const info = ty.intInfo(target);
+
+        var buffer: Value.BigIntSpace = undefined;
+        const operand_bigint = val.toBigInt(&buffer);
+
+        const limbs = try arena.alloc(
+            std.math.big.Limb,
+            std.math.big.int.calcTwosCompLimbCount(info.bits),
+        );
+        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        result_bigint.bitReverse(operand_bigint, info.signedness, info.bits);
+
+        return fromBigInt(arena, result_bigint.toConst());
+    }
+
+    pub fn byteSwap(val: Value, ty: Type, target: Target, arena: Allocator) !Value {
+        assert(!val.isUndef());
+
+        const info = ty.intInfo(target);
+
+        // Bit count must be evenly divisible by 8
+        assert(info.bits % 8 == 0);
+
+        var buffer: Value.BigIntSpace = undefined;
+        const operand_bigint = val.toBigInt(&buffer);
+
+        const limbs = try arena.alloc(
+            std.math.big.Limb,
+            std.math.big.int.calcTwosCompLimbCount(info.bits),
+        );
+        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        result_bigint.byteSwap(operand_bigint, info.signedness, info.bits / 8);
+
+        return fromBigInt(arena, result_bigint.toConst());
     }
 
     /// Asserts the value is an integer and not undefined.
@@ -1658,8 +1856,20 @@ pub const Value = extern union {
 
                 return eql(a_payload.ptr, b_payload.ptr, ptr_ty);
             },
-            .elem_ptr => @panic("TODO: Implement more pointer eql cases"),
-            .field_ptr => @panic("TODO: Implement more pointer eql cases"),
+            .elem_ptr => {
+                const a_payload = a.castTag(.elem_ptr).?.data;
+                const b_payload = b.castTag(.elem_ptr).?.data;
+                if (a_payload.index != b_payload.index) return false;
+
+                return eql(a_payload.array_ptr, b_payload.array_ptr, ty);
+            },
+            .field_ptr => {
+                const a_payload = a.castTag(.field_ptr).?.data;
+                const b_payload = b.castTag(.field_ptr).?.data;
+                if (a_payload.field_index != b_payload.field_index) return false;
+
+                return eql(a_payload.container_ptr, b_payload.container_ptr, ty);
+            },
             .eu_payload_ptr => @panic("TODO: Implement more pointer eql cases"),
             .opt_payload_ptr => @panic("TODO: Implement more pointer eql cases"),
             .array => {
@@ -1691,6 +1901,25 @@ pub const Value = extern union {
                     if (!eql(a_field_vals[i], b_field_vals[i], field.ty)) return false;
                 }
                 return true;
+            },
+            .@"union" => {
+                const a_union = a.castTag(.@"union").?.data;
+                const b_union = b.castTag(.@"union").?.data;
+                switch (ty.containerLayout()) {
+                    .Packed, .Extern => {
+                        // In this case, we must disregard mismatching tags and compare
+                        // based on the in-memory bytes of the payloads.
+                        @panic("TODO implement comparison of extern union values");
+                    },
+                    .Auto => {
+                        const tag_ty = ty.unionTagTypeHypothetical();
+                        if (!a_union.tag.eql(b_union.tag, tag_ty)) {
+                            return false;
+                        }
+                        const active_field_ty = ty.unionFieldType(a_union.tag);
+                        return a_union.val.eql(b_union.val, active_field_ty);
+                    },
+                }
             },
             else => {},
         } else if (a_tag == .null_value or b_tag == .null_value) {
@@ -2128,21 +2357,33 @@ pub const Value = extern union {
     }
 
     /// Returns a pointer to the element value at the index.
-    pub fn elemPtr(self: Value, allocator: Allocator, index: usize) !Value {
-        switch (self.tag()) {
+    pub fn elemPtr(val: Value, arena: Allocator, index: usize) Allocator.Error!Value {
+        switch (val.tag()) {
             .elem_ptr => {
-                const elem_ptr = self.castTag(.elem_ptr).?.data;
-                return Tag.elem_ptr.create(allocator, .{
+                const elem_ptr = val.castTag(.elem_ptr).?.data;
+                return Tag.elem_ptr.create(arena, .{
                     .array_ptr = elem_ptr.array_ptr,
                     .index = elem_ptr.index + index,
                 });
             },
-            .slice => return Tag.elem_ptr.create(allocator, .{
-                .array_ptr = self.castTag(.slice).?.data.ptr,
-                .index = index,
-            }),
-            else => return Tag.elem_ptr.create(allocator, .{
-                .array_ptr = self,
+            .slice => {
+                const ptr_val = val.castTag(.slice).?.data.ptr;
+                switch (ptr_val.tag()) {
+                    .elem_ptr => {
+                        const elem_ptr = ptr_val.castTag(.elem_ptr).?.data;
+                        return Tag.elem_ptr.create(arena, .{
+                            .array_ptr = elem_ptr.array_ptr,
+                            .index = elem_ptr.index + index,
+                        });
+                    },
+                    else => return Tag.elem_ptr.create(arena, .{
+                        .array_ptr = ptr_val,
+                        .index = index,
+                    }),
+                }
+            },
+            else => return Tag.elem_ptr.create(arena, .{
+                .array_ptr = val,
                 .index = index,
             }),
         }
@@ -3971,6 +4212,10 @@ pub const Value = extern union {
     pub const @"null" = initTag(.null_value);
     pub const @"false" = initTag(.bool_false);
     pub const @"true" = initTag(.bool_true);
+
+    pub fn makeBool(x: bool) Value {
+        return if (x) Value.@"true" else Value.@"false";
+    }
 };
 
 var negative_one_payload: Value.Payload.I64 = .{

@@ -3047,6 +3047,9 @@ fn createMhExecuteHeaderAtom(self: *MachO) !void {
         .seg = self.text_segment_cmd_index.?,
         .sect = self.text_section_index.?,
     };
+    const seg = self.load_commands.items[match.seg].segment;
+    const sect = seg.sections.items[match.sect];
+
     const n_strx = try self.makeString("__mh_execute_header");
     const local_sym_index = @intCast(u32, self.locals.items.len);
     var nlist = macho.nlist_64{
@@ -3054,29 +3057,42 @@ fn createMhExecuteHeaderAtom(self: *MachO) !void {
         .n_type = macho.N_SECT,
         .n_sect = @intCast(u8, self.section_ordinals.getIndex(match).? + 1),
         .n_desc = 0,
-        .n_value = 0,
+        .n_value = sect.addr,
     };
     try self.locals.append(self.base.allocator, nlist);
-
-    nlist.n_type |= macho.N_EXT;
-    const global_sym_index = @intCast(u32, self.globals.items.len);
-    try self.globals.append(self.base.allocator, nlist);
-    try self.symbol_resolver.putNoClobber(self.base.allocator, n_strx, .{
-        .where = .global,
-        .where_index = global_sym_index,
-        .local_sym_index = local_sym_index,
-        .file = null,
-    });
-
-    const atom = try self.createEmptyAtom(local_sym_index, 0, 0);
-
-    if (self.needs_prealloc) {
-        const sym = &self.locals.items[local_sym_index];
-        const vaddr = try self.allocateAtom(atom, 0, 1, match);
-        sym.n_value = vaddr;
-    } else try self.addAtomToSection(atom, match);
-
     self.mh_execute_header_index = local_sym_index;
+
+    if (self.symbol_resolver.getPtr(n_strx)) |resolv| {
+        const global = &self.globals.items[resolv.where_index];
+        if (!(global.weakDef() or !global.pext())) {
+            log.err("symbol '__mh_execute_header' defined multiple times", .{});
+            return error.MultipleSymbolDefinitions;
+        }
+        resolv.local_sym_index = local_sym_index;
+    } else {
+        const global_sym_index = @intCast(u32, self.globals.items.len);
+        nlist.n_type |= macho.N_EXT;
+        try self.globals.append(self.base.allocator, nlist);
+        try self.symbol_resolver.putNoClobber(self.base.allocator, n_strx, .{
+            .where = .global,
+            .where_index = global_sym_index,
+            .local_sym_index = local_sym_index,
+            .file = null,
+        });
+    }
+
+    // We always set the __mh_execute_header to point to the beginning of the __TEXT,__text section
+    const atom = try self.createEmptyAtom(local_sym_index, 0, 0);
+    if (self.atoms.get(match)) |last| {
+        var first = last;
+        while (first.prev) |prev| {
+            first = prev;
+        }
+        atom.next = first;
+        first.prev = atom;
+    } else {
+        try self.atoms.putNoClobber(self.base.allocator, match, atom);
+    }
 }
 
 fn resolveDyldStubBinder(self: *MachO) !void {
@@ -3747,9 +3763,12 @@ pub fn lowerUnnamedConst(self: *MachO, typed_value: TypedValue, decl: *Module.De
     }
     const unnamed_consts = gop.value_ptr;
 
+    const decl_name = try decl.getFullyQualifiedName(self.base.allocator);
+    defer self.base.allocator.free(decl_name);
+
     const name_str_index = blk: {
         const index = unnamed_consts.items.len;
-        const name = try std.fmt.allocPrint(self.base.allocator, "__unnamed_{s}_{d}", .{ decl.name, index });
+        const name = try std.fmt.allocPrint(self.base.allocator, "__unnamed_{s}_{d}", .{ decl_name, index });
         defer self.base.allocator.free(name);
         break :blk try self.makeString(name);
     };
@@ -3778,10 +3797,11 @@ pub fn lowerUnnamedConst(self: *MachO, typed_value: TypedValue, decl: *Module.De
     atom.code.clearRetainingCapacity();
     try atom.code.appendSlice(self.base.allocator, code);
 
-    const match = try self.getMatchingSectionAtom(atom, typed_value.ty, typed_value.val);
+    const match = try self.getMatchingSectionAtom(atom, decl_name, typed_value.ty, typed_value.val);
     const addr = try self.allocateAtom(atom, code.len, required_alignment, match);
 
     log.debug("allocated atom for {s} at 0x{x}", .{ name, addr });
+    log.debug("  (required alignment 0x{x})", .{required_alignment});
 
     errdefer self.freeAtom(atom, match, true);
 
@@ -3884,28 +3904,60 @@ pub fn updateDecl(self: *MachO, module: *Module, decl: *Module.Decl) !void {
     try self.updateDeclExports(module, decl, decl_exports);
 }
 
-fn isElemTyPointer(ty: Type) bool {
+/// Checks if the value, or any of its embedded values stores a pointer, and thus requires
+/// a rebase opcode for the dynamic linker.
+fn needsPointerRebase(ty: Type, val: Value) bool {
+    if (ty.zigTypeTag() == .Fn) {
+        return false;
+    }
+    if (val.pointerDecl()) |_| {
+        return true;
+    }
+
     switch (ty.zigTypeTag()) {
-        .Fn => return false,
+        .Fn => unreachable,
         .Pointer => return true,
-        .Array => {
-            const elem_ty = ty.elemType();
-            return isElemTyPointer(elem_ty);
+        .Array, .Vector => {
+            if (ty.arrayLen() == 0) return false;
+            const elem_ty = ty.childType();
+            var elem_value_buf: Value.ElemValueBuffer = undefined;
+            const elem_val = val.elemValueBuffer(0, &elem_value_buf);
+            return needsPointerRebase(elem_ty, elem_val);
         },
-        .Struct, .Union => {
-            const len = ty.structFieldCount();
-            var i: usize = 0;
-            while (i < len) : (i += 1) {
-                const field_ty = ty.structFieldType(i);
-                if (isElemTyPointer(field_ty)) return true;
-            }
-            return false;
+        .Struct => {
+            const fields = ty.structFields().values();
+            if (fields.len == 0) return false;
+            if (val.castTag(.@"struct")) |payload| {
+                const field_values = payload.data;
+                for (field_values) |field_val, i| {
+                    if (needsPointerRebase(fields[i].ty, field_val)) return true;
+                } else return false;
+            } else return false;
+        },
+        .Optional => {
+            if (val.castTag(.opt_payload)) |payload| {
+                const sub_val = payload.data;
+                var buffer: Type.Payload.ElemType = undefined;
+                const sub_ty = ty.optionalChild(&buffer);
+                return needsPointerRebase(sub_ty, sub_val);
+            } else return false;
+        },
+        .Union => {
+            const union_obj = val.cast(Value.Payload.Union).?.data;
+            const active_field_ty = ty.unionFieldType(union_obj.tag);
+            return needsPointerRebase(active_field_ty, union_obj.val);
+        },
+        .ErrorUnion => {
+            if (val.castTag(.eu_payload)) |payload| {
+                const payload_ty = ty.errorUnionPayload();
+                return needsPointerRebase(payload_ty, payload.data);
+            } else return false;
         },
         else => return false,
     }
 }
 
-fn getMatchingSectionAtom(self: *MachO, atom: *Atom, ty: Type, val: Value) !MatchingSection {
+fn getMatchingSectionAtom(self: *MachO, atom: *Atom, name: []const u8, ty: Type, val: Value) !MatchingSection {
     const code = atom.code.items;
     const alignment = ty.abiAlignment(self.base.options.target);
     const align_log_2 = math.log2(alignment);
@@ -3919,10 +3971,25 @@ fn getMatchingSectionAtom(self: *MachO, atom: *Atom, ty: Type, val: Value) !Matc
                     .seg = self.data_segment_cmd_index.?,
                     .sect = self.bss_section_index.?,
                 };
+            } else {
+                break :blk MatchingSection{
+                    .seg = self.data_segment_cmd_index.?,
+                    .sect = self.data_section_index.?,
+                };
             }
+        }
+
+        if (val.castTag(.variable)) |_| {
+            break :blk MatchingSection{
+                .seg = self.data_segment_cmd_index.?,
+                .sect = self.data_section_index.?,
+            };
+        }
+
+        if (needsPointerRebase(ty, val)) {
             break :blk (try self.getMatchingSection(.{
-                .segname = makeStaticString("__DATA"),
-                .sectname = makeStaticString("__data"),
+                .segname = makeStaticString("__DATA_CONST"),
+                .sectname = makeStaticString("__const"),
                 .size = code.len,
                 .@"align" = align_log_2,
             })).?;
@@ -3935,8 +4002,8 @@ fn getMatchingSectionAtom(self: *MachO, atom: *Atom, ty: Type, val: Value) !Matc
                     .sect = self.text_section_index.?,
                 };
             },
-            .Array => switch (val.tag()) {
-                .bytes => {
+            .Array => {
+                if (val.tag() == .bytes) {
                     switch (ty.tag()) {
                         .array_u8_sentinel_0,
                         .const_slice_u8_sentinel_0,
@@ -3950,79 +4017,23 @@ fn getMatchingSectionAtom(self: *MachO, atom: *Atom, ty: Type, val: Value) !Matc
                                 .@"align" = align_log_2,
                             })).?;
                         },
-                        else => {
-                            break :blk (try self.getMatchingSection(.{
-                                .segname = makeStaticString("__TEXT"),
-                                .sectname = makeStaticString("__const"),
-                                .size = code.len,
-                                .@"align" = align_log_2,
-                            })).?;
-                        },
+                        else => {},
                     }
-                },
-                .array => {
-                    if (isElemTyPointer(ty)) {
-                        break :blk (try self.getMatchingSection(.{
-                            .segname = makeStaticString("__DATA_CONST"),
-                            .sectname = makeStaticString("__const"),
-                            .size = code.len,
-                            .@"align" = align_log_2,
-                        })).?;
-                    } else {
-                        break :blk (try self.getMatchingSection(.{
-                            .segname = makeStaticString("__TEXT"),
-                            .sectname = makeStaticString("__const"),
-                            .size = code.len,
-                            .@"align" = align_log_2,
-                        })).?;
-                    }
-                },
-                else => {
-                    break :blk (try self.getMatchingSection(.{
-                        .segname = makeStaticString("__TEXT"),
-                        .sectname = makeStaticString("__const"),
-                        .size = code.len,
-                        .@"align" = align_log_2,
-                    })).?;
-                },
-            },
-            .Pointer => {
-                if (val.castTag(.variable)) |_| {
-                    break :blk MatchingSection{
-                        .seg = self.data_segment_cmd_index.?,
-                        .sect = self.data_section_index.?,
-                    };
-                } else {
-                    break :blk (try self.getMatchingSection(.{
-                        .segname = makeStaticString("__DATA_CONST"),
-                        .sectname = makeStaticString("__const"),
-                        .size = code.len,
-                        .@"align" = align_log_2,
-                    })).?;
                 }
             },
-            else => {
-                if (val.castTag(.variable)) |_| {
-                    break :blk MatchingSection{
-                        .seg = self.data_segment_cmd_index.?,
-                        .sect = self.data_section_index.?,
-                    };
-                } else {
-                    break :blk (try self.getMatchingSection(.{
-                        .segname = makeStaticString("__TEXT"),
-                        .sectname = makeStaticString("__const"),
-                        .size = code.len,
-                        .@"align" = align_log_2,
-                    })).?;
-                }
-            },
+            else => {},
         }
+        break :blk (try self.getMatchingSection(.{
+            .segname = makeStaticString("__TEXT"),
+            .sectname = makeStaticString("__const"),
+            .size = code.len,
+            .@"align" = align_log_2,
+        })).?;
     };
-    const local = self.locals.items[atom.local_sym_index];
     const seg = self.load_commands.items[match.seg].segment;
     const sect = seg.sections.items[match.sect];
     log.debug("  allocating atom '{s}' in '{s},{s}' ({d},{d})", .{
-        self.getString(local.n_strx),
+        name,
         sect.segName(),
         sect.sectName(),
         match.seg,
@@ -4036,19 +4047,24 @@ fn placeDecl(self: *MachO, decl: *Module.Decl, code_len: usize) !*macho.nlist_64
     assert(decl.link.macho.local_sym_index != 0); // Caller forgot to call allocateDeclIndexes()
     const symbol = &self.locals.items[decl.link.macho.local_sym_index];
 
+    const sym_name = try decl.getFullyQualifiedName(self.base.allocator);
+    defer self.base.allocator.free(sym_name);
+
     const decl_ptr = self.decls.getPtr(decl).?;
     if (decl_ptr.* == null) {
-        decl_ptr.* = try self.getMatchingSectionAtom(&decl.link.macho, decl.ty, decl.val);
+        decl_ptr.* = try self.getMatchingSectionAtom(&decl.link.macho, sym_name, decl.ty, decl.val);
     }
     const match = decl_ptr.*.?;
 
     if (decl.link.macho.size != 0) {
         const capacity = decl.link.macho.capacity(self.*);
         const need_realloc = code_len > capacity or !mem.isAlignedGeneric(u64, symbol.n_value, required_alignment);
+
         if (need_realloc) {
             const vaddr = try self.growAtom(&decl.link.macho, code_len, required_alignment, match);
 
-            log.debug("growing {s} and moving from 0x{x} to 0x{x}", .{ decl.name, symbol.n_value, vaddr });
+            log.debug("growing {s} and moving from 0x{x} to 0x{x}", .{ sym_name, symbol.n_value, vaddr });
+            log.debug("  (required alignment 0x{x})", .{required_alignment});
 
             if (vaddr != symbol.n_value) {
                 log.debug(" (writing new GOT entry)", .{});
@@ -4074,25 +4090,16 @@ fn placeDecl(self: *MachO, decl: *Module.Decl, code_len: usize) !*macho.nlist_64
         decl.link.macho.size = code_len;
         decl.link.macho.dirty = true;
 
-        const new_name = try std.fmt.allocPrint(self.base.allocator, "_{s}", .{
-            mem.sliceTo(decl.name, 0),
-        });
-        defer self.base.allocator.free(new_name);
-
-        symbol.n_strx = try self.makeString(new_name);
+        symbol.n_strx = try self.makeString(sym_name);
         symbol.n_type = macho.N_SECT;
         symbol.n_sect = @intCast(u8, self.text_section_index.?) + 1;
         symbol.n_desc = 0;
     } else {
-        const decl_name = try std.fmt.allocPrint(self.base.allocator, "_{s}", .{
-            mem.sliceTo(decl.name, 0),
-        });
-        defer self.base.allocator.free(decl_name);
-
-        const name_str_index = try self.makeString(decl_name);
+        const name_str_index = try self.makeString(sym_name);
         const addr = try self.allocateAtom(&decl.link.macho, code_len, required_alignment, match);
 
-        log.debug("allocated atom for {s} at 0x{x}", .{ decl_name, addr });
+        log.debug("allocated atom for {s} at 0x{x}", .{ sym_name, addr });
+        log.debug("  (required alignment 0x{x})", .{required_alignment});
 
         errdefer self.freeAtom(&decl.link.macho, match, false);
 
@@ -4279,6 +4286,7 @@ pub fn deleteExport(self: *MachO, exp: Export) void {
 }
 
 fn freeUnnamedConsts(self: *MachO, decl: *Module.Decl) void {
+    log.debug("freeUnnamedConsts for decl {*}", .{decl});
     const unnamed_consts = self.unnamed_const_atoms.getPtr(decl) orelse return;
     for (unnamed_consts.items) |atom| {
         self.freeAtom(atom, .{
@@ -4288,6 +4296,7 @@ fn freeUnnamedConsts(self: *MachO, decl: *Module.Decl) void {
         self.locals_free_list.append(self.base.allocator, atom.local_sym_index) catch {};
         self.locals.items[atom.local_sym_index].n_type = 0;
         _ = self.atom_by_index_table.remove(atom.local_sym_index);
+        log.debug("  adding local symbol index {d} to free list", .{atom.local_sym_index});
         atom.local_sym_index = 0;
     }
     unnamed_consts.clearAndFree(self.base.allocator);
@@ -4312,10 +4321,15 @@ pub fn freeDecl(self: *MachO, decl: *Module.Decl) void {
             self.got_entries_free_list.append(self.base.allocator, @intCast(u32, got_index)) catch {};
             self.got_entries.items[got_index] = .{ .target = .{ .local = 0 }, .atom = undefined };
             _ = self.got_entries_table.swapRemove(.{ .local = decl.link.macho.local_sym_index });
+            log.debug("  adding GOT index {d} to free list (target local@{d})", .{
+                got_index,
+                decl.link.macho.local_sym_index,
+            });
         }
 
         self.locals.items[decl.link.macho.local_sym_index].n_type = 0;
         _ = self.atom_by_index_table.remove(decl.link.macho.local_sym_index);
+        log.debug("  adding local symbol index {d} to free list", .{decl.link.macho.local_sym_index});
         decl.link.macho.local_sym_index = 0;
     }
     if (self.d_sym) |*d_sym| {
@@ -5082,22 +5096,18 @@ fn growSegment(self: *MachO, seg_id: u16, new_size: u64) !void {
         seg.inner.vmaddr + seg.inner.vmsize,
     });
 
-    // TODO We should probably nop the expanded by distance, or put 0s.
-
-    // TODO copyRangeAll doesn't automatically extend the file on macOS.
-    const ledit_seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].segment;
-    const new_filesize = offset_amt + ledit_seg.inner.fileoff + ledit_seg.inner.filesize;
-    try self.base.file.?.pwriteAll(&[_]u8{0}, new_filesize - 1);
-
     var next: usize = seg_id + 1;
     while (next < self.linkedit_segment_cmd_index.? + 1) : (next += 1) {
         const next_seg = &self.load_commands.items[next].segment;
-        _ = try self.base.file.?.copyRangeAll(
-            next_seg.inner.fileoff,
+
+        try MachO.copyRangeAllOverlappingAlloc(
+            self.base.allocator,
             self.base.file.?,
+            next_seg.inner.fileoff,
             next_seg.inner.fileoff + offset_amt,
-            next_seg.inner.filesize,
+            try math.cast(usize, next_seg.inner.filesize),
         );
+
         next_seg.inner.fileoff += offset_amt;
         next_seg.inner.vmaddr += offset_amt;
 
@@ -5174,11 +5184,13 @@ fn growSection(self: *MachO, match: MatchingSection, new_size: u32) !void {
         // the required amount and update their header offsets.
         const next_sect = seg.sections.items[match.sect + 1];
         const total_size = last_sect_off - next_sect.offset;
-        _ = try self.base.file.?.copyRangeAll(
-            next_sect.offset,
+
+        try MachO.copyRangeAllOverlappingAlloc(
+            self.base.allocator,
             self.base.file.?,
+            next_sect.offset,
             next_sect.offset + offset_amt,
-            total_size,
+            try math.cast(usize, total_size),
         );
 
         var next = match.sect + 1;
@@ -6677,17 +6689,17 @@ fn snapshotState(self: *MachO) !void {
 fn logSymtab(self: MachO) void {
     log.debug("locals:", .{});
     for (self.locals.items) |sym, id| {
-        log.debug("  {d}: {s}: {}", .{ id, self.getString(sym.n_strx), sym });
+        log.debug("  {d}: {s}: @{x} in {d}", .{ id, self.getString(sym.n_strx), sym.n_value, sym.n_sect });
     }
 
     log.debug("globals:", .{});
     for (self.globals.items) |sym, id| {
-        log.debug("  {d}: {s}: {}", .{ id, self.getString(sym.n_strx), sym });
+        log.debug("  {d}: {s}: @{x} in {d}", .{ id, self.getString(sym.n_strx), sym.n_value, sym.n_sect });
     }
 
     log.debug("undefs:", .{});
     for (self.undefs.items) |sym, id| {
-        log.debug("  {d}: {s}: {}", .{ id, self.getString(sym.n_strx), sym });
+        log.debug("  {d}: {s}: in {d}", .{ id, self.getString(sym.n_strx), sym.n_desc });
     }
 
     {
@@ -6702,26 +6714,28 @@ fn logSymtab(self: MachO) void {
     for (self.got_entries_table.values()) |value| {
         const key = self.got_entries.items[value].target;
         const atom = self.got_entries.items[value].atom;
+        const n_value = self.locals.items[atom.local_sym_index].n_value;
         switch (key) {
-            .local => {
-                const sym = self.locals.items[atom.local_sym_index];
-                log.debug("  {} => {s}", .{ key, self.getString(sym.n_strx) });
-            },
-            .global => |n_strx| log.debug("  {} => {s}", .{ key, self.getString(n_strx) }),
+            .local => |ndx| log.debug("  {d}: @{x}", .{ ndx, n_value }),
+            .global => |n_strx| log.debug("  {s}: @{x}", .{ self.getString(n_strx), n_value }),
         }
     }
 
     log.debug("__thread_ptrs entries:", .{});
-    for (self.tlv_ptr_entries_table.keys()) |key| {
-        switch (key) {
-            .local => unreachable,
-            .global => |n_strx| log.debug("  {} => {s}", .{ key, self.getString(n_strx) }),
-        }
+    for (self.tlv_ptr_entries_table.values()) |value| {
+        const key = self.tlv_ptr_entries.items[value].target;
+        const atom = self.tlv_ptr_entries.items[value].atom;
+        const n_value = self.locals.items[atom.local_sym_index].n_value;
+        assert(key == .global);
+        log.debug("  {s}: @{x}", .{ self.getString(key.global), n_value });
     }
 
     log.debug("stubs:", .{});
     for (self.stubs_table.keys()) |key| {
-        log.debug("  {} => {s}", .{ key, self.getString(key) });
+        const value = self.stubs_table.get(key).?;
+        const atom = self.stubs.items[value];
+        const sym = self.locals.items[atom.local_sym_index];
+        log.debug("  {s}: @{x}", .{ self.getString(key), sym.n_value });
     }
 }
 
@@ -6737,4 +6751,20 @@ fn logSectionOrdinals(self: MachO) void {
             sect.sectName(),
         });
     }
+}
+
+/// Since `os.copy_file_range` cannot be used when copying overlapping ranges within the same file,
+/// and since `File.copyRangeAll` uses `os.copy_file_range` under-the-hood, we use heap allocated
+/// buffers on all hosts except Linux (if `copy_file_range` syscall is available).
+pub fn copyRangeAllOverlappingAlloc(
+    allocator: Allocator,
+    file: std.fs.File,
+    in_offset: u64,
+    out_offset: u64,
+    len: usize,
+) !void {
+    const buf = try allocator.alloc(u8, len);
+    defer allocator.free(buf);
+    _ = try file.preadAll(buf, in_offset);
+    try file.pwriteAll(buf, out_offset);
 }

@@ -4,7 +4,6 @@ const mem = std.mem;
 const math = std.math;
 const assert = std.debug.assert;
 const Air = @import("../../Air.zig");
-const Zir = @import("../../Zir.zig");
 const Mir = @import("Mir.zig");
 const Emit = @import("Emit.zig");
 const Liveness = @import("../../Liveness.zig");
@@ -592,10 +591,13 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .clz             => try self.airClz(inst),
             .ctz             => try self.airCtz(inst),
             .popcount        => try self.airPopcount(inst),
+            .byte_swap       => try self.airByteSwap(inst),
+            .bit_reverse     => try self.airBitReverse(inst),
             .tag_name        => try self.airTagName(inst),
             .error_name      => try self.airErrorName(inst),
             .splat           => try self.airSplat(inst),
-            .vector_init     => try self.airVectorInit(inst),
+            .aggregate_init  => try self.airAggregateInit(inst),
+            .union_init      => try self.airUnionInit(inst),
             .prefetch        => try self.airPrefetch(inst),
 
             .atomic_store_unordered => try self.airAtomicStore(inst, .Unordered),
@@ -607,6 +609,8 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .struct_field_ptr_index_1 => try self.airStructFieldPtrIndex(inst, 1),
             .struct_field_ptr_index_2 => try self.airStructFieldPtrIndex(inst, 2),
             .struct_field_ptr_index_3 => try self.airStructFieldPtrIndex(inst, 3),
+
+            .field_parent_ptr => try self.airFieldParentPtr(inst),
 
             .switch_br       => try self.airSwitch(inst),
             .slice_ptr       => try self.airSlicePtr(inst),
@@ -632,6 +636,7 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .unwrap_errunion_payload    => try self.airUnwrapErrPayload(inst),
             .unwrap_errunion_err_ptr    => try self.airUnwrapErrErrPtr(inst),
             .unwrap_errunion_payload_ptr=> try self.airUnwrapErrPayloadPtr(inst),
+            .errunion_payload_ptr_set   => try self.airErrUnionPayloadPtrSet(inst),
 
             .wrap_optional         => try self.airWrapOptional(inst),
             .wrap_errunion_payload => try self.airWrapErrUnionPayload(inst),
@@ -1064,6 +1069,12 @@ fn airUnwrapErrPayloadPtr(self: *Self, inst: Air.Inst.Index) !void {
     return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
 }
 
+fn airErrUnionPayloadPtrSet(self: *Self, inst: Air.Inst.Index) !void {
+    const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+    const result: MCValue = if (self.liveness.isUnused(inst)) .dead else return self.fail("TODO implement .errunion_payload_ptr_set for {}", .{self.target.cpu.arch});
+    return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
+}
+
 fn airWrapOptional(self: *Self, inst: Air.Inst.Index) !void {
     const ty_op = self.air.instructions.items(.data)[inst].ty_op;
     const result: MCValue = if (self.liveness.isUnused(inst)) .dead else result: {
@@ -1178,6 +1189,18 @@ fn airCtz(self: *Self, inst: Air.Inst.Index) !void {
 fn airPopcount(self: *Self, inst: Air.Inst.Index) !void {
     const ty_op = self.air.instructions.items(.data)[inst].ty_op;
     const result: MCValue = if (self.liveness.isUnused(inst)) .dead else return self.fail("TODO implement airPopcount for {}", .{self.target.cpu.arch});
+    return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
+}
+
+fn airByteSwap(self: *Self, inst: Air.Inst.Index) !void {
+    const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+    const result: MCValue = if (self.liveness.isUnused(inst)) .dead else return self.fail("TODO implement airByteSwap for {}", .{self.target.cpu.arch});
+    return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
+}
+
+fn airBitReverse(self: *Self, inst: Air.Inst.Index) !void {
+    const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+    const result: MCValue = if (self.liveness.isUnused(inst)) .dead else return self.fail("TODO implement airBitReverse for {}", .{self.target.cpu.arch});
     return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
 }
 
@@ -1340,12 +1363,16 @@ fn airStructFieldVal(self: *Self, inst: Air.Inst.Index) !void {
     //return self.finishAir(inst, result, .{ extra.struct_ptr, .none, .none });
 }
 
-fn genArgDbgInfo(self: *Self, inst: Air.Inst.Index, mcv: MCValue) !void {
-    const ty_str = self.air.instructions.items(.data)[inst].ty_str;
-    const zir = &self.mod_fn.owner_decl.getFileScope().zir;
-    const name = zir.nullTerminatedString(ty_str.str);
+fn airFieldParentPtr(self: *Self, inst: Air.Inst.Index) !void {
+    _ = self;
+    _ = inst;
+    return self.fail("TODO implement codegen airFieldParentPtr", .{});
+}
+
+fn genArgDbgInfo(self: *Self, inst: Air.Inst.Index, mcv: MCValue, arg_index: u32) !void {
+    const ty = self.air.instructions.items(.data)[inst].ty;
+    const name = self.mod_fn.getParamName(arg_index);
     const name_with_null = name.ptr[0 .. name.len + 1];
-    const ty = self.air.getRefType(ty_str.ty);
 
     switch (mcv) {
         .register => |reg| {
@@ -1388,7 +1415,7 @@ fn airArg(self: *Self, inst: Air.Inst.Index) !void {
     // TODO support stack-only arguments
     // TODO Copy registers to the stack
     const mcv = result;
-    try self.genArgDbgInfo(inst, mcv);
+    try self.genArgDbgInfo(inst, mcv, @intCast(u32, arg_index));
 
     if (self.liveness.isUnused(inst))
         return self.finishAirBookkeeping();
@@ -1824,40 +1851,39 @@ fn brVoid(self: *Self, block: Air.Inst.Index) !void {
 }
 
 fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
-    const air_datas = self.air.instructions.items(.data);
-    const air_extra = self.air.extraData(Air.Asm, air_datas[inst].ty_pl.payload);
-    const zir = self.mod_fn.owner_decl.getFileScope().zir;
-    const extended = zir.instructions.items(.data)[air_extra.data.zir_index].extended;
-    const zir_extra = zir.extraData(Zir.Inst.Asm, extended.operand);
-    const asm_source = zir.nullTerminatedString(zir_extra.data.asm_source);
-    const outputs_len = @truncate(u5, extended.small);
-    const args_len = @truncate(u5, extended.small >> 5);
-    const clobbers_len = @truncate(u5, extended.small >> 10);
-    _ = clobbers_len; // TODO honor these
-    const is_volatile = @truncate(u1, extended.small >> 15) != 0;
-    const outputs = @bitCast([]const Air.Inst.Ref, self.air.extra[air_extra.end..][0..outputs_len]);
-    const args = @bitCast([]const Air.Inst.Ref, self.air.extra[air_extra.end + outputs.len ..][0..args_len]);
-
-    if (outputs_len > 1) {
-        return self.fail("TODO implement codegen for asm with more than 1 output", .{});
-    }
-    var extra_i: usize = zir_extra.end;
-    const output_constraint: ?[]const u8 = out: {
-        var i: usize = 0;
-        while (i < outputs_len) : (i += 1) {
-            const output = zir.extraData(Zir.Inst.Asm.Output, extra_i);
-            extra_i = output.end;
-            break :out zir.nullTerminatedString(output.data.constraint);
-        }
-        break :out null;
-    };
+    const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
+    const extra = self.air.extraData(Air.Asm, ty_pl.payload);
+    const is_volatile = @truncate(u1, extra.data.flags >> 31) != 0;
+    const clobbers_len = @truncate(u31, extra.data.flags);
+    var extra_i: usize = extra.end;
+    const outputs = @bitCast([]const Air.Inst.Ref, self.air.extra[extra_i..][0..extra.data.outputs_len]);
+    extra_i += outputs.len;
+    const inputs = @bitCast([]const Air.Inst.Ref, self.air.extra[extra_i..][0..extra.data.inputs_len]);
+    extra_i += inputs.len;
 
     const dead = !is_volatile and self.liveness.isUnused(inst);
     const result: MCValue = if (dead) .dead else result: {
-        for (args) |arg| {
-            const input = zir.extraData(Zir.Inst.Asm.Input, extra_i);
-            extra_i = input.end;
-            const constraint = zir.nullTerminatedString(input.data.constraint);
+        if (outputs.len > 1) {
+            return self.fail("TODO implement codegen for asm with more than 1 output", .{});
+        }
+
+        const output_constraint: ?[]const u8 = for (outputs) |output| {
+            if (output != .none) {
+                return self.fail("TODO implement codegen for non-expr asm", .{});
+            }
+            const constraint = std.mem.sliceTo(std.mem.sliceAsBytes(self.air.extra[extra_i..]), 0);
+            // This equation accounts for the fact that even if we have exactly 4 bytes
+            // for the string, we still use the next u32 for the null terminator.
+            extra_i += constraint.len / 4 + 1;
+
+            break constraint;
+        } else null;
+
+        for (inputs) |input| {
+            const constraint = std.mem.sliceTo(std.mem.sliceAsBytes(self.air.extra[extra_i..]), 0);
+            // This equation accounts for the fact that even if we have exactly 4 bytes
+            // for the string, we still use the next u32 for the null terminator.
+            extra_i += constraint.len / 4 + 1;
 
             if (constraint.len < 3 or constraint[0] != '{' or constraint[constraint.len - 1] != '}') {
                 return self.fail("unrecognized asm input constraint: '{s}'", .{constraint});
@@ -1866,10 +1892,24 @@ fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
             const reg = parseRegName(reg_name) orelse
                 return self.fail("unrecognized register: '{s}'", .{reg_name});
 
-            const arg_mcv = try self.resolveInst(arg);
+            const arg_mcv = try self.resolveInst(input);
             try self.register_manager.getReg(reg, null);
-            try self.genSetReg(self.air.typeOf(arg), reg, arg_mcv);
+            try self.genSetReg(self.air.typeOf(input), reg, arg_mcv);
         }
+
+        {
+            var clobber_i: u32 = 0;
+            while (clobber_i < clobbers_len) : (clobber_i += 1) {
+                const clobber = std.mem.sliceTo(std.mem.sliceAsBytes(self.air.extra[extra_i..]), 0);
+                // This equation accounts for the fact that even if we have exactly 4 bytes
+                // for the string, we still use the next u32 for the null terminator.
+                extra_i += clobber.len / 4 + 1;
+
+                // TODO honor these
+            }
+        }
+
+        const asm_source = std.mem.sliceAsBytes(self.air.extra[extra_i..])[0..extra.data.source_len];
 
         if (mem.eql(u8, asm_source, "ecall")) {
             _ = try self.addInst(.{
@@ -1892,18 +1932,28 @@ fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
             break :result MCValue{ .none = {} };
         }
     };
-    if (outputs.len + args.len <= Liveness.bpi - 1) {
+    simple: {
         var buf = [1]Air.Inst.Ref{.none} ** (Liveness.bpi - 1);
-        std.mem.copy(Air.Inst.Ref, &buf, outputs);
-        std.mem.copy(Air.Inst.Ref, buf[outputs.len..], args);
+        var buf_index: usize = 0;
+        for (outputs) |output| {
+            if (output == .none) continue;
+
+            if (buf_index >= buf.len) break :simple;
+            buf[buf_index] = output;
+            buf_index += 1;
+        }
+        if (buf_index + inputs.len > buf.len) break :simple;
+        std.mem.copy(Air.Inst.Ref, buf[buf_index..], inputs);
         return self.finishAir(inst, result, buf);
     }
-    var bt = try self.iterateBigTomb(inst, outputs.len + args.len);
+    var bt = try self.iterateBigTomb(inst, outputs.len + inputs.len);
     for (outputs) |output| {
+        if (output == .none) continue;
+
         bt.feed(output);
     }
-    for (args) |arg| {
-        bt.feed(arg);
+    for (inputs) |input| {
+        bt.feed(input);
     }
     return bt.finishAir(result);
 }
@@ -2108,14 +2158,14 @@ fn airSplat(self: *Self, inst: Air.Inst.Index) !void {
     return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
 }
 
-fn airVectorInit(self: *Self, inst: Air.Inst.Index) !void {
+fn airAggregateInit(self: *Self, inst: Air.Inst.Index) !void {
     const vector_ty = self.air.typeOfIndex(inst);
     const len = vector_ty.vectorLen();
     const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
     const elements = @bitCast([]const Air.Inst.Ref, self.air.extra[ty_pl.payload..][0..len]);
     const result: MCValue = res: {
         if (self.liveness.isUnused(inst)) break :res MCValue.dead;
-        return self.fail("TODO implement airVectorInit for riscv64", .{});
+        return self.fail("TODO implement airAggregateInit for riscv64", .{});
     };
 
     if (elements.len <= Liveness.bpi - 1) {
@@ -2128,6 +2178,14 @@ fn airVectorInit(self: *Self, inst: Air.Inst.Index) !void {
         bt.feed(elem);
     }
     return bt.finishAir(result);
+}
+
+fn airUnionInit(self: *Self, inst: Air.Inst.Index) !void {
+    const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
+    const extra = self.air.extraData(Air.UnionInit, ty_pl.payload).data;
+    _ = extra;
+    return self.fail("TODO implement airUnionInit for riscv64", .{});
+    // return self.finishAir(inst, result, .{ extra.ptr, extra.expected_value, extra.new_value });
 }
 
 fn airPrefetch(self: *Self, inst: Air.Inst.Index) !void {

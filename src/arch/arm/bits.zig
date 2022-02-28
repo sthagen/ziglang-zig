@@ -1,5 +1,6 @@
 const std = @import("std");
 const DW = std.dwarf;
+const assert = std.debug.assert;
 const testing = std.testing;
 
 /// The condition field specifies the flags necessary for an
@@ -237,6 +238,17 @@ pub const Instruction = union(enum) {
         fixed_3: u5 = 0b00010,
         cond: u4,
     },
+    bit_field_extract: packed struct {
+        rn: u4,
+        fixed_1: u3 = 0b101,
+        lsb: u5,
+        rd: u4,
+        widthm1: u5,
+        fixed_2: u1 = 0b1,
+        unsigned: u1,
+        fixed_3: u5 = 0b01111,
+        cond: u4,
+    },
     single_data_transfer: packed struct {
         offset: u12,
         rd: u4,
@@ -457,6 +469,23 @@ pub const Instruction = union(enum) {
         }
     };
 
+    pub const AddressingMode = enum {
+        /// [<Rn>, <offset>]
+        ///
+        /// Address = Rn + offset
+        offset,
+        /// [<Rn>, <offset>]!
+        ///
+        /// Address = Rn + offset
+        /// Rn = Rn + offset
+        pre_index,
+        /// [<Rn>], <offset>
+        ///
+        /// Address = Rn
+        /// Rn = Rn + offset
+        post_index,
+    };
+
     /// Represents the offset operand of a load or store
     /// instruction. Data can be loaded from memory with either an
     /// immediate offset or an offset that is stored in some register.
@@ -576,6 +605,7 @@ pub const Instruction = union(enum) {
             .multiply => |v| @bitCast(u32, v),
             .multiply_long => |v| @bitCast(u32, v),
             .integer_saturating_arithmetic => |v| @bitCast(u32, v),
+            .bit_field_extract => |v| @bitCast(u32, v),
             .single_data_transfer => |v| @bitCast(u32, v),
             .extra_load_store => |v| @bitCast(u32, v),
             .block_data_transfer => |v| @bitCast(u32, v),
@@ -691,15 +721,35 @@ pub const Instruction = union(enum) {
         };
     }
 
+    fn bitFieldExtract(
+        unsigned: u1,
+        cond: Condition,
+        rd: Register,
+        rn: Register,
+        lsb: u5,
+        width: u6,
+    ) Instruction {
+        assert(width > 0 and width <= 32);
+        return Instruction{
+            .bit_field_extract = .{
+                .rn = rn.id(),
+                .lsb = lsb,
+                .rd = rd.id(),
+                .widthm1 = @intCast(u5, width - 1),
+                .unsigned = unsigned,
+                .cond = @enumToInt(cond),
+            },
+        };
+    }
+
     fn singleDataTransfer(
         cond: Condition,
         rd: Register,
         rn: Register,
         offset: Offset,
-        pre_index: bool,
+        mode: AddressingMode,
         positive: bool,
         byte_word: u1,
-        write_back: bool,
         load_store: u1,
     ) Instruction {
         return Instruction{
@@ -709,10 +759,16 @@ pub const Instruction = union(enum) {
                 .rd = rd.id(),
                 .offset = offset.toU12(),
                 .load_store = load_store,
-                .write_back = @boolToInt(write_back),
+                .write_back = switch (mode) {
+                    .offset => 0b0,
+                    .pre_index, .post_index => 0b1,
+                },
                 .byte_word = byte_word,
                 .up_down = @boolToInt(positive),
-                .pre_post = @boolToInt(pre_index),
+                .pre_post = switch (mode) {
+                    .offset, .pre_index => 0b1,
+                    .post_index => 0b0,
+                },
                 .imm = @boolToInt(offset != .immediate),
             },
         };
@@ -720,9 +776,8 @@ pub const Instruction = union(enum) {
 
     fn extraLoadStore(
         cond: Condition,
-        pre_index: bool,
+        mode: AddressingMode,
         positive: bool,
-        write_back: bool,
         o1: u1,
         op2: u2,
         rn: Register,
@@ -746,10 +801,16 @@ pub const Instruction = union(enum) {
                 .rt = rt.id(),
                 .rn = rn.id(),
                 .o1 = o1,
-                .write_back = @boolToInt(write_back),
+                .write_back = switch (mode) {
+                    .offset => 0b0,
+                    .pre_index, .post_index => 0b1,
+                },
                 .imm = @boolToInt(offset == .immediate),
                 .up_down = @boolToInt(positive),
-                .pre_index = @boolToInt(pre_index),
+                .pre_index = switch (mode) {
+                    .offset, .pre_index => 0b1,
+                    .post_index => 0b0,
+                },
                 .cond = @enumToInt(cond),
             },
         };
@@ -1044,46 +1105,62 @@ pub const Instruction = union(enum) {
         return multiplyLong(cond, 1, 1, 1, rdhi, rdlo, rm, rn);
     }
 
+    // Bit field extract
+
+    pub fn ubfx(cond: Condition, rd: Register, rn: Register, lsb: u5, width: u6) Instruction {
+        return bitFieldExtract(0b1, cond, rd, rn, lsb, width);
+    }
+
+    pub fn sbfx(cond: Condition, rd: Register, rn: Register, lsb: u5, width: u6) Instruction {
+        return bitFieldExtract(0b0, cond, rd, rn, lsb, width);
+    }
+
     // Single data transfer
 
     pub const OffsetArgs = struct {
-        pre_index: bool = true,
+        mode: AddressingMode = .offset,
         positive: bool = true,
         offset: Offset,
-        write_back: bool = false,
     };
 
     pub fn ldr(cond: Condition, rd: Register, rn: Register, args: OffsetArgs) Instruction {
-        return singleDataTransfer(cond, rd, rn, args.offset, args.pre_index, args.positive, 0, args.write_back, 1);
+        return singleDataTransfer(cond, rd, rn, args.offset, args.mode, args.positive, 0, 1);
     }
 
     pub fn ldrb(cond: Condition, rd: Register, rn: Register, args: OffsetArgs) Instruction {
-        return singleDataTransfer(cond, rd, rn, args.offset, args.pre_index, args.positive, 1, args.write_back, 1);
+        return singleDataTransfer(cond, rd, rn, args.offset, args.mode, args.positive, 1, 1);
     }
 
     pub fn str(cond: Condition, rd: Register, rn: Register, args: OffsetArgs) Instruction {
-        return singleDataTransfer(cond, rd, rn, args.offset, args.pre_index, args.positive, 0, args.write_back, 0);
+        return singleDataTransfer(cond, rd, rn, args.offset, args.mode, args.positive, 0, 0);
     }
 
     pub fn strb(cond: Condition, rd: Register, rn: Register, args: OffsetArgs) Instruction {
-        return singleDataTransfer(cond, rd, rn, args.offset, args.pre_index, args.positive, 1, args.write_back, 0);
+        return singleDataTransfer(cond, rd, rn, args.offset, args.mode, args.positive, 1, 0);
     }
 
     // Extra load/store
 
     pub const ExtraLoadStoreOffsetArgs = struct {
-        pre_index: bool = true,
+        mode: AddressingMode = .offset,
         positive: bool = true,
         offset: ExtraLoadStoreOffset,
-        write_back: bool = false,
     };
 
     pub fn strh(cond: Condition, rt: Register, rn: Register, args: ExtraLoadStoreOffsetArgs) Instruction {
-        return extraLoadStore(cond, args.pre_index, args.positive, args.write_back, 0, 0b01, rn, rt, args.offset);
+        return extraLoadStore(cond, args.mode, args.positive, 0b0, 0b01, rn, rt, args.offset);
     }
 
     pub fn ldrh(cond: Condition, rt: Register, rn: Register, args: ExtraLoadStoreOffsetArgs) Instruction {
-        return extraLoadStore(cond, args.pre_index, args.positive, args.write_back, 1, 0b01, rn, rt, args.offset);
+        return extraLoadStore(cond, args.mode, args.positive, 0b1, 0b01, rn, rt, args.offset);
+    }
+
+    pub fn ldrsh(cond: Condition, rt: Register, rn: Register, args: ExtraLoadStoreOffsetArgs) Instruction {
+        return extraLoadStore(cond, args.mode, args.positive, 0b1, 0b11, rn, rt, args.offset);
+    }
+
+    pub fn ldrsb(cond: Condition, rt: Register, rn: Register, args: ExtraLoadStoreOffsetArgs) Instruction {
+        return extraLoadStore(cond, args.mode, args.positive, 0b1, 0b10, rn, rt, args.offset);
     }
 
     // Block data transfer
@@ -1182,10 +1259,9 @@ pub const Instruction = union(enum) {
         } else if (args.len == 1) {
             const reg = args[0];
             return ldr(cond, reg, .sp, .{
-                .pre_index = false,
+                .mode = .post_index,
                 .positive = true,
                 .offset = Offset.imm(4),
-                .write_back = false,
             });
         } else {
             var register_list: u16 = 0;
@@ -1207,10 +1283,9 @@ pub const Instruction = union(enum) {
         } else if (args.len == 1) {
             const reg = args[0];
             return str(cond, reg, .sp, .{
-                .pre_index = true,
+                .mode = .pre_index,
                 .positive = false,
                 .offset = Offset.imm(4),
-                .write_back = true,
             });
         } else {
             var register_list: u16 = 0;
@@ -1395,10 +1470,9 @@ test "aliases" {
         .{ // pop { r6 }
             .actual = Instruction.pop(.al, .{.r6}),
             .expected = Instruction.ldr(.al, .r6, .sp, .{
-                .pre_index = false,
+                .mode = .post_index,
                 .positive = true,
                 .offset = Instruction.Offset.imm(4),
-                .write_back = false,
             }),
         },
         .{ // pop { r1, r5 }
@@ -1408,10 +1482,9 @@ test "aliases" {
         .{ // push { r3 }
             .actual = Instruction.push(.al, .{.r3}),
             .expected = Instruction.str(.al, .r3, .sp, .{
-                .pre_index = true,
+                .mode = .pre_index,
                 .positive = false,
                 .offset = Instruction.Offset.imm(4),
-                .write_back = true,
             }),
         },
         .{ // push { r0, r2 }

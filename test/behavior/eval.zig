@@ -495,7 +495,7 @@ test "@tagName of @typeInfo" {
 }
 
 test "static eval list init" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
 
     try expect(static_vec3.data[2] == 1.0);
     try expect(vec3(0.0, 0.0, 3.0).data[2] == 3.0);
@@ -511,8 +511,6 @@ pub fn vec3(x: f32, y: f32, z: f32) Vec3 {
 }
 
 test "inlined loop has array literal with elided runtime scope on first iteration but not second iteration" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
-
     var runtime = [1]i32{3};
     comptime var i: usize = 0;
     inline while (i < 2) : (i += 1) {
@@ -524,20 +522,12 @@ test "inlined loop has array literal with elided runtime scope on first iteratio
     }
 }
 
-test "eval @setFloatMode at compile-time" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
-
-    const result = comptime fnWithFloatMode();
-    try expect(result == 1234.0);
-}
-
-fn fnWithFloatMode() f32 {
-    @setFloatMode(std.builtin.FloatMode.Strict);
-    return 1234.0;
-}
-
 test "call method on bound fn referring to var instance" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend != .stage1) {
+        // Let's delay solving this one; I want to try to eliminate bound functions from
+        // the language.
+        return error.SkipZigTest; // TODO
+    }
 
     try expect(bound_fn() == 1237);
 }
@@ -555,8 +545,6 @@ var simple_struct = SimpleStruct{ .field = 1234 };
 const bound_fn = simple_struct.method;
 
 test "ptr to local array argument at comptime" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
-
     comptime {
         var bytes: [10]u8 = undefined;
         modifySomeBytes(bytes[0..]);
@@ -571,8 +559,6 @@ fn modifySomeBytes(bytes: []u8) void {
 }
 
 test "comparisons 0 <= uint and 0 > uint should be comptime" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
-
     testCompTimeUIntComparisons(1234);
 }
 fn testCompTimeUIntComparisons(x: u32) void {
@@ -593,26 +579,11 @@ fn testCompTimeUIntComparisons(x: u32) void {
 const hi1 = "hi";
 const hi2 = hi1;
 test "const global shares pointer with other same one" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
-
     try assertEqualPtrs(&hi1[0], &hi2[0]);
     comptime try expect(&hi1[0] == &hi2[0]);
 }
 fn assertEqualPtrs(ptr1: *const u8, ptr2: *const u8) !void {
     try expect(ptr1 == ptr2);
-}
-
-test "float literal at compile time not lossy" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
-
-    try expect(16777216.0 + 1.0 == 16777217.0);
-    try expect(9007199254740992.0 + 1.0 == 9007199254740993.0);
-}
-
-test "f128 at compile time is lossy" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
-
-    try expect(@as(f128, 10384593717069655257060992658440192.0) + 1 == 10384593717069655257060992658440192.0);
 }
 
 test "string literal used as comptime slice is memoized" {
@@ -706,7 +677,7 @@ fn loopNTimes(comptime n: usize) void {
 }
 
 test "variable inside inline loop that has different types on different iterations" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
 
     try testVarInsideInlineLoop(.{ true, @as(u32, 42) });
 }
@@ -720,20 +691,7 @@ fn testVarInsideInlineLoop(args: anytype) !void {
     }
 }
 
-test "bit shift a u1" {
-    // note: when debugging this test case for stage2, be sure to run it
-    // in valgrind. I noticed the rhs value is undefined in the lowering
-    // of the const value.
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
-
-    var x: u1 = 1;
-    var y = x << 0;
-    try expect(y == 1);
-}
-
 test "*align(1) u16 is the same as *align(1:0:2) u16" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
-
     comptime {
         try expect(*align(1:0:2) u16 == *align(1) u16);
         try expect(*align(2:0:2) u16 == *u16);
@@ -741,14 +699,22 @@ test "*align(1) u16 is the same as *align(1:0:2) u16" {
 }
 
 test "array concatenation forces comptime" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend != .stage1) {
+        // note: our plan is to change the language to support runtime array
+        // concatenation instead of making this test pass.
+        return error.SkipZigTest; // TODO
+    }
 
     var a = oneItem(3) ++ oneItem(4);
     try expect(std.mem.eql(i32, &a, &[_]i32{ 3, 4 }));
 }
 
 test "array multiplication forces comptime" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend != .stage1) {
+        // note: our plan is to change the language to support runtime array
+        // multiplication instead of making this test pass.
+        return error.SkipZigTest; // TODO
+    }
 
     var a = oneItem(3) ** scalar(2);
     try expect(std.mem.eql(i32, &a, &[_]i32{ 3, 3 }));
@@ -763,8 +729,6 @@ fn scalar(x: u32) u32 {
 }
 
 test "comptime assign int to optional int" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
-
     comptime {
         var x: ?i32 = null;
         x = 2;

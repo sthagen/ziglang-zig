@@ -299,15 +299,14 @@ pub fn openPath(allocator: Allocator, sub_path: []const u8, options: link.Option
         return createEmpty(allocator, options);
     }
 
+    const self = try createEmpty(allocator, options);
+    errdefer self.base.destroy();
+
     const file = try options.emit.?.directory.handle.createFile(sub_path, .{
         .truncate = false,
         .read = true,
         .mode = link.determineMode(options),
     });
-    errdefer file.close();
-
-    const self = try createEmpty(allocator, options);
-    errdefer self.base.destroy();
 
     self.base.file = file;
     self.shdr_table_dirty = true;
@@ -2578,7 +2577,10 @@ pub fn allocateDeclIndexes(self: *Elf, decl: *Module.Decl) !void {
     try self.offset_table.ensureUnusedCapacity(self.base.allocator, 1);
     try self.decls.putNoClobber(self.base.allocator, decl, null);
 
-    log.debug("allocating symbol indexes for {s}", .{decl.name});
+    const decl_name = try decl.getFullyQualifiedName(self.base.allocator);
+    defer self.base.allocator.free(decl_name);
+
+    log.debug("allocating symbol indexes for {s}", .{decl_name});
     decl.link.elf.local_sym_index = try self.allocateLocalSymbol();
     try self.atom_by_index_table.putNoClobber(self.base.allocator, decl.link.elf.local_sym_index, &decl.link.elf);
 
@@ -2677,7 +2679,10 @@ fn getDeclPhdrIndex(self: *Elf, decl: *Module.Decl) !u16 {
 }
 
 fn updateDeclCode(self: *Elf, decl: *Module.Decl, code: []const u8, stt_bits: u8) !*elf.Elf64_Sym {
-    log.debug("updateDeclCode {s}{*}", .{ mem.sliceTo(decl.name, 0), decl });
+    const decl_name = try decl.getFullyQualifiedName(self.base.allocator);
+    defer self.base.allocator.free(decl_name);
+
+    log.debug("updateDeclCode {s}{*}", .{ decl_name, decl });
     const required_alignment = decl.ty.abiAlignment(self.base.options.target);
 
     const decl_ptr = self.decls.getPtr(decl).?;
@@ -2695,7 +2700,7 @@ fn updateDeclCode(self: *Elf, decl: *Module.Decl, code: []const u8, stt_bits: u8
             !mem.isAlignedGeneric(u64, local_sym.st_value, required_alignment);
         if (need_realloc) {
             const vaddr = try self.growTextBlock(&decl.link.elf, code.len, required_alignment, phdr_index);
-            log.debug("growing {s} from 0x{x} to 0x{x}", .{ decl.name, local_sym.st_value, vaddr });
+            log.debug("growing {s} from 0x{x} to 0x{x}", .{ decl_name, local_sym.st_value, vaddr });
             if (vaddr != local_sym.st_value) {
                 local_sym.st_value = vaddr;
 
@@ -2707,14 +2712,13 @@ fn updateDeclCode(self: *Elf, decl: *Module.Decl, code: []const u8, stt_bits: u8
             self.shrinkTextBlock(&decl.link.elf, code.len, phdr_index);
         }
         local_sym.st_size = code.len;
-        local_sym.st_name = try self.updateString(local_sym.st_name, mem.sliceTo(decl.name, 0));
+        local_sym.st_name = try self.updateString(local_sym.st_name, decl_name);
         local_sym.st_info = (elf.STB_LOCAL << 4) | stt_bits;
         local_sym.st_other = 0;
         local_sym.st_shndx = shdr_index;
         // TODO this write could be avoided if no fields of the symbol were changed.
         try self.writeSymbol(decl.link.elf.local_sym_index);
     } else {
-        const decl_name = mem.sliceTo(decl.name, 0);
         const name_str_index = try self.makeString(decl_name);
         const vaddr = try self.allocateTextBlock(&decl.link.elf, code.len, required_alignment, phdr_index);
         errdefer self.freeTextBlock(&decl.link.elf, phdr_index);
@@ -2824,7 +2828,10 @@ pub fn updateFunc(self: *Elf, module: *Module, func: *Module.Fn, air: Air, liven
     const decl = func.owner_decl;
     self.freeUnnamedConsts(decl);
 
-    log.debug("updateFunc {s}{*}", .{ decl.name, func.owner_decl });
+    const decl_name = try decl.getFullyQualifiedName(self.base.allocator);
+    defer self.base.allocator.free(decl_name);
+
+    log.debug("updateFunc {s}{*}", .{ decl_name, func.owner_decl });
     log.debug("  (decl.src_line={d}, func.lbrace_line={d}, func.rbrace_line={d})", .{
         decl.src_line,
         func.lbrace_line,
@@ -2861,7 +2868,7 @@ pub fn updateFunc(self: *Elf, module: *Module, func: *Module.Fn, air: Air, liven
     dbg_line_buffer.appendAssumeCapacity(DW.LNS.copy);
 
     // .debug_info subprogram
-    const decl_name_with_null = decl.name[0 .. mem.sliceTo(decl.name, 0).len + 1];
+    const decl_name_with_null = decl_name[0 .. decl_name.len + 1];
     try dbg_info_buffer.ensureUnusedCapacity(25 + decl_name_with_null.len);
 
     const fn_ret_type = decl.ty.fnReturnType();
@@ -3108,9 +3115,13 @@ pub fn lowerUnnamedConst(self: *Elf, typed_value: TypedValue, decl: *Module.Decl
     try self.managed_atoms.append(self.base.allocator, atom);
 
     const name_str_index = blk: {
+        const decl_name = try decl.getFullyQualifiedName(self.base.allocator);
+        defer self.base.allocator.free(decl_name);
+
         const index = unnamed_consts.items.len;
-        const name = try std.fmt.allocPrint(self.base.allocator, "__unnamed_{s}_{d}", .{ decl.name, index });
+        const name = try std.fmt.allocPrint(self.base.allocator, "__unnamed_{s}_{d}", .{ decl_name, index });
         defer self.base.allocator.free(name);
+
         break :blk try self.makeString(name);
     };
     const name = self.getString(name_str_index);
@@ -3128,6 +3139,7 @@ pub fn lowerUnnamedConst(self: *Elf, typed_value: TypedValue, decl: *Module.Decl
         .fail => |em| {
             decl.analysis = .codegen_failure;
             try module.failed_decls.put(module.gpa, decl, em);
+            log.err("{s}", .{em.msg});
             return error.AnalysisFail;
         },
     };
@@ -3511,7 +3523,10 @@ pub fn updateDeclLineNumber(self: *Elf, module: *Module, decl: *const Module.Dec
     const tracy = trace(@src());
     defer tracy.end();
 
-    log.debug("updateDeclLineNumber {s}{*}", .{ decl.name, decl });
+    const decl_name = try decl.getFullyQualifiedName(self.base.allocator);
+    defer self.base.allocator.free(decl_name);
+
+    log.debug("updateDeclLineNumber {s}{*}", .{ decl_name, decl });
 
     if (self.llvm_object) |_| return;
 
