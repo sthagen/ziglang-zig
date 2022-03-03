@@ -160,6 +160,7 @@ pub const Object = struct {
     llvm_module: *const llvm.Module,
     context: *const llvm.Context,
     target_machine: *const llvm.TargetMachine,
+    target_data: *const llvm.TargetData,
     /// Ideally we would use `llvm_module.getNamedFunction` to go from *Decl to LLVM function,
     /// but that has some downsides:
     /// * we have to compute the fully qualified name every time we want to do the lookup
@@ -258,7 +259,7 @@ pub const Object = struct {
         errdefer target_machine.dispose();
 
         const target_data = target_machine.createTargetDataLayout();
-        defer target_data.dispose();
+        errdefer target_data.dispose();
 
         llvm_module.setModuleDataLayout(target_data);
 
@@ -266,6 +267,7 @@ pub const Object = struct {
             .llvm_module = llvm_module,
             .context = context,
             .target_machine = target_machine,
+            .target_data = target_data,
             .decl_map = .{},
             .type_map = .{},
             .type_map_arena = std.heap.ArenaAllocator.init(gpa),
@@ -274,6 +276,7 @@ pub const Object = struct {
     }
 
     pub fn deinit(self: *Object, gpa: Allocator) void {
+        self.target_data.dispose();
         self.target_machine.dispose();
         self.llvm_module.dispose();
         self.context.dispose();
@@ -450,10 +453,22 @@ pub const Object = struct {
             DeclGen.removeFnAttr(llvm_func, "cold");
         }
 
+        // Remove all the basic blocks of a function in order to start over, generating
+        // LLVM IR from an empty function body.
+        while (llvm_func.getFirstBasicBlock()) |bb| {
+            bb.deleteBasicBlock();
+        }
+
+        const builder = dg.context.createBuilder();
+
+        const entry_block = dg.context.appendBasicBlock(llvm_func, "Entry");
+        builder.positionBuilderAtEnd(entry_block);
+
         // This gets the LLVM values from the function and stores them in `dg.args`.
         const fn_info = decl.ty.fnInfo();
-        const ret_ty_by_ref = isByRef(fn_info.return_type);
-        const ret_ptr = if (ret_ty_by_ref) llvm_func.getParam(0) else null;
+        const target = dg.module.getTarget();
+        const sret = firstParamSRet(fn_info, target);
+        const ret_ptr = if (sret) llvm_func.getParam(0) else null;
 
         var args = std.ArrayList(*const llvm.Value).init(dg.gpa);
         defer args.deinit();
@@ -466,17 +481,6 @@ pub const Object = struct {
             try args.append(llvm_func.getParam(llvm_arg_i));
         }
 
-        // Remove all the basic blocks of a function in order to start over, generating
-        // LLVM IR from an empty function body.
-        while (llvm_func.getFirstBasicBlock()) |bb| {
-            bb.deleteBasicBlock();
-        }
-
-        const builder = dg.context.createBuilder();
-
-        const entry_block = dg.context.appendBasicBlock(llvm_func, "Entry");
-        builder.positionBuilderAtEnd(entry_block);
-
         var fg: FuncGen = .{
             .gpa = dg.gpa,
             .air = air,
@@ -485,7 +489,7 @@ pub const Object = struct {
             .dg = &dg,
             .builder = builder,
             .ret_ptr = ret_ptr,
-            .args = args.toOwnedSlice(),
+            .args = args.items,
             .arg_index = 0,
             .func_inst_table = .{},
             .llvm_func = llvm_func,
@@ -544,6 +548,10 @@ pub const Object = struct {
             llvm_global.setValueName(decl.name);
             llvm_global.setUnnamedAddr(.False);
             llvm_global.setLinkage(.External);
+            if (decl.val.castTag(.variable)) |variable| {
+                if (variable.data.is_threadlocal) llvm_global.setThreadLocalMode(.GeneralDynamicTLSModel);
+                if (variable.data.is_weak_linkage) llvm_global.setLinkage(.ExternalWeak);
+            }
         } else if (exports.len != 0) {
             const exp_name = exports[0].options.name;
             llvm_global.setValueName2(exp_name.ptr, exp_name.len);
@@ -553,6 +561,9 @@ pub const Object = struct {
                 .Strong => llvm_global.setLinkage(.External),
                 .Weak => llvm_global.setLinkage(.WeakODR),
                 .LinkOnce => llvm_global.setLinkage(.LinkOnceODR),
+            }
+            if (decl.val.castTag(.variable)) |variable| {
+                if (variable.data.is_threadlocal) llvm_global.setThreadLocalMode(.GeneralDynamicTLSModel);
             }
             // If a Decl is exported more than one time (which is rare),
             // we add aliases for all but the first export.
@@ -784,8 +795,15 @@ pub const DeclGen = struct {
         const llvm_global = dg.object.llvm_module.addGlobalInAddressSpace(llvm_type, fqn, llvm_addrspace);
         gop.value_ptr.* = llvm_global;
 
-        const is_extern = decl.val.tag() == .unreachable_value;
-        if (!is_extern) {
+        if (decl.isExtern()) {
+            llvm_global.setValueName(decl.name);
+            llvm_global.setUnnamedAddr(.False);
+            llvm_global.setLinkage(.External);
+            if (decl.val.castTag(.variable)) |variable| {
+                if (variable.data.is_threadlocal) llvm_global.setThreadLocalMode(.GeneralDynamicTLSModel);
+                if (variable.data.is_weak_linkage) llvm_global.setLinkage(.ExternalWeak);
+            }
+        } else {
             llvm_global.setLinkage(.Internal);
             llvm_global.setUnnamedAddr(.True);
         }
@@ -954,20 +972,55 @@ pub const DeclGen = struct {
                 // reference, we need to copy it here.
                 gop.key_ptr.* = try t.copy(dg.object.type_map_arena.allocator());
 
-                if (t.castTag(.tuple)) |tuple| {
+                if (t.isTupleOrAnonStruct()) {
+                    const tuple = t.tupleFields();
                     const llvm_struct_ty = dg.context.structCreateNamed("");
                     gop.value_ptr.* = llvm_struct_ty; // must be done before any recursive calls
 
-                    const types = tuple.data.types;
-                    const values = tuple.data.values;
-                    var llvm_field_types = try std.ArrayListUnmanaged(*const llvm.Type).initCapacity(gpa, types.len);
+                    var llvm_field_types: std.ArrayListUnmanaged(*const llvm.Type) = .{};
                     defer llvm_field_types.deinit(gpa);
 
-                    for (types) |field_ty, i| {
-                        const field_val = values[i];
+                    try llvm_field_types.ensureUnusedCapacity(gpa, tuple.types.len);
+
+                    // We need to insert extra padding if LLVM's isn't enough.
+                    var zig_offset: u64 = 0;
+                    var llvm_offset: u64 = 0;
+                    var zig_big_align: u32 = 0;
+                    var llvm_big_align: u32 = 0;
+
+                    for (tuple.types) |field_ty, i| {
+                        const field_val = tuple.values[i];
                         if (field_val.tag() != .unreachable_value) continue;
 
-                        llvm_field_types.appendAssumeCapacity(try dg.llvmType(field_ty));
+                        const field_align = field_ty.abiAlignment(target);
+                        zig_big_align = @maximum(zig_big_align, field_align);
+                        zig_offset = std.mem.alignForwardGeneric(u64, zig_offset, field_align);
+
+                        const field_llvm_ty = try dg.llvmType(field_ty);
+                        const field_llvm_align = dg.object.target_data.ABIAlignmentOfType(field_llvm_ty);
+                        llvm_big_align = @maximum(llvm_big_align, field_llvm_align);
+                        llvm_offset = std.mem.alignForwardGeneric(u64, llvm_offset, field_llvm_align);
+
+                        const padding_len = @intCast(c_uint, zig_offset - llvm_offset);
+                        if (padding_len > 0) {
+                            const llvm_array_ty = dg.context.intType(8).arrayType(padding_len);
+                            try llvm_field_types.append(gpa, llvm_array_ty);
+                            llvm_offset = zig_offset;
+                        }
+                        try llvm_field_types.append(gpa, field_llvm_ty);
+
+                        llvm_offset += dg.object.target_data.ABISizeOfType(field_llvm_ty);
+                        zig_offset += field_ty.abiSize(target);
+                    }
+                    {
+                        zig_offset = std.mem.alignForwardGeneric(u64, zig_offset, zig_big_align);
+                        llvm_offset = std.mem.alignForwardGeneric(u64, llvm_offset, llvm_big_align);
+                        const padding_len = @intCast(c_uint, zig_offset - llvm_offset);
+                        if (padding_len > 0) {
+                            const llvm_array_ty = dg.context.intType(8).arrayType(padding_len);
+                            try llvm_field_types.append(gpa, llvm_array_ty);
+                            llvm_offset = zig_offset;
+                        }
                     }
 
                     llvm_struct_ty.structSetBody(
@@ -997,12 +1050,49 @@ pub const DeclGen = struct {
 
                 assert(struct_obj.haveFieldTypes());
 
-                var llvm_field_types = try std.ArrayListUnmanaged(*const llvm.Type).initCapacity(gpa, struct_obj.fields.count());
+                var llvm_field_types: std.ArrayListUnmanaged(*const llvm.Type) = .{};
                 defer llvm_field_types.deinit(gpa);
 
+                try llvm_field_types.ensureUnusedCapacity(gpa, struct_obj.fields.count());
+
+                // We need to insert extra padding if LLVM's isn't enough.
+                var zig_offset: u64 = 0;
+                var llvm_offset: u64 = 0;
+                var zig_big_align: u32 = 0;
+                var llvm_big_align: u32 = 0;
+
                 for (struct_obj.fields.values()) |field| {
-                    if (!field.ty.hasRuntimeBits()) continue;
-                    llvm_field_types.appendAssumeCapacity(try dg.llvmType(field.ty));
+                    if (field.is_comptime or !field.ty.hasRuntimeBits()) continue;
+
+                    const field_align = field.normalAlignment(target);
+                    zig_big_align = @maximum(zig_big_align, field_align);
+                    zig_offset = std.mem.alignForwardGeneric(u64, zig_offset, field_align);
+
+                    const field_llvm_ty = try dg.llvmType(field.ty);
+                    const field_llvm_align = dg.object.target_data.ABIAlignmentOfType(field_llvm_ty);
+                    llvm_big_align = @maximum(llvm_big_align, field_llvm_align);
+                    llvm_offset = std.mem.alignForwardGeneric(u64, llvm_offset, field_llvm_align);
+
+                    const padding_len = @intCast(c_uint, zig_offset - llvm_offset);
+                    if (padding_len > 0) {
+                        const llvm_array_ty = dg.context.intType(8).arrayType(padding_len);
+                        try llvm_field_types.append(gpa, llvm_array_ty);
+                        llvm_offset = zig_offset;
+                    }
+                    try llvm_field_types.append(gpa, field_llvm_ty);
+
+                    llvm_offset += dg.object.target_data.ABISizeOfType(field_llvm_ty);
+                    zig_offset += field.ty.abiSize(target);
+                }
+                {
+                    zig_offset = std.mem.alignForwardGeneric(u64, zig_offset, zig_big_align);
+                    llvm_offset = std.mem.alignForwardGeneric(u64, llvm_offset, llvm_big_align);
+                    const padding_len = @intCast(c_uint, zig_offset - llvm_offset);
+                    if (padding_len > 0) {
+                        const llvm_array_ty = dg.context.intType(8).arrayType(padding_len);
+                        try llvm_field_types.append(gpa, llvm_array_ty);
+                        llvm_offset = zig_offset;
+                    }
                 }
 
                 llvm_struct_ty.structSetBody(
@@ -1049,7 +1139,7 @@ pub const DeclGen = struct {
                             llvm_aligned_field_ty,
                             dg.context.intType(8).arrayType(padding_len),
                         };
-                        break :t dg.context.structType(&fields, fields.len, .False);
+                        break :t dg.context.structType(&fields, fields.len, .True);
                     };
 
                     if (layout.tag_size == 0) {
@@ -1460,12 +1550,11 @@ pub const DeclGen = struct {
                 const field_vals = tv.val.castTag(.@"struct").?.data;
                 const gpa = dg.gpa;
                 const struct_obj = tv.ty.castTag(.@"struct").?.data;
+                const target = dg.module.getTarget();
 
                 if (struct_obj.layout == .Packed) {
-                    const target = dg.module.getTarget();
-                    var int_ty_buf: Type.Payload.Bits = undefined;
-                    const int_ty = struct_obj.packedIntegerType(target, &int_ty_buf);
-                    const int_llvm_ty = try dg.llvmType(int_ty);
+                    const big_bits = struct_obj.packedIntegerBits(target);
+                    const int_llvm_ty = dg.context.intType(big_bits);
                     const fields = struct_obj.fields.values();
                     comptime assert(Type.packed_struct_layout_version == 2);
                     var running_int: *const llvm.Value = int_llvm_ty.constNull();
@@ -1482,7 +1571,10 @@ pub const DeclGen = struct {
                         const small_int_ty = dg.context.intType(ty_bit_size);
                         const small_int_val = non_int_val.constBitCast(small_int_ty);
                         const shift_rhs = int_llvm_ty.constInt(running_bits, .False);
-                        const extended_int_val = small_int_val.constZExt(int_llvm_ty);
+                        // If the field is as large as the entire packed struct, this
+                        // zext would go from, e.g. i16 to i16. This is legal with
+                        // constZExtOrBitCast but not legal with constZExt.
+                        const extended_int_val = small_int_val.constZExtOrBitCast(int_llvm_ty);
                         const shifted = extended_int_val.constShl(shift_rhs);
                         running_int = running_int.constOr(shifted);
                         running_bits += ty_bit_size;
@@ -1494,19 +1586,56 @@ pub const DeclGen = struct {
                 var llvm_fields = try std.ArrayListUnmanaged(*const llvm.Value).initCapacity(gpa, llvm_field_count);
                 defer llvm_fields.deinit(gpa);
 
+                // These are used to detect where the extra padding fields are so that we
+                // can initialize them with undefined.
+                var zig_offset: u64 = 0;
+                var llvm_offset: u64 = 0;
+                var zig_big_align: u32 = 0;
+                var llvm_big_align: u32 = 0;
+
                 var need_unnamed = false;
-                for (field_vals) |field_val, i| {
-                    const field_ty = tv.ty.structFieldType(i);
-                    if (!field_ty.hasRuntimeBits()) continue;
+                for (struct_obj.fields.values()) |field, i| {
+                    if (field.is_comptime or !field.ty.hasRuntimeBits()) continue;
+
+                    const field_align = field.normalAlignment(target);
+                    zig_big_align = @maximum(zig_big_align, field_align);
+                    zig_offset = std.mem.alignForwardGeneric(u64, zig_offset, field_align);
+
+                    const field_llvm_ty = try dg.llvmType(field.ty);
+                    const field_llvm_align = dg.object.target_data.ABIAlignmentOfType(field_llvm_ty);
+                    llvm_big_align = @maximum(llvm_big_align, field_llvm_align);
+                    llvm_offset = std.mem.alignForwardGeneric(u64, llvm_offset, field_llvm_align);
+
+                    const padding_len = @intCast(c_uint, zig_offset - llvm_offset);
+                    if (padding_len > 0) {
+                        const llvm_array_ty = dg.context.intType(8).arrayType(padding_len);
+                        // TODO make this and all other padding elsewhere in debug
+                        // builds be 0xaa not undef.
+                        llvm_fields.appendAssumeCapacity(llvm_array_ty.getUndef());
+                        llvm_offset = zig_offset;
+                    }
 
                     const field_llvm_val = try dg.genTypedValue(.{
-                        .ty = field_ty,
-                        .val = field_val,
+                        .ty = field.ty,
+                        .val = field_vals[i],
                     });
 
-                    need_unnamed = need_unnamed or dg.isUnnamedType(field_ty, field_llvm_val);
+                    need_unnamed = need_unnamed or dg.isUnnamedType(field.ty, field_llvm_val);
 
                     llvm_fields.appendAssumeCapacity(field_llvm_val);
+
+                    llvm_offset += dg.object.target_data.ABISizeOfType(field_llvm_ty);
+                    zig_offset += field.ty.abiSize(target);
+                }
+                {
+                    zig_offset = std.mem.alignForwardGeneric(u64, zig_offset, zig_big_align);
+                    llvm_offset = std.mem.alignForwardGeneric(u64, llvm_offset, llvm_big_align);
+                    const padding_len = @intCast(c_uint, zig_offset - llvm_offset);
+                    if (padding_len > 0) {
+                        const llvm_array_ty = dg.context.intType(8).arrayType(padding_len);
+                        llvm_fields.appendAssumeCapacity(llvm_array_ty.getUndef());
+                        llvm_offset = zig_offset;
+                    }
                 }
 
                 if (need_unnamed) {
@@ -1553,7 +1682,7 @@ pub const DeclGen = struct {
                     const fields: [2]*const llvm.Value = .{
                         field, dg.context.intType(8).arrayType(padding_len).getUndef(),
                     };
-                    break :p dg.context.constStruct(&fields, fields.len, .False);
+                    break :p dg.context.constStruct(&fields, fields.len, .True);
                 };
 
                 // In this case we must make an unnamed struct because LLVM does
@@ -1738,7 +1867,7 @@ pub const DeclGen = struct {
                     },
                     .Struct => {
                         var ty_buf: Type.Payload.Pointer = undefined;
-                        const llvm_field_index = llvmFieldIndex(parent.ty, field_index, target, &ty_buf).?;
+                        const llvm_field_index = dg.llvmFieldIndex(parent.ty, field_index, &ty_buf).?;
                         const indices: [2]*const llvm.Value = .{
                             llvm_u32.constInt(0, .False),
                             llvm_u32.constInt(llvm_field_index, .False),
@@ -1969,6 +2098,107 @@ pub const DeclGen = struct {
             return null;
         }
     }
+
+    /// Take into account 0 bit fields and padding. Returns null if an llvm
+    /// field could not be found.
+    /// This only happens if you want the field index of a zero sized field at
+    /// the end of the struct.
+    fn llvmFieldIndex(
+        dg: *DeclGen,
+        ty: Type,
+        field_index: usize,
+        ptr_pl_buf: *Type.Payload.Pointer,
+    ) ?c_uint {
+        const target = dg.module.getTarget();
+
+        // Detects where we inserted extra padding fields so that we can skip
+        // over them in this function.
+        var zig_offset: u64 = 0;
+        var llvm_offset: u64 = 0;
+        var zig_big_align: u32 = 0;
+        var llvm_big_align: u32 = 0;
+
+        if (ty.isTupleOrAnonStruct()) {
+            const tuple = ty.tupleFields();
+            var llvm_field_index: c_uint = 0;
+            for (tuple.types) |field_ty, i| {
+                if (tuple.values[i].tag() != .unreachable_value) continue;
+
+                const field_align = field_ty.abiAlignment(target);
+                zig_big_align = @maximum(zig_big_align, field_align);
+                zig_offset = std.mem.alignForwardGeneric(u64, zig_offset, field_align);
+
+                // assert no error because we have already seen a successful
+                // llvmType on this field.
+                const field_llvm_ty = dg.llvmType(field_ty) catch unreachable;
+                const field_llvm_align = dg.object.target_data.ABIAlignmentOfType(field_llvm_ty);
+                llvm_big_align = @maximum(llvm_big_align, field_llvm_align);
+                llvm_offset = std.mem.alignForwardGeneric(u64, llvm_offset, field_llvm_align);
+
+                const padding_len = @intCast(c_uint, zig_offset - llvm_offset);
+                if (padding_len > 0) {
+                    llvm_field_index += 1;
+                    llvm_offset = zig_offset;
+                }
+
+                if (field_index == i) {
+                    ptr_pl_buf.* = .{
+                        .data = .{
+                            .pointee_type = field_ty,
+                            .@"align" = field_align,
+                            .@"addrspace" = .generic,
+                        },
+                    };
+                    return llvm_field_index;
+                }
+
+                llvm_field_index += 1;
+                llvm_offset += dg.object.target_data.ABISizeOfType(field_llvm_ty);
+                zig_offset += field_ty.abiSize(target);
+            }
+            return null;
+        }
+        assert(ty.containerLayout() != .Packed);
+
+        var llvm_field_index: c_uint = 0;
+        for (ty.structFields().values()) |field, i| {
+            if (field.is_comptime or !field.ty.hasRuntimeBits()) continue;
+
+            const field_align = field.normalAlignment(target);
+            zig_big_align = @maximum(zig_big_align, field_align);
+            zig_offset = std.mem.alignForwardGeneric(u64, zig_offset, field_align);
+
+            // assert no error because we have already seen a successful llvmType on this field.
+            const field_llvm_ty = dg.llvmType(field.ty) catch unreachable;
+            const field_llvm_align = dg.object.target_data.ABIAlignmentOfType(field_llvm_ty);
+            llvm_big_align = @maximum(llvm_big_align, field_llvm_align);
+            llvm_offset = std.mem.alignForwardGeneric(u64, llvm_offset, field_llvm_align);
+
+            const padding_len = @intCast(c_uint, zig_offset - llvm_offset);
+            if (padding_len > 0) {
+                llvm_field_index += 1;
+                llvm_offset = zig_offset;
+            }
+
+            if (field_index == i) {
+                ptr_pl_buf.* = .{
+                    .data = .{
+                        .pointee_type = field.ty,
+                        .@"align" = field_align,
+                        .@"addrspace" = .generic,
+                    },
+                };
+                return llvm_field_index;
+            }
+
+            llvm_field_index += 1;
+            llvm_offset += dg.object.target_data.ABISizeOfType(field_llvm_ty);
+            zig_offset += field.ty.abiSize(target);
+        } else {
+            // We did not find an llvm field that corresponds to this zig field.
+            return null;
+        }
+    }
 };
 
 pub const FuncGen = struct {
@@ -1977,20 +2207,22 @@ pub const FuncGen = struct {
     air: Air,
     liveness: Liveness,
     context: *const llvm.Context,
-
     builder: *const llvm.Builder,
 
     /// This stores the LLVM values used in a function, such that they can be referred to
     /// in other instructions. This table is cleared before every function is generated.
     func_inst_table: std.AutoHashMapUnmanaged(Air.Inst.Ref, *const llvm.Value),
 
-    /// If the return type isByRef, this is the result pointer. Otherwise null.
+    /// If the return type is sret, this is the result pointer. Otherwise null.
+    /// Note that this can disagree with isByRef for the return type in the case
+    /// of C ABI functions.
     ret_ptr: ?*const llvm.Value,
     /// These fields are used to refer to the LLVM value of the function parameters
     /// in an Arg instruction.
     /// This list may be shorter than the list according to the zig type system;
-    /// it omits 0-bit types.
-    args: []*const llvm.Value,
+    /// it omits 0-bit types. If the function uses sret as the first parameter,
+    /// this slice does not include it.
+    args: []const *const llvm.Value,
     arg_index: usize,
 
     llvm_func: *const llvm.Value,
@@ -2010,7 +2242,6 @@ pub const FuncGen = struct {
     fn deinit(self: *FuncGen) void {
         self.builder.dispose();
         self.func_inst_table.deinit(self.gpa);
-        self.gpa.free(self.args);
         self.blocks.deinit(self.gpa);
     }
 
@@ -2135,6 +2366,7 @@ pub const FuncGen = struct {
                 .switch_br      => try self.airSwitchBr(inst),
                 .breakpoint     => try self.airBreakpoint(inst),
                 .ret_addr       => try self.airRetAddr(inst),
+                .frame_addr     => try self.airFrameAddress(inst),
                 .call           => try self.airCall(inst),
                 .cond_br        => try self.airCondBr(inst),
                 .intcast        => try self.airIntCast(inst),
@@ -2282,12 +2514,35 @@ pub const FuncGen = struct {
         if (return_type.isNoReturn()) {
             _ = self.builder.buildUnreachable();
             return null;
-        } else if (self.liveness.isUnused(inst) or !return_type.hasRuntimeBits()) {
+        }
+
+        if (self.liveness.isUnused(inst) or !return_type.hasRuntimeBits()) {
             return null;
-        } else if (sret) {
+        }
+
+        if (ret_ptr) |rp| {
             const llvm_ret_ty = try self.dg.llvmType(return_type);
             call.setCallSret(llvm_ret_ty);
-            return ret_ptr;
+            if (isByRef(return_type)) {
+                return rp;
+            } else {
+                // our by-ref status disagrees with sret so we must load.
+                const loaded = self.builder.buildLoad(rp, "");
+                loaded.setAlignment(return_type.abiAlignment(target));
+                return loaded;
+            }
+        }
+
+        if (isByRef(return_type)) {
+            // our by-ref status disagrees with sret so we must allocate, store,
+            // and return the allocation pointer.
+            const llvm_ret_ty = try self.dg.llvmType(return_type);
+            const rp = self.buildAlloca(llvm_ret_ty);
+            const alignment = return_type.abiAlignment(target);
+            rp.setAlignment(alignment);
+            const store_inst = self.builder.buildStore(call, rp);
+            store_inst.setAlignment(alignment);
+            return rp;
         } else {
             return call;
         }
@@ -2320,12 +2575,14 @@ pub const FuncGen = struct {
         const un_op = self.air.instructions.items(.data)[inst].un_op;
         const ptr_ty = self.air.typeOf(un_op);
         const ret_ty = ptr_ty.childType();
-        if (!ret_ty.hasRuntimeBits() or isByRef(ret_ty)) {
+        if (!ret_ty.hasRuntimeBits() or self.ret_ptr != null) {
             _ = self.builder.buildRetVoid();
             return null;
         }
+        const target = self.dg.module.getTarget();
         const ptr = try self.resolveInst(un_op);
         const loaded = self.builder.buildLoad(ptr, "");
+        loaded.setAlignment(ret_ty.abiAlignment(target));
         _ = self.builder.buildRet(loaded);
         return null;
     }
@@ -2820,7 +3077,7 @@ pub const FuncGen = struct {
                     },
                     else => {
                         var ptr_ty_buf: Type.Payload.Pointer = undefined;
-                        const llvm_field_index = llvmFieldIndex(struct_ty, field_index, target, &ptr_ty_buf).?;
+                        const llvm_field_index = self.dg.llvmFieldIndex(struct_ty, field_index, &ptr_ty_buf).?;
                         return self.builder.buildExtractValue(struct_llvm_val, llvm_field_index, "");
                     },
                 },
@@ -2835,7 +3092,7 @@ pub const FuncGen = struct {
             .Struct => {
                 assert(struct_ty.containerLayout() != .Packed);
                 var ptr_ty_buf: Type.Payload.Pointer = undefined;
-                const llvm_field_index = llvmFieldIndex(struct_ty, field_index, target, &ptr_ty_buf).?;
+                const llvm_field_index = self.dg.llvmFieldIndex(struct_ty, field_index, &ptr_ty_buf).?;
                 const field_ptr = self.builder.buildStructGEP(struct_llvm_val, llvm_field_index, "");
                 const field_ptr_ty = Type.initPayload(&ptr_ty_buf.base);
                 return self.load(field_ptr, field_ptr_ty);
@@ -3886,6 +4143,7 @@ pub const FuncGen = struct {
         const operand_is_ref = isByRef(operand_ty);
         const result_is_ref = isByRef(inst_ty);
         const llvm_dest_ty = try self.dg.llvmType(inst_ty);
+        const target = self.dg.module.getTarget();
 
         if (operand_is_ref and result_is_ref) {
             // They are both pointers; just do a bitcast on the pointers :)
@@ -3897,7 +4155,6 @@ pub const FuncGen = struct {
         }
 
         if (operand_ty.zigTypeTag() == .Vector and inst_ty.zigTypeTag() == .Array) {
-            const target = self.dg.module.getTarget();
             const elem_ty = operand_ty.childType();
             if (!result_is_ref) {
                 return self.dg.todo("implement bitcast vector to non-ref array", .{});
@@ -3927,7 +4184,6 @@ pub const FuncGen = struct {
             }
             return array_ptr;
         } else if (operand_ty.zigTypeTag() == .Array and inst_ty.zigTypeTag() == .Vector) {
-            const target = self.dg.module.getTarget();
             const elem_ty = operand_ty.childType();
             const llvm_vector_ty = try self.dg.llvmType(inst_ty);
             if (!operand_is_ref) {
@@ -3968,16 +4224,37 @@ pub const FuncGen = struct {
         if (operand_is_ref) {
             // Bitcast the operand pointer, then load.
             const casted_ptr = self.builder.buildBitCast(operand, llvm_dest_ty.pointerType(0), "");
-            return self.builder.buildLoad(casted_ptr, "");
+            const load_inst = self.builder.buildLoad(casted_ptr, "");
+            load_inst.setAlignment(operand_ty.abiAlignment(target));
+            return load_inst;
         }
 
         if (result_is_ref) {
             // Bitcast the result pointer, then store.
+            const alignment = @maximum(operand_ty.abiAlignment(target), inst_ty.abiAlignment(target));
             const result_ptr = self.buildAlloca(llvm_dest_ty);
+            result_ptr.setAlignment(alignment);
             const operand_llvm_ty = try self.dg.llvmType(operand_ty);
             const casted_ptr = self.builder.buildBitCast(result_ptr, operand_llvm_ty.pointerType(0), "");
-            _ = self.builder.buildStore(operand, casted_ptr);
+            const store_inst = self.builder.buildStore(operand, casted_ptr);
+            store_inst.setAlignment(alignment);
             return result_ptr;
+        }
+
+        if (llvm_dest_ty.getTypeKind() == .Struct) {
+            // Both our operand and our result are values, not pointers,
+            // but LLVM won't let us bitcast struct values.
+            // Therefore, we store operand to bitcasted alloca, then load for result.
+            const alignment = @maximum(operand_ty.abiAlignment(target), inst_ty.abiAlignment(target));
+            const result_ptr = self.buildAlloca(llvm_dest_ty);
+            result_ptr.setAlignment(alignment);
+            const operand_llvm_ty = try self.dg.llvmType(operand_ty);
+            const casted_ptr = self.builder.buildBitCast(result_ptr, operand_llvm_ty.pointerType(0), "");
+            const store_inst = self.builder.buildStore(operand, casted_ptr);
+            store_inst.setAlignment(alignment);
+            const load_inst = self.builder.buildLoad(result_ptr, "");
+            load_inst.setAlignment(alignment);
+            return load_inst;
         }
 
         return self.builder.buildBitCast(operand, llvm_dest_ty, "");
@@ -4100,12 +4377,25 @@ pub const FuncGen = struct {
     }
 
     fn airRetAddr(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
-        _ = inst;
-        const i32_zero = self.context.intType(32).constNull();
-        const usize_llvm_ty = try self.dg.llvmType(Type.usize);
+        if (self.liveness.isUnused(inst)) return null;
+
+        const llvm_i32 = self.context.intType(32);
         const llvm_fn = self.getIntrinsic("llvm.returnaddress", &.{});
-        const ptr_val = self.builder.buildCall(llvm_fn, &[_]*const llvm.Value{i32_zero}, 1, .Fast, .Auto, "");
-        return self.builder.buildPtrToInt(ptr_val, usize_llvm_ty, "");
+        const params = [_]*const llvm.Value{llvm_i32.constNull()};
+        const ptr_val = self.builder.buildCall(llvm_fn, &params, params.len, .Fast, .Auto, "");
+        const llvm_usize = try self.dg.llvmType(Type.usize);
+        return self.builder.buildPtrToInt(ptr_val, llvm_usize, "");
+    }
+
+    fn airFrameAddress(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        if (self.liveness.isUnused(inst)) return null;
+
+        const llvm_i32 = self.context.intType(32);
+        const llvm_fn = self.getIntrinsic("llvm.frameaddress", &.{llvm_i32});
+        const params = [_]*const llvm.Value{llvm_i32.constNull()};
+        const ptr_val = self.builder.buildCall(llvm_fn, &params, params.len, .Fast, .Auto, "");
+        const llvm_usize = try self.dg.llvmType(Type.usize);
+        return self.builder.buildPtrToInt(ptr_val, llvm_usize, "");
     }
 
     fn airFence(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
@@ -4631,38 +4921,37 @@ pub const FuncGen = struct {
                 return vector;
             },
             .Struct => {
-                const tuple = result_ty.castTag(.tuple).?.data;
+                var ptr_ty_buf: Type.Payload.Pointer = undefined;
 
                 if (isByRef(result_ty)) {
                     const llvm_u32 = self.context.intType(32);
                     const alloca_inst = self.buildAlloca(llvm_result_ty);
+                    // TODO in debug builds init to undef so that the padding will be 0xaa
+                    // even if we fully populate the fields.
                     const target = self.dg.module.getTarget();
                     alloca_inst.setAlignment(result_ty.abiAlignment(target));
 
                     var indices: [2]*const llvm.Value = .{ llvm_u32.constNull(), undefined };
-                    var llvm_i: u32 = 0;
-
                     for (elements) |elem, i| {
-                        if (tuple.values[i].tag() != .unreachable_value) continue;
-                        const field_ty = tuple.types[i];
+                        if (result_ty.structFieldValueComptime(i) != null) continue;
+
                         const llvm_elem = try self.resolveInst(elem);
+                        const llvm_i = self.dg.llvmFieldIndex(result_ty, i, &ptr_ty_buf).?;
                         indices[1] = llvm_u32.constInt(llvm_i, .False);
-                        llvm_i += 1;
                         const field_ptr = self.builder.buildInBoundsGEP(alloca_inst, &indices, indices.len, "");
                         const store_inst = self.builder.buildStore(llvm_elem, field_ptr);
-                        store_inst.setAlignment(field_ty.abiAlignment(target));
+                        store_inst.setAlignment(result_ty.structFieldAlign(i, target));
                     }
 
                     return alloca_inst;
                 } else {
                     var result = llvm_result_ty.getUndef();
-                    var llvm_i: u32 = 0;
                     for (elements) |elem, i| {
-                        if (tuple.values[i].tag() != .unreachable_value) continue;
+                        if (result_ty.structFieldValueComptime(i) != null) continue;
 
                         const llvm_elem = try self.resolveInst(elem);
+                        const llvm_i = self.dg.llvmFieldIndex(result_ty, i, &ptr_ty_buf).?;
                         result = self.builder.buildInsertValue(result, llvm_elem, llvm_i, "");
-                        llvm_i += 1;
                     }
                     return result;
                 }
@@ -4789,7 +5078,7 @@ pub const FuncGen = struct {
                 index_type.constInt(@boolToInt(layout.tag_align < layout.payload_align), .False),
             };
             const field_ptr = self.builder.buildInBoundsGEP(casted_ptr, &indices, indices.len, "");
-            const llvm_tag = union_llvm_ty.constInt(extra.field_index, .False);
+            const llvm_tag = tag_llvm_ty.constInt(extra.field_index, .False);
             const store_inst = self.builder.buildStore(llvm_tag, field_ptr);
             store_inst.setAlignment(union_obj.tag_ty.abiAlignment(target));
         }
@@ -4966,9 +5255,8 @@ pub const FuncGen = struct {
                     return self.builder.buildBitCast(struct_ptr, result_llvm_ty, "");
                 },
                 else => {
-                    const target = self.dg.module.getTarget();
                     var ty_buf: Type.Payload.Pointer = undefined;
-                    if (llvmFieldIndex(struct_ty, field_index, target, &ty_buf)) |llvm_field_index| {
+                    if (self.dg.llvmFieldIndex(struct_ty, field_index, &ty_buf)) |llvm_field_index| {
                         return self.builder.buildStructGEP(struct_ptr, llvm_field_index, "");
                     } else {
                         // If we found no index then this means this is a zero sized field at the
@@ -5379,81 +5667,25 @@ fn toLlvmCallConv(cc: std.builtin.CallingConvention, target: std.Target) llvm.Ca
     };
 }
 
-/// Take into account 0 bit fields. Returns null if an llvm field could not be found. This only
-/// happens if you want the field index of a zero sized field at the end of the struct.
-fn llvmFieldIndex(
-    ty: Type,
-    field_index: u32,
-    target: std.Target,
-    ptr_pl_buf: *Type.Payload.Pointer,
-) ?c_uint {
-    if (ty.castTag(.tuple)) |payload| {
-        const values = payload.data.values;
-        var llvm_field_index: c_uint = 0;
-        for (values) |val, i| {
-            if (val.tag() != .unreachable_value) {
-                continue;
-            }
-            if (field_index > i) {
-                llvm_field_index += 1;
-                continue;
-            }
-            const field_ty = payload.data.types[i];
-            ptr_pl_buf.* = .{
-                .data = .{
-                    .pointee_type = field_ty,
-                    .@"align" = field_ty.abiAlignment(target),
-                    .@"addrspace" = .generic,
-                },
-            };
-            return llvm_field_index;
-        }
-        return null;
-    }
-    const struct_obj = ty.castTag(.@"struct").?.data;
-    assert(struct_obj.layout != .Packed);
-
-    var llvm_field_index: c_uint = 0;
-    for (struct_obj.fields.values()) |field, i| {
-        if (!field.ty.hasRuntimeBits())
-            continue;
-        if (field_index > i) {
-            llvm_field_index += 1;
-            continue;
-        }
-
-        ptr_pl_buf.* = .{
-            .data = .{
-                .pointee_type = field.ty,
-                .@"align" = field.normalAlignment(target),
-                .@"addrspace" = .generic,
-            },
-        };
-        return llvm_field_index;
-    } else {
-        // We did not find an llvm field that corresponds to this zig field.
-        return null;
-    }
-}
-
 fn firstParamSRet(fn_info: Type.Payload.Function.Data, target: std.Target) bool {
     switch (fn_info.cc) {
         .Unspecified, .Inline => return isByRef(fn_info.return_type),
         .C => {},
         else => return false,
     }
+    const x86_64_abi = @import("../arch/x86_64/abi.zig");
     switch (target.cpu.arch) {
         .mips, .mipsel => return false,
         .x86_64 => switch (target.os.tag) {
-            .windows => return @import("../arch/x86_64/abi.zig").classifyWindows(fn_info.return_type, target) == .memory,
-            else => return @import("../arch/x86_64/abi.zig").classifySystemV(fn_info.return_type, target)[0] == .memory,
+            .windows => return x86_64_abi.classifyWindows(fn_info.return_type, target) == .memory,
+            else => return x86_64_abi.classifySystemV(fn_info.return_type, target)[0] == .memory,
         },
         else => return false, // TODO investigate C ABI for other architectures
     }
 }
 
 fn isByRef(ty: Type) bool {
-    // For tuples (and TODO structs), if there are more than this many non-void
+    // For tuples and structs, if there are more than this many non-void
     // fields, then we make it byref, otherwise byval.
     const max_fields_byval = 2;
 
@@ -5485,24 +5717,28 @@ fn isByRef(ty: Type) bool {
         .Struct => {
             // Packed structs are represented to LLVM as integers.
             if (ty.containerLayout() == .Packed) return false;
-
-            if (!ty.hasRuntimeBits()) return false;
-            if (ty.castTag(.tuple)) |tuple| {
+            if (ty.isTupleOrAnonStruct()) {
+                const tuple = ty.tupleFields();
                 var count: usize = 0;
-                for (tuple.data.values) |field_val, i| {
+                for (tuple.values) |field_val, i| {
                     if (field_val.tag() != .unreachable_value) continue;
+
                     count += 1;
-                    if (count > max_fields_byval) {
-                        return true;
-                    }
-                    const field_ty = tuple.data.types[i];
-                    if (isByRef(field_ty)) {
-                        return true;
-                    }
+                    if (count > max_fields_byval) return true;
+                    if (isByRef(tuple.types[i])) return true;
                 }
                 return false;
             }
-            return true;
+            var count: usize = 0;
+            const fields = ty.structFields();
+            for (fields.values()) |field| {
+                if (field.is_comptime or !field.ty.hasRuntimeBits()) continue;
+
+                count += 1;
+                if (count > max_fields_byval) return true;
+                if (isByRef(field.ty)) return true;
+            }
+            return false;
         },
         .Union => return ty.hasRuntimeBits(),
         .ErrorUnion => return isByRef(ty.errorUnionPayload()),

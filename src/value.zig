@@ -1829,7 +1829,7 @@ pub const Value = extern union {
         assert(a_tag != .undef);
         assert(b_tag != .undef);
         if (a_tag == b_tag) switch (a_tag) {
-            .void_value, .null_value, .the_only_possible_value => return true,
+            .void_value, .null_value, .the_only_possible_value, .empty_struct_value => return true,
             .enum_literal => {
                 const a_name = a.castTag(.enum_literal).?.data;
                 const b_name = b.castTag(.enum_literal).?.data;
@@ -1892,10 +1892,18 @@ pub const Value = extern union {
                 return a_payload == b_payload;
             },
             .@"struct" => {
-                const fields = ty.structFields().values();
                 const a_field_vals = a.castTag(.@"struct").?.data;
                 const b_field_vals = b.castTag(.@"struct").?.data;
                 assert(a_field_vals.len == b_field_vals.len);
+                if (ty.isTupleOrAnonStruct()) {
+                    const types = ty.tupleFields().types;
+                    assert(types.len == a_field_vals.len);
+                    for (types) |field_ty, i| {
+                        if (!eql(a_field_vals[i], b_field_vals[i], field_ty)) return false;
+                    }
+                    return true;
+                }
+                const fields = ty.structFields().values();
                 assert(fields.len == a_field_vals.len);
                 for (fields) |field, i| {
                     if (!eql(a_field_vals[i], b_field_vals[i], field.ty)) return false;
@@ -1967,11 +1975,10 @@ pub const Value = extern union {
                 return true;
             },
             .Struct => {
-                // must be a struct with no fields since we checked for if
-                // both have the struct tag above.
-                const fields = ty.structFields().values();
-                assert(fields.len == 0);
-                return true;
+                // A tuple can be represented with .empty_struct_value,
+                // the_one_possible_value, .@"struct" in which case we could
+                // end up here and the values are equal if the type has zero fields.
+                return ty.structFieldCount() != 0;
             },
             else => return order(a, b).compare(.eq),
         }
@@ -2024,11 +2031,28 @@ pub const Value = extern union {
                 }
             },
             .Struct => {
+                if (ty.isTupleOrAnonStruct()) {
+                    const fields = ty.tupleFields();
+                    for (fields.values) |field_val, i| {
+                        field_val.hash(fields.types[i], hasher);
+                    }
+                    return;
+                }
                 const fields = ty.structFields().values();
                 if (fields.len == 0) return;
-                const field_values = val.castTag(.@"struct").?.data;
-                for (field_values) |field_val, i| {
-                    field_val.hash(fields[i].ty, hasher);
+                switch (val.tag()) {
+                    .empty_struct_value => {
+                        for (fields) |field| {
+                            field.default_val.hash(field.ty, hasher);
+                        }
+                    },
+                    .@"struct" => {
+                        const field_values = val.castTag(.@"struct").?.data;
+                        for (field_values) |field_val, i| {
+                            field_val.hash(fields[i].ty, hasher);
+                        }
+                    },
+                    else => unreachable,
                 }
             },
             .Optional => {
@@ -2043,10 +2067,25 @@ pub const Value = extern union {
                 }
             },
             .ErrorUnion => {
-                @panic("TODO implement hashing error union values");
+                if (val.tag() == .@"error") {
+                    std.hash.autoHash(hasher, false); // error
+                    const sub_ty = ty.errorUnionSet();
+                    val.hash(sub_ty, hasher);
+                    return;
+                }
+
+                if (val.castTag(.eu_payload)) |payload| {
+                    std.hash.autoHash(hasher, true); // payload
+                    const sub_ty = ty.errorUnionPayload();
+                    payload.data.hash(sub_ty, hasher);
+                    return;
+                } else unreachable;
             },
             .ErrorSet => {
-                @panic("TODO implement hashing error set values");
+                // just hash the literal error value. this is the most stable
+                // thing between compiler invocations. we can't use the error
+                // int cause (1) its not stable and (2) we don't have access to mod.
+                hasher.update(val.getError().?);
             },
             .Enum => {
                 var enum_space: Payload.U64 = undefined;

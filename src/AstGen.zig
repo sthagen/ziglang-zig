@@ -290,6 +290,7 @@ pub const ResultLoc = union(enum) {
 };
 
 pub const align_rl: ResultLoc = .{ .ty = .u16_type };
+pub const coerced_align_rl: ResultLoc = .{ .coerced_ty = .u16_type };
 pub const bool_rl: ResultLoc = .{ .ty = .bool_type };
 pub const type_rl: ResultLoc = .{ .ty = .type_type };
 pub const coerced_type_rl: ResultLoc = .{ .coerced_ty = .type_type };
@@ -2302,7 +2303,7 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
             .compile_error,
             .ret_node,
             .ret_load,
-            .ret_coerce,
+            .ret_tok,
             .ret_err_value,
             .@"unreachable",
             .repeat,
@@ -2971,7 +2972,7 @@ fn ptrType(
         trailing_count += 1;
     }
     if (ptr_info.ast.align_node != 0) {
-        align_ref = try expr(gz, scope, align_rl, ptr_info.ast.align_node);
+        align_ref = try expr(gz, scope, coerced_align_rl, ptr_info.ast.align_node);
         trailing_count += 1;
     }
     if (ptr_info.ast.addrspace_node != 0) {
@@ -2980,8 +2981,8 @@ fn ptrType(
     }
     if (ptr_info.ast.bit_range_start != 0) {
         assert(ptr_info.ast.bit_range_end != 0);
-        bit_start_ref = try expr(gz, scope, .none, ptr_info.ast.bit_range_start);
-        bit_end_ref = try expr(gz, scope, .none, ptr_info.ast.bit_range_end);
+        bit_start_ref = try expr(gz, scope, .{ .coerced_ty = .u16_type }, ptr_info.ast.bit_range_start);
+        bit_end_ref = try expr(gz, scope, .{ .coerced_ty = .u16_type }, ptr_info.ast.bit_range_end);
         trailing_count += 2;
     }
 
@@ -3419,8 +3420,8 @@ fn fnDecl(
 
         if (!fn_gz.endsWithNoReturn()) {
             // Since we are adding the return instruction here, we must handle the coercion.
-            // We do this by using the `ret_coerce` instruction.
-            _ = try fn_gz.addUnTok(.ret_coerce, .void_value, tree.lastToken(body_node));
+            // We do this by using the `ret_tok` instruction.
+            _ = try fn_gz.addUnTok(.ret_tok, .void_value, tree.lastToken(body_node));
         }
 
         break :func try decl_gz.addFunc(.{
@@ -3849,8 +3850,8 @@ fn testDecl(
     const block_result = try expr(&fn_block, &fn_block.base, .none, body_node);
     if (fn_block.isEmpty() or !fn_block.refIsNoReturn(block_result)) {
         // Since we are adding the return instruction here, we must handle the coercion.
-        // We do this by using the `ret_coerce` instruction.
-        _ = try fn_block.addUnTok(.ret_coerce, .void_value, tree.lastToken(body_node));
+        // We do this by using the `ret_tok` instruction.
+        _ = try fn_block.addUnTok(.ret_tok, .void_value, tree.lastToken(body_node));
     }
 
     const func_inst = try decl_block.addFunc(.{
@@ -6446,7 +6447,7 @@ fn multilineStringLiteral(
     return rvalue(gz, rl, result, node);
 }
 
-fn charLiteral(gz: *GenZir, rl: ResultLoc, node: Ast.Node.Index) !Zir.Inst.Ref {
+fn charLiteral(gz: *GenZir, rl: ResultLoc, node: Ast.Node.Index) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
     const main_tokens = tree.nodes.items(.main_token);
@@ -6458,70 +6459,7 @@ fn charLiteral(gz: *GenZir, rl: ResultLoc, node: Ast.Node.Index) !Zir.Inst.Ref {
             const result = try gz.addInt(codepoint);
             return rvalue(gz, rl, result, node);
         },
-        .invalid_escape_character => |bad_index| {
-            return astgen.failOff(
-                main_token,
-                @intCast(u32, bad_index),
-                "invalid escape character: '{c}'",
-                .{slice[bad_index]},
-            );
-        },
-        .expected_hex_digit => |bad_index| {
-            return astgen.failOff(
-                main_token,
-                @intCast(u32, bad_index),
-                "expected hex digit, found '{c}'",
-                .{slice[bad_index]},
-            );
-        },
-        .empty_unicode_escape_sequence => |bad_index| {
-            return astgen.failOff(
-                main_token,
-                @intCast(u32, bad_index),
-                "empty unicode escape sequence",
-                .{},
-            );
-        },
-        .expected_hex_digit_or_rbrace => |bad_index| {
-            return astgen.failOff(
-                main_token,
-                @intCast(u32, bad_index),
-                "expected hex digit or '}}', found '{c}'",
-                .{slice[bad_index]},
-            );
-        },
-        .unicode_escape_overflow => |bad_index| {
-            return astgen.failOff(
-                main_token,
-                @intCast(u32, bad_index),
-                "unicode escape too large to be a valid codepoint",
-                .{},
-            );
-        },
-        .expected_lbrace => |bad_index| {
-            return astgen.failOff(
-                main_token,
-                @intCast(u32, bad_index),
-                "expected '{{', found '{c}",
-                .{slice[bad_index]},
-            );
-        },
-        .expected_end => |bad_index| {
-            return astgen.failOff(
-                main_token,
-                @intCast(u32, bad_index),
-                "expected ending single quote ('), found '{c}",
-                .{slice[bad_index]},
-            );
-        },
-        .invalid_character => |bad_index| {
-            return astgen.failOff(
-                main_token,
-                @intCast(u32, bad_index),
-                "invalid byte in character literal: '{c}'",
-                .{slice[bad_index]},
-            );
-        },
+        .failure => |err| return astgen.failWithStrLitError(err, main_token, slice, 0),
     }
 }
 
@@ -7122,7 +7060,7 @@ fn builtinCall(
         .error_to_int          => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .error_to_int),
         .int_to_error          => return simpleUnOp(gz, scope, rl, node, .{ .ty = .u16_type },                params[0], .int_to_error),
         .compile_error         => return simpleUnOp(gz, scope, rl, node, .{ .ty = .const_slice_u8_type },     params[0], .compile_error),
-        .set_eval_branch_quota => return simpleUnOp(gz, scope, rl, node, .{ .ty = .u32_type },                params[0], .set_eval_branch_quota),
+        .set_eval_branch_quota => return simpleUnOp(gz, scope, rl, node, .{ .coerced_ty = .u32_type },        params[0], .set_eval_branch_quota),
         .enum_to_int           => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .enum_to_int),
         .bool_to_int           => return simpleUnOp(gz, scope, rl, node, bool_rl,                             params[0], .bool_to_int),
         .embed_file            => return simpleUnOp(gz, scope, rl, node, .{ .ty = .const_slice_u8_type },     params[0], .embed_file),
@@ -7437,7 +7375,7 @@ fn builtinCall(
         },
         .Vector => {
             const result = try gz.addPlNode(.vector_type, node, Zir.Inst.Bin{
-                .lhs = try comptimeExpr(gz, scope, .{ .ty = .u32_type }, params[0]),
+                .lhs = try comptimeExpr(gz, scope, .{ .coerced_ty = .u32_type }, params[0]),
                 .rhs = try typeExpr(gz, scope, params[1]),
             });
             return rvalue(gz, rl, result, node);
@@ -8957,52 +8895,83 @@ fn parseStrLit(
     buf.* = buf_managed.moveToUnmanaged();
     switch (try result) {
         .success => return,
+        .failure => |err| return astgen.failWithStrLitError(err, token, bytes, offset),
+    }
+}
+
+fn failWithStrLitError(astgen: *AstGen, err: std.zig.string_literal.Error, token: Ast.TokenIndex, bytes: []const u8, offset: u32) InnerError {
+    const raw_string = bytes[offset..];
+    switch (err) {
+        .invalid_escape_character => |bad_index| {
+            return astgen.failOff(
+                token,
+                offset + @intCast(u32, bad_index),
+                "invalid escape character: '{c}'",
+                .{raw_string[bad_index]},
+            );
+        },
+        .expected_hex_digit => |bad_index| {
+            return astgen.failOff(
+                token,
+                offset + @intCast(u32, bad_index),
+                "expected hex digit, found '{c}'",
+                .{raw_string[bad_index]},
+            );
+        },
+        .empty_unicode_escape_sequence => |bad_index| {
+            return astgen.failOff(
+                token,
+                offset + @intCast(u32, bad_index),
+                "empty unicode escape sequence",
+                .{},
+            );
+        },
+        .expected_hex_digit_or_rbrace => |bad_index| {
+            return astgen.failOff(
+                token,
+                offset + @intCast(u32, bad_index),
+                "expected hex digit or '}}', found '{c}'",
+                .{raw_string[bad_index]},
+            );
+        },
+        .invalid_unicode_codepoint => |bad_index| {
+            return astgen.failOff(
+                token,
+                offset + @intCast(u32, bad_index),
+                "unicode escape does not correspond to a valid codepoint",
+                .{},
+            );
+        },
+        .expected_lbrace => |bad_index| {
+            return astgen.failOff(
+                token,
+                offset + @intCast(u32, bad_index),
+                "expected '{{', found '{c}",
+                .{raw_string[bad_index]},
+            );
+        },
+        .expected_rbrace => |bad_index| {
+            return astgen.failOff(
+                token,
+                offset + @intCast(u32, bad_index),
+                "expected '}}', found '{c}",
+                .{raw_string[bad_index]},
+            );
+        },
+        .expected_single_quote => |bad_index| {
+            return astgen.failOff(
+                token,
+                offset + @intCast(u32, bad_index),
+                "expected single quote ('), found '{c}",
+                .{raw_string[bad_index]},
+            );
+        },
         .invalid_character => |bad_index| {
             return astgen.failOff(
                 token,
                 offset + @intCast(u32, bad_index),
-                "invalid string literal character: '{c}'",
+                "invalid byte in string or character literal: '{c}'",
                 .{raw_string[bad_index]},
-            );
-        },
-        .expected_hex_digits => |bad_index| {
-            return astgen.failOff(
-                token,
-                offset + @intCast(u32, bad_index),
-                "expected hex digits after '\\x'",
-                .{},
-            );
-        },
-        .invalid_hex_escape => |bad_index| {
-            return astgen.failOff(
-                token,
-                offset + @intCast(u32, bad_index),
-                "invalid hex digit: '{c}'",
-                .{raw_string[bad_index]},
-            );
-        },
-        .invalid_unicode_escape => |bad_index| {
-            return astgen.failOff(
-                token,
-                offset + @intCast(u32, bad_index),
-                "invalid unicode digit: '{c}'",
-                .{raw_string[bad_index]},
-            );
-        },
-        .missing_matching_rbrace => |bad_index| {
-            return astgen.failOff(
-                token,
-                offset + @intCast(u32, bad_index),
-                "missing matching '}}' character",
-                .{},
-            );
-        },
-        .expected_unicode_digits => |bad_index| {
-            return astgen.failOff(
-                token,
-                offset + @intCast(u32, bad_index),
-                "expected unicode digits after '\\u'",
-                .{},
             );
         },
     }

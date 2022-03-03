@@ -46,9 +46,9 @@ pub fn main() void {
 
     var leaks: usize = 0;
     for (test_fn_list) |test_fn, i| {
-        if (builtin.zig_backend != .stage2_llvm) std.testing.allocator_instance = .{};
+        std.testing.allocator_instance = .{};
         defer {
-            if (builtin.zig_backend != .stage2_llvm and std.testing.allocator_instance.deinit()) {
+            if (std.testing.allocator_instance.deinit()) {
                 leaks += 1;
             }
         }

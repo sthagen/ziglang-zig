@@ -19,7 +19,7 @@ test "integer literal to pointer cast" {
 
 test "peer type resolution: ?T and T" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_x86_64 or builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
 
     try expect(peerTypeTAndOptionalT(true, false).? == 0);
     try expect(peerTypeTAndOptionalT(false, false).? == 3);
@@ -179,7 +179,7 @@ test "@floatCast comptime_int and comptime_float" {
 
 test "coerce undefined to optional" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_x86_64 or builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
 
     try expect(MakeType(void).getNull() == null);
     try expect(MakeType(void).getNonNull() != null);
@@ -223,7 +223,7 @@ test "@intToEnum passed a comptime_int to an enum with one item" {
 }
 
 test "@intCast to u0 and use the result" {
-    if (builtin.zig_backend == .stage2_x86_64 or builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
 
     const S = struct {
         fn doTheTest(zero: u1, one: u1, bigzero: i32) !void {
@@ -237,7 +237,7 @@ test "@intCast to u0 and use the result" {
 
 test "peer result null and comptime_int" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_x86_64 or builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
 
     const S = struct {
         fn blah(n: i32) ?i32 {
@@ -302,7 +302,7 @@ fn implicitIntLitToOptional() void {
 
 test "return u8 coercing into ?u32 return type" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_x86_64 or builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
 
     const S = struct {
         fn doTheTest() !void {
@@ -324,7 +324,6 @@ test "cast from ?[*]T to ??[*]T" {
 test "peer type unsigned int to signed" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
 
     var w: u31 = 5;
     var x: u8 = 7;
@@ -374,7 +373,6 @@ fn testPeerResolveArrayConstSlice(b: bool) !void {
 test "implicitly cast from T to anyerror!?T" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
 
     try castToOptionalTypeError(1);
     comptime try castToOptionalTypeError(1);
@@ -401,7 +399,6 @@ test "implicitly cast from [0]T to anyerror![]T" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     try testCastZeroArrayToErrSliceMut();
     comptime try testCastZeroArrayToErrSliceMut();
@@ -419,7 +416,6 @@ test "peer type resolution: [0]u8, []const u8, and anyerror![]u8" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn doTheTest() anyerror!void {
@@ -475,7 +471,6 @@ fn testCastConstArrayRefToConstSlice() !void {
 test "peer type resolution: error and [N]T" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     try expect(mem.eql(u8, try testPeerErrorAndArray(0), "OK"));
     comptime try expect(mem.eql(u8, try testPeerErrorAndArray(0), "OK"));
@@ -501,7 +496,6 @@ test "single-item pointer of array to slice to unknown length pointer" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     try testCastPtrOfArrayToSliceAndPtr();
     comptime try testCastPtrOfArrayToSliceAndPtr();
@@ -591,7 +585,10 @@ test "@floatCast cast down" {
 }
 
 test "peer type resolution: unreachable, error set, unreachable" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
     const Error = error{
         FileDescriptorAlreadyPresentInSet,
@@ -613,6 +610,147 @@ test "peer type resolution: unreachable, error set, unreachable" {
         error.Unexpected => unreachable,
     };
     try expect(transformed_err == error.SystemResources);
+}
+
+test "peer cast: error set any anyerror" {
+    const a: error{ One, Two } = undefined;
+    const b: anyerror = undefined;
+    try expect(@TypeOf(a, b) == anyerror);
+    try expect(@TypeOf(b, a) == anyerror);
+}
+
+test "peer type resolution: error set supersets" {
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+
+    const a: error{ One, Two } = undefined;
+    const b: error{One} = undefined;
+
+    // A superset of B
+    {
+        const ty = @TypeOf(a, b);
+        const error_set_info = @typeInfo(ty);
+        try expect(error_set_info == .ErrorSet);
+        try expect(error_set_info.ErrorSet.?.len == 2);
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[0].name, "One"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[1].name, "Two"));
+    }
+
+    // B superset of A
+    {
+        const ty = @TypeOf(b, a);
+        const error_set_info = @typeInfo(ty);
+        try expect(error_set_info == .ErrorSet);
+        try expect(error_set_info.ErrorSet.?.len == 2);
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[0].name, "One"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[1].name, "Two"));
+    }
+}
+
+test "peer type resolution: disjoint error sets" {
+    if (builtin.zig_backend == .stage1) {
+        // stage1 gets the order of the error names wrong after merging the sets.
+        return error.SkipZigTest;
+    }
+
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+
+    const a: error{ One, Two } = undefined;
+    const b: error{Three} = undefined;
+
+    {
+        const ty = @TypeOf(a, b);
+        const error_set_info = @typeInfo(ty);
+        try expect(error_set_info == .ErrorSet);
+        try expect(error_set_info.ErrorSet.?.len == 3);
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[0].name, "One"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[1].name, "Two"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[2].name, "Three"));
+    }
+
+    {
+        const ty = @TypeOf(b, a);
+        const error_set_info = @typeInfo(ty);
+        try expect(error_set_info == .ErrorSet);
+        try expect(error_set_info.ErrorSet.?.len == 3);
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[0].name, "Three"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[1].name, "One"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[2].name, "Two"));
+    }
+}
+
+test "peer type resolution: error union and error set" {
+    if (builtin.zig_backend == .stage1) {
+        // stage1 gets the order of the error names wrong after merging the sets.
+        return error.SkipZigTest;
+    }
+
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+
+    const a: error{Three} = undefined;
+    const b: error{ One, Two }!u32 = undefined;
+
+    {
+        const ty = @TypeOf(a, b);
+        const info = @typeInfo(ty);
+        try expect(info == .ErrorUnion);
+
+        const error_set_info = @typeInfo(info.ErrorUnion.error_set);
+        try expect(error_set_info.ErrorSet.?.len == 3);
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[0].name, "Three"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[1].name, "One"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[2].name, "Two"));
+    }
+
+    {
+        const ty = @TypeOf(b, a);
+        const info = @typeInfo(ty);
+        try expect(info == .ErrorUnion);
+
+        const error_set_info = @typeInfo(info.ErrorUnion.error_set);
+        try expect(error_set_info.ErrorSet.?.len == 3);
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[0].name, "One"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[1].name, "Two"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[2].name, "Three"));
+    }
+}
+
+test "peer type resolution: error union after non-error" {
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+
+    const a: u32 = undefined;
+    const b: error{ One, Two }!u32 = undefined;
+
+    {
+        const ty = @TypeOf(a, b);
+        const info = @typeInfo(ty);
+        try expect(info == .ErrorUnion);
+        try expect(info.ErrorUnion.payload == u32);
+
+        const error_set_info = @typeInfo(info.ErrorUnion.error_set);
+        try expect(error_set_info.ErrorSet.?.len == 2);
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[0].name, "One"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[1].name, "Two"));
+    }
+
+    {
+        const ty = @TypeOf(b, a);
+        const info = @typeInfo(ty);
+        try expect(info == .ErrorUnion);
+        try expect(info.ErrorUnion.payload == u32);
+
+        const error_set_info = @typeInfo(info.ErrorUnion.error_set);
+        try expect(error_set_info.ErrorSet.?.len == 2);
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[0].name, "One"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[1].name, "Two"));
+    }
 }
 
 test "peer cast *[0]T to E![]const T" {
@@ -646,7 +784,6 @@ test "peer cast *[0]T to []const T" {
 test "peer cast *[N]T to [*]T" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     var array = [4:99]i32{ 1, 2, 3, 4 };
     var dest: [*]i32 = undefined;
@@ -655,7 +792,11 @@ test "peer cast *[N]T to [*]T" {
 }
 
 test "peer resolution of string literals" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
 
     const S = struct {
         const E = enum { a, b, c, d };
@@ -678,7 +819,6 @@ test "peer cast [:x]T to []T" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn doTheTest() !void {
@@ -696,7 +836,6 @@ test "peer cast [N:x]T to [N]T" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn doTheTest() !void {
@@ -713,7 +852,6 @@ test "peer cast *[N:x]T to *[N]T" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn doTheTest() !void {
@@ -767,7 +905,6 @@ test "peer type resolution implicit cast to return type" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn doTheTest() !void {
@@ -882,7 +1019,6 @@ test "pointer reinterpret const float to int" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     // The hex representation is 0x3fe3333333333303.
     const float: f64 = 5.99999999999994648725e-01;
@@ -899,7 +1035,6 @@ test "implicit cast from [*]T to ?*anyopaque" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     var a = [_]u8{ 3, 2, 1 };
     var runtime_zero: usize = 0;
@@ -915,9 +1050,9 @@ fn incrementVoidPtrArray(array: ?*anyopaque, len: usize) void {
 }
 
 test "compile time int to ptr of function" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage1) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == .aarch64) return error.SkipZigTest; // TODO
+
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
@@ -925,18 +1060,19 @@ test "compile time int to ptr of function" {
     try foobar(FUNCTION_CONSTANT);
 }
 
-pub const FUNCTION_CONSTANT = @intToPtr(PFN_void, maxInt(usize));
+// On some architectures function pointers must be aligned.
+const hardcoded_fn_addr = maxInt(usize) & ~@as(usize, 0xf);
+pub const FUNCTION_CONSTANT = @intToPtr(PFN_void, hardcoded_fn_addr);
 pub const PFN_void = *const fn (*anyopaque) callconv(.C) void;
 
 fn foobar(func: PFN_void) !void {
-    try std.testing.expect(@ptrToInt(func) == maxInt(usize));
+    try std.testing.expect(@ptrToInt(func) == hardcoded_fn_addr);
 }
 
 test "implicit ptr to *anyopaque" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     var a: u32 = 1;
     var ptr: *align(@alignOf(u32)) anyopaque = &a;
@@ -950,7 +1086,6 @@ test "implicit ptr to *anyopaque" {
 test "return null from fn() anyerror!?&T" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     const a = returnNullFromOptionalTypeErrorRef();
     const b = returnNullLitFromOptionalTypeErrorRef();
@@ -968,7 +1103,6 @@ test "peer type resolution: [0]u8 and []const u8" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     try expect(peerTypeEmptyArrayAndSlice(true, "hi").len == 0);
     try expect(peerTypeEmptyArrayAndSlice(false, "hi").len == 1);
@@ -989,7 +1123,6 @@ test "implicitly cast from [N]T to ?[]const T" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     try expect(mem.eql(u8, castToOptionalSlice().?, "hi"));
     comptime try expect(mem.eql(u8, castToOptionalSlice().?, "hi"));
@@ -1041,7 +1174,6 @@ test "implicit cast from *T to ?*anyopaque" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     var a: u8 = 1;
     incrementVoidPtrValue(&a);
@@ -1056,7 +1188,6 @@ test "implicit cast *[0]T to E![]const u8" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     var x = @as(anyerror![]const u8, &[0]u8{});
     try expect((x catch unreachable).len == 0);
@@ -1064,14 +1195,11 @@ test "implicit cast *[0]T to E![]const u8" {
 
 var global_array: [4]u8 = undefined;
 test "cast from array reference to fn: comptime fn ptr" {
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-
     const f = @ptrCast(*const fn () callconv(.C) void, &global_array);
     try expect(@ptrToInt(f) == @ptrToInt(&global_array));
 }
 test "cast from array reference to fn: runtime fn ptr" {
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     var f = @ptrCast(*const fn () callconv(.C) void, &global_array);
     try expect(@ptrToInt(f) == @ptrToInt(&global_array));
@@ -1081,7 +1209,6 @@ test "*const [N]null u8 to ?[]const u8" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn doTheTest() !void {
@@ -1095,8 +1222,6 @@ test "*const [N]null u8 to ?[]const u8" {
 }
 
 test "cast between [*c]T and ?[*:0]T on fn parameter" {
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-
     const S = struct {
         const Handler = ?fn ([*c]const u8) callconv(.C) void;
         fn addCallback(handler: Handler) void {
@@ -1119,7 +1244,6 @@ test "assignment to optional pointer result loc" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     var foo: struct { ptr: ?*anyopaque } = .{ .ptr = &global_struct };
     try expect(foo.ptr.? == @ptrCast(*anyopaque, &global_struct));
@@ -1128,7 +1252,6 @@ test "assignment to optional pointer result loc" {
 test "cast between *[N]void and []void" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     var a: [4]void = undefined;
     var b: []void = &a;
@@ -1138,7 +1261,6 @@ test "cast between *[N]void and []void" {
 test "peer resolve arrays of different size to const slice" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     try expect(mem.eql(u8, boolToStr(true), "true"));
     try expect(mem.eql(u8, boolToStr(false), "false"));
@@ -1209,7 +1331,6 @@ test "peer type resolution: unreachable, null, slice" {
 test "cast i8 fn call peers to i32 result" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn doTheTest() !void {

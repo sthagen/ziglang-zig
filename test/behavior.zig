@@ -51,6 +51,7 @@ test {
     _ = @import("behavior/defer.zig");
     _ = @import("behavior/enum.zig");
     _ = @import("behavior/error.zig");
+    _ = @import("behavior/floatop.zig");
     _ = @import("behavior/fn.zig");
     _ = @import("behavior/fn_delegation.zig");
     _ = @import("behavior/fn_in_struct_in_comptime.zig");
@@ -65,19 +66,21 @@ test {
     _ = @import("behavior/inttoptr.zig");
     _ = @import("behavior/ir_block_deps.zig");
     _ = @import("behavior/member_func.zig");
+    _ = @import("behavior/muladd.zig");
     _ = @import("behavior/namespace_depends_on_compile_var.zig");
     _ = @import("behavior/null.zig");
     _ = @import("behavior/optional.zig");
-    _ = @import("behavior/prefetch.zig");
     _ = @import("behavior/pointers.zig");
-    _ = @import("behavior/pub_enum.zig");
+    _ = @import("behavior/prefetch.zig");
     _ = @import("behavior/ptrcast.zig");
-    _ = @import("behavior/reflection.zig");
+    _ = @import("behavior/pub_enum.zig");
     _ = @import("behavior/ref_var_in_if_after_if_2nd_switch_prong.zig");
+    _ = @import("behavior/reflection.zig");
     _ = @import("behavior/slice.zig");
     _ = @import("behavior/slice_sentinel_comptime.zig");
-    _ = @import("behavior/struct.zig");
     _ = @import("behavior/src.zig");
+    _ = @import("behavior/struct.zig");
+    _ = @import("behavior/switch.zig");
     _ = @import("behavior/this.zig");
     _ = @import("behavior/truncate.zig");
     _ = @import("behavior/try.zig");
@@ -92,7 +95,6 @@ test {
     _ = @import("behavior/void.zig");
     _ = @import("behavior/while.zig");
 
-    // tests that don't pass for stage1
     if (builtin.zig_backend != .stage1) {
         _ = @import("behavior/decltest.zig");
     }
@@ -115,13 +117,11 @@ test {
         if (builtin.zig_backend != .stage2_c) {
             // Tests that pass for stage1 and the llvm backend.
             _ = @import("behavior/atomics.zig");
-            _ = @import("behavior/floatop.zig");
             _ = @import("behavior/math.zig");
             _ = @import("behavior/maximum_minimum.zig");
             _ = @import("behavior/popcount.zig");
             _ = @import("behavior/saturating_arithmetic.zig");
             _ = @import("behavior/sizeof_and_typeof.zig");
-            _ = @import("behavior/switch.zig");
             _ = @import("behavior/widening.zig");
             _ = @import("behavior/bugs/421.zig");
             _ = @import("behavior/bugs/726.zig");
@@ -135,6 +135,7 @@ test {
             _ = @import("behavior/bugs/5398.zig");
             _ = @import("behavior/bugs/5413.zig");
             _ = @import("behavior/bugs/5487.zig");
+            _ = @import("behavior/bugs/7003.zig");
             _ = @import("behavior/struct_contains_null_ptr_itself.zig");
             _ = @import("behavior/switch_prong_err_enum.zig");
             _ = @import("behavior/switch_prong_implicit_cast.zig");
@@ -156,14 +157,12 @@ test {
                 _ = @import("behavior/bugs/3779.zig");
                 _ = @import("behavior/bugs/6456.zig");
                 _ = @import("behavior/bugs/6781.zig");
-                _ = @import("behavior/bugs/7003.zig");
                 _ = @import("behavior/bugs/7027.zig");
                 _ = @import("behavior/bugs/7047.zig");
                 _ = @import("behavior/bugs/10147.zig");
                 _ = @import("behavior/const_slice_child.zig");
+                _ = @import("behavior/export.zig");
                 _ = @import("behavior/export_self_referential_type_info.zig");
-                _ = @import("behavior/misc.zig");
-                _ = @import("behavior/muladd.zig");
                 _ = @import("behavior/select.zig");
                 _ = @import("behavior/shuffle.zig");
                 _ = @import("behavior/struct_contains_slice_of_itself.zig");

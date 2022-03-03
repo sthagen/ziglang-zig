@@ -120,6 +120,9 @@ pub const Value = opaque {
     pub const setUnnamedAddr = LLVMSetUnnamedAddr;
     extern fn LLVMSetUnnamedAddr(Global: *const Value, HasUnnamedAddr: Bool) void;
 
+    pub const setThreadLocalMode = LLVMSetThreadLocalMode;
+    extern fn LLVMSetThreadLocalMode(Global: *const Value, Mode: ThreadLocalMode) void;
+
     pub const deleteGlobal = LLVMDeleteGlobal;
     extern fn LLVMDeleteGlobal(GlobalVar: *const Value) void;
 
@@ -156,6 +159,9 @@ pub const Value = opaque {
 
     pub const constZExt = LLVMConstZExt;
     extern fn LLVMConstZExt(ConstantVal: *const Value, ToType: *const Type) *const Value;
+
+    pub const constZExtOrBitCast = LLVMConstZExtOrBitCast;
+    extern fn LLVMConstZExtOrBitCast(ConstantVal: *const Value, ToType: *const Type) *const Value;
 
     pub const constNot = LLVMConstNot;
     extern fn LLVMConstNot(ConstantVal: *const Value) *const Value;
@@ -913,6 +919,12 @@ pub const TargetMachine = opaque {
 pub const TargetData = opaque {
     pub const dispose = LLVMDisposeTargetData;
     extern fn LLVMDisposeTargetData(*const TargetData) void;
+
+    pub const ABISizeOfType = LLVMABISizeOfType;
+    extern fn LLVMABISizeOfType(TD: *const TargetData, Ty: *const Type) c_ulonglong;
+
+    pub const ABIAlignmentOfType = LLVMABIAlignmentOfType;
+    extern fn LLVMABIAlignmentOfType(TD: *const TargetData, Ty: *const Type) c_uint;
 };
 
 pub const CodeModel = enum(c_int) {
@@ -1219,6 +1231,14 @@ pub const Linkage = enum(c_uint) {
     Common,
     LinkerPrivate,
     LinkerPrivateWeak,
+};
+
+pub const ThreadLocalMode = enum(c_uint) {
+    NotThreadLocal,
+    GeneralDynamicTLSModel,
+    LocalDynamicTLSModel,
+    InitialExecTLSModel,
+    LocalExecTLSModel,
 };
 
 pub const AtomicOrdering = enum(c_uint) {
