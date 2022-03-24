@@ -8,6 +8,7 @@ const mem = std.mem;
 const wasm = std.wasm;
 const log = std.log.scoped(.codegen);
 
+const codegen = @import("../../codegen.zig");
 const Module = @import("../../Module.zig");
 const Decl = Module.Decl;
 const Type = @import("../../type.zig").Type;
@@ -211,7 +212,8 @@ fn buildOpcode(args: OpcodeBuildArguments) wasm.Opcode {
             16 => switch (args.valtype1.?) {
                 .i32 => if (args.signedness.? == .signed) return .i32_load16_s else return .i32_load16_u,
                 .i64 => if (args.signedness.? == .signed) return .i64_load16_s else return .i64_load16_u,
-                .f32, .f64 => unreachable,
+                .f32 => return .f32_load,
+                .f64 => unreachable,
             },
             32 => switch (args.valtype1.?) {
                 .i64 => if (args.signedness.? == .signed) return .i64_load32_s else return .i64_load32_u,
@@ -241,7 +243,8 @@ fn buildOpcode(args: OpcodeBuildArguments) wasm.Opcode {
                 16 => switch (args.valtype1.?) {
                     .i32 => return .i32_store16,
                     .i64 => return .i64_store16,
-                    .f32, .f64 => unreachable,
+                    .f32 => return .f32_store,
+                    .f64 => unreachable,
                 },
                 32 => switch (args.valtype1.?) {
                     .i64 => return .i64_store32,
@@ -546,7 +549,7 @@ blocks: std.AutoArrayHashMapUnmanaged(Air.Inst.Index, struct {
     value: WValue,
 }) = .{},
 /// `bytes` contains the wasm bytecode belonging to the 'code' section.
-code: ArrayList(u8),
+code: *ArrayList(u8),
 /// The index the next local generated will have
 /// NOTE: arguments share the index with locals therefore the first variable
 /// will have the index that comes after the last argument's index
@@ -566,9 +569,6 @@ locals: std.ArrayListUnmanaged(u8),
 target: std.Target,
 /// Represents the wasm binary file that is being linked.
 bin_file: *link.File.Wasm,
-/// Reference to the Module that this decl is part of.
-/// Used to find the error value.
-module: *Module,
 /// List of MIR Instructions
 mir_instructions: std.MultiArrayList(Mir.Inst) = .{},
 /// Contains extra data for MIR
@@ -611,7 +611,6 @@ pub fn deinit(self: *Self) void {
     self.locals.deinit(self.gpa);
     self.mir_instructions.deinit(self.gpa);
     self.mir_extra.deinit(self.gpa);
-    self.code.deinit();
     self.* = undefined;
 }
 
@@ -633,13 +632,13 @@ fn resolveInst(self: *Self, ref: Air.Inst.Ref) InnerError!WValue {
     // means we must generate it from a constant.
     const val = self.air.value(ref).?;
     const ty = self.air.typeOf(ref);
-    if (!ty.hasRuntimeBits() and !ty.isInt()) {
+    if (!ty.hasRuntimeBitsIgnoreComptime() and !ty.isInt()) {
         gop.value_ptr.* = WValue{ .none = {} };
         return gop.value_ptr.*;
     }
 
     // When we need to pass the value by reference (such as a struct), we will
-    // leverage `genTypedValue` to lower the constant to bytes and emit it
+    // leverage `generateSymbol` to lower the constant to bytes and emit it
     // to the 'rodata' section. We then return the index into the section as `WValue`.
     //
     // In the other cases, we will simply lower the constant to a value that fits
@@ -806,13 +805,13 @@ fn genFunctype(gpa: Allocator, fn_ty: Type, target: std.Target) !wasm.Type {
         defer gpa.free(fn_params);
         fn_ty.fnParamTypes(fn_params);
         for (fn_params) |param_type| {
-            if (!param_type.hasRuntimeBits()) continue;
+            if (!param_type.hasRuntimeBitsIgnoreComptime()) continue;
             try params.append(typeToValtype(param_type, target));
         }
     }
 
     // return type
-    if (!want_sret and return_type.hasRuntimeBits()) {
+    if (!want_sret and return_type.hasRuntimeBitsIgnoreComptime()) {
         try returns.append(typeToValtype(return_type, target));
     }
 
@@ -822,7 +821,40 @@ fn genFunctype(gpa: Allocator, fn_ty: Type, target: std.Target) !wasm.Type {
     };
 }
 
-pub fn genFunc(self: *Self) InnerError!void {
+pub fn generate(
+    bin_file: *link.File,
+    src_loc: Module.SrcLoc,
+    func: *Module.Fn,
+    air: Air,
+    liveness: Liveness,
+    code: *std.ArrayList(u8),
+    debug_output: codegen.DebugInfoOutput,
+) codegen.GenerateSymbolError!codegen.FnResult {
+    _ = debug_output; // TODO
+    _ = src_loc;
+    var code_gen: Self = .{
+        .gpa = bin_file.allocator,
+        .air = air,
+        .liveness = liveness,
+        .values = .{},
+        .code = code,
+        .decl = func.owner_decl,
+        .err_msg = undefined,
+        .locals = .{},
+        .target = bin_file.options.target,
+        .bin_file = bin_file.cast(link.File.Wasm).?,
+    };
+    defer code_gen.deinit();
+
+    genFunc(&code_gen) catch |err| switch (err) {
+        error.CodegenFail => return codegen.FnResult{ .fail = code_gen.err_msg },
+        else => |e| return e,
+    };
+
+    return codegen.FnResult{ .appended = {} };
+}
+
+fn genFunc(self: *Self) InnerError!void {
     var func_type = try genFunctype(self.gpa, self.decl.ty, self.target);
     defer func_type.deinit(self.gpa);
     self.decl.fn_link.wasm.type_index = try self.bin_file.putOrGetFuncType(func_type);
@@ -863,7 +895,7 @@ pub fn genFunc(self: *Self) InnerError!void {
         try prologue.append(.{ .tag = .i32_sub, .data = .{ .tag = {} } });
         // Get negative stack aligment
         try prologue.append(.{ .tag = .i32_const, .data = .{ .imm32 = @intCast(i32, self.stack_alignment) * -1 } });
-        // Bit and the value to get the new stack pointer to ensure the pointers are aligned with the abi alignment
+        // Bitwise-and the value to get the new stack pointer to ensure the pointers are aligned with the abi alignment
         try prologue.append(.{ .tag = .i32_and, .data = .{ .tag = {} } });
         // store the current stack pointer as the bottom, which will be used to calculate all stack pointer offsets
         try prologue.append(.{ .tag = .local_tee, .data = .{ .label = self.bottom_stack_value.local } });
@@ -889,7 +921,7 @@ pub fn genFunc(self: *Self) InnerError!void {
     var emit: Emit = .{
         .mir = mir,
         .bin_file = &self.bin_file.base,
-        .code = &self.code,
+        .code = self.code,
         .locals = self.locals.items,
         .decl = self.decl,
     };
@@ -902,433 +934,6 @@ pub fn genFunc(self: *Self) InnerError!void {
         else => |e| return e,
     };
 }
-
-pub const DeclGen = struct {
-    /// The decl we are generating code for.
-    decl: *Decl,
-    /// The symbol we're generating code for.
-    /// This can either be the symbol of the Decl itself,
-    /// or one of its locals.
-    symbol_index: u32,
-    gpa: Allocator,
-    /// A reference to the linker, that will process the decl's
-    /// code and create any relocations it deems neccesary.
-    bin_file: *link.File.Wasm,
-    /// This will be set when `InnerError` has been returned.
-    /// In any other case, this will be 'undefined'.
-    err_msg: *Module.ErrorMsg,
-    /// Reference to the Module that is being compiled.
-    /// Used to find the error value of an error.
-    module: *Module,
-    /// The list of bytes that have been generated so far,
-    /// can be used to calculate the offset into a section.
-    code: *std.ArrayList(u8),
-
-    /// Sets `err_msg` on `DeclGen` and returns `error.CodegenFail` which is caught in link/Wasm.zig
-    fn fail(self: *DeclGen, comptime fmt: []const u8, args: anytype) InnerError {
-        const src: LazySrcLoc = .{ .node_offset = 0 };
-        const src_loc = src.toSrcLoc(self.decl);
-        self.err_msg = try Module.ErrorMsg.create(self.gpa, src_loc, fmt, args);
-        return error.CodegenFail;
-    }
-
-    fn target(self: *const DeclGen) std.Target {
-        return self.bin_file.base.options.target;
-    }
-
-    pub fn genDecl(self: *DeclGen) InnerError!Result {
-        const decl = self.decl;
-        assert(decl.has_tv);
-
-        log.debug("gen: {s} type: {}, value: {}", .{ decl.name, decl.ty, decl.val });
-
-        if (decl.val.castTag(.function)) |func_payload| {
-            _ = func_payload;
-            return self.fail("TODO wasm backend genDecl function pointer", .{});
-        } else if (decl.val.castTag(.extern_fn)) |extern_fn| {
-            const ext_decl = extern_fn.data.owner_decl;
-            var func_type = try genFunctype(self.gpa, ext_decl.ty, self.target());
-            defer func_type.deinit(self.gpa);
-            ext_decl.fn_link.wasm.type_index = try self.bin_file.putOrGetFuncType(func_type);
-            return Result{ .appended = {} };
-        } else {
-            const init_val = if (decl.val.castTag(.variable)) |payload| init_val: {
-                break :init_val payload.data.init;
-            } else decl.val;
-            if (init_val.tag() != .unreachable_value) {
-                return self.genTypedValue(decl.ty, init_val);
-            }
-            return Result{ .appended = {} };
-        }
-    }
-
-    /// Generates the wasm bytecode for the declaration belonging to `Context`
-    pub fn genTypedValue(self: *DeclGen, ty: Type, val: Value) InnerError!Result {
-        log.debug("genTypedValue: ty = {}, val = {}", .{ ty, val });
-
-        const writer = self.code.writer();
-        if (val.isUndef()) {
-            try writer.writeByteNTimes(0xaa, @intCast(usize, ty.abiSize(self.target())));
-            return Result{ .appended = {} };
-        }
-        switch (ty.zigTypeTag()) {
-            .Fn => {
-                const fn_decl = switch (val.tag()) {
-                    .extern_fn => val.castTag(.extern_fn).?.data.owner_decl,
-                    .function => val.castTag(.function).?.data.owner_decl,
-                    else => unreachable,
-                };
-                return try self.lowerDeclRefValue(ty, val, fn_decl, 0);
-            },
-            .Optional => {
-                var opt_buf: Type.Payload.ElemType = undefined;
-                const payload_type = ty.optionalChild(&opt_buf);
-                const is_pl = !val.isNull();
-                const abi_size = @intCast(usize, ty.abiSize(self.target()));
-                const offset = abi_size - @intCast(usize, payload_type.abiSize(self.target()));
-
-                if (!payload_type.hasRuntimeBits()) {
-                    try writer.writeByteNTimes(@boolToInt(is_pl), abi_size);
-                    return Result{ .appended = {} };
-                }
-
-                if (ty.isPtrLikeOptional()) {
-                    if (val.castTag(.opt_payload)) |payload| {
-                        return self.genTypedValue(payload_type, payload.data);
-                    } else if (!val.isNull()) {
-                        return self.genTypedValue(payload_type, val);
-                    } else {
-                        try writer.writeByteNTimes(0, abi_size);
-                        return Result{ .appended = {} };
-                    }
-                }
-
-                // `null-tag` bytes
-                try writer.writeByteNTimes(@boolToInt(is_pl), offset);
-                switch (try self.genTypedValue(
-                    payload_type,
-                    if (val.castTag(.opt_payload)) |pl| pl.data else Value.initTag(.undef),
-                )) {
-                    .appended => {},
-                    .externally_managed => |payload| try writer.writeAll(payload),
-                }
-                return Result{ .appended = {} };
-            },
-            .Array => switch (val.tag()) {
-                .bytes => {
-                    const payload = val.castTag(.bytes).?;
-                    return Result{ .externally_managed = payload.data };
-                },
-                .array => {
-                    const elem_vals = val.castTag(.array).?.data;
-                    const elem_ty = ty.childType();
-                    for (elem_vals) |elem_val| {
-                        switch (try self.genTypedValue(elem_ty, elem_val)) {
-                            .appended => {},
-                            .externally_managed => |data| try writer.writeAll(data),
-                        }
-                    }
-                    return Result{ .appended = {} };
-                },
-                .repeated => {
-                    const array = val.castTag(.repeated).?.data;
-                    const elem_ty = ty.childType();
-                    const sentinel = ty.sentinel();
-                    const len = ty.arrayLen();
-
-                    var index: u32 = 0;
-                    while (index < len) : (index += 1) {
-                        switch (try self.genTypedValue(elem_ty, array)) {
-                            .externally_managed => |data| try writer.writeAll(data),
-                            .appended => {},
-                        }
-                    }
-                    if (sentinel) |sentinel_value| {
-                        return self.genTypedValue(elem_ty, sentinel_value);
-                    }
-                    return Result{ .appended = {} };
-                },
-                .empty_array_sentinel => {
-                    const elem_ty = ty.childType();
-                    const sent_val = ty.sentinel().?;
-                    return self.genTypedValue(elem_ty, sent_val);
-                },
-                else => unreachable,
-            },
-            .Int => {
-                const info = ty.intInfo(self.target());
-                const abi_size = @intCast(usize, ty.abiSize(self.target()));
-                if (info.bits <= 64) {
-                    var buf: [8]u8 = undefined;
-                    if (info.signedness == .unsigned) {
-                        std.mem.writeIntLittle(u64, &buf, val.toUnsignedInt());
-                    } else std.mem.writeIntLittle(i64, &buf, val.toSignedInt());
-                    try writer.writeAll(buf[0..abi_size]);
-                    return Result{ .appended = {} };
-                }
-                var space: Value.BigIntSpace = undefined;
-                const bigint = val.toBigInt(&space);
-                const iterations = @divExact(abi_size, @sizeOf(usize));
-                for (bigint.limbs) |_, index| {
-                    const limb = bigint.limbs[bigint.limbs.len - index - 1];
-                    try writer.writeIntLittle(usize, limb);
-                } else if (bigint.limbs.len < iterations) {
-                    // When the value is saved in less limbs than the required
-                    // abi size, we fill the remaining parts with 0's.
-                    var it_left = iterations - bigint.limbs.len;
-                    while (it_left > 0) {
-                        it_left -= 1;
-                        try writer.writeIntLittle(usize, 0);
-                    }
-                }
-                return Result{ .appended = {} };
-            },
-            .Float => {
-                const float_bits = ty.floatBits(self.target());
-                if (float_bits > 64) {
-                    return self.fail("Wasm TODO: Implement f80 and f128", .{});
-                }
-
-                switch (float_bits) {
-                    16, 32 => try writer.writeIntLittle(u32, @bitCast(u32, val.toFloat(f32))),
-                    64 => try writer.writeIntLittle(u64, @bitCast(u64, val.toFloat(f64))),
-                    else => unreachable,
-                }
-
-                return Result{ .appended = {} };
-            },
-            .Enum => {
-                var int_buffer: Value.Payload.U64 = undefined;
-                const int_val = val.enumToInt(ty, &int_buffer);
-                var buf: Type.Payload.Bits = undefined;
-                const int_ty = ty.intTagType(&buf);
-                return self.genTypedValue(int_ty, int_val);
-            },
-            .Bool => {
-                try writer.writeByte(@boolToInt(val.toBool()));
-                return Result{ .appended = {} };
-            },
-            .Struct => {
-                const struct_obj = ty.castTag(.@"struct").?.data;
-                if (struct_obj.layout == .Packed) {
-                    return self.fail("TODO: Packed structs for wasm", .{});
-                }
-
-                const struct_begin = self.code.items.len;
-                const field_vals = val.castTag(.@"struct").?.data;
-                for (field_vals) |field_val, index| {
-                    const field_ty = ty.structFieldType(index);
-                    if (!field_ty.hasRuntimeBits()) continue;
-
-                    switch (try self.genTypedValue(field_ty, field_val)) {
-                        .appended => {},
-                        .externally_managed => |payload| try writer.writeAll(payload),
-                    }
-                    const unpadded_field_len = self.code.items.len - struct_begin;
-
-                    // Pad struct members if required
-                    const padded_field_end = ty.structFieldOffset(index + 1, self.target());
-                    const padding = try std.math.cast(usize, padded_field_end - unpadded_field_len);
-
-                    if (padding > 0) {
-                        try writer.writeByteNTimes(0, padding);
-                    }
-                }
-                return Result{ .appended = {} };
-            },
-            .Union => {
-                const union_val = val.castTag(.@"union").?.data;
-                const layout = ty.unionGetLayout(self.target());
-
-                if (layout.payload_size == 0) {
-                    return self.genTypedValue(ty.unionTagType().?, union_val.tag);
-                }
-
-                // Check if we should store the tag first, in which case, do so now:
-                if (layout.tag_align >= layout.payload_align) {
-                    switch (try self.genTypedValue(ty.unionTagType().?, union_val.tag)) {
-                        .appended => {},
-                        .externally_managed => |payload| try writer.writeAll(payload),
-                    }
-                }
-
-                const union_ty = ty.cast(Type.Payload.Union).?.data;
-                const field_index = union_ty.tag_ty.enumTagFieldIndex(union_val.tag).?;
-                assert(union_ty.haveFieldTypes());
-                const field_ty = union_ty.fields.values()[field_index].ty;
-                if (!field_ty.hasRuntimeBits()) {
-                    try writer.writeByteNTimes(0xaa, @intCast(usize, layout.payload_size));
-                } else {
-                    switch (try self.genTypedValue(field_ty, union_val.val)) {
-                        .appended => {},
-                        .externally_managed => |payload| try writer.writeAll(payload),
-                    }
-
-                    // Unions have the size of the largest field, so we must pad
-                    // whenever the active field has a smaller size.
-                    const diff = layout.payload_size - field_ty.abiSize(self.target());
-                    if (diff > 0) {
-                        try writer.writeByteNTimes(0xaa, @intCast(usize, diff));
-                    }
-                }
-
-                if (layout.tag_size == 0) {
-                    return Result{ .appended = {} };
-                }
-                return self.genTypedValue(union_ty.tag_ty, union_val.tag);
-            },
-            .Pointer => switch (val.tag()) {
-                .variable => {
-                    const decl = val.castTag(.variable).?.data.owner_decl;
-                    return self.lowerDeclRefValue(ty, val, decl, 0);
-                },
-                .decl_ref => {
-                    const decl = val.castTag(.decl_ref).?.data;
-                    return self.lowerDeclRefValue(ty, val, decl, 0);
-                },
-                .slice => {
-                    const slice = val.castTag(.slice).?.data;
-                    var buf: Type.SlicePtrFieldTypeBuffer = undefined;
-                    const ptr_ty = ty.slicePtrFieldType(&buf);
-                    switch (try self.genTypedValue(ptr_ty, slice.ptr)) {
-                        .externally_managed => |data| try writer.writeAll(data),
-                        .appended => {},
-                    }
-                    switch (try self.genTypedValue(Type.usize, slice.len)) {
-                        .externally_managed => |data| try writer.writeAll(data),
-                        .appended => {},
-                    }
-                    return Result{ .appended = {} };
-                },
-                .zero => {
-                    try writer.writeByteNTimes(0, @divExact(self.target().cpu.arch.ptrBitWidth(), 8));
-                    return Result{ .appended = {} };
-                },
-                .elem_ptr => {
-                    const elem_ptr = val.castTag(.elem_ptr).?.data;
-                    const elem_size = ty.childType().abiSize(self.target());
-                    const offset = elem_ptr.index * elem_size;
-                    return self.lowerParentPtr(elem_ptr.array_ptr, @intCast(usize, offset));
-                },
-                .int_u64 => return self.genTypedValue(Type.usize, val),
-                else => return self.fail("TODO: Implement zig decl gen for pointer type value: '{s}'", .{@tagName(val.tag())}),
-            },
-            .ErrorUnion => {
-                const error_ty = ty.errorUnionSet();
-                const payload_ty = ty.errorUnionPayload();
-                const is_pl = val.errorUnionIsPayload();
-                const abi_align = ty.abiAlignment(self.target());
-
-                {
-                    const err_val = if (!is_pl) val else Value.initTag(.zero);
-                    const start = self.code.items.len;
-                    switch (try self.genTypedValue(error_ty, err_val)) {
-                        .externally_managed => |data| try writer.writeAll(data),
-                        .appended => {},
-                    }
-                    const unpadded_end = self.code.items.len - start;
-                    const padded_end = mem.alignForwardGeneric(usize, unpadded_end, abi_align);
-                    const padding = padded_end - unpadded_end;
-                    if (padding > 0) {
-                        try writer.writeByteNTimes(0, padding);
-                    }
-                }
-
-                if (payload_ty.hasRuntimeBits()) {
-                    const start = self.code.items.len;
-                    const pl_val = if (val.castTag(.eu_payload)) |pl| pl.data else Value.initTag(.undef);
-                    switch (try self.genTypedValue(payload_ty, pl_val)) {
-                        .externally_managed => |data| try writer.writeAll(data),
-                        .appended => {},
-                    }
-
-                    const unpadded_end = self.code.items.len - start;
-                    const padded_end = mem.alignForwardGeneric(usize, unpadded_end, abi_align);
-                    const padding = padded_end - unpadded_end;
-                    if (padding > 0) {
-                        try writer.writeByteNTimes(0, padding);
-                    }
-                }
-
-                return Result{ .appended = {} };
-            },
-            .ErrorSet => {
-                switch (val.tag()) {
-                    .@"error" => {
-                        const name = val.castTag(.@"error").?.data.name;
-                        const kv = try self.module.getErrorValue(name);
-                        try writer.writeIntLittle(u32, kv.value);
-                    },
-                    else => {
-                        try writer.writeByteNTimes(0, @intCast(usize, ty.abiSize(self.target())));
-                    },
-                }
-                return Result{ .appended = {} };
-            },
-            else => |tag| return self.fail("TODO: Implement zig type codegen for type: '{s}'", .{tag}),
-        }
-    }
-
-    fn lowerParentPtr(self: *DeclGen, ptr_value: Value, offset: usize) InnerError!Result {
-        switch (ptr_value.tag()) {
-            .decl_ref => {
-                const decl = ptr_value.castTag(.decl_ref).?.data;
-                return self.lowerParentPtrDecl(ptr_value, decl, offset);
-            },
-            else => |tag| return self.fail("TODO: Implement lowerParentPtr for pointer value tag: {s}", .{tag}),
-        }
-    }
-
-    fn lowerParentPtrDecl(self: *DeclGen, ptr_val: Value, decl: *Module.Decl, offset: usize) InnerError!Result {
-        decl.markAlive();
-        var ptr_ty_payload: Type.Payload.ElemType = .{
-            .base = .{ .tag = .single_mut_pointer },
-            .data = decl.ty,
-        };
-        const ptr_ty = Type.initPayload(&ptr_ty_payload.base);
-        return self.lowerDeclRefValue(ptr_ty, ptr_val, decl, offset);
-    }
-
-    fn lowerDeclRefValue(
-        self: *DeclGen,
-        ty: Type,
-        val: Value,
-        /// The target decl that is being pointed to
-        decl: *Module.Decl,
-        /// When lowering to an indexed pointer, we can specify the offset
-        /// which will then be used as 'addend' to the relocation.
-        offset: usize,
-    ) InnerError!Result {
-        const writer = self.code.writer();
-        if (ty.isSlice()) {
-            var buf: Type.SlicePtrFieldTypeBuffer = undefined;
-            const slice_ty = ty.slicePtrFieldType(&buf);
-            switch (try self.genTypedValue(slice_ty, val)) {
-                .appended => {},
-                .externally_managed => |payload| try writer.writeAll(payload),
-            }
-            var slice_len: Value.Payload.U64 = .{
-                .base = .{ .tag = .int_u64 },
-                .data = val.sliceLen(),
-            };
-            return self.genTypedValue(Type.usize, Value.initPayload(&slice_len.base));
-        }
-
-        decl.markAlive();
-        if (decl.link.wasm.sym_index == 0) {
-            try writer.writeIntLittle(u32, 0);
-        } else {
-            try writer.writeIntLittle(u32, try self.bin_file.getDeclVAddr(
-                self.decl, // parent decl that owns the atom of the symbol
-                self.symbol_index, // source symbol index
-                decl, // target decl that contains the target symbol
-                @intCast(u32, self.code.items.len), // offset
-                @intCast(u32, offset), // addend
-            ));
-        }
-        return Result{ .appended = {} };
-    }
-};
 
 const CallWValues = struct {
     args: []WValue,
@@ -1365,7 +970,7 @@ fn resolveCallingConventionValues(self: *Self, fn_ty: Type) InnerError!CallWValu
         .Naked => return result,
         .Unspecified, .C => {
             for (param_types) |ty| {
-                if (!ty.hasRuntimeBits()) {
+                if (!ty.hasRuntimeBitsIgnoreComptime()) {
                     continue;
                 }
 
@@ -1410,13 +1015,15 @@ fn restoreStackPointer(self: *Self) !void {
 ///
 /// Asserts Type has codegenbits
 fn allocStack(self: *Self, ty: Type) !WValue {
-    assert(ty.hasRuntimeBits());
+    assert(ty.hasRuntimeBitsIgnoreComptime());
     if (self.initial_stack_value == .none) {
         try self.initializeStack();
     }
 
     const abi_size = std.math.cast(u32, ty.abiSize(self.target)) catch {
-        return self.fail("Type {} with ABI size of {d} exceeds stack frame size", .{ ty, ty.abiSize(self.target) });
+        return self.fail("Type {} with ABI size of {d} exceeds stack frame size", .{
+            ty.fmt(self.target), ty.abiSize(self.target),
+        });
     };
     const abi_align = ty.abiAlignment(self.target);
 
@@ -1442,13 +1049,15 @@ fn allocStackPtr(self: *Self, inst: Air.Inst.Index) !WValue {
         try self.initializeStack();
     }
 
-    if (!pointee_ty.hasRuntimeBits()) {
+    if (!pointee_ty.hasRuntimeBitsIgnoreComptime()) {
         return self.allocStack(Type.usize); // create a value containing just the stack pointer.
     }
 
     const abi_alignment = ptr_ty.ptrAlignment(self.target);
     const abi_size = std.math.cast(u32, pointee_ty.abiSize(self.target)) catch {
-        return self.fail("Type {} with ABI size of {d} exceeds stack frame size", .{ pointee_ty, pointee_ty.abiSize(self.target) });
+        return self.fail("Type {} with ABI size of {d} exceeds stack frame size", .{
+            pointee_ty.fmt(self.target), pointee_ty.abiSize(self.target),
+        });
     };
     if (abi_alignment > self.stack_alignment) {
         self.stack_alignment = abi_alignment;
@@ -1461,7 +1070,7 @@ fn allocStackPtr(self: *Self, inst: Air.Inst.Index) !WValue {
 }
 
 /// From given zig bitsize, returns the wasm bitsize
-fn toWasmIntBits(bits: u16) ?u16 {
+fn toWasmBits(bits: u16) ?u16 {
     return for ([_]u16{ 32, 64 }) |wasm_bits| {
         if (bits <= wasm_bits) return wasm_bits;
     } else null;
@@ -1469,22 +1078,123 @@ fn toWasmIntBits(bits: u16) ?u16 {
 
 /// Performs a copy of bytes for a given type. Copying all bytes
 /// from rhs to lhs.
-///
-/// TODO: Perform feature detection and when bulk_memory is available,
-/// use wasm's mem.copy instruction.
-fn memCopy(self: *Self, ty: Type, lhs: WValue, rhs: WValue) !void {
-    const abi_size = ty.abiSize(self.target);
-    var offset: u32 = 0;
-    const lhs_base = lhs.offset();
-    const rhs_base = rhs.offset();
-    while (offset < abi_size) : (offset += 1) {
-        // get lhs' address to store the result
-        try self.emitWValue(lhs);
-        // load byte from rhs' adress
-        try self.emitWValue(rhs);
-        try self.addMemArg(.i32_load8_u, .{ .offset = rhs_base + offset, .alignment = 1 });
-        // store the result in lhs (we already have its address on the stack)
-        try self.addMemArg(.i32_store8, .{ .offset = lhs_base + offset, .alignment = 1 });
+fn memcpy(self: *Self, dst: WValue, src: WValue, len: WValue) !void {
+    // When bulk_memory is enabled, we lower it to wasm's memcpy instruction.
+    // If not, we lower it ourselves manually
+    if (std.Target.wasm.featureSetHas(self.target.cpu.features, .bulk_memory)) {
+        switch (dst) {
+            .stack_offset => try self.emitWValue(try self.buildPointerOffset(dst, 0, .new)),
+            else => try self.emitWValue(dst),
+        }
+        switch (src) {
+            .stack_offset => try self.emitWValue(try self.buildPointerOffset(src, 0, .new)),
+            else => try self.emitWValue(src),
+        }
+        try self.emitWValue(len);
+        try self.addExtended(.memory_copy);
+        return;
+    }
+
+    // when the length is comptime-known, rather than a runtime value, we can optimize the generated code by having
+    // the loop during codegen, rather than inserting a runtime loop into the binary.
+    switch (len) {
+        .imm32, .imm64 => {
+            const length = switch (len) {
+                .imm32 => |val| val,
+                .imm64 => |val| val,
+                else => unreachable,
+            };
+            var offset: u32 = 0;
+            const lhs_base = dst.offset();
+            const rhs_base = src.offset();
+            while (offset < length) : (offset += 1) {
+                // get dst's address to store the result
+                try self.emitWValue(dst);
+                // load byte from src's address
+                try self.emitWValue(src);
+                switch (self.arch()) {
+                    .wasm32 => {
+                        try self.addMemArg(.i32_load8_u, .{ .offset = rhs_base + offset, .alignment = 1 });
+                        try self.addMemArg(.i32_store8, .{ .offset = lhs_base + offset, .alignment = 1 });
+                    },
+                    .wasm64 => {
+                        try self.addMemArg(.i64_load8_u, .{ .offset = rhs_base + offset, .alignment = 1 });
+                        try self.addMemArg(.i64_store8, .{ .offset = lhs_base + offset, .alignment = 1 });
+                    },
+                    else => unreachable,
+                }
+            }
+        },
+        else => {
+            // TODO: We should probably lower this to a call to compiler_rt
+            // But for now, we implement it manually
+            const offset = try self.allocLocal(Type.usize); // local for counter
+            // outer block to jump to when loop is done
+            try self.startBlock(.block, wasm.block_empty);
+            try self.startBlock(.loop, wasm.block_empty);
+
+            // loop condition (offset == length -> break)
+            {
+                try self.emitWValue(offset);
+                try self.emitWValue(len);
+                switch (self.arch()) {
+                    .wasm32 => try self.addTag(.i32_eq),
+                    .wasm64 => try self.addTag(.i64_eq),
+                    else => unreachable,
+                }
+                try self.addLabel(.br_if, 1); // jump out of loop into outer block (finished)
+            }
+
+            // get dst ptr
+            {
+                try self.emitWValue(dst);
+                try self.emitWValue(offset);
+                switch (self.arch()) {
+                    .wasm32 => try self.addTag(.i32_add),
+                    .wasm64 => try self.addTag(.i64_add),
+                    else => unreachable,
+                }
+            }
+
+            // get src value and also store in dst
+            {
+                try self.emitWValue(src);
+                try self.emitWValue(offset);
+                switch (self.arch()) {
+                    .wasm32 => {
+                        try self.addTag(.i32_add);
+                        try self.addMemArg(.i32_load8_u, .{ .offset = src.offset(), .alignment = 1 });
+                        try self.addMemArg(.i32_store8, .{ .offset = dst.offset(), .alignment = 1 });
+                    },
+                    .wasm64 => {
+                        try self.addTag(.i64_add);
+                        try self.addMemArg(.i64_load8_u, .{ .offset = src.offset(), .alignment = 1 });
+                        try self.addMemArg(.i64_store8, .{ .offset = dst.offset(), .alignment = 1 });
+                    },
+                    else => unreachable,
+                }
+            }
+
+            // increment loop counter
+            {
+                try self.emitWValue(offset);
+                switch (self.arch()) {
+                    .wasm32 => {
+                        try self.addImm32(1);
+                        try self.addTag(.i32_add);
+                    },
+                    .wasm64 => {
+                        try self.addImm64(1);
+                        try self.addTag(.i64_add);
+                    },
+                    else => unreachable,
+                }
+                try self.addLabel(.local_set, offset.local);
+                try self.addLabel(.br, 0); // jump to start of loop
+            }
+            try self.endBlock(); // close off loop block
+            try self.endBlock(); // close off outer block
+        },
     }
 }
 
@@ -1517,26 +1227,26 @@ fn isByRef(ty: Type, target: std.Target) bool {
         .ErrorSet,
         .Fn,
         .Enum,
-        .Vector,
         .AnyFrame,
         => return false,
 
         .Array,
+        .Vector,
         .Struct,
         .Frame,
         .Union,
-        => return ty.hasRuntimeBits(),
+        => return ty.hasRuntimeBitsIgnoreComptime(),
         .Int => return if (ty.intInfo(target).bits > 64) true else false,
         .ErrorUnion => {
-            const has_tag = ty.errorUnionSet().hasRuntimeBits();
-            const has_pl = ty.errorUnionPayload().hasRuntimeBits();
+            const has_tag = ty.errorUnionSet().hasRuntimeBitsIgnoreComptime();
+            const has_pl = ty.errorUnionPayload().hasRuntimeBitsIgnoreComptime();
             if (!has_tag or !has_pl) return false;
-            return ty.hasRuntimeBits();
+            return ty.hasRuntimeBitsIgnoreComptime();
         },
         .Optional => {
             if (ty.isPtrLikeOptional()) return false;
             var buf: Type.Payload.ElemType = undefined;
-            return ty.optionalChild(&buf).hasRuntimeBits();
+            return ty.optionalChild(&buf).hasRuntimeBitsIgnoreComptime();
         },
         .Pointer => {
             // Slices act like struct and will be passed by reference
@@ -1552,22 +1262,24 @@ fn isByRef(ty: Type, target: std.Target) bool {
 /// local value to store the pointer. This allows for local re-use and improves binary size.
 fn buildPointerOffset(self: *Self, ptr_value: WValue, offset: u64, action: enum { modify, new }) InnerError!WValue {
     // do not perform arithmetic when offset is 0.
-    if (offset == 0 and ptr_value.offset() == 0) return ptr_value;
+    if (offset == 0 and ptr_value.offset() == 0 and action == .modify) return ptr_value;
     const result_ptr: WValue = switch (action) {
         .new => try self.allocLocal(Type.usize),
         .modify => ptr_value,
     };
     try self.emitWValue(ptr_value);
-    switch (self.arch()) {
-        .wasm32 => {
-            try self.addImm32(@bitCast(i32, @intCast(u32, offset + ptr_value.offset())));
-            try self.addTag(.i32_add);
-        },
-        .wasm64 => {
-            try self.addImm64(offset + ptr_value.offset());
-            try self.addTag(.i64_add);
-        },
-        else => unreachable,
+    if (offset + ptr_value.offset() > 0) {
+        switch (self.arch()) {
+            .wasm32 => {
+                try self.addImm32(@bitCast(i32, @intCast(u32, offset + ptr_value.offset())));
+                try self.addTag(.i32_add);
+            },
+            .wasm64 => {
+                try self.addImm64(offset + ptr_value.offset());
+                try self.addTag(.i64_add);
+            },
+            else => unreachable,
+        }
     }
     try self.addLabel(.local_set, result_ptr.local);
     return result_ptr;
@@ -1601,6 +1313,7 @@ fn genInst(self: *Self, inst: Air.Inst.Index) !WValue {
         .cmp_lte => self.airCmp(inst, .lte),
         .cmp_lt => self.airCmp(inst, .lt),
         .cmp_neq => self.airCmp(inst, .neq),
+        .cmp_vector => self.airCmpVector(inst),
 
         .array_elem_val => self.airArrayElemVal(inst),
         .array_to_slice => self.airArrayToSlice(inst),
@@ -1611,12 +1324,28 @@ fn genInst(self: *Self, inst: Air.Inst.Index) !WValue {
         .breakpoint => self.airBreakpoint(inst),
         .br => self.airBr(inst),
         .bool_to_int => self.airBoolToInt(inst),
-        .call => self.airCall(inst),
         .cond_br => self.airCondBr(inst),
-        .dbg_stmt => WValue.none,
         .intcast => self.airIntcast(inst),
+        .fptrunc => self.airFptrunc(inst),
+        .fpext => self.airFpext(inst),
         .float_to_int => self.airFloatToInt(inst),
+        .int_to_float => self.airIntToFloat(inst),
         .get_union_tag => self.airGetUnionTag(inst),
+
+        // TODO
+        .dbg_stmt,
+        .dbg_inline_begin,
+        .dbg_inline_end,
+        .dbg_block_begin,
+        .dbg_block_end,
+        .dbg_var_ptr,
+        .dbg_var_val,
+        => WValue.none,
+
+        .call => self.airCall(inst, .auto),
+        .call_always_tail => self.airCall(inst, .always_tail),
+        .call_never_tail => self.airCall(inst, .never_tail),
+        .call_never_inline => self.airCall(inst, .never_inline),
 
         .is_err => self.airIsErr(inst, .i32_ne),
         .is_non_err => self.airIsErr(inst, .i32_eq),
@@ -1642,15 +1371,20 @@ fn genInst(self: *Self, inst: Air.Inst.Index) !WValue {
         .ret_ptr => self.airRetPtr(inst),
         .ret_load => self.airRetLoad(inst),
         .splat => self.airSplat(inst),
+        .shuffle => self.airShuffle(inst),
+        .reduce => self.airReduce(inst),
         .aggregate_init => self.airAggregateInit(inst),
         .union_init => self.airUnionInit(inst),
         .prefetch => self.airPrefetch(inst),
+        .popcount => self.airPopcount(inst),
 
         .slice => self.airSlice(inst),
         .slice_len => self.airSliceLen(inst),
         .slice_elem_val => self.airSliceElemVal(inst),
         .slice_elem_ptr => self.airSliceElemPtr(inst),
         .slice_ptr => self.airSlicePtr(inst),
+        .ptr_slice_len_ptr => self.airPtrSliceFieldPtr(inst, self.ptrSize()),
+        .ptr_slice_ptr_ptr => self.airPtrSliceFieldPtr(inst, 0),
         .store => self.airStore(inst),
 
         .set_union_tag => self.airSetUnionTag(inst),
@@ -1660,16 +1394,26 @@ fn genInst(self: *Self, inst: Air.Inst.Index) !WValue {
         .struct_field_ptr_index_2 => self.airStructFieldPtrIndex(inst, 2),
         .struct_field_ptr_index_3 => self.airStructFieldPtrIndex(inst, 3),
         .struct_field_val => self.airStructFieldVal(inst),
+        .field_parent_ptr => self.airFieldParentPtr(inst),
 
         .switch_br => self.airSwitchBr(inst),
         .trunc => self.airTrunc(inst),
         .unreach => self.airUnreachable(inst),
 
         .wrap_optional => self.airWrapOptional(inst),
-        .unwrap_errunion_payload => self.airUnwrapErrUnionPayload(inst),
-        .unwrap_errunion_err => self.airUnwrapErrUnionError(inst),
+        .unwrap_errunion_payload => self.airUnwrapErrUnionPayload(inst, false),
+        .unwrap_errunion_payload_ptr => self.airUnwrapErrUnionPayload(inst, true),
+        .unwrap_errunion_err => self.airUnwrapErrUnionError(inst, false),
+        .unwrap_errunion_err_ptr => self.airUnwrapErrUnionError(inst, true),
         .wrap_errunion_payload => self.airWrapErrUnionPayload(inst),
         .wrap_errunion_err => self.airWrapErrUnionErr(inst),
+        .errunion_payload_ptr_set => self.airErrUnionPayloadPtrSet(inst),
+        .error_name => self.airErrorName(inst),
+
+        .wasm_memory_size => self.airWasmMemorySize(inst),
+        .wasm_memory_grow => self.airWasmMemoryGrow(inst),
+
+        .memcpy => self.airMemcpy(inst),
 
         .add_sat,
         .sub_sat,
@@ -1686,15 +1430,10 @@ fn genInst(self: *Self, inst: Air.Inst.Index) !WValue {
         .frame_addr,
         .clz,
         .ctz,
-        .popcount,
         .byte_swap,
         .bit_reverse,
         .is_err_ptr,
         .is_non_err_ptr,
-        .fptrunc,
-        .fpext,
-        .unwrap_errunion_payload_ptr,
-        .unwrap_errunion_err_ptr,
 
         .sqrt,
         .sin,
@@ -1710,10 +1449,6 @@ fn genInst(self: *Self, inst: Air.Inst.Index) !WValue {
         .round,
         .trunc_float,
 
-        .ptr_slice_len_ptr,
-        .ptr_slice_ptr_ptr,
-        .int_to_float,
-        .memcpy,
         .cmpxchg_weak,
         .cmpxchg_strong,
         .fence,
@@ -1724,9 +1459,7 @@ fn genInst(self: *Self, inst: Air.Inst.Index) !WValue {
         .atomic_store_seq_cst,
         .atomic_rmw,
         .tag_name,
-        .error_name,
-        .errunion_payload_ptr_set,
-        .field_parent_ptr,
+        .mul_add,
 
         // For these 4, probably best to wait until https://github.com/ziglang/zig/issues/10248
         // is implemented in the frontend before implementing them here in the wasm backend.
@@ -1763,7 +1496,10 @@ fn airRet(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
 
 fn airRetPtr(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     const child_type = self.air.typeOfIndex(inst).childType();
-    if (child_type.abiSize(self.target) == 0) return WValue{ .none = {} };
+
+    if (!child_type.isFnOrHasRuntimeBitsIgnoreComptime()) {
+        return self.allocStack(Type.usize); // create pointer to void
+    }
 
     if (isByRef(child_type, self.target)) {
         return self.return_value;
@@ -1775,7 +1511,7 @@ fn airRetLoad(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     const un_op = self.air.instructions.items(.data)[inst].un_op;
     const operand = try self.resolveInst(un_op);
     const ret_ty = self.air.typeOf(un_op).childType();
-    if (!ret_ty.hasRuntimeBits()) return WValue.none;
+    if (!ret_ty.hasRuntimeBitsIgnoreComptime()) return WValue.none;
 
     if (!isByRef(ret_ty, self.target)) {
         const result = try self.load(operand, ret_ty, 0);
@@ -1787,7 +1523,8 @@ fn airRetLoad(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     return .none;
 }
 
-fn airCall(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
+fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallOptions.Modifier) InnerError!WValue {
+    if (modifier == .always_tail) return self.fail("TODO implement tail calls for wasm", .{});
     const pl_op = self.air.instructions.items(.data)[inst].pl_op;
     const extra = self.air.extraData(Air.Call, pl_op.payload);
     const args = self.air.extra[extra.end..][0..extra.data.args_len];
@@ -1806,8 +1543,12 @@ fn airCall(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
 
         if (func_val.castTag(.function)) |func| {
             break :blk func.data.owner_decl;
-        } else if (func_val.castTag(.extern_fn)) |ext_fn| {
-            break :blk ext_fn.data.owner_decl;
+        } else if (func_val.castTag(.extern_fn)) |extern_fn| {
+            const ext_decl = extern_fn.data.owner_decl;
+            var func_type = try genFunctype(self.gpa, ext_decl.ty, self.target);
+            defer func_type.deinit(self.gpa);
+            ext_decl.fn_link.wasm.type_index = try self.bin_file.putOrGetFuncType(func_type);
+            break :blk ext_decl;
         } else if (func_val.castTag(.decl_ref)) |decl_ref| {
             break :blk decl_ref.data;
         }
@@ -1826,7 +1567,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
         const arg_val = try self.resolveInst(arg_ref);
 
         const arg_ty = self.air.typeOf(arg_ref);
-        if (!arg_ty.hasRuntimeBits()) continue;
+        if (!arg_ty.hasRuntimeBitsIgnoreComptime()) continue;
 
         switch (arg_val) {
             .stack_offset => try self.emitWValue(try self.buildPointerOffset(arg_val, 0, .new)),
@@ -1850,7 +1591,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
         try self.addLabel(.call_indirect, fn_type_index);
     }
 
-    if (self.liveness.isUnused(inst) or !ret_ty.hasRuntimeBits()) {
+    if (self.liveness.isUnused(inst) or !ret_ty.hasRuntimeBitsIgnoreComptime()) {
         return WValue.none;
     } else if (ret_ty.isNoReturn()) {
         try self.addTag(.@"unreachable");
@@ -1884,11 +1625,12 @@ fn store(self: *Self, lhs: WValue, rhs: WValue, ty: Type, offset: u32) InnerErro
         .ErrorUnion => {
             const err_ty = ty.errorUnionSet();
             const pl_ty = ty.errorUnionPayload();
-            if (!pl_ty.hasRuntimeBits()) {
+            if (!pl_ty.hasRuntimeBitsIgnoreComptime()) {
                 return self.store(lhs, rhs, err_ty, 0);
             }
 
-            return self.memCopy(ty, lhs, rhs);
+            const len = @intCast(u32, ty.abiSize(self.target));
+            return self.memcpy(lhs, rhs, .{ .imm32 = len });
         },
         .Optional => {
             if (ty.isPtrLikeOptional()) {
@@ -1896,14 +1638,16 @@ fn store(self: *Self, lhs: WValue, rhs: WValue, ty: Type, offset: u32) InnerErro
             }
             var buf: Type.Payload.ElemType = undefined;
             const pl_ty = ty.optionalChild(&buf);
-            if (!pl_ty.hasRuntimeBits()) {
+            if (!pl_ty.hasRuntimeBitsIgnoreComptime()) {
                 return self.store(lhs, rhs, Type.u8, 0);
             }
 
-            return self.memCopy(ty, lhs, rhs);
+            const len = @intCast(u32, ty.abiSize(self.target));
+            return self.memcpy(lhs, rhs, .{ .imm32 = len });
         },
-        .Struct, .Array, .Union => {
-            return self.memCopy(ty, lhs, rhs);
+        .Struct, .Array, .Union, .Vector => {
+            const len = @intCast(u32, ty.abiSize(self.target));
+            return self.memcpy(lhs, rhs, .{ .imm32 = len });
         },
         .Pointer => {
             if (ty.isSlice()) {
@@ -1918,7 +1662,8 @@ fn store(self: *Self, lhs: WValue, rhs: WValue, ty: Type, offset: u32) InnerErro
             }
         },
         .Int => if (ty.intInfo(self.target).bits > 64) {
-            return self.memCopy(ty, lhs, rhs);
+            const len = @intCast(u32, ty.abiSize(self.target));
+            return self.memcpy(lhs, rhs, .{ .imm32 = len });
         },
         else => {},
     }
@@ -1951,7 +1696,7 @@ fn airLoad(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     const operand = try self.resolveInst(ty_op.operand);
     const ty = self.air.getRefType(ty_op.ty);
 
-    if (!ty.hasRuntimeBits()) return WValue{ .none = {} };
+    if (!ty.hasRuntimeBitsIgnoreComptime()) return WValue{ .none = {} };
 
     if (isByRef(ty, self.target)) {
         const new_local = try self.allocStack(ty);
@@ -2009,7 +1754,7 @@ fn airBinOp(self: *Self, inst: Air.Inst.Index, op: Op) InnerError!WValue {
     const operand_ty = self.air.typeOfIndex(inst);
 
     if (isByRef(operand_ty, self.target)) {
-        return self.fail("TODO: Implement binary operation for type: {}", .{operand_ty});
+        return self.fail("TODO: Implement binary operation for type: {}", .{operand_ty.fmtDebug()});
     }
 
     try self.emitWValue(lhs);
@@ -2078,19 +1823,123 @@ fn airWrapBinOp(self: *Self, inst: Air.Inst.Index, op: Op) InnerError!WValue {
     return bin_local;
 }
 
+fn lowerParentPtr(self: *Self, ptr_val: Value, ptr_child_ty: Type) InnerError!WValue {
+    switch (ptr_val.tag()) {
+        .decl_ref_mut => {
+            const decl = ptr_val.castTag(.decl_ref_mut).?.data.decl;
+            return self.lowerParentPtrDecl(ptr_val, decl);
+        },
+        .decl_ref => {
+            const decl = ptr_val.castTag(.decl_ref).?.data;
+            return self.lowerParentPtrDecl(ptr_val, decl);
+        },
+        .variable => {
+            const decl = ptr_val.castTag(.variable).?.data.owner_decl;
+            return self.lowerParentPtrDecl(ptr_val, decl);
+        },
+        .field_ptr => {
+            const field_ptr = ptr_val.castTag(.field_ptr).?.data;
+            const parent_ty = field_ptr.container_ty;
+            const parent_ptr = try self.lowerParentPtr(field_ptr.container_ptr, parent_ty);
+
+            const offset = switch (parent_ty.zigTypeTag()) {
+                .Struct => blk: {
+                    const offset = parent_ty.structFieldOffset(field_ptr.field_index, self.target);
+                    break :blk offset;
+                },
+                .Union => blk: {
+                    const layout: Module.Union.Layout = parent_ty.unionGetLayout(self.target);
+                    if (layout.payload_size == 0) break :blk 0;
+                    if (layout.payload_align > layout.tag_align) break :blk 0;
+
+                    // tag is stored first so calculate offset from where payload starts
+                    const offset = @intCast(u32, std.mem.alignForwardGeneric(u64, layout.tag_size, layout.tag_align));
+                    break :blk offset;
+                },
+                else => unreachable,
+            };
+
+            return switch (parent_ptr) {
+                .memory => |ptr| WValue{
+                    .memory_offset = .{
+                        .pointer = ptr,
+                        .offset = @intCast(u32, offset),
+                    },
+                },
+                .memory_offset => |mem_off| WValue{
+                    .memory_offset = .{
+                        .pointer = mem_off.pointer,
+                        .offset = @intCast(u32, offset) + mem_off.offset,
+                    },
+                },
+                else => unreachable,
+            };
+        },
+        .elem_ptr => {
+            const elem_ptr = ptr_val.castTag(.elem_ptr).?.data;
+            const index = elem_ptr.index;
+            const offset = index * ptr_child_ty.abiSize(self.target);
+            const array_ptr = try self.lowerParentPtr(elem_ptr.array_ptr, elem_ptr.elem_ty);
+
+            return WValue{ .memory_offset = .{
+                .pointer = array_ptr.memory,
+                .offset = @intCast(u32, offset),
+            } };
+        },
+        .opt_payload_ptr => {
+            const payload_ptr = ptr_val.castTag(.opt_payload_ptr).?.data;
+            const parent_ptr = try self.lowerParentPtr(payload_ptr.container_ptr, payload_ptr.container_ty);
+            var buf: Type.Payload.ElemType = undefined;
+            const payload_ty = payload_ptr.container_ty.optionalChild(&buf);
+            if (!payload_ty.hasRuntimeBitsIgnoreComptime() or payload_ty.isPtrLikeOptional()) {
+                return parent_ptr;
+            }
+
+            const abi_size = payload_ptr.container_ty.abiSize(self.target);
+            const offset = abi_size - payload_ty.abiSize(self.target);
+
+            return WValue{ .memory_offset = .{
+                .pointer = parent_ptr.memory,
+                .offset = @intCast(u32, offset),
+            } };
+        },
+        else => |tag| return self.fail("TODO: Implement lowerParentPtr for tag: {}", .{tag}),
+    }
+}
+
+fn lowerParentPtrDecl(self: *Self, ptr_val: Value, decl: *Module.Decl) InnerError!WValue {
+    decl.markAlive();
+    var ptr_ty_payload: Type.Payload.ElemType = .{
+        .base = .{ .tag = .single_mut_pointer },
+        .data = decl.ty,
+    };
+    const ptr_ty = Type.initPayload(&ptr_ty_payload.base);
+    return self.lowerDeclRefValue(.{ .ty = ptr_ty, .val = ptr_val }, decl);
+}
+
+fn lowerDeclRefValue(self: *Self, tv: TypedValue, decl: *Module.Decl) InnerError!WValue {
+    if (tv.ty.isSlice()) {
+        return WValue{ .memory = try self.bin_file.lowerUnnamedConst(self.decl, tv) };
+    } else if (decl.ty.zigTypeTag() != .Fn and !decl.ty.hasRuntimeBitsIgnoreComptime()) {
+        return WValue{ .imm32 = 0xaaaaaaaa };
+    }
+
+    decl.markAlive();
+    const target_sym_index = decl.link.wasm.sym_index;
+    if (decl.ty.zigTypeTag() == .Fn) {
+        try self.bin_file.addTableFunction(target_sym_index);
+        return WValue{ .function_index = target_sym_index };
+    } else return WValue{ .memory = target_sym_index };
+}
+
 fn lowerConstant(self: *Self, val: Value, ty: Type) InnerError!WValue {
     if (val.isUndefDeep()) return self.emitUndefined(ty);
     if (val.castTag(.decl_ref)) |decl_ref| {
         const decl = decl_ref.data;
-        decl.markAlive();
-        const target_sym_index = decl.link.wasm.sym_index;
-        if (ty.isSlice()) {
-            return WValue{ .memory = try self.bin_file.lowerUnnamedConst(self.decl, .{ .ty = ty, .val = val }) };
-        } else if (decl.ty.zigTypeTag() == .Fn) {
-            try self.bin_file.addTableFunction(target_sym_index);
-            return WValue{ .function_index = target_sym_index };
-        } else return WValue{ .memory = target_sym_index };
+        return self.lowerDeclRefValue(.{ .ty = ty, .val = val }, decl);
     }
+
+    const target = self.target;
 
     switch (ty.zigTypeTag()) {
         .Int => {
@@ -2103,52 +1952,23 @@ fn lowerConstant(self: *Self, val: Value, ty: Type) InnerError!WValue {
                     else => unreachable,
                 },
                 .unsigned => switch (int_info.bits) {
-                    0...32 => return WValue{ .imm32 = @intCast(u32, val.toUnsignedInt()) },
-                    33...64 => return WValue{ .imm64 = val.toUnsignedInt() },
+                    0...32 => return WValue{ .imm32 = @intCast(u32, val.toUnsignedInt(target)) },
+                    33...64 => return WValue{ .imm64 = val.toUnsignedInt(target) },
                     else => unreachable,
                 },
             }
         },
-        .Bool => return WValue{ .imm32 = @intCast(u32, val.toUnsignedInt()) },
+        .Bool => return WValue{ .imm32 = @intCast(u32, val.toUnsignedInt(target)) },
         .Float => switch (ty.floatBits(self.target)) {
             0...32 => return WValue{ .float32 = val.toFloat(f32) },
             33...64 => return WValue{ .float64 = val.toFloat(f64) },
             else => unreachable,
         },
         .Pointer => switch (val.tag()) {
-            .elem_ptr => {
-                const elem_ptr = val.castTag(.elem_ptr).?.data;
-                const index = elem_ptr.index;
-                const offset = index * ty.childType().abiSize(self.target);
-                const array_ptr = try self.lowerConstant(elem_ptr.array_ptr, ty);
-
-                return WValue{ .memory_offset = .{
-                    .pointer = array_ptr.memory,
-                    .offset = @intCast(u32, offset),
-                } };
+            .field_ptr, .elem_ptr, .opt_payload_ptr => {
+                return self.lowerParentPtr(val, ty.childType());
             },
-            .field_ptr => {
-                const field_ptr = val.castTag(.field_ptr).?.data;
-                const container = field_ptr.container_ptr;
-                const parent_ptr = try self.lowerConstant(container, ty);
-
-                const offset = switch (container.tag()) {
-                    .decl_ref => blk: {
-                        const decl_ref = container.castTag(.decl_ref).?.data;
-                        if (decl_ref.ty.castTag(.@"struct")) |_| {
-                            const offset = decl_ref.ty.structFieldOffset(field_ptr.field_index, self.target);
-                            break :blk offset;
-                        }
-                        return self.fail("Wasm TODO: field_ptr decl_ref for type '{}'", .{decl_ref.ty});
-                    },
-                    else => |tag| return self.fail("Wasm TODO: Implement field_ptr for value tag: '{s}'", .{tag}),
-                };
-                return WValue{ .memory_offset = .{
-                    .pointer = parent_ptr.memory,
-                    .offset = @intCast(u32, offset),
-                } };
-            },
-            .int_u64, .one => return WValue{ .imm32 = @intCast(u32, val.toUnsignedInt()) },
+            .int_u64, .one => return WValue{ .imm32 = @intCast(u32, val.toUnsignedInt(target)) },
             .zero, .null_value => return WValue{ .imm32 = 0 },
             else => return self.fail("Wasm TODO: lowerConstant for other const pointer tag {s}", .{val.tag()}),
         },
@@ -2181,7 +2001,7 @@ fn lowerConstant(self: *Self, val: Value, ty: Type) InnerError!WValue {
         },
         .ErrorSet => switch (val.tag()) {
             .@"error" => {
-                const kv = try self.module.getErrorValue(val.getError().?);
+                const kv = try self.bin_file.base.options.module.?.getErrorValue(val.getError().?);
                 return WValue{ .imm32 = kv.value };
             },
             else => return WValue{ .imm32 = 0 },
@@ -2247,6 +2067,7 @@ fn emitUndefined(self: *Self, ty: Type) InnerError!WValue {
 /// It's illegal to provide a value with a type that cannot be represented
 /// as an integer value.
 fn valueAsI32(self: Self, val: Value, ty: Type) i32 {
+    const target = self.target;
     switch (ty.zigTypeTag()) {
         .Enum => {
             if (val.castTag(.enum_field_index)) |field_index| {
@@ -2259,6 +2080,11 @@ fn valueAsI32(self: Self, val: Value, ty: Type) i32 {
                             return self.valueAsI32(tag_val, enum_full.tag_ty);
                         } else return @bitCast(i32, field_index.data);
                     },
+                    .enum_numbered => {
+                        const index = field_index.data;
+                        const enum_data = ty.castTag(.enum_numbered).?.data;
+                        return self.valueAsI32(enum_data.values.keys()[index], enum_data.tag_ty);
+                    },
                     else => unreachable,
                 }
             } else {
@@ -2269,12 +2095,14 @@ fn valueAsI32(self: Self, val: Value, ty: Type) i32 {
         },
         .Int => switch (ty.intInfo(self.target).signedness) {
             .signed => return @truncate(i32, val.toSignedInt()),
-            .unsigned => return @bitCast(i32, @truncate(u32, val.toUnsignedInt())),
+            .unsigned => return @bitCast(i32, @truncate(u32, val.toUnsignedInt(target))),
         },
         .ErrorSet => {
-            const kv = self.module.getErrorValue(val.getError().?) catch unreachable; // passed invalid `Value` to function
+            const kv = self.bin_file.base.options.module.?.getErrorValue(val.getError().?) catch unreachable; // passed invalid `Value` to function
             return @bitCast(i32, kv.value);
         },
+        .Bool => return @intCast(i32, val.toSignedInt()),
+        .Pointer => return @intCast(i32, val.toSignedInt()),
         else => unreachable, // Programmer called this function for an illegal type
     }
 }
@@ -2372,7 +2200,7 @@ fn airCmp(self: *Self, inst: Air.Inst.Index, op: std.math.CompareOperator) Inner
     if (operand_ty.zigTypeTag() == .Optional and !operand_ty.isPtrLikeOptional()) {
         var buf: Type.Payload.ElemType = undefined;
         const payload_ty = operand_ty.optionalChild(&buf);
-        if (payload_ty.hasRuntimeBits()) {
+        if (payload_ty.hasRuntimeBitsIgnoreComptime()) {
             // When we hit this case, we must check the value of optionals
             // that are not pointers. This means first checking against non-null for
             // both lhs and rhs, as well as checking the payload are matching of lhs and rhs
@@ -2382,8 +2210,16 @@ fn airCmp(self: *Self, inst: Air.Inst.Index, op: std.math.CompareOperator) Inner
         return self.cmpBigInt(lhs, rhs, operand_ty, op);
     }
 
-    try self.emitWValue(lhs);
-    try self.emitWValue(rhs);
+    // ensure that when we compare pointers, we emit
+    // the true pointer of a stack value, rather than the stack pointer.
+    switch (lhs) {
+        .stack_offset => try self.emitWValue(try self.buildPointerOffset(lhs, 0, .new)),
+        else => try self.emitWValue(lhs),
+    }
+    switch (rhs) {
+        .stack_offset => try self.emitWValue(try self.buildPointerOffset(rhs, 0, .new)),
+        else => try self.emitWValue(rhs),
+    }
 
     const signedness: std.builtin.Signedness = blk: {
         // by default we tell the operand type is unsigned (i.e. bools and enum values)
@@ -2411,12 +2247,17 @@ fn airCmp(self: *Self, inst: Air.Inst.Index, op: std.math.CompareOperator) Inner
     return cmp_tmp;
 }
 
+fn airCmpVector(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
+    _ = inst;
+    return self.fail("TODO implement airCmpVector for wasm", .{});
+}
+
 fn airBr(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     const br = self.air.instructions.items(.data)[inst].br;
     const block = self.blocks.get(br.block_inst).?;
 
     // if operand has codegen bits we should break with a value
-    if (self.air.typeOf(br.operand).hasRuntimeBits()) {
+    if (self.air.typeOf(br.operand).hasRuntimeBitsIgnoreComptime()) {
         const operand = try self.resolveInst(br.operand);
         const op = switch (operand) {
             .stack_offset => try self.buildPointerOffset(operand, 0, .new),
@@ -2479,7 +2320,7 @@ fn airStructFieldPtr(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     const struct_ty = self.air.typeOf(extra.data.struct_operand).childType();
     const offset = std.math.cast(u32, struct_ty.structFieldOffset(extra.data.field_index, self.target)) catch {
         return self.fail("Field type '{}' too big to fit into stack frame", .{
-            struct_ty.structFieldType(extra.data.field_index),
+            struct_ty.structFieldType(extra.data.field_index).fmt(self.target),
         });
     };
     return self.structFieldPtr(struct_ptr, offset);
@@ -2492,7 +2333,7 @@ fn airStructFieldPtrIndex(self: *Self, inst: Air.Inst.Index, index: u32) InnerEr
     const field_ty = struct_ty.structFieldType(index);
     const offset = std.math.cast(u32, struct_ty.structFieldOffset(index, self.target)) catch {
         return self.fail("Field type '{}' too big to fit into stack frame", .{
-            field_ty,
+            field_ty.fmt(self.target),
         });
     };
     return self.structFieldPtr(struct_ptr, offset);
@@ -2516,9 +2357,9 @@ fn airStructFieldVal(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     const operand = try self.resolveInst(struct_field.struct_operand);
     const field_index = struct_field.field_index;
     const field_ty = struct_ty.structFieldType(field_index);
-    if (!field_ty.hasRuntimeBits()) return WValue{ .none = {} };
+    if (!field_ty.hasRuntimeBitsIgnoreComptime()) return WValue{ .none = {} };
     const offset = std.math.cast(u32, struct_ty.structFieldOffset(field_index, self.target)) catch {
-        return self.fail("Field type '{}' too big to fit into stack frame", .{field_ty});
+        return self.fail("Field type '{}' too big to fit into stack frame", .{field_ty.fmt(self.target)});
     };
 
     if (isByRef(field_ty, self.target)) {
@@ -2553,8 +2394,8 @@ fn airSwitchBr(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
         self.gpa.free(case.values);
     } else case_list.deinit();
 
-    var lowest: i32 = 0;
-    var highest: i32 = 0;
+    var lowest_maybe: ?i32 = null;
+    var highest_maybe: ?i32 = null;
     while (case_i < switch_br.data.cases_len) : (case_i += 1) {
         const case = self.air.extraData(Air.SwitchBr.Case, extra_index);
         const items = @bitCast([]const Air.Inst.Ref, self.air.extra[case.end..][0..case.data.items_len]);
@@ -2566,11 +2407,11 @@ fn airSwitchBr(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
         for (items) |ref, i| {
             const item_val = self.air.value(ref).?;
             const int_val = self.valueAsI32(item_val, target_ty);
-            if (int_val < lowest) {
-                lowest = int_val;
+            if (lowest_maybe == null or int_val < lowest_maybe.?) {
+                lowest_maybe = int_val;
             }
-            if (int_val > highest) {
-                highest = int_val;
+            if (highest_maybe == null or int_val > highest_maybe.?) {
+                highest_maybe = int_val;
             }
             values[i] = .{ .integer = int_val, .value = item_val };
         }
@@ -2579,6 +2420,9 @@ fn airSwitchBr(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
         try self.startBlock(.block, blocktype);
     }
 
+    // When highest and lowest are null, we have no cases and can use a jump table
+    const lowest = lowest_maybe orelse 0;
+    const highest = highest_maybe orelse 0;
     // When the highest and lowest values are seperated by '50',
     // we define it as sparse and use an if/else-chain, rather than a jump table.
     // When the target is an integer size larger than u32, we have no way to use the value
@@ -2604,6 +2448,10 @@ fn airSwitchBr(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
             // we put inside, are atleast 0.
             try self.addImm32(lowest * -1);
             try self.addTag(.i32_add);
+        } else if (lowest > 0) {
+            // make the index start from 0 by substracting the lowest value
+            try self.addImm32(lowest);
+            try self.addTag(.i32_sub);
         }
 
         // Account for default branch so always add '1'
@@ -2612,15 +2460,20 @@ fn airSwitchBr(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
         const table_extra_index = try self.addExtra(jump_table);
         try self.addInst(.{ .tag = .br_table, .data = .{ .payload = table_extra_index } });
         try self.mir_extra.ensureUnusedCapacity(self.gpa, depth);
-        while (lowest <= highest) : (lowest += 1) {
+        var value = lowest;
+        while (value <= highest) : (value += 1) {
             // idx represents the branch we jump to
             const idx = blk: {
                 for (case_list.items) |case, idx| {
                     for (case.values) |case_value| {
-                        if (case_value.integer == lowest) break :blk @intCast(u32, idx);
+                        if (case_value.integer == value) break :blk @intCast(u32, idx);
                     }
                 }
-                break :blk if (has_else_body) case_i else unreachable;
+                // error sets are almost always sparse so we use the default case
+                // for errors that are not present in any branch. This is fine as this default
+                // case will never be hit for those cases but we do save runtime cost and size
+                // by using a jump table for this instead of if-else chains.
+                break :blk if (has_else_body or target_ty.zigTypeTag() == .ErrorSet) case_i else unreachable;
             };
             self.mir_extra.appendAssumeCapacity(idx);
         } else if (has_else_body) {
@@ -2691,7 +2544,7 @@ fn airIsErr(self: *Self, inst: Air.Inst.Index, opcode: wasm.Opcode) InnerError!W
 
     // load the error tag value
     try self.emitWValue(operand);
-    if (pl_ty.hasRuntimeBits()) {
+    if (pl_ty.hasRuntimeBitsIgnoreComptime()) {
         try self.addMemArg(.i32_load16_u, .{
             .offset = operand.offset(),
             .alignment = err_ty.errorUnionSet().abiAlignment(self.target),
@@ -2707,30 +2560,32 @@ fn airIsErr(self: *Self, inst: Air.Inst.Index, opcode: wasm.Opcode) InnerError!W
     return is_err_tmp;
 }
 
-fn airUnwrapErrUnionPayload(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
+fn airUnwrapErrUnionPayload(self: *Self, inst: Air.Inst.Index, op_is_ptr: bool) InnerError!WValue {
     if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
     const ty_op = self.air.instructions.items(.data)[inst].ty_op;
     const operand = try self.resolveInst(ty_op.operand);
-    const err_ty = self.air.typeOf(ty_op.operand);
+    const op_ty = self.air.typeOf(ty_op.operand);
+    const err_ty = if (op_is_ptr) op_ty.childType() else op_ty;
     const payload_ty = err_ty.errorUnionPayload();
-    if (!payload_ty.hasRuntimeBits()) return WValue{ .none = {} };
+    if (!payload_ty.hasRuntimeBitsIgnoreComptime()) return WValue{ .none = {} };
     const err_align = err_ty.abiAlignment(self.target);
     const set_size = err_ty.errorUnionSet().abiSize(self.target);
     const offset = mem.alignForwardGeneric(u64, set_size, err_align);
-    if (isByRef(payload_ty, self.target)) {
+    if (op_is_ptr or isByRef(payload_ty, self.target)) {
         return self.buildPointerOffset(operand, offset, .new);
     }
     return self.load(operand, payload_ty, @intCast(u32, offset));
 }
 
-fn airUnwrapErrUnionError(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
+fn airUnwrapErrUnionError(self: *Self, inst: Air.Inst.Index, op_is_ptr: bool) InnerError!WValue {
     if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
 
     const ty_op = self.air.instructions.items(.data)[inst].ty_op;
     const operand = try self.resolveInst(ty_op.operand);
-    const err_ty = self.air.typeOf(ty_op.operand);
+    const op_ty = self.air.typeOf(ty_op.operand);
+    const err_ty = if (op_is_ptr) op_ty.childType() else op_ty;
     const payload_ty = err_ty.errorUnionPayload();
-    if (!payload_ty.hasRuntimeBits()) {
+    if (op_is_ptr or !payload_ty.hasRuntimeBitsIgnoreComptime()) {
         return operand;
     }
 
@@ -2744,7 +2599,7 @@ fn airWrapErrUnionPayload(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     const operand = try self.resolveInst(ty_op.operand);
 
     const op_ty = self.air.typeOf(ty_op.operand);
-    if (!op_ty.hasRuntimeBits()) return operand;
+    if (!op_ty.hasRuntimeBitsIgnoreComptime()) return operand;
     const err_ty = self.air.getRefType(ty_op.ty);
     const err_align = err_ty.abiAlignment(self.target);
     const set_size = err_ty.errorUnionSet().abiSize(self.target);
@@ -2769,11 +2624,19 @@ fn airWrapErrUnionErr(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     const operand = try self.resolveInst(ty_op.operand);
     const err_ty = self.air.getRefType(ty_op.ty);
 
-    if (!err_ty.errorUnionPayload().hasRuntimeBits()) return operand;
+    if (!err_ty.errorUnionPayload().hasRuntimeBitsIgnoreComptime()) return operand;
 
     const err_union = try self.allocStack(err_ty);
-    // TODO: Also write 'undefined' to the payload
     try self.store(err_union, operand, err_ty.errorUnionSet(), 0);
+
+    // write 'undefined' to the payload
+    const err_align = err_ty.abiAlignment(self.target);
+    const set_size = err_ty.errorUnionSet().abiSize(self.target);
+    const offset = mem.alignForwardGeneric(u64, set_size, err_align);
+    const payload_ptr = try self.buildPointerOffset(err_union, offset, .new);
+    const len = @intCast(u32, err_ty.errorUnionPayload().abiSize(self.target));
+    try self.memset(payload_ptr, .{ .imm32 = len }, .{ .imm32 = 0xaaaaaaaa });
+
     return err_union;
 }
 
@@ -2787,9 +2650,9 @@ fn airIntcast(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     const ref_info = ref_ty.intInfo(self.target);
     const wanted_info = ty.intInfo(self.target);
 
-    const op_bits = toWasmIntBits(ref_info.bits) orelse
+    const op_bits = toWasmBits(ref_info.bits) orelse
         return self.fail("TODO: Wasm intcast integer types of bitsize: {d}", .{ref_info.bits});
-    const wanted_bits = toWasmIntBits(wanted_info.bits) orelse
+    const wanted_bits = toWasmBits(wanted_info.bits) orelse
         return self.fail("TODO: Wasm intcast integer types of bitsize: {d}", .{wanted_info.bits});
 
     // hot path
@@ -2827,7 +2690,7 @@ fn isNull(self: *Self, operand: WValue, optional_ty: Type, opcode: wasm.Opcode) 
         const payload_ty = optional_ty.optionalChild(&buf);
         // When payload is zero-bits, we can treat operand as a value, rather than
         // a pointer to the stack value
-        if (payload_ty.hasRuntimeBits()) {
+        if (payload_ty.hasRuntimeBitsIgnoreComptime()) {
             try self.addMemArg(.i32_load8_u, .{ .offset = operand.offset(), .alignment = 1 });
         }
     }
@@ -2847,7 +2710,7 @@ fn airOptionalPayload(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     const operand = try self.resolveInst(ty_op.operand);
     const opt_ty = self.air.typeOf(ty_op.operand);
     const payload_ty = self.air.typeOfIndex(inst);
-    if (!payload_ty.hasRuntimeBits()) return WValue{ .none = {} };
+    if (!payload_ty.hasRuntimeBitsIgnoreComptime()) return WValue{ .none = {} };
     if (opt_ty.isPtrLikeOptional()) return operand;
 
     const offset = opt_ty.abiSize(self.target) - payload_ty.abiSize(self.target);
@@ -2868,7 +2731,7 @@ fn airOptionalPayloadPtr(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
 
     var buf: Type.Payload.ElemType = undefined;
     const payload_ty = opt_ty.optionalChild(&buf);
-    if (!payload_ty.hasRuntimeBits() or opt_ty.isPtrLikeOptional()) {
+    if (!payload_ty.hasRuntimeBitsIgnoreComptime() or opt_ty.isPtrLikeOptional()) {
         return operand;
     }
 
@@ -2882,8 +2745,8 @@ fn airOptionalPayloadPtrSet(self: *Self, inst: Air.Inst.Index) InnerError!WValue
     const opt_ty = self.air.typeOf(ty_op.operand).childType();
     var buf: Type.Payload.ElemType = undefined;
     const payload_ty = opt_ty.optionalChild(&buf);
-    if (!payload_ty.hasRuntimeBits()) {
-        return self.fail("TODO: Implement OptionalPayloadPtrSet for optional with zero-sized type {}", .{payload_ty});
+    if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
+        return self.fail("TODO: Implement OptionalPayloadPtrSet for optional with zero-sized type {}", .{payload_ty.fmtDebug()});
     }
 
     if (opt_ty.isPtrLikeOptional()) {
@@ -2891,7 +2754,7 @@ fn airOptionalPayloadPtrSet(self: *Self, inst: Air.Inst.Index) InnerError!WValue
     }
 
     const offset = std.math.cast(u32, opt_ty.abiSize(self.target) - payload_ty.abiSize(self.target)) catch {
-        return self.fail("Optional type {} too big to fit into stack frame", .{opt_ty});
+        return self.fail("Optional type {} too big to fit into stack frame", .{opt_ty.fmt(self.target)});
     };
 
     try self.emitWValue(operand);
@@ -2906,7 +2769,7 @@ fn airWrapOptional(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
 
     const ty_op = self.air.instructions.items(.data)[inst].ty_op;
     const payload_ty = self.air.typeOf(ty_op.operand);
-    if (!payload_ty.hasRuntimeBits()) {
+    if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
         const non_null_bit = try self.allocStack(Type.initTag(.u1));
         try self.emitWValue(non_null_bit);
         try self.addImm32(1);
@@ -2920,7 +2783,7 @@ fn airWrapOptional(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
         return operand;
     }
     const offset = std.math.cast(u32, op_ty.abiSize(self.target) - payload_ty.abiSize(self.target)) catch {
-        return self.fail("Optional type {} too big to fit into stack frame", .{op_ty});
+        return self.fail("Optional type {} too big to fit into stack frame", .{op_ty.fmt(self.target)});
     };
 
     // Create optional type, set the non-null bit, and store the operand inside the optional type
@@ -3030,7 +2893,7 @@ fn airTrunc(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     const result = try self.allocLocal(self.air.getRefType(ty_op.ty));
     const op_bits = op_ty.intInfo(self.target).bits;
 
-    const wasm_bits = toWasmIntBits(wanted_bits) orelse
+    const wasm_bits = toWasmBits(wanted_bits) orelse
         return self.fail("TODO: Implement wasm integer truncation for integer bitsize: {d}", .{wanted_bits});
 
     // Use wasm's instruction to wrap from 64bit to 32bit integer when possible
@@ -3095,7 +2958,7 @@ fn airArrayToSlice(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     const slice_local = try self.allocStack(slice_ty);
 
     // store the array ptr in the slice
-    if (array_ty.hasRuntimeBits()) {
+    if (array_ty.hasRuntimeBitsIgnoreComptime()) {
         try self.store(slice_local, operand, Type.usize, 0);
     }
 
@@ -3225,7 +3088,7 @@ fn airMemset(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     const ptr = try self.resolveInst(pl_op.operand);
     const value = try self.resolveInst(bin_op.lhs);
     const len = try self.resolveInst(bin_op.rhs);
-    try self.memSet(ptr, len, value);
+    try self.memset(ptr, len, value);
 
     return WValue{ .none = {} };
 }
@@ -3234,7 +3097,7 @@ fn airMemset(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
 /// When the user has enabled the bulk_memory feature, we lower
 /// this to wasm's memset instruction. When the feature is not present,
 /// we implement it manually.
-fn memSet(self: *Self, ptr: WValue, len: WValue, value: WValue) InnerError!void {
+fn memset(self: *Self, ptr: WValue, len: WValue, value: WValue) InnerError!void {
     // When bulk_memory is enabled, we lower it to wasm's memset instruction.
     // If not, we lower it ourselves
     if (std.Target.wasm.featureSetHas(self.target.cpu.features, .bulk_memory)) {
@@ -3248,45 +3111,74 @@ fn memSet(self: *Self, ptr: WValue, len: WValue, value: WValue) InnerError!void 
         return;
     }
 
-    // TODO: We should probably lower this to a call to compiler_rt
-    // But for now, we implement it manually
-    const offset = try self.allocLocal(Type.usize); // local for counter
-    // outer block to jump to when loop is done
-    try self.startBlock(.block, wasm.block_empty);
-    try self.startBlock(.loop, wasm.block_empty);
-    try self.emitWValue(offset);
-    try self.emitWValue(len);
-    switch (self.ptrSize()) {
-        4 => try self.addTag(.i32_eq),
-        8 => try self.addTag(.i64_eq),
-        else => unreachable,
+    // When the length is comptime-known we do the loop at codegen, rather
+    // than emitting a runtime loop into the binary
+    switch (len) {
+        .imm32, .imm64 => {
+            const length = switch (len) {
+                .imm32 => |val| val,
+                .imm64 => |val| val,
+                else => unreachable,
+            };
+
+            var offset: u32 = 0;
+            const base = ptr.offset();
+            while (offset < length) : (offset += 1) {
+                try self.emitWValue(ptr);
+                try self.emitWValue(value);
+                switch (self.arch()) {
+                    .wasm32 => {
+                        try self.addMemArg(.i32_store8, .{ .offset = base + offset, .alignment = 1 });
+                    },
+                    .wasm64 => {
+                        try self.addMemArg(.i64_store8, .{ .offset = base + offset, .alignment = 1 });
+                    },
+                    else => unreachable,
+                }
+            }
+        },
+        else => {
+            // TODO: We should probably lower this to a call to compiler_rt
+            // But for now, we implement it manually
+            const offset = try self.allocLocal(Type.usize); // local for counter
+            // outer block to jump to when loop is done
+            try self.startBlock(.block, wasm.block_empty);
+            try self.startBlock(.loop, wasm.block_empty);
+            try self.emitWValue(offset);
+            try self.emitWValue(len);
+            switch (self.arch()) {
+                .wasm32 => try self.addTag(.i32_eq),
+                .wasm64 => try self.addTag(.i64_eq),
+                else => unreachable,
+            }
+            try self.addLabel(.br_if, 1); // jump out of loop into outer block (finished)
+            try self.emitWValue(ptr);
+            try self.emitWValue(offset);
+            switch (self.arch()) {
+                .wasm32 => try self.addTag(.i32_add),
+                .wasm64 => try self.addTag(.i64_add),
+                else => unreachable,
+            }
+            try self.emitWValue(value);
+            const mem_store_op: Mir.Inst.Tag = switch (self.arch()) {
+                .wasm32 => .i32_store8,
+                .wasm64 => .i64_store8,
+                else => unreachable,
+            };
+            try self.addMemArg(mem_store_op, .{ .offset = ptr.offset(), .alignment = 1 });
+            try self.emitWValue(offset);
+            try self.addImm32(1);
+            switch (self.arch()) {
+                .wasm32 => try self.addTag(.i32_add),
+                .wasm64 => try self.addTag(.i64_add),
+                else => unreachable,
+            }
+            try self.addLabel(.local_set, offset.local);
+            try self.addLabel(.br, 0); // jump to start of loop
+            try self.endBlock();
+            try self.endBlock();
+        },
     }
-    try self.addLabel(.br_if, 1); // jump out of loop into outer block (finished)
-    try self.emitWValue(ptr);
-    try self.emitWValue(offset);
-    switch (self.arch()) {
-        .wasm32 => try self.addTag(.i32_add),
-        .wasm64 => try self.addTag(.i64_add),
-        else => unreachable,
-    }
-    try self.emitWValue(value);
-    const mem_store_op: Mir.Inst.Tag = switch (self.arch()) {
-        .wasm32 => .i32_store8,
-        .wasm64 => .i64_store8,
-        else => unreachable,
-    };
-    try self.addMemArg(mem_store_op, .{ .offset = ptr.offset(), .alignment = 1 });
-    try self.emitWValue(offset);
-    try self.addImm32(1);
-    switch (self.ptrSize()) {
-        4 => try self.addTag(.i32_add),
-        8 => try self.addTag(.i64_add),
-        else => unreachable,
-    }
-    try self.addLabel(.local_set, offset.local);
-    try self.addLabel(.br, 0); // jump to start of loop
-    try self.endBlock();
-    try self.endBlock();
 }
 
 fn airArrayElemVal(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
@@ -3341,30 +3233,71 @@ fn airFloatToInt(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     return result;
 }
 
+fn airIntToFloat(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
+    if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
+
+    const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+    const operand = try self.resolveInst(ty_op.operand);
+    const dest_ty = self.air.typeOfIndex(inst);
+    const op_ty = self.air.typeOf(ty_op.operand);
+
+    try self.emitWValue(operand);
+    const op = buildOpcode(.{
+        .op = .convert,
+        .valtype1 = typeToValtype(dest_ty, self.target),
+        .valtype2 = typeToValtype(op_ty, self.target),
+        .signedness = if (op_ty.isSignedInt()) .signed else .unsigned,
+    });
+    try self.addTag(Mir.Inst.Tag.fromOpcode(op));
+
+    const result = try self.allocLocal(dest_ty);
+    try self.addLabel(.local_set, result.local);
+    return result;
+}
+
 fn airSplat(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
 
     const ty_op = self.air.instructions.items(.data)[inst].ty_op;
     const operand = try self.resolveInst(ty_op.operand);
 
-    _ = ty_op;
     _ = operand;
     return self.fail("TODO: Implement wasm airSplat", .{});
+}
+
+fn airShuffle(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
+    if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
+
+    const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+    const operand = try self.resolveInst(ty_op.operand);
+
+    _ = operand;
+    return self.fail("TODO: Implement wasm airShuffle", .{});
+}
+
+fn airReduce(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
+    if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
+
+    const reduce = self.air.instructions.items(.data)[inst].reduce;
+    const operand = try self.resolveInst(reduce.operand);
+
+    _ = operand;
+    return self.fail("TODO: Implement wasm airReduce", .{});
 }
 
 fn airAggregateInit(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
 
-    const vector_ty = self.air.typeOfIndex(inst);
-    const len = vector_ty.vectorLen();
     const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
+    const result_ty = self.air.typeOfIndex(inst);
+    const len = @intCast(usize, result_ty.arrayLen());
     const elements = @bitCast([]const Air.Inst.Ref, self.air.extra[ty_pl.payload..][0..len]);
 
-    switch (vector_ty.zigTypeTag()) {
+    switch (result_ty.zigTypeTag()) {
         .Vector => return self.fail("TODO: Wasm backend: implement airAggregateInit for vectors", .{}),
         .Array => {
-            const result = try self.allocStack(vector_ty);
-            const elem_ty = vector_ty.childType();
+            const result = try self.allocStack(result_ty);
+            const elem_ty = result_ty.childType();
             const elem_size = @intCast(u32, elem_ty.abiSize(self.target));
 
             // When the element type is by reference, we must copy the entire
@@ -3393,13 +3326,12 @@ fn airAggregateInit(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
             return result;
         },
         .Struct => {
-            const tuple = vector_ty.castTag(.tuple).?.data;
-            const result = try self.allocStack(vector_ty);
+            const result = try self.allocStack(result_ty);
             const offset = try self.buildPointerOffset(result, 0, .new); // pointer to offset
             for (elements) |elem, elem_index| {
-                if (tuple.values[elem_index].tag() != .unreachable_value) continue;
+                if (result_ty.structFieldValueComptime(elem_index) != null) continue;
 
-                const elem_ty = tuple.types[elem_index];
+                const elem_ty = result_ty.structFieldType(elem_index);
                 const elem_size = @intCast(u32, elem_ty.abiSize(self.target));
                 const value = try self.resolveInst(elem);
                 try self.store(offset, value, elem_ty, 0);
@@ -3417,7 +3349,34 @@ fn airAggregateInit(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
 
 fn airUnionInit(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
-    return self.fail("TODO: Wasm backend: implement airUnionInit", .{});
+
+    const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
+    const extra = self.air.extraData(Air.UnionInit, ty_pl.payload).data;
+    const union_ty = self.air.typeOfIndex(inst);
+    const layout = union_ty.unionGetLayout(self.target);
+    if (layout.payload_size == 0) {
+        if (layout.tag_size == 0) {
+            return WValue{ .none = {} };
+        }
+        assert(!isByRef(union_ty, self.target));
+        return WValue{ .imm32 = extra.field_index };
+    }
+    assert(isByRef(union_ty, self.target));
+
+    const result_ptr = try self.allocStack(union_ty);
+    const payload = try self.resolveInst(extra.init);
+    const union_obj = union_ty.cast(Type.Payload.Union).?.data;
+    assert(union_obj.haveFieldTypes());
+    const field = union_obj.fields.values()[extra.field_index];
+
+    if (layout.tag_align >= layout.payload_align) {
+        const payload_ptr = try self.buildPointerOffset(result_ptr, layout.tag_size, .new);
+        try self.store(payload_ptr, payload, field.ty, 0);
+    } else {
+        try self.store(result_ptr, payload, field.ty, 0);
+    }
+
+    return result_ptr;
 }
 
 fn airPrefetch(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
@@ -3426,8 +3385,30 @@ fn airPrefetch(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     return WValue{ .none = {} };
 }
 
+fn airWasmMemorySize(self: *Self, inst: Air.Inst.Index) !WValue {
+    if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
+
+    const pl_op = self.air.instructions.items(.data)[inst].pl_op;
+
+    const result = try self.allocLocal(self.air.typeOfIndex(inst));
+    try self.addLabel(.memory_size, pl_op.payload);
+    try self.addLabel(.local_set, result.local);
+    return result;
+}
+
+fn airWasmMemoryGrow(self: *Self, inst: Air.Inst.Index) !WValue {
+    const pl_op = self.air.instructions.items(.data)[inst].pl_op;
+    const operand = try self.resolveInst(pl_op.operand);
+
+    const result = try self.allocLocal(self.air.typeOfIndex(inst));
+    try self.emitWValue(operand);
+    try self.addLabel(.memory_grow, pl_op.payload);
+    try self.addLabel(.local_set, result.local);
+    return result;
+}
+
 fn cmpOptionals(self: *Self, lhs: WValue, rhs: WValue, operand_ty: Type, op: std.math.CompareOperator) InnerError!WValue {
-    assert(operand_ty.hasRuntimeBits());
+    assert(operand_ty.hasRuntimeBitsIgnoreComptime());
     assert(op == .eq or op == .neq);
     var buf: Type.Payload.ElemType = undefined;
     const payload_ty = operand_ty.optionalChild(&buf);
@@ -3538,4 +3519,198 @@ fn airGetUnionTag(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
         break :blk @intCast(u32, layout.payload_size);
     } else @as(u32, 0);
     return self.load(operand, tag_ty, offset);
+}
+
+fn airFpext(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
+    if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
+
+    const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+    const dest_ty = self.air.typeOfIndex(inst);
+    const dest_bits = dest_ty.floatBits(self.target);
+    const src_bits = self.air.typeOf(ty_op.operand).floatBits(self.target);
+    const operand = try self.resolveInst(ty_op.operand);
+
+    if (dest_bits == 64 and src_bits == 32) {
+        const result = try self.allocLocal(dest_ty);
+        try self.emitWValue(operand);
+        try self.addTag(.f64_promote_f32);
+        try self.addLabel(.local_set, result.local);
+        return result;
+    } else {
+        // TODO: Emit a call to compiler-rt to extend the float. e.g. __extendhfsf2
+        return self.fail("TODO: Implement 'fpext' for floats with bitsize: {d}", .{dest_bits});
+    }
+}
+
+fn airFptrunc(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
+    if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
+
+    const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+    const dest_ty = self.air.typeOfIndex(inst);
+    const dest_bits = dest_ty.floatBits(self.target);
+    const src_bits = self.air.typeOf(ty_op.operand).floatBits(self.target);
+    const operand = try self.resolveInst(ty_op.operand);
+
+    if (dest_bits == 32 and src_bits == 64) {
+        const result = try self.allocLocal(dest_ty);
+        try self.emitWValue(operand);
+        try self.addTag(.f32_demote_f64);
+        try self.addLabel(.local_set, result.local);
+        return result;
+    } else {
+        // TODO: Emit a call to compiler-rt to trunc the float. e.g. __truncdfhf2
+        return self.fail("TODO: Implement 'fptrunc' for floats with bitsize: {d}", .{dest_bits});
+    }
+}
+
+fn airErrUnionPayloadPtrSet(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
+    const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+    const err_set_ty = self.air.typeOf(ty_op.operand).childType();
+    const err_ty = err_set_ty.errorUnionSet();
+    const payload_ty = err_set_ty.errorUnionPayload();
+    const operand = try self.resolveInst(ty_op.operand);
+
+    // set error-tag to '0' to annotate error union is non-error
+    try self.store(operand, .{ .imm32 = 0 }, err_ty, 0);
+
+    if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
+
+    if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
+        return operand;
+    }
+
+    const err_align = err_set_ty.abiAlignment(self.target);
+    const set_size = err_ty.abiSize(self.target);
+    const offset = mem.alignForwardGeneric(u64, set_size, err_align);
+
+    return self.buildPointerOffset(operand, @intCast(u32, offset), .new);
+}
+
+fn airFieldParentPtr(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
+    if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
+
+    const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
+    const extra = self.air.extraData(Air.FieldParentPtr, ty_pl.payload).data;
+    const field_ptr = try self.resolveInst(extra.field_ptr);
+
+    const struct_ty = self.air.getRefType(ty_pl.ty).childType();
+    const field_offset = struct_ty.structFieldOffset(extra.field_index, self.target);
+
+    if (field_offset == 0) {
+        return field_ptr;
+    }
+
+    const base = try self.buildPointerOffset(field_ptr, 0, .new);
+    try self.addLabel(.local_get, base.local);
+    try self.addImm32(@bitCast(i32, @intCast(u32, field_offset)));
+    try self.addTag(.i32_sub);
+    try self.addLabel(.local_set, base.local);
+    return base;
+}
+
+fn airMemcpy(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
+    const pl_op = self.air.instructions.items(.data)[inst].pl_op;
+    const bin_op = self.air.extraData(Air.Bin, pl_op.payload).data;
+    const dst = try self.resolveInst(pl_op.operand);
+    const src = try self.resolveInst(bin_op.lhs);
+    const len = try self.resolveInst(bin_op.rhs);
+    try self.memcpy(dst, src, len);
+    return WValue{ .none = {} };
+}
+
+fn airPopcount(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
+    if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
+    const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+    const operand = try self.resolveInst(ty_op.operand);
+    const op_ty = self.air.typeOf(ty_op.operand);
+
+    if (op_ty.zigTypeTag() == .Vector) {
+        return self.fail("TODO: Implement @popCount for vectors", .{});
+    }
+
+    const int_info = op_ty.intInfo(self.target);
+    const bits = int_info.bits;
+    const wasm_bits = toWasmBits(bits) orelse {
+        return self.fail("TODO: Implement @popCount for integers with bitsize '{d}'", .{bits});
+    };
+
+    try self.emitWValue(operand);
+
+    // for signed integers we first mask the signedness bit
+    if (int_info.signedness == .signed and wasm_bits != bits) {
+        switch (wasm_bits) {
+            32 => {
+                const mask = (@as(u32, 1) << @intCast(u5, bits)) - 1;
+                try self.addImm32(@bitCast(i32, mask));
+                try self.addTag(.i32_and);
+            },
+            64 => {
+                const mask = (@as(u64, 1) << @intCast(u6, bits)) - 1;
+                try self.addImm64(mask);
+                try self.addTag(.i64_and);
+            },
+            else => unreachable,
+        }
+    }
+
+    switch (wasm_bits) {
+        32 => try self.addTag(.i32_popcnt),
+        64 => try self.addTag(.i64_popcnt),
+        else => unreachable,
+    }
+
+    const result = try self.allocLocal(op_ty);
+    try self.addLabel(.local_set, result.local);
+    return result;
+}
+
+fn airErrorName(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
+    if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
+
+    const un_op = self.air.instructions.items(.data)[inst].un_op;
+    const operand = try self.resolveInst(un_op);
+
+    // First retrieve the symbol index to the error name table
+    // that will be used to emit a relocation for the pointer
+    // to the error name table.
+    //
+    // Each entry to this table is a slice (ptr+len).
+    // The operand in this instruction represents the index within this table.
+    // This means to get the final name, we emit the base pointer and then perform
+    // pointer arithmetic to find the pointer to this slice and return that.
+    //
+    // As the names are global and the slice elements are constant, we do not have
+    // to make a copy of the ptr+value but can point towards them directly.
+    const error_table_symbol = try self.bin_file.getErrorTableSymbol();
+    const name_ty = Type.initTag(.const_slice_u8_sentinel_0);
+    const abi_size = name_ty.abiSize(self.target);
+
+    const error_name_value: WValue = .{ .memory = error_table_symbol }; // emitting this will create a relocation
+    try self.emitWValue(error_name_value);
+    try self.emitWValue(operand);
+    switch (self.arch()) {
+        .wasm32 => {
+            try self.addImm32(@bitCast(i32, @intCast(u32, abi_size)));
+            try self.addTag(.i32_mul);
+            try self.addTag(.i32_add);
+        },
+        .wasm64 => {
+            try self.addImm64(abi_size);
+            try self.addTag(.i64_mul);
+            try self.addTag(.i64_add);
+        },
+        else => unreachable,
+    }
+
+    const result_ptr = try self.allocLocal(Type.usize);
+    try self.addLabel(.local_set, result_ptr.local);
+    return result_ptr;
+}
+
+fn airPtrSliceFieldPtr(self: *Self, inst: Air.Inst.Index, offset: u32) InnerError!WValue {
+    if (self.liveness.isUnused(inst)) return WValue{ .none = {} };
+
+    const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+    const slice_ptr = try self.resolveInst(ty_op.operand);
+    return self.buildPointerOffset(slice_ptr, offset, .new);
 }

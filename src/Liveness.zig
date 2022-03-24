@@ -314,10 +314,15 @@ fn analyzeInst(
         .const_ty,
         .breakpoint,
         .dbg_stmt,
+        .dbg_inline_begin,
+        .dbg_inline_end,
+        .dbg_block_begin,
+        .dbg_block_end,
         .unreach,
         .fence,
         .ret_addr,
         .frame_addr,
+        .wasm_memory_size,
         => return trackOperands(a, new_set, inst, main_tomb, .{ .none, .none, .none }),
 
         .not,
@@ -393,12 +398,19 @@ fn analyzeInst(
             return trackOperands(a, new_set, inst, main_tomb, .{ operand, .none, .none });
         },
 
+        .dbg_var_ptr,
+        .dbg_var_val,
+        => {
+            const operand = inst_datas[inst].pl_op.operand;
+            return trackOperands(a, new_set, inst, main_tomb, .{ operand, .none, .none });
+        },
+
         .prefetch => {
             const prefetch = inst_datas[inst].prefetch;
             return trackOperands(a, new_set, inst, main_tomb, .{ prefetch.ptr, .none, .none });
         },
 
-        .call => {
+        .call, .call_always_tail, .call_never_tail, .call_never_inline => {
             const inst_data = inst_datas[inst].pl_op;
             const callee = inst_data.operand;
             const extra = a.air.extraData(Air.Call, inst_data.payload);
@@ -420,6 +432,18 @@ fn analyzeInst(
                 try extra_tombs.feed(arg);
             }
             return extra_tombs.finish();
+        },
+        .shuffle => {
+            const extra = a.air.extraData(Air.Shuffle, inst_datas[inst].ty_pl.payload).data;
+            return trackOperands(a, new_set, inst, main_tomb, .{ extra.a, extra.b, .none });
+        },
+        .reduce => {
+            const reduce = inst_datas[inst].reduce;
+            return trackOperands(a, new_set, inst, main_tomb, .{ reduce.operand, .none, .none });
+        },
+        .cmp_vector => {
+            const extra = a.air.extraData(Air.VectorCmp, inst_datas[inst].ty_pl.payload).data;
+            return trackOperands(a, new_set, inst, main_tomb, .{ extra.lhs, extra.rhs, .none });
         },
         .aggregate_init => {
             const ty_pl = inst_datas[inst].ty_pl;
@@ -462,6 +486,11 @@ fn analyzeInst(
         .cmpxchg_strong, .cmpxchg_weak => {
             const extra = a.air.extraData(Air.Cmpxchg, inst_datas[inst].ty_pl.payload).data;
             return trackOperands(a, new_set, inst, main_tomb, .{ extra.ptr, extra.expected_value, extra.new_value });
+        },
+        .mul_add => {
+            const pl_op = inst_datas[inst].pl_op;
+            const extra = a.air.extraData(Air.Bin, pl_op.payload).data;
+            return trackOperands(a, new_set, inst, main_tomb, .{ extra.lhs, extra.rhs, pl_op.operand });
         },
         .atomic_load => {
             const ptr = inst_datas[inst].atomic_load.ptr;
@@ -705,6 +734,10 @@ fn analyzeInst(
             try a.special.put(gpa, inst, extra_index);
 
             return trackOperands(a, new_set, inst, main_tomb, .{ condition, .none, .none });
+        },
+        .wasm_memory_grow => {
+            const pl_op = inst_datas[inst].pl_op;
+            return trackOperands(a, new_set, inst, main_tomb, .{ pl_op.operand, .none, .none });
         },
     }
 }

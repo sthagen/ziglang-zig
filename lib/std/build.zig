@@ -17,6 +17,7 @@ const fmt_lib = std.fmt;
 const File = std.fs.File;
 const CrossTarget = std.zig.CrossTarget;
 const NativeTargetInfo = std.zig.system.NativeTargetInfo;
+const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub const FmtStep = @import("build/FmtStep.zig");
 pub const TranslateCStep = @import("build/TranslateCStep.zig");
@@ -1320,6 +1321,7 @@ pub const Builder = struct {
                 error.FileNotFound => error.PkgConfigNotInstalled,
                 error.InvalidName => error.PkgConfigNotInstalled,
                 error.PkgConfigInvalidOutput => error.PkgConfigInvalidOutput,
+                error.ChildExecFailed => error.PkgConfigFailed,
                 else => return err,
             };
             self.pkg_config_pkg_list = result;
@@ -1567,6 +1569,9 @@ pub const LibExeObjStep = struct {
 
     /// (Darwin) Install name for the dylib
     install_name: ?[]const u8 = null,
+
+    /// (Darwin) Path to entitlements file
+    entitlements: ?[]const u8 = null,
 
     /// Position Independent Code
     force_pic: ?bool = null,
@@ -1962,6 +1967,7 @@ pub const LibExeObjStep = struct {
             error.ExecNotSupported => return error.PkgConfigFailed,
             error.ExitCodeFailure => return error.PkgConfigFailed,
             error.FileNotFound => return error.PkgConfigNotInstalled,
+            error.ChildExecFailed => return error.PkgConfigFailed,
             else => return err,
         };
         var it = mem.tokenize(u8, stdout, " \r\n\t");
@@ -2512,6 +2518,10 @@ pub const LibExeObjStep = struct {
             }
         }
 
+        if (self.entitlements) |entitlements| {
+            try zig_args.appendSlice(&[_][]const u8{ "--entitlements", entitlements });
+        }
+
         if (self.bundle_compiler_rt) |x| {
             if (x) {
                 try zig_args.append("-fcompiler-rt");
@@ -2892,6 +2902,41 @@ pub const LibExeObjStep = struct {
 
         try zig_args.append("--enable-cache");
 
+        // Windows has an argument length limit of 32,766 characters, macOS 262,144 and Linux
+        // 2,097,152. If our args exceed 30 KiB, we instead write them to a "response file" and
+        // pass that to zig, e.g. via 'zig build-lib @args.rsp'
+        var args_length: usize = 0;
+        for (zig_args.items) |arg| {
+            args_length += arg.len + 1; // +1 to account for null terminator
+        }
+        if (args_length >= 30 * 1024) {
+            const args_dir = try fs.path.join(
+                builder.allocator,
+                &[_][]const u8{ builder.pathFromRoot("zig-cache"), "args" },
+            );
+            try std.fs.cwd().makePath(args_dir);
+
+            // Write the args to zig-cache/args/<SHA256 hash of args> to avoid conflicts with
+            // other zig build commands running in parallel.
+            const partially_quoted = try std.mem.join(builder.allocator, "\" \"", zig_args.items[2..]);
+            const args = try std.mem.concat(builder.allocator, u8, &[_][]const u8{ "\"", partially_quoted, "\"" });
+
+            var args_hash: [Sha256.digest_length]u8 = undefined;
+            Sha256.hash(args, &args_hash, .{});
+            var args_hex_hash: [Sha256.digest_length * 2]u8 = undefined;
+            _ = try std.fmt.bufPrint(
+                &args_hex_hash,
+                "{s}",
+                .{std.fmt.fmtSliceHexLower(&args_hash)},
+            );
+
+            const args_file = try fs.path.join(builder.allocator, &[_][]const u8{ args_dir, args_hex_hash[0..] });
+            try std.fs.cwd().writeFile(args_file, args);
+
+            zig_args.shrinkRetainingCapacity(2);
+            try zig_args.append(try std.mem.concat(builder.allocator, u8, &[_][]const u8{ "@", args_file }));
+        }
+
         const output_dir_nl = try builder.execFromStep(zig_args.items, &self.step);
         const build_output_dir = mem.trimRight(u8, output_dir_nl, "\r\n");
 
@@ -3218,10 +3263,15 @@ const ThisModule = @This();
 pub const Step = struct {
     id: Id,
     name: []const u8,
-    makeFn: fn (self: *Step) anyerror!void,
+    makeFn: MakeFn,
     dependencies: ArrayList(*Step),
     loop_flag: bool,
     done_flag: bool,
+
+    const MakeFn = switch (builtin.zig_backend) {
+        .stage1 => fn (self: *Step) anyerror!void,
+        else => *const fn (self: *Step) anyerror!void,
+    };
 
     pub const Id = enum {
         top_level,
@@ -3241,7 +3291,7 @@ pub const Step = struct {
         custom,
     };
 
-    pub fn init(id: Id, name: []const u8, allocator: Allocator, makeFn: fn (*Step) anyerror!void) Step {
+    pub fn init(id: Id, name: []const u8, allocator: Allocator, makeFn: MakeFn) Step {
         return Step{
             .id = id,
             .name = allocator.dupe(u8, name) catch unreachable,

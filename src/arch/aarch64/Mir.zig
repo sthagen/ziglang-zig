@@ -28,6 +28,12 @@ pub const Inst = struct {
         add_immediate,
         /// Add (shifted register)
         add_shifted_register,
+        /// Bitwise AND (shifted register)
+        and_shifted_register,
+        /// Arithmetic Shift Right (immediate)
+        asr_immediate,
+        /// Arithmetic Shift Right (register)
+        asr_register,
         /// Branch conditionally
         b_cond,
         /// Branch
@@ -54,6 +60,8 @@ pub const Inst = struct {
         dbg_epilogue_begin,
         /// Pseudo-instruction: Update debug line
         dbg_line,
+        /// Bitwise Exclusive OR (immediate)
+        eor_immediate,
         /// Bitwise Exclusive OR (shifted register)
         eor_shifted_register,
         /// Loads the contents into a register
@@ -92,6 +100,14 @@ pub const Inst = struct {
         ldrh_immediate,
         /// Load Register Halfword (register)
         ldrh_register,
+        /// Logical Shift Left (immediate)
+        lsl_immediate,
+        /// Logical Shift Left (register)
+        lsl_register,
+        /// Logical Shift Right (immediate)
+        lsr_immediate,
+        /// Logical Shift Right (register)
+        lsr_register,
         /// Move (to/from SP)
         mov_to_from_sp,
         /// Move (register)
@@ -106,6 +122,8 @@ pub const Inst = struct {
         mvn,
         /// No Operation
         nop,
+        /// Bitwise inclusive OR (shifted register)
+        orr_shifted_register,
         /// Pseudo-instruction: Pop multiple registers
         pop_regs,
         /// Psuedo-instruction: Push multiple registers
@@ -231,16 +249,35 @@ pub const Inst = struct {
             imm12: u12,
             sh: u1 = 0,
         },
-        /// Two registers and a shift (shift type and 6-bit amount)
+        /// Two registers and a shift (logical instruction version)
+        /// (shift type and 6-bit amount)
         ///
         /// Used by e.g. mvn
         rr_imm6_shift: struct {
             rd: Register,
             rm: Register,
             imm6: u6,
-            shift: bits.Instruction.AddSubtractShiftedRegisterShift,
+            shift: bits.Instruction.LogicalShiftedRegisterShift,
         },
-        /// Two registers
+        /// Two registers and a bitmask immediate
+        ///
+        /// Used by e.g. eor_immediate
+        rr_bitmask: struct {
+            rd: Register,
+            rn: Register,
+            imms: u6,
+            immr: u6,
+            n: u1,
+        },
+        /// Two registers and a 6-bit unsigned shift
+        ///
+        /// Used by e.g. lsl_immediate
+        rr_shift: struct {
+            rd: Register,
+            rn: Register,
+            shift: u6,
+        },
+        /// Three registers
         ///
         /// Used by e.g. mul
         rrr: struct {

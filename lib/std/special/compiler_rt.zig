@@ -19,13 +19,12 @@ const strong_linkage = if (is_test)
 else
     std.builtin.GlobalLinkage.Strong;
 
-const long_double_is_f128 = builtin.target.longDoubleIsF128();
+const long_double_is_f80 = builtin.target.longDoubleIs(f80);
+const long_double_is_f128 = builtin.target.longDoubleIs(f128);
 
 comptime {
     // These files do their own comptime exporting logic.
-    if (builtin.zig_backend == .stage1) {
-        _ = @import("compiler_rt/atomics.zig");
-    }
+    _ = @import("compiler_rt/atomics.zig");
     if (builtin.zig_backend != .stage2_llvm) { // TODO
         _ = @import("compiler_rt/clear_cache.zig").clear_cache;
     }
@@ -201,7 +200,7 @@ comptime {
     const __trunctfxf2 = @import("compiler_rt/trunc_f80.zig").__trunctfxf2;
     @export(__trunctfxf2, .{ .name = "__trunctfxf2", .linkage = linkage });
 
-    if (builtin.zig_backend == .stage1) {
+    if (builtin.zig_backend == .stage1) { // TODO
         switch (arch) {
             .i386,
             .x86_64,
@@ -304,10 +303,8 @@ comptime {
 
     const __floatunsisf = @import("compiler_rt/floatunsisf.zig").__floatunsisf;
     @export(__floatunsisf, .{ .name = "__floatunsisf", .linkage = linkage });
-    if (builtin.zig_backend == .stage1) {
-        const __floatundisf = @import("compiler_rt/floatundisf.zig").__floatundisf;
-        @export(__floatundisf, .{ .name = "__floatundisf", .linkage = linkage });
-    }
+    const __floatundisf = @import("compiler_rt/floatundisf.zig").__floatundisf;
+    @export(__floatundisf, .{ .name = "__floatundisf", .linkage = linkage });
     const __floatunsidf = @import("compiler_rt/floatunsidf.zig").__floatunsidf;
     @export(__floatunsidf, .{ .name = "__floatunsidf", .linkage = linkage });
     const __floatundidf = @import("compiler_rt/floatundidf.zig").__floatundidf;
@@ -675,6 +672,33 @@ comptime {
         @export(_aullrem, .{ .name = "\x01__aullrem", .linkage = strong_linkage });
     }
 
+    const fmodl = @import("compiler_rt/floatfmodl.zig").fmodl;
+    if (!is_test) {
+        @export(fmodl, .{ .name = "fmodl", .linkage = linkage });
+
+        @export(floorf, .{ .name = "floorf", .linkage = linkage });
+        @export(floor, .{ .name = "floor", .linkage = linkage });
+        @export(floorl, .{ .name = "floorl", .linkage = linkage });
+
+        @export(ceilf, .{ .name = "ceilf", .linkage = linkage });
+        @export(ceil, .{ .name = "ceil", .linkage = linkage });
+        @export(ceill, .{ .name = "ceill", .linkage = linkage });
+
+        @export(fma, .{ .name = "fma", .linkage = linkage });
+        @export(fmaf, .{ .name = "fmaf", .linkage = linkage });
+        @export(fmal, .{ .name = "fmal", .linkage = linkage });
+        if (long_double_is_f80) {
+            @export(fmal, .{ .name = "__fmax", .linkage = linkage });
+        } else {
+            @export(__fmax, .{ .name = "__fmax", .linkage = linkage });
+        }
+        if (long_double_is_f128) {
+            @export(fmal, .{ .name = "fmaq", .linkage = linkage });
+        } else {
+            @export(fmaq, .{ .name = "fmaq", .linkage = linkage });
+        }
+    }
+
     if (arch.isSPARC()) {
         // SPARC systems use a different naming scheme
         const _Qp_add = @import("compiler_rt/sparc.zig")._Qp_add;
@@ -727,7 +751,7 @@ comptime {
         @export(_Qp_qtod, .{ .name = "_Qp_qtod", .linkage = linkage });
     }
 
-    if ((arch == .powerpc or arch.isPPC64()) and !is_test) {
+    if ((arch.isPPC() or arch.isPPC64()) and !is_test) {
         @export(__addtf3, .{ .name = "__addkf3", .linkage = linkage });
         @export(__subtf3, .{ .name = "__subkf3", .linkage = linkage });
         @export(__multf3, .{ .name = "__mulkf3", .linkage = linkage });
@@ -752,21 +776,28 @@ comptime {
         @export(__letf2, .{ .name = "__lekf2", .linkage = linkage });
         @export(__getf2, .{ .name = "__gtkf2", .linkage = linkage });
         @export(__unordtf2, .{ .name = "__unordkf2", .linkage = linkage });
+
+        // LLVM PPC backend lowers f128 fma to `fmaf128`.
+        @export(fmal, .{ .name = "fmaf128", .linkage = linkage });
     }
-
-    const fmodl = @import("compiler_rt/floatfmodl.zig").fmodl;
-    @export(fmodl, .{ .name = "fmodl", .linkage = linkage });
-
-    @export(floorf, .{ .name = "floorf", .linkage = linkage });
-    @export(floor, .{ .name = "floor", .linkage = linkage });
-    @export(floorl, .{ .name = "floorl", .linkage = linkage });
-    @export(fmaq, .{ .name = "fmaq", .linkage = linkage });
 }
 
 const math = std.math;
 
+fn fmaf(a: f32, b: f32, c: f32) callconv(.C) f32 {
+    return math.fma(f32, a, b, c);
+}
+fn fma(a: f64, b: f64, c: f64) callconv(.C) f64 {
+    return math.fma(f64, a, b, c);
+}
+fn __fmax(a: f80, b: f80, c: f80) callconv(.C) f80 {
+    return math.fma(f80, a, b, c);
+}
 fn fmaq(a: f128, b: f128, c: f128) callconv(.C) f128 {
     return math.fma(f128, a, b, c);
+}
+fn fmal(a: c_longdouble, b: c_longdouble, c: c_longdouble) callconv(.C) c_longdouble {
+    return math.fma(c_longdouble, a, b, c);
 }
 
 // TODO add intrinsics for these (and probably the double version too)
@@ -784,16 +815,24 @@ fn floorl(x: c_longdouble) callconv(.C) c_longdouble {
     return math.floor(x);
 }
 
+fn ceilf(x: f32) callconv(.C) f32 {
+    return math.ceil(x);
+}
+fn ceil(x: f64) callconv(.C) f64 {
+    return math.ceil(x);
+}
+fn ceill(x: c_longdouble) callconv(.C) c_longdouble {
+    if (!long_double_is_f128) {
+        @panic("TODO implement this");
+    }
+    return math.ceil(x);
+}
+
 // Avoid dragging in the runtime safety mechanisms into this .o file,
 // unless we're trying to test this file.
 pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace) noreturn {
     _ = error_return_trace;
     @setCold(true);
-    if (builtin.zig_backend != .stage1) {
-        while (true) {
-            @breakpoint();
-        }
-    }
     if (is_test) {
         std.debug.panic("{s}", .{msg});
     } else {

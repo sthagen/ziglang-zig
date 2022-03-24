@@ -26,7 +26,6 @@ pub const EmptyStruct = struct {};
 
 test "optional pointer to size zero struct" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
     var e = EmptyStruct{};
     var o: ?*EmptyStruct = &e;
@@ -34,8 +33,6 @@ test "optional pointer to size zero struct" {
 }
 
 test "equality compare optional pointers" {
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-
     try testNullPtrsEql();
     comptime try testNullPtrsEql();
 }
@@ -68,7 +65,6 @@ test "optional with void type" {
 }
 
 test "address of unwrap optional" {
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
@@ -273,7 +269,9 @@ test "0-bit child type coerced to optional return ptr result location" {
 }
 
 test "0-bit child type coerced to optional" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn doTheTest() !void {
