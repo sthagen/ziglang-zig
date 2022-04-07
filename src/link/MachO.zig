@@ -27,6 +27,7 @@ const Atom = @import("MachO/Atom.zig");
 const Cache = @import("../Cache.zig");
 const CodeSignature = @import("MachO/CodeSignature.zig");
 const Compilation = @import("../Compilation.zig");
+const Dwarf = File.Dwarf;
 const Dylib = @import("MachO/Dylib.zig");
 const File = link.File;
 const Object = @import("MachO/Object.zig");
@@ -231,7 +232,7 @@ atom_by_index_table: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
 /// const Foo = struct{
 ///     a: u8,
 /// };
-/// 
+///
 /// pub fn main() void {
 ///     var foo = Foo{ .a = 1 };
 ///     _ = foo;
@@ -332,7 +333,13 @@ pub fn openPath(allocator: Allocator, options: link.Options) !*MachO {
         return self;
     }
 
-    if (!options.strip and options.module != null) {
+    if (!options.strip and options.module != null) blk: {
+        // TODO once I add support for converting (and relocating) DWARF info from relocatable
+        // object files, this check becomes unnecessary.
+        // For now, for LLVM backend we fallback to the old-fashioned stabs approach used by
+        // stage1.
+        if (build_options.have_llvm and options.use_llvm) break :blk;
+
         // Create dSYM bundle.
         const dir = options.module.?.zig_cache_artifact_directory;
         log.debug("creating {s}.dSYM bundle in {s}", .{ emit.sub_path, dir.path });
@@ -446,6 +453,12 @@ pub fn flushModule(self: *MachO, comp: *Compilation) !void {
 
     const directory = self.base.options.emit.?.directory; // Just an alias to make it shorter to type.
     const full_out_path = try directory.join(arena, &[_][]const u8{self.base.options.emit.?.sub_path});
+
+    if (self.d_sym) |*d_sym| {
+        if (self.base.options.module) |module| {
+            try d_sym.dwarf.flushModule(&self.base, module);
+        }
+    }
 
     // If there is no Zig code to compile, then we should skip flushing the output file because it
     // will not be part of the linker line anyway.
@@ -3664,32 +3677,19 @@ pub fn updateFunc(self: *MachO, module: *Module, func: *Module.Fn, air: Air, liv
     var code_buffer = std.ArrayList(u8).init(self.base.allocator);
     defer code_buffer.deinit();
 
-    var debug_buffers_buf: link.File.Dwarf.DeclDebugBuffers = undefined;
-    const debug_buffers = if (self.d_sym) |*d_sym| blk: {
-        debug_buffers_buf = try d_sym.initDeclDebugInfo(module, decl);
-        break :blk &debug_buffers_buf;
-    } else null;
-    defer {
-        if (debug_buffers) |dbg| {
-            dbg.dbg_line_buffer.deinit();
-            dbg.dbg_info_buffer.deinit();
-            for (dbg.dbg_info_type_relocs.values()) |*value| {
-                value.relocs.deinit(self.base.allocator);
-            }
-            dbg.dbg_info_type_relocs.deinit(self.base.allocator);
-        }
-    }
+    var decl_state = if (self.d_sym) |*d_sym|
+        try d_sym.dwarf.initDeclState(decl)
+    else
+        null;
+    defer if (decl_state) |*ds| ds.deinit();
 
-    const res = if (debug_buffers) |dbg|
+    const res = if (decl_state) |*ds|
         try codegen.generateFunction(&self.base, decl.srcLoc(), func, air, liveness, &code_buffer, .{
-            .dwarf = .{
-                .dbg_line = &dbg.dbg_line_buffer,
-                .dbg_info = &dbg.dbg_info_buffer,
-                .dbg_info_type_relocs = &dbg.dbg_info_type_relocs,
-            },
+            .dwarf = ds,
         })
     else
         try codegen.generateFunction(&self.base, decl.srcLoc(), func, air, liveness, &code_buffer, .none);
+
     switch (res) {
         .appended => {
             try decl.link.macho.code.appendSlice(self.base.allocator, code_buffer.items);
@@ -3701,12 +3701,17 @@ pub fn updateFunc(self: *MachO, module: *Module, func: *Module.Fn, air: Air, liv
         },
     }
 
-    _ = try self.placeDecl(decl, decl.link.macho.code.items.len);
+    const symbol = try self.placeDecl(decl, decl.link.macho.code.items.len);
 
-    if (debug_buffers) |db| {
-        if (self.d_sym) |*d_sym| {
-            try d_sym.commitDeclDebugInfo(module, decl, db);
-        }
+    if (decl_state) |*ds| {
+        try self.d_sym.?.dwarf.commitDeclState(
+            &self.base,
+            module,
+            decl,
+            symbol.n_value,
+            decl.link.macho.size,
+            ds,
+        );
     }
 
     // Since we updated the vaddr and the size, each corresponding export symbol also
@@ -3806,33 +3811,19 @@ pub fn updateDecl(self: *MachO, module: *Module, decl: *Module.Decl) !void {
     var code_buffer = std.ArrayList(u8).init(self.base.allocator);
     defer code_buffer.deinit();
 
-    var debug_buffers_buf: link.File.Dwarf.DeclDebugBuffers = undefined;
-    const debug_buffers = if (self.d_sym) |*d_sym| blk: {
-        debug_buffers_buf = try d_sym.initDeclDebugInfo(module, decl);
-        break :blk &debug_buffers_buf;
-    } else null;
-    defer {
-        if (debug_buffers) |dbg| {
-            dbg.dbg_line_buffer.deinit();
-            dbg.dbg_info_buffer.deinit();
-            for (dbg.dbg_info_type_relocs.values()) |*value| {
-                value.relocs.deinit(self.base.allocator);
-            }
-            dbg.dbg_info_type_relocs.deinit(self.base.allocator);
-        }
-    }
+    var decl_state: ?Dwarf.DeclState = if (self.d_sym) |*d_sym|
+        try d_sym.dwarf.initDeclState(decl)
+    else
+        null;
+    defer if (decl_state) |*ds| ds.deinit();
 
     const decl_val = if (decl.val.castTag(.variable)) |payload| payload.data.init else decl.val;
-    const res = if (debug_buffers) |dbg|
+    const res = if (decl_state) |*ds|
         try codegen.generateSymbol(&self.base, decl.srcLoc(), .{
             .ty = decl.ty,
             .val = decl_val,
         }, &code_buffer, .{
-            .dwarf = .{
-                .dbg_line = &dbg.dbg_line_buffer,
-                .dbg_info = &dbg.dbg_info_buffer,
-                .dbg_info_type_relocs = &dbg.dbg_info_type_relocs,
-            },
+            .dwarf = ds,
         }, .{
             .parent_atom_index = decl.link.macho.local_sym_index,
         })
@@ -3864,7 +3855,18 @@ pub fn updateDecl(self: *MachO, module: *Module, decl: *Module.Decl) !void {
             },
         }
     };
-    _ = try self.placeDecl(decl, code.len);
+    const symbol = try self.placeDecl(decl, code.len);
+
+    if (decl_state) |*ds| {
+        try self.d_sym.?.dwarf.commitDeclState(
+            &self.base,
+            module,
+            decl,
+            symbol.n_value,
+            decl.link.macho.size,
+            ds,
+        );
+    }
 
     // Since we updated the vaddr and the size, each corresponding export symbol also
     // needs to be updated.
@@ -4078,8 +4080,9 @@ fn placeDecl(self: *MachO, decl: *Module.Decl, code_len: usize) !*macho.nlist_64
 }
 
 pub fn updateDeclLineNumber(self: *MachO, module: *Module, decl: *const Module.Decl) !void {
+    _ = module;
     if (self.d_sym) |*d_sym| {
-        try d_sym.updateDeclLineNumber(module, decl);
+        try d_sym.dwarf.updateDeclLineNumber(&self.base, decl);
     }
 }
 

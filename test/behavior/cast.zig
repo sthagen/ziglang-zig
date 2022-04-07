@@ -360,7 +360,11 @@ test "expected [*c]const u8, found [*:0]const u8" {
 }
 
 test "explicit cast from integer to error type" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
     try testCastIntToErr(error.ItBroke);
     comptime try testCastIntToErr(error.ItBroke);
@@ -969,7 +973,8 @@ test "variable initialization uses result locations properly with regards to the
 }
 
 test "cast between C pointer with different but compatible types" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn foo(arg: [*]c_ushort) u16 {
@@ -981,6 +986,7 @@ test "cast between C pointer with different but compatible types" {
         }
     };
     try S.doTheTest();
+    comptime try S.doTheTest();
 }
 
 test "peer type resolve string lit with sentinel-terminated mutable slice" {
@@ -1362,4 +1368,28 @@ test "cast i8 fn call peers to i32 result" {
     };
     try S.doTheTest();
     comptime try S.doTheTest();
+}
+
+test "cast compatible optional types" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+
+    var a: ?[:0]const u8 = null;
+    var b: ?[]const u8 = a;
+    try expect(b == null);
+}
+
+test "coerce undefined single-item pointer of array to error union of slice" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+
+    const a = @as([*]u8, undefined)[0..0];
+    var b: error{a}![]const u8 = a;
+    const s = try b;
+    try expect(s.len == 0);
+}
+
+test "pointer to empty struct literal to mutable slice" {
+    var x: []i32 = &.{};
+    try expect(x.len == 0);
 }

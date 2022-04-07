@@ -166,6 +166,7 @@ const Writer = struct {
             .ceil,
             .round,
             .trunc_float,
+            .cmp_lt_errors_len,
             => try w.writeUnOp(s, inst),
 
             .breakpoint,
@@ -264,6 +265,7 @@ const Writer = struct {
             .wasm_memory_size => try w.writeWasmMemorySize(s, inst),
             .wasm_memory_grow => try w.writeWasmMemoryGrow(s, inst),
             .mul_add => try w.writeMulAdd(s, inst),
+            .select => try w.writeSelect(s, inst),
             .shuffle => try w.writeShuffle(s, inst),
             .reduce => try w.writeReduce(s, inst),
             .cmp_vector => try w.writeCmpVector(s, inst),
@@ -396,6 +398,19 @@ const Writer = struct {
         try s.print(", mask {d}, len {d}", .{ extra.mask, extra.mask_len });
     }
 
+    fn writeSelect(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {
+        const pl_op = w.air.instructions.items(.data)[inst].pl_op;
+        const extra = w.air.extraData(Air.Bin, pl_op.payload).data;
+
+        const elem_ty = w.air.typeOfIndex(inst).childType();
+        try s.print("{}, ", .{elem_ty.fmtDebug()});
+        try w.writeOperand(s, inst, 0, pl_op.operand);
+        try s.writeAll(", ");
+        try w.writeOperand(s, inst, 1, extra.lhs);
+        try s.writeAll(", ");
+        try w.writeOperand(s, inst, 2, extra.rhs);
+    }
+
     fn writeReduce(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {
         const reduce = w.air.instructions.items(.data)[inst].reduce;
 
@@ -459,14 +474,12 @@ const Writer = struct {
     }
 
     fn writeOverflow(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {
-        const pl_op = w.air.instructions.items(.data)[inst].pl_op;
-        const extra = w.air.extraData(Air.Bin, pl_op.payload).data;
+        const ty_pl = w.air.instructions.items(.data)[inst].ty_pl;
+        const extra = w.air.extraData(Air.Bin, ty_pl.payload).data;
 
-        try w.writeOperand(s, inst, 0, pl_op.operand);
+        try w.writeOperand(s, inst, 0, extra.lhs);
         try s.writeAll(", ");
-        try w.writeOperand(s, inst, 1, extra.lhs);
-        try s.writeAll(", ");
-        try w.writeOperand(s, inst, 2, extra.rhs);
+        try w.writeOperand(s, inst, 1, extra.rhs);
     }
 
     fn writeMemset(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {

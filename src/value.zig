@@ -461,7 +461,7 @@ pub const Value = extern union {
             => unreachable,
 
             .ty, .lazy_align => {
-                const payload = self.castTag(.ty).?;
+                const payload = self.cast(Payload.Ty).?;
                 const new_payload = try arena.create(Payload.Ty);
                 new_payload.* = .{
                     .base = payload.base,
@@ -718,7 +718,7 @@ pub const Value = extern union {
             .lazy_align => {
                 try out_stream.writeAll("@alignOf(");
                 try val.castTag(.lazy_align).?.data.dump("", options, out_stream);
-                try out_stream.writeAll(")");
+                return try out_stream.writeAll(")");
             },
             .int_type => {
                 const int_type = val.castTag(.int_type).?.data;
@@ -1076,9 +1076,10 @@ pub const Value = extern union {
             .lazy_align => {
                 const ty = val.castTag(.lazy_align).?.data;
                 if (sema_kit) |sk| {
-                    try sk.sema.resolveTypeLayout(sk.block, sk.src, ty);
+                    return (try ty.abiAlignmentAdvanced(target, .{ .sema_kit = sk })).scalar;
+                } else {
+                    return ty.abiAlignment(target);
                 }
-                return ty.abiAlignment(target);
             },
 
             else => return null,
@@ -2475,6 +2476,7 @@ pub const Value = extern union {
             .bool_false,
             .bool_true,
             .the_only_possible_value,
+            .lazy_align,
             => return hashInt(ptr_val, hasher, target),
 
             else => unreachable,
@@ -2659,8 +2661,7 @@ pub const Value = extern union {
         };
     }
 
-    pub fn fieldValue(val: Value, allocator: Allocator, index: usize) error{OutOfMemory}!Value {
-        _ = allocator;
+    pub fn fieldValue(val: Value, ty: Type, index: usize) Value {
         switch (val.tag()) {
             .aggregate => {
                 const field_values = val.castTag(.aggregate).?.data;
@@ -2671,8 +2672,16 @@ pub const Value = extern union {
                 // TODO assert the tag is correct
                 return payload.val;
             },
-            // Structs which have only one possible value need to consist of members which have only one possible value.
-            .the_only_possible_value => return val,
+
+            .the_only_possible_value => return ty.onePossibleValue().?,
+
+            .empty_struct_value => {
+                if (ty.isTupleOrAnonStruct()) {
+                    const tuple = ty.tupleFields();
+                    return tuple.values[index];
+                }
+                unreachable;
+            },
 
             else => unreachable,
         }

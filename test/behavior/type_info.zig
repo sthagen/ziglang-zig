@@ -160,7 +160,6 @@ test "type info: error set, error union info, anyerror" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
 
     try testErrorSet();
     comptime try testErrorSet();
@@ -192,7 +191,6 @@ test "type info: error set single value" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
 
     const TestSet = error.One;
 
@@ -449,7 +447,7 @@ test "type info: vectors" {
 }
 
 fn testVector() !void {
-    const vec_info = @typeInfo(std.meta.Vector(4, i32));
+    const vec_info = @typeInfo(@Vector(4, i32));
     try expect(vec_info == .Vector);
     try expect(vec_info.Vector.len == 4);
     try expect(vec_info.Vector.child == i32);

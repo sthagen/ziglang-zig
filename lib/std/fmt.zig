@@ -2299,6 +2299,8 @@ test "float.decimal" {
     try expectFmt("f64: 0.00000", "f64: {d:.5}", .{@as(f64, 1.40130e-45)});
     try expectFmt("f64: 0.00000", "f64: {d:.5}", .{@as(f64, 9.999960e-40)});
     try expectFmt("f64: 10000000000000.00", "f64: {d:.2}", .{@as(f64, 9999999999999.999)});
+    try expectFmt("f64: 10000000000000000000000000000000000000", "f64: {d}", .{@as(f64, 1e37)});
+    try expectFmt("f64: 100000000000000000000000000000000000000", "f64: {d}", .{@as(f64, 1e38)});
 }
 
 test "float.libc.sanity" {
@@ -2594,9 +2596,9 @@ test "vector" {
         return error.SkipZigTest;
     }
 
-    const vbool: std.meta.Vector(4, bool) = [_]bool{ true, false, true, false };
-    const vi64: std.meta.Vector(4, i64) = [_]i64{ -2, -1, 0, 1 };
-    const vu64: std.meta.Vector(4, u64) = [_]u64{ 1000, 2000, 3000, 4000 };
+    const vbool: @Vector(4, bool) = [_]bool{ true, false, true, false };
+    const vi64: @Vector(4, i64) = [_]i64{ -2, -1, 0, 1 };
+    const vu64: @Vector(4, u64) = [_]u64{ 1000, 2000, 3000, 4000 };
 
     try expectFmt("{ true, false, true, false }", "{}", .{vbool});
     try expectFmt("{ -2, -1, 0, 1 }", "{}", .{vi64});

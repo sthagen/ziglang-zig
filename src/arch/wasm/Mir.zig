@@ -10,7 +10,7 @@ const Mir = @This();
 
 const std = @import("std");
 
-/// A struct of array that represents each individual wasm 
+/// A struct of array that represents each individual wasm
 instructions: std.MultiArrayList(Inst).Slice,
 /// A slice of indexes where the meaning of the data is determined by the
 /// `Inst.Tag` value.
@@ -77,6 +77,10 @@ pub const Inst = struct {
         ///
         /// Uses `label`
         call_indirect = 0x11,
+        /// Pops three values from the stack and pushes
+        /// the first or second value dependent on the third value.
+        /// Uses `tag`
+        select = 0x1B,
         /// Loads a local at given index onto the stack.
         ///
         /// Uses `label`
@@ -317,6 +321,10 @@ pub const Inst = struct {
         /// Uses `tag`
         f64_ge = 0x66,
         /// Uses `tag`
+        i32_clz = 0x67,
+        /// Uses `tag`
+        i32_ctz = 0x68,
+        /// Uses `tag`
         i32_popcnt = 0x69,
         /// Uses `tag`
         i32_add = 0x6A,
@@ -344,6 +352,10 @@ pub const Inst = struct {
         i32_shr_s = 0x75,
         /// Uses `tag`
         i32_shr_u = 0x76,
+        /// Uses `tag`
+        i64_clz = 0x79,
+        /// Uses `tag`
+        i64_ctz = 0x7A,
         /// Uses `tag`
         i64_popcnt = 0x7B,
         /// Uses `tag`
@@ -530,7 +542,7 @@ pub const Inst = struct {
         /// Contains an u32 index into a wasm section entry, such as a local.
         /// Note: This is not an index to another instruction.
         ///
-        /// Used by e.g. `local_get`, `local_set`, etc. 
+        /// Used by e.g. `local_get`, `local_set`, etc.
         label: u32,
         /// A 32-bit immediate value.
         ///

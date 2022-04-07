@@ -393,6 +393,7 @@ fn analyzeInst(
         .ceil,
         .round,
         .trunc_float,
+        .cmp_lt_errors_len,
         => {
             const operand = inst_datas[inst].un_op;
             return trackOperands(a, new_set, inst, main_tomb, .{ operand, .none, .none });
@@ -432,6 +433,11 @@ fn analyzeInst(
                 try extra_tombs.feed(arg);
             }
             return extra_tombs.finish();
+        },
+        .select => {
+            const pl_op = inst_datas[inst].pl_op;
+            const extra = a.air.extraData(Air.Bin, pl_op.payload).data;
+            return trackOperands(a, new_set, inst, main_tomb, .{ pl_op.operand, extra.lhs, extra.rhs });
         },
         .shuffle => {
             const extra = a.air.extraData(Air.Shuffle, inst_datas[inst].ty_pl.payload).data;
@@ -503,14 +509,19 @@ fn analyzeInst(
         },
         .memset,
         .memcpy,
+        => {
+            const pl_op = inst_datas[inst].pl_op;
+            const extra = a.air.extraData(Air.Bin, pl_op.payload).data;
+            return trackOperands(a, new_set, inst, main_tomb, .{ pl_op.operand, extra.lhs, extra.rhs });
+        },
         .add_with_overflow,
         .sub_with_overflow,
         .mul_with_overflow,
         .shl_with_overflow,
         => {
-            const pl_op = inst_datas[inst].pl_op;
-            const extra = a.air.extraData(Air.Bin, pl_op.payload).data;
-            return trackOperands(a, new_set, inst, main_tomb, .{ pl_op.operand, extra.lhs, extra.rhs });
+            const ty_pl = inst_datas[inst].ty_pl;
+            const extra = a.air.extraData(Air.Bin, ty_pl.payload).data;
+            return trackOperands(a, new_set, inst, main_tomb, .{ extra.lhs, extra.rhs, .none });
         },
         .br => {
             const br = inst_datas[inst].br;

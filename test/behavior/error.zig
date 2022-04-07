@@ -251,6 +251,13 @@ fn testErrToIntWithOnePossibleValue(
     }
 }
 
+test "inferred empty error set comptime catch" {
+    const S = struct {
+        fn foo() !void {}
+    };
+    S.foo() catch @compileError("fail");
+}
+
 test "error union peer type resolution" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
@@ -636,4 +643,22 @@ test "coerce error set to the current inferred error set" {
         }
     };
     S.foo() catch {};
+}
+
+test "error union payload is properly aligned" {
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+
+    const S = struct {
+        a: u128,
+        b: u128,
+        c: u128,
+        fn foo() error{}!@This() {
+            return @This(){ .a = 1, .b = 2, .c = 3 };
+        }
+    };
+    const blk = S.foo() catch unreachable;
+    if (blk.a != 1) unreachable;
 }

@@ -16,7 +16,6 @@ const Air = @import("../../Air.zig");
 const CodeGen = @import("CodeGen.zig");
 const Register = bits.Register;
 
-function: *const CodeGen,
 instructions: std.MultiArrayList(Inst).Slice,
 /// The meaning of this data is determined by `Inst.Tag` value.
 extra: []const u32,
@@ -227,6 +226,7 @@ pub const Inst = struct {
         ///      0b11  qword ptr [reg2 + imm32]
         imul,
         idiv,
+        mul,
         div,
 
         /// ops flags: form:
@@ -309,6 +309,13 @@ pub const Inst = struct {
         cond_mov_lt,
         cond_mov_below,
 
+        /// ops flags:
+        ///     0b00 reg1 if OF = 1
+        ///     0b01 reg1 if OF = 0
+        ///     0b10 reg1 if CF = 1
+        ///     0b11 reg1 if CF = 0
+        cond_set_byte_overflow,
+
         /// ops flags:  form:
         ///       0b00   reg1
         ///       0b01   [reg1 + imm32]
@@ -356,11 +363,8 @@ pub const Inst = struct {
         /// update debug line
         dbg_line,
 
-        /// arg debug info
-        arg_dbg_info,
-
         /// push registers from the callee_preserved_regs
-        /// data is the bitfield of which regs to push 
+        /// data is the bitfield of which regs to push
         /// for example on x86_64, the callee_preserved_regs are [_]Register{ .rcx, .rsi, .rdi, .r8, .r9, .r10, .r11 };    };
         /// so to push rcx and r8 one would make data 0b00000000_00000000_00000000_00001001 (the first and fourth bits are set)
         /// ops is unused
@@ -445,18 +449,6 @@ pub const DbgLineColumn = struct {
     column: u32,
 };
 
-pub const ArgDbgInfo = struct {
-    air_inst: Air.Inst.Index,
-    arg_index: u32,
-    max_stack: u32,
-};
-
-pub fn deinit(mir: *Mir, gpa: std.mem.Allocator) void {
-    mir.instructions.deinit(gpa);
-    gpa.free(mir.extra);
-    mir.* = undefined;
-}
-
 pub const Ops = struct {
     reg1: Register = .none,
     reg2: Register = .none,
@@ -481,6 +473,12 @@ pub const Ops = struct {
         };
     }
 };
+
+pub fn deinit(mir: *Mir, gpa: std.mem.Allocator) void {
+    mir.instructions.deinit(gpa);
+    gpa.free(mir.extra);
+    mir.* = undefined;
+}
 
 pub fn extraData(mir: Mir, comptime T: type, index: usize) struct { data: T, end: usize } {
     const fields = std.meta.fields(T);

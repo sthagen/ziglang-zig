@@ -60,7 +60,6 @@ fn assertFalse(b: bool) !void {
 }
 
 test "@clz" {
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
@@ -137,7 +136,6 @@ fn expectVectorsEqual(a: anytype, b: anytype) !void {
 }
 
 test "@ctz" {
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
@@ -320,7 +318,6 @@ test "comptime_int multi-limb partial shift right" {
 
 test "xor" {
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     try test_xor();
     comptime try test_xor();
@@ -502,7 +499,6 @@ fn mod(comptime T: type, a: T, b: T) T {
 }
 
 test "unsigned wrapping" {
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
 
     try testUnsignedWrappingEval(maxInt(u32));
@@ -516,7 +512,6 @@ fn testUnsignedWrappingEval(x: u32) !void {
 }
 
 test "signed wrapping" {
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
 
     try testSignedWrappingEval(maxInt(i32));
@@ -530,7 +525,6 @@ fn testSignedWrappingEval(x: i32) !void {
 }
 
 test "signed negation wrapping" {
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
 
     try testSignedNegationWrappingEval(minInt(i16));
@@ -543,7 +537,6 @@ fn testSignedNegationWrappingEval(x: i16) !void {
 }
 
 test "unsigned negation wrapping" {
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
 
     try testUnsignedNegationWrappingEval(1);
@@ -639,10 +632,7 @@ test "128-bit multiplication" {
 
 test "@addWithOverflow" {
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
     var result: u8 = undefined;
     try expect(@addWithOverflow(u8, 250, 100, &result));
@@ -661,7 +651,6 @@ test "@addWithOverflow" {
 
 test "small int addition" {
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
@@ -686,10 +675,7 @@ test "small int addition" {
 
 test "@mulWithOverflow" {
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
     var result: u8 = undefined;
     try expect(@mulWithOverflow(u8, 86, 3, &result));
@@ -701,6 +687,7 @@ test "@mulWithOverflow" {
     var b: u8 = 2;
     try expect(!@mulWithOverflow(u8, a, b, &result));
     try expect(result == 246);
+
     b = 4;
     try expect(@mulWithOverflow(u8, a, b, &result));
     try expect(result == 236);
@@ -708,10 +695,7 @@ test "@mulWithOverflow" {
 
 test "@subWithOverflow" {
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
     var result: u8 = undefined;
     try expect(@subWithOverflow(u8, 1, 2, &result));
@@ -730,10 +714,8 @@ test "@subWithOverflow" {
 
 test "@shlWithOverflow" {
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
     var result: u16 = undefined;
     try expect(@shlWithOverflow(u16, 0b0010111111111111, 3, &result));
@@ -752,8 +734,6 @@ test "@shlWithOverflow" {
 
 test "overflow arithmetic with u0 values" {
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     var result: u0 = undefined;
     try expect(!@addWithOverflow(u0, 0, 0, &result));
@@ -879,7 +859,6 @@ test "quad hex float literal parsing accurate" {
 }
 
 test "truncating shift left" {
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
 
     try testShlTrunc(maxInt(u16));
@@ -1290,8 +1269,8 @@ test "vector integer addition" {
 
     const S = struct {
         fn doTheTest() !void {
-            var a: std.meta.Vector(4, i32) = [_]i32{ 1, 2, 3, 4 };
-            var b: std.meta.Vector(4, i32) = [_]i32{ 5, 6, 7, 8 };
+            var a: @Vector(4, i32) = [_]i32{ 1, 2, 3, 4 };
+            var b: @Vector(4, i32) = [_]i32{ 5, 6, 7, 8 };
             var result = a + b;
             var result_array: [4]i32 = result;
             const expected = [_]i32{ 6, 8, 10, 12 };
@@ -1348,8 +1327,8 @@ test "vector comparison" {
 
     const S = struct {
         fn doTheTest() !void {
-            var a: std.meta.Vector(6, i32) = [_]i32{ 1, 3, -1, 5, 7, 9 };
-            var b: std.meta.Vector(6, i32) = [_]i32{ -1, 3, 0, 6, 10, -10 };
+            var a: @Vector(6, i32) = [_]i32{ 1, 3, -1, 5, 7, 9 };
+            var b: @Vector(6, i32) = [_]i32{ -1, 3, 0, 6, 10, -10 };
             try expect(mem.eql(bool, &@as([6]bool, a < b), &[_]bool{ false, false, true, true, true, false }));
             try expect(mem.eql(bool, &@as([6]bool, a <= b), &[_]bool{ false, true, true, true, true, false }));
             try expect(mem.eql(bool, &@as([6]bool, a == b), &[_]bool{ false, true, false, false, false, false }));

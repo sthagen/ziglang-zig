@@ -154,7 +154,7 @@ atom_by_index_table: std.AutoHashMapUnmanaged(u32, *TextBlock) = .{},
 /// const Foo = struct{
 ///     a: u8,
 /// };
-/// 
+///
 /// pub fn main() void {
 ///     var foo = Foo{ .a = 1 };
 ///     _ = foo;
@@ -207,7 +207,7 @@ pub const TextBlock = struct {
     prev: ?*TextBlock,
     next: ?*TextBlock,
 
-    dbg_info_atom: Dwarf.DebugInfoAtom,
+    dbg_info_atom: Dwarf.Atom,
 
     pub const empty = TextBlock{
         .local_sym_index = 0,
@@ -957,6 +957,10 @@ pub fn flushModule(self: *Elf, comp: *Compilation) !void {
 
     const target_endian = self.base.options.target.cpu.arch.endian();
     const foreign_endian = target_endian != builtin.cpu.arch.endian();
+
+    if (self.dwarf) |*dw| {
+        try dw.flushModule(&self.base, module);
+    }
 
     {
         var it = self.relocs.iterator();
@@ -1823,7 +1827,7 @@ fn writeElfHeader(self: *Elf) !void {
     var hdr_buf: [@sizeOf(elf.Elf64_Ehdr)]u8 = undefined;
 
     var index: usize = 0;
-    hdr_buf[0..4].* = "\x7fELF".*;
+    hdr_buf[0..4].* = elf.MAGIC.*;
     index += 4;
 
     hdr_buf[index] = switch (self.ptr_width) {
@@ -2228,13 +2232,6 @@ pub fn freeDecl(self: *Elf, decl: *Module.Decl) void {
     }
 }
 
-fn deinitRelocs(gpa: Allocator, table: *File.DbgInfoTypeRelocsTable) void {
-    for (table.values()) |*value| {
-        value.relocs.deinit(gpa);
-    }
-    table.deinit(gpa);
-}
-
 fn getDeclPhdrIndex(self: *Elf, decl: *Module.Decl) !u16 {
     const ty = decl.ty;
     const zig_ty = ty.zigTypeTag();
@@ -2342,26 +2339,12 @@ pub fn updateFunc(self: *Elf, module: *Module, func: *Module.Fn, air: Air, liven
     const decl = func.owner_decl;
     self.freeUnnamedConsts(decl);
 
-    var debug_buffers_buf: Dwarf.DeclDebugBuffers = undefined;
-    const debug_buffers = if (self.dwarf) |*dw| blk: {
-        debug_buffers_buf = try dw.initDeclDebugInfo(decl);
-        break :blk &debug_buffers_buf;
-    } else null;
-    defer {
-        if (debug_buffers) |dbg| {
-            dbg.dbg_line_buffer.deinit();
-            dbg.dbg_info_buffer.deinit();
-            deinitRelocs(self.base.allocator, &dbg.dbg_info_type_relocs);
-        }
-    }
+    var decl_state: ?Dwarf.DeclState = if (self.dwarf) |*dw| try dw.initDeclState(decl) else null;
+    defer if (decl_state) |*ds| ds.deinit();
 
-    const res = if (debug_buffers) |dbg|
+    const res = if (decl_state) |*ds|
         try codegen.generateFunction(&self.base, decl.srcLoc(), func, air, liveness, &code_buffer, .{
-            .dwarf = .{
-                .dbg_line = &dbg.dbg_line_buffer,
-                .dbg_info = &dbg.dbg_info_buffer,
-                .dbg_info_type_relocs = &dbg.dbg_info_type_relocs,
-            },
+            .dwarf = ds,
         })
     else
         try codegen.generateFunction(&self.base, decl.srcLoc(), func, air, liveness, &code_buffer, .none);
@@ -2375,8 +2358,15 @@ pub fn updateFunc(self: *Elf, module: *Module, func: *Module.Fn, air: Air, liven
         },
     };
     const local_sym = try self.updateDeclCode(decl, code, elf.STT_FUNC);
-    if (debug_buffers) |dbg| {
-        try self.dwarf.?.commitDeclDebugInfo(&self.base, module, decl, local_sym.st_value, local_sym.st_size, dbg);
+    if (decl_state) |*ds| {
+        try self.dwarf.?.commitDeclState(
+            &self.base,
+            module,
+            decl,
+            local_sym.st_value,
+            local_sym.st_size,
+            ds,
+        );
     }
 
     // Since we updated the vaddr and the size, each corresponding export symbol also needs to be updated.
@@ -2410,31 +2400,17 @@ pub fn updateDecl(self: *Elf, module: *Module, decl: *Module.Decl) !void {
     var code_buffer = std.ArrayList(u8).init(self.base.allocator);
     defer code_buffer.deinit();
 
-    var debug_buffers_buf: Dwarf.DeclDebugBuffers = undefined;
-    const debug_buffers = if (self.dwarf) |*dw| blk: {
-        debug_buffers_buf = try dw.initDeclDebugInfo(decl);
-        break :blk &debug_buffers_buf;
-    } else null;
-    defer {
-        if (debug_buffers) |dbg| {
-            dbg.dbg_line_buffer.deinit();
-            dbg.dbg_info_buffer.deinit();
-            deinitRelocs(self.base.allocator, &dbg.dbg_info_type_relocs);
-        }
-    }
+    var decl_state: ?Dwarf.DeclState = if (self.dwarf) |*dw| try dw.initDeclState(decl) else null;
+    defer if (decl_state) |*ds| ds.deinit();
 
     // TODO implement .debug_info for global variables
     const decl_val = if (decl.val.castTag(.variable)) |payload| payload.data.init else decl.val;
-    const res = if (debug_buffers) |dbg|
+    const res = if (decl_state) |*ds|
         try codegen.generateSymbol(&self.base, decl.srcLoc(), .{
             .ty = decl.ty,
             .val = decl_val,
         }, &code_buffer, .{
-            .dwarf = .{
-                .dbg_line = &dbg.dbg_line_buffer,
-                .dbg_info = &dbg.dbg_info_buffer,
-                .dbg_info_type_relocs = &dbg.dbg_info_type_relocs,
-            },
+            .dwarf = ds,
         }, .{
             .parent_atom_index = decl.link.elf.local_sym_index,
         })
@@ -2457,8 +2433,15 @@ pub fn updateDecl(self: *Elf, module: *Module, decl: *Module.Decl) !void {
     };
 
     const local_sym = try self.updateDeclCode(decl, code, elf.STT_OBJECT);
-    if (debug_buffers) |dbg| {
-        try self.dwarf.?.commitDeclDebugInfo(&self.base, module, decl, local_sym.st_value, local_sym.st_size, dbg);
+    if (decl_state) |*ds| {
+        try self.dwarf.?.commitDeclState(
+            &self.base,
+            module,
+            decl,
+            local_sym.st_value,
+            local_sym.st_size,
+            ds,
+        );
     }
 
     // Since we updated the vaddr and the size, each corresponding export symbol also needs to be updated.

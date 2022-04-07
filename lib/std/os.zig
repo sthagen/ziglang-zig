@@ -1441,7 +1441,7 @@ var wasi_cwd = if (builtin.os.tag == .wasi and !builtin.link_libc) struct {
 /// Note that `cwd_init` corresponds to a Preopen directory, not necessarily
 /// a POSIX path. For example, "." matches a Preopen provided with `--dir=.`
 ///
-/// This must be called before using any relative or absolute paths with `std.os` 
+/// This must be called before using any relative or absolute paths with `std.os`
 /// functions, if you are on WASI without linking libc.
 ///
 /// `alloc` must not be a temporary or leak-detecting allocator, since `std.os`
@@ -1475,7 +1475,7 @@ pub fn initPreopensWasi(alloc: Allocator, cwd_init: ?[]const u8) !void {
 
 /// Resolve a relative or absolute path to an handle (`fd_t`) and a relative subpath.
 ///
-/// For absolute paths, this automatically searches among available Preopens to find 
+/// For absolute paths, this automatically searches among available Preopens to find
 /// a match. For relative paths, it uses the "emulated" CWD.
 pub fn resolvePathWasi(path: []const u8, out_buffer: *[MAX_PATH_BYTES]u8) !RelativePathWasi {
     // Note: Due to WASI's "sandboxed" file handles, operations with this RelativePathWasi
@@ -5325,7 +5325,7 @@ pub fn dl_iterate_phdr(
     const elf_base = std.process.getBaseAddress();
     const ehdr = @intToPtr(*elf.Ehdr, elf_base);
     // Make sure the base address points to an ELF image.
-    assert(mem.eql(u8, ehdr.e_ident[0..4], "\x7fELF"));
+    assert(mem.eql(u8, ehdr.e_ident[0..4], elf.MAGIC));
     const n_phdr = ehdr.e_phnum;
     const phdrs = (@intToPtr([*]elf.Phdr, elf_base + ehdr.e_phoff))[0..n_phdr];
 

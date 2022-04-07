@@ -448,6 +448,14 @@ pub const Builder = opaque {
         Name: [*:0]const u8,
     ) *const Value;
 
+    pub const buildZExtOrBitCast = LLVMBuildZExtOrBitCast;
+    extern fn LLVMBuildZExtOrBitCast(
+        *const Builder,
+        Val: *const Value,
+        DestTy: *const Type,
+        Name: [*:0]const u8,
+    ) *const Value;
+
     pub const buildSExt = LLVMBuildSExt;
     extern fn LLVMBuildSExt(
         *const Builder,
@@ -1593,7 +1601,7 @@ pub const DIBuilder = opaque {
         dib: *DIBuilder,
         scope: *DIScope,
         name: [*:0]const u8,
-        file: *DIFile,
+        file: ?*DIFile,
         line_number: c_uint,
         size_in_bits: u64,
         align_in_bits: u64,

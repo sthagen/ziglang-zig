@@ -12,7 +12,7 @@ const enable_wasmtime: bool = build_options.enable_wasmtime;
 const enable_darling: bool = build_options.enable_darling;
 const enable_rosetta: bool = build_options.enable_rosetta;
 const glibc_runtimes_dir: ?[]const u8 = build_options.glibc_runtimes_dir;
-const skip_compile_errors = build_options.skip_compile_errors;
+const skip_stage1 = build_options.skip_stage1;
 const ThreadPool = @import("ThreadPool.zig");
 const CrossTarget = std.zig.CrossTarget;
 const print = std.debug.print;
@@ -27,8 +27,49 @@ test {
         @import("stage1.zig").os_init();
     }
 
-    var ctx = TestContext.init();
+    var arena_allocator = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_allocator.deinit();
+    const arena = arena_allocator.allocator();
+
+    var ctx = TestContext.init(std.testing.allocator, arena);
     defer ctx.deinit();
+
+    const compile_errors_dir_path = try std.fs.path.join(arena, &.{
+        std.fs.path.dirname(@src().file).?, "..", "test", "compile_errors",
+    });
+
+    var compile_errors_dir = try std.fs.cwd().openDir(compile_errors_dir_path, .{});
+    defer compile_errors_dir.close();
+
+    {
+        var stage2_dir = try compile_errors_dir.openDir("stage2", .{ .iterate = true });
+        defer stage2_dir.close();
+
+        // TODO make this incremental once the bug is solved that it triggers
+        ctx.addErrorCasesFromDir("stage2", stage2_dir, .stage2, .Obj, false, .independent);
+    }
+
+    if (!skip_stage1) {
+        var stage1_dir = try compile_errors_dir.openDir("stage1", .{});
+        defer stage1_dir.close();
+
+        const Config = struct {
+            name: []const u8,
+            is_test: bool,
+            output_mode: std.builtin.OutputMode,
+        };
+
+        for ([_]Config{
+            .{ .name = "obj", .is_test = false, .output_mode = .Obj },
+            .{ .name = "exe", .is_test = false, .output_mode = .Exe },
+            .{ .name = "test", .is_test = true, .output_mode = .Exe },
+        }) |config| {
+            var dir = try stage1_dir.openDir(config.name, .{ .iterate = true });
+            defer dir.close();
+
+            ctx.addErrorCasesFromDir("stage1", dir, .stage1, config.output_mode, config.is_test, .independent);
+        }
+    }
 
     try @import("test_cases").addCases(&ctx);
 
@@ -113,6 +154,7 @@ const ErrorMsg = union(enum) {
 };
 
 pub const TestContext = struct {
+    arena: Allocator,
     cases: std.ArrayList(Case),
 
     pub const Update = struct {
@@ -124,6 +166,7 @@ pub const TestContext = struct {
         /// you can keep it mostly consistent, with small changes, testing the
         /// effects of the incremental compilation.
         src: [:0]const u8,
+        name: []const u8,
         case: union(enum) {
             /// Check the main binary output file against an expected set of bytes.
             /// This is most useful with, for example, `-ofmt=c`.
@@ -189,6 +232,7 @@ pub const TestContext = struct {
             self.emit_h = true;
             self.updates.append(.{
                 .src = src,
+                .name = "update",
                 .case = .{ .Header = result },
             }) catch @panic("out of memory");
         }
@@ -198,6 +242,7 @@ pub const TestContext = struct {
         pub fn addCompareOutput(self: *Case, src: [:0]const u8, result: []const u8) void {
             self.updates.append(.{
                 .src = src,
+                .name = "update",
                 .case = .{ .Execution = result },
             }) catch @panic("out of memory");
         }
@@ -207,15 +252,25 @@ pub const TestContext = struct {
         pub fn addCompareObjectFile(self: *Case, src: [:0]const u8, result: []const u8) void {
             self.updates.append(.{
                 .src = src,
+                .name = "update",
                 .case = .{ .CompareObjectFile = result },
             }) catch @panic("out of memory");
+        }
+
+        pub fn addError(self: *Case, src: [:0]const u8, errors: []const []const u8) void {
+            return self.addErrorNamed("update", src, errors);
         }
 
         /// Adds a subcase in which the module is updated with `src`, which
         /// should contain invalid input, and ensures that compilation fails
         /// for the expected reasons, given in sequential order in `errors` in
         /// the form `:line:column: error: message`.
-        pub fn addError(self: *Case, src: [:0]const u8, errors: []const []const u8) void {
+        pub fn addErrorNamed(
+            self: *Case,
+            name: []const u8,
+            src: [:0]const u8,
+            errors: []const []const u8,
+        ) void {
             var array = self.updates.allocator.alloc(ErrorMsg, errors.len) catch @panic("out of memory");
             for (errors) |err_msg_line, i| {
                 if (std.mem.startsWith(u8, err_msg_line, "error: ")) {
@@ -278,7 +333,11 @@ pub const TestContext = struct {
                     },
                 };
             }
-            self.updates.append(.{ .src = src, .case = .{ .Error = array } }) catch @panic("out of memory");
+            self.updates.append(.{
+                .src = src,
+                .name = name,
+                .case = .{ .Error = array },
+            }) catch @panic("out of memory");
         }
 
         /// Adds a subcase in which the module is updated with `src`, and
@@ -298,7 +357,7 @@ pub const TestContext = struct {
             .target = target,
             .updates = std.ArrayList(Update).init(ctx.cases.allocator),
             .output_mode = .Exe,
-            .files = std.ArrayList(File).init(ctx.cases.allocator),
+            .files = std.ArrayList(File).init(ctx.arena),
         }) catch @panic("out of memory");
         return &ctx.cases.items[ctx.cases.items.len - 1];
     }
@@ -309,7 +368,7 @@ pub const TestContext = struct {
     }
 
     pub fn exeFromCompiledC(ctx: *TestContext, name: []const u8, target: CrossTarget) *Case {
-        const prefixed_name = std.fmt.allocPrint(ctx.cases.allocator, "CBE: {s}", .{name}) catch
+        const prefixed_name = std.fmt.allocPrint(ctx.arena, "CBE: {s}", .{name}) catch
             @panic("out of memory");
         ctx.cases.append(Case{
             .name = prefixed_name,
@@ -317,7 +376,7 @@ pub const TestContext = struct {
             .updates = std.ArrayList(Update).init(ctx.cases.allocator),
             .output_mode = .Exe,
             .object_format = .c,
-            .files = std.ArrayList(File).init(ctx.cases.allocator),
+            .files = std.ArrayList(File).init(ctx.arena),
         }) catch @panic("out of memory");
         return &ctx.cases.items[ctx.cases.items.len - 1];
     }
@@ -330,7 +389,7 @@ pub const TestContext = struct {
             .target = target,
             .updates = std.ArrayList(Update).init(ctx.cases.allocator),
             .output_mode = .Exe,
-            .files = std.ArrayList(File).init(ctx.cases.allocator),
+            .files = std.ArrayList(File).init(ctx.arena),
             .backend = .llvm,
             .link_libc = true,
         }) catch @panic("out of memory");
@@ -347,7 +406,7 @@ pub const TestContext = struct {
             .target = target,
             .updates = std.ArrayList(Update).init(ctx.cases.allocator),
             .output_mode = .Obj,
-            .files = std.ArrayList(File).init(ctx.cases.allocator),
+            .files = std.ArrayList(File).init(ctx.arena),
         }) catch @panic("out of memory");
         return &ctx.cases.items[ctx.cases.items.len - 1];
     }
@@ -363,7 +422,7 @@ pub const TestContext = struct {
             .updates = std.ArrayList(Update).init(ctx.cases.allocator),
             .output_mode = .Exe,
             .is_test = true,
-            .files = std.ArrayList(File).init(ctx.cases.allocator),
+            .files = std.ArrayList(File).init(ctx.arena),
         }) catch @panic("out of memory");
         return &ctx.cases.items[ctx.cases.items.len - 1];
     }
@@ -386,7 +445,7 @@ pub const TestContext = struct {
             .updates = std.ArrayList(Update).init(ctx.cases.allocator),
             .output_mode = .Obj,
             .object_format = .c,
-            .files = std.ArrayList(File).init(ctx.cases.allocator),
+            .files = std.ArrayList(File).init(ctx.arena),
         }) catch @panic("out of memory");
         return &ctx.cases.items[ctx.cases.items.len - 1];
     }
@@ -405,7 +464,7 @@ pub const TestContext = struct {
         src: [:0]const u8,
         expected_errors: []const []const u8,
     ) void {
-        if (skip_compile_errors) return;
+        if (skip_stage1) return;
 
         const case = ctx.addObj(name, .{});
         case.backend = .stage1;
@@ -418,7 +477,7 @@ pub const TestContext = struct {
         src: [:0]const u8,
         expected_errors: []const []const u8,
     ) void {
-        if (skip_compile_errors) return;
+        if (skip_stage1) return;
 
         const case = ctx.addTest(name, .{});
         case.backend = .stage1;
@@ -431,7 +490,7 @@ pub const TestContext = struct {
         src: [:0]const u8,
         expected_errors: []const []const u8,
     ) void {
-        if (skip_compile_errors) return;
+        if (skip_stage1) return;
 
         const case = ctx.addExe(name, .{});
         case.backend = .stage1;
@@ -594,9 +653,140 @@ pub const TestContext = struct {
         case.compiles(fixed_src);
     }
 
-    fn init() TestContext {
-        const allocator = std.heap.page_allocator;
-        return .{ .cases = std.ArrayList(Case).init(allocator) };
+    const Strategy = enum { incremental, independent };
+
+    /// Adds a compile-error test for each file in the provided directory, using the
+    /// selected backend and output mode. If `one_test_case_per_file` is true, a new
+    /// test case is created for each file. Otherwise, a single test case is used for
+    /// all tests.
+    ///
+    /// Each file should include a test manifest as a contiguous block of comments at
+    /// the end of the file. The first line should be the test case name, followed by
+    /// a blank line, then one expected errors on each line in the form
+    /// `:line:column: error: message`
+    pub fn addErrorCasesFromDir(
+        ctx: *TestContext,
+        name: []const u8,
+        dir: std.fs.Dir,
+        backend: Backend,
+        output_mode: std.builtin.OutputMode,
+        is_test: bool,
+        strategy: Strategy,
+    ) void {
+        var current_file: []const u8 = "none";
+        addErrorCasesFromDirInner(ctx, name, dir, backend, output_mode, is_test, strategy, &current_file) catch |err| {
+            std.debug.panic("test harness failed to process file '{s}': {s}\n", .{
+                current_file, @errorName(err),
+            });
+        };
+    }
+
+    fn addErrorCasesFromDirInner(
+        ctx: *TestContext,
+        name: []const u8,
+        dir: std.fs.Dir,
+        backend: Backend,
+        output_mode: std.builtin.OutputMode,
+        is_test: bool,
+        strategy: Strategy,
+        /// This is kept up to date with the currently being processed file so
+        /// that if any errors occur the caller knows it happened during this file.
+        current_file: *[]const u8,
+    ) !void {
+        var opt_case: ?*Case = null;
+
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .File) continue;
+
+            // Ignore stuff such as .swp files
+            switch (Compilation.classifyFileExt(entry.name)) {
+                .unknown => continue,
+                else => {},
+            }
+
+            current_file.* = try ctx.arena.dupe(u8, entry.name);
+
+            const max_file_size = 10 * 1024 * 1024;
+            const src = try dir.readFileAllocOptions(ctx.arena, entry.name, max_file_size, null, 1, 0);
+
+            // The manifest is the last contiguous block of comments in the file
+            // We scan for the beginning by searching backward for the first non-empty line that does not start with "//"
+            var manifest_start: ?usize = null;
+            var manifest_end: usize = src.len;
+            if (src.len > 0) {
+                var cursor: usize = src.len - 1;
+                while (true) {
+                    // Move to beginning of line
+                    while (cursor > 0 and src[cursor - 1] != '\n') cursor -= 1;
+
+                    // Check if line is non-empty and does not start with "//"
+                    if (cursor + 1 < src.len and src[cursor + 1] != '\n' and src[cursor + 1] != '\r') {
+                        if (std.mem.startsWith(u8, src[cursor..], "//")) {
+                            manifest_start = cursor;
+                        } else {
+                            break;
+                        }
+                    } else manifest_end = cursor;
+
+                    // Move to previous line
+                    if (cursor != 0) cursor -= 1 else break;
+                }
+            }
+
+            var errors = std.ArrayList([]const u8).init(ctx.arena);
+
+            if (manifest_start) |start| {
+                // Due to the above processing, we know that this is a contiguous block of comments
+                var manifest_it = std.mem.tokenize(u8, src[start..manifest_end], "\r\n");
+
+                // First line is the test case name
+                const first_line = manifest_it.next() orelse return error.MissingTestCaseName;
+                const case_name = try std.mem.concat(ctx.arena, u8, &.{ name, ": ", std.mem.trim(u8, first_line[2..], " \t") });
+
+                // If the second line is present, it should be blank
+                if (manifest_it.next()) |second_line| {
+                    if (std.mem.trim(u8, second_line[2..], " \t").len != 0) return error.SecondLineNotBlank;
+                }
+
+                // All following lines are expected error messages
+                while (manifest_it.next()) |line| try errors.append(try ctx.arena.dupe(u8, std.mem.trim(u8, line[2..], " \t")));
+
+                const case = opt_case orelse case: {
+                    ctx.cases.append(TestContext.Case{
+                        .name = name,
+                        .target = .{},
+                        .backend = backend,
+                        .updates = std.ArrayList(TestContext.Update).init(ctx.cases.allocator),
+                        .is_test = is_test,
+                        .output_mode = output_mode,
+                        .files = std.ArrayList(TestContext.File).init(ctx.cases.allocator),
+                    }) catch @panic("out of memory");
+                    const case = &ctx.cases.items[ctx.cases.items.len - 1];
+                    opt_case = case;
+                    break :case case;
+                };
+                switch (strategy) {
+                    .independent => {
+                        case.name = case_name;
+                        case.addError(src, errors.items);
+                        opt_case = null;
+                    },
+                    .incremental => {
+                        case.addErrorNamed(case_name, src, errors.items);
+                    },
+                }
+            } else {
+                return error.MissingManifest;
+            }
+        }
+    }
+
+    fn init(gpa: Allocator, arena: Allocator) TestContext {
+        return .{
+            .cases = std.ArrayList(Case).init(gpa),
+            .arena = arena,
+        };
     }
 
     fn deinit(self: *TestContext) void {
@@ -919,7 +1109,7 @@ pub const TestContext = struct {
         defer comp.destroy();
 
         for (case.updates.items) |update, update_index| {
-            var update_node = root_node.start("update", 3);
+            var update_node = root_node.start(update.name, 3);
             update_node.activate();
             defer update_node.end();
 

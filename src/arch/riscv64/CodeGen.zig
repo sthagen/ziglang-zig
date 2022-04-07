@@ -537,7 +537,9 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .cmp_gte => try self.airCmp(inst, .gte),
             .cmp_gt  => try self.airCmp(inst, .gt),
             .cmp_neq => try self.airCmp(inst, .neq),
+
             .cmp_vector => try self.airCmpVector(inst),
+            .cmp_lt_errors_len => try self.airCmpLtErrorsLen(inst),
 
             .bool_and        => try self.airBoolOp(inst),
             .bool_or         => try self.airBoolOp(inst),
@@ -600,6 +602,7 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .tag_name        => try self.airTagName(inst),
             .error_name      => try self.airErrorName(inst),
             .splat           => try self.airSplat(inst),
+            .select          => try self.airSelect(inst),
             .shuffle         => try self.airShuffle(inst),
             .reduce          => try self.airReduce(inst),
             .aggregate_init  => try self.airAggregateInit(inst),
@@ -744,21 +747,17 @@ fn ensureProcessDeathCapacity(self: *Self, additional_count: usize) !void {
 /// after codegen for this symbol is done.
 fn addDbgInfoTypeReloc(self: *Self, ty: Type) !void {
     switch (self.debug_output) {
-        .dwarf => |dbg_out| {
+        .dwarf => |dw| {
             assert(ty.hasRuntimeBits());
-            const index = dbg_out.dbg_info.items.len;
-            try dbg_out.dbg_info.resize(index + 4); // DW.AT.type,  DW.FORM.ref4
-
-            const gop = try dbg_out.dbg_info_type_relocs.getOrPutContext(self.gpa, ty, .{
-                .target = self.target.*,
-            });
-            if (!gop.found_existing) {
-                gop.value_ptr.* = .{
-                    .off = undefined,
-                    .relocs = .{},
-                };
-            }
-            try gop.value_ptr.relocs.append(self.gpa, @intCast(u32, index));
+            const dbg_info = &dw.dbg_info;
+            const index = dbg_info.items.len;
+            try dbg_info.resize(index + 4); // DW.AT.type,  DW.FORM.ref4
+            const atom = switch (self.bin_file.tag) {
+                .elf => &self.mod_fn.owner_decl.link.elf.dbg_info_atom,
+                .macho => unreachable,
+                else => unreachable,
+            };
+            try dw.addTypeReloc(atom, ty, @intCast(u32, index), null);
         },
         .plan9 => {},
         .none => {},
@@ -1572,16 +1571,17 @@ fn genArgDbgInfo(self: *Self, inst: Air.Inst.Index, mcv: MCValue, arg_index: u32
     switch (mcv) {
         .register => |reg| {
             switch (self.debug_output) {
-                .dwarf => |dbg_out| {
-                    try dbg_out.dbg_info.ensureUnusedCapacity(3);
-                    dbg_out.dbg_info.appendAssumeCapacity(link.File.Dwarf.abbrev_parameter);
-                    dbg_out.dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                .dwarf => |dw| {
+                    const dbg_info = &dw.dbg_info;
+                    try dbg_info.ensureUnusedCapacity(3);
+                    dbg_info.appendAssumeCapacity(@enumToInt(link.File.Dwarf.AbbrevKind.parameter));
+                    dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
                         1, // ULEB128 dwarf expression length
                         reg.dwarfLocOp(),
                     });
-                    try dbg_out.dbg_info.ensureUnusedCapacity(5 + name_with_null.len);
+                    try dbg_info.ensureUnusedCapacity(5 + name_with_null.len);
                     try self.addDbgInfoTypeReloc(ty); // DW.AT.type,  DW.FORM.ref4
-                    dbg_out.dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT.name, DW.FORM.string
+                    dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT.name, DW.FORM.string
                 },
                 .plan9 => {},
                 .none => {},
@@ -1799,6 +1799,14 @@ fn airCmp(self: *Self, inst: Air.Inst.Index, op: math.CompareOperator) !void {
 fn airCmpVector(self: *Self, inst: Air.Inst.Index) !void {
     _ = inst;
     return self.fail("TODO implement airCmpVector for {}", .{self.target.cpu.arch});
+}
+
+fn airCmpLtErrorsLen(self: *Self, inst: Air.Inst.Index) !void {
+    const un_op = self.air.instructions.items(.data)[inst].un_op;
+    const operand = try self.resolveInst(un_op);
+    _ = operand;
+    const result: MCValue = if (self.liveness.isUnused(inst)) .dead else return self.fail("TODO implement airCmpLtErrorsLen for {}", .{self.target.cpu.arch});
+    return self.finishAir(inst, result, .{ un_op, .none, .none });
 }
 
 fn airDbgStmt(self: *Self, inst: Air.Inst.Index) !void {
@@ -2105,10 +2113,12 @@ fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
         } else null;
 
         for (inputs) |input| {
-            const constraint = std.mem.sliceTo(std.mem.sliceAsBytes(self.air.extra[extra_i..]), 0);
+            const input_bytes = std.mem.sliceAsBytes(self.air.extra[extra_i..]);
+            const constraint = std.mem.sliceTo(input_bytes, 0);
+            const input_name = std.mem.sliceTo(input_bytes[constraint.len + 1 ..], 0);
             // This equation accounts for the fact that even if we have exactly 4 bytes
             // for the string, we still use the next u32 for the null terminator.
-            extra_i += constraint.len / 4 + 1;
+            extra_i += (constraint.len + input_name.len + 1) / 4 + 1;
 
             if (constraint.len < 3 or constraint[0] != '{' or constraint[constraint.len - 1] != '}') {
                 return self.fail("unrecognized asm input constraint: '{s}'", .{constraint});
@@ -2394,6 +2404,13 @@ fn airSplat(self: *Self, inst: Air.Inst.Index) !void {
     const ty_op = self.air.instructions.items(.data)[inst].ty_op;
     const result: MCValue = if (self.liveness.isUnused(inst)) .dead else return self.fail("TODO implement airSplat for riscv64", .{});
     return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
+}
+
+fn airSelect(self: *Self, inst: Air.Inst.Index) !void {
+    const pl_op = self.air.instructions.items(.data)[inst].pl_op;
+    const extra = self.air.extraData(Air.Bin, pl_op.payload).data;
+    const result: MCValue = if (self.liveness.isUnused(inst)) .dead else return self.fail("TODO implement airSelect for riscv64", .{});
+    return self.finishAir(inst, result, .{ pl_op.operand, extra.lhs, extra.rhs });
 }
 
 fn airShuffle(self: *Self, inst: Air.Inst.Index) !void {

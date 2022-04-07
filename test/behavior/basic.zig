@@ -336,7 +336,6 @@ test "call result of if else expression" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
 
     try expect(mem.eql(u8, f2(true), "a"));
     try expect(mem.eql(u8, f2(false), "b"));
@@ -616,8 +615,6 @@ test "global variable initialized to global variable array element" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
 
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
-
     try expect(global_ptr == &gdt[0]);
 }
 const GDTEntry = struct {
@@ -660,7 +657,6 @@ test "multiline string literal is null terminated" {
 }
 
 test "string escapes" {
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
@@ -733,7 +729,6 @@ test "thread local variable" {
 }
 
 test "result location is optional inside error union" {
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
@@ -858,4 +853,37 @@ test "labeled block implicitly ends in a break" {
     blk: {
         if (a) break :blk;
     }
+}
+
+test "catch in block has correct result location" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+
+    const S = struct {
+        fn open() error{A}!@This() {
+            return @This(){};
+        }
+        fn foo(_: @This()) u32 {
+            return 1;
+        }
+    };
+    const config_h_text: u32 = blk: {
+        var dir = S.open() catch unreachable;
+        break :blk dir.foo();
+    };
+    try expect(config_h_text == 1);
+}
+
+test "labeled block with runtime branch forwards its result location type to break statements" {
+    const E = enum { a, b };
+    var a = false;
+    const e: E = blk: {
+        if (a) {
+            break :blk .a;
+        }
+        break :blk .b;
+    };
+    try expect(e == .b);
 }

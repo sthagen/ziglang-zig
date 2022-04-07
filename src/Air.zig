@@ -134,28 +134,24 @@ pub const Inst = struct {
         /// Uses the `bin_op` field.
         min,
         /// Integer addition with overflow. Both operands are guaranteed to be the same type,
-        /// and the result is bool. The wrapped value is written to the pointer given by the in
-        /// operand of the `pl_op` field. Payload is `Bin` with `lhs` and `rhs` the relevant types
-        /// of the operation.
-        /// Uses the `pl_op` field with payload `Bin`.
+        /// and the result is a tuple with .{res, ov}. The wrapped value is written to res
+        /// and if an overflow happens, ov is 1. Otherwise ov is 0.
+        /// Uses the `ty_pl` field. Payload is `Bin`.
         add_with_overflow,
         /// Integer subtraction with overflow. Both operands are guaranteed to be the same type,
-        /// and the result is bool. The wrapped value is written to the pointer given by the in
-        /// operand of the `pl_op` field. Payload is `Bin` with `lhs` and `rhs` the relevant types
-        /// of the operation.
-        /// Uses the `pl_op` field with payload `Bin`.
+        /// and the result is a tuple with .{res, ov}. The wrapped value is written to res
+        /// and if an overflow happens, ov is 1. Otherwise ov is 0.
+        /// Uses the `ty_pl` field. Payload is `Bin`.
         sub_with_overflow,
         /// Integer multiplication with overflow. Both operands are guaranteed to be the same type,
-        /// and the result is bool. The wrapped value is written to the pointer given by the in
-        /// operand of the `pl_op` field. Payload is `Bin` with `lhs` and `rhs` the relevant types
-        /// of the operation.
-        /// Uses the `pl_op` field with payload `Bin`.
+        /// and the result is a tuple with .{res, ov}. The wrapped value is written to res
+        /// and if an overflow happens, ov is 1. Otherwise ov is 0.
+        /// Uses the `ty_pl` field. Payload is `Bin`.
         mul_with_overflow,
         /// Integer left-shift with overflow. Both operands are guaranteed to be the same type,
-        /// and the result is bool. The wrapped value is written to the pointer given by the in
-        /// operand of the `pl_op` field. Payload is `Bin` with `lhs` and `rhs` the relevant types
-        /// of the operation.
-        /// Uses the `pl_op` field with payload `Bin`.
+        /// and the result is a tuple with .{res, ov}. The wrapped value is written to res
+        /// and if an overflow happens, ov is 1. Otherwise ov is 0.
+        /// Uses the `ty_pl` field. Payload is `Bin`.
         shl_with_overflow,
         /// Allocates stack local memory.
         /// Uses the `ty` field.
@@ -344,7 +340,7 @@ pub const Inst = struct {
         /// to the storage for the variable. The local may be a const or a var.
         /// Result type is always void.
         /// Uses `pl_op`. The payload index is the variable name. It points to the extra
-        /// array, reinterpreting the bytes there as a null-terminated string. 
+        /// array, reinterpreting the bytes there as a null-terminated string.
         dbg_var_ptr,
         /// Same as `dbg_var_ptr` except the local is a const, not a var, and the
         /// operand is the local's value.
@@ -553,6 +549,9 @@ pub const Inst = struct {
         /// Constructs a vector by selecting elements from `a` and `b` based on `mask`.
         /// Uses the `ty_pl` field with payload `Shuffle`.
         shuffle,
+        /// Constructs a vector element-wise from `a` or `b` based on `pred`.
+        /// Uses the `pl_op` field with `pred` as operand, and payload `Bin`.
+        select,
 
         /// Given dest ptr, value, and len, set all elements at dest to value.
         /// Result type is always void.
@@ -637,6 +636,15 @@ pub const Inst = struct {
         /// Result type is always `i32`,
         /// Uses the `pl_op` field, payload represents the index of the target memory.
         wasm_memory_grow,
+
+        /// Returns `true` if and only if the operand, an integer with
+        /// the same size as the error integer type, is less than the
+        /// total number of errors in the Module.
+        /// Result type is always `bool`.
+        /// Uses the `un_op` field.
+        /// Note that the number of errors in the Module cannot be considered stable until
+        /// flush().
+        cmp_lt_errors_len,
 
         pub fn fromCmpOp(op: std.math.CompareOperator) Tag {
             return switch (op) {
@@ -807,6 +815,8 @@ pub const VectorCmp = struct {
 ///      terminated string. pad to the next u32 after the null byte.
 /// 3. for every inputs_len
 ///    - constraint: memory at this position is reinterpreted as a null
+///      terminated string.
+///    - name: memory at this position is reinterpreted as a null
 ///      terminated string. pad to the next u32 after the null byte.
 /// 4. for every clobbers_len
 ///    - clobber_name: memory at this position is reinterpreted as a null
@@ -929,6 +939,7 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .cmp_gte,
         .cmp_gt,
         .cmp_neq,
+        .cmp_lt_errors_len,
         .is_null,
         .is_non_null,
         .is_null_ptr,
@@ -937,9 +948,9 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .is_non_err,
         .is_err_ptr,
         .is_non_err_ptr,
-        => return Type.initTag(.bool),
+        => return Type.bool,
 
-        .const_ty => return Type.initTag(.type),
+        .const_ty => return Type.type,
 
         .alloc,
         .ret_ptr,
@@ -961,6 +972,10 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .union_init,
         .field_parent_ptr,
         .cmp_vector,
+        .add_with_overflow,
+        .sub_with_overflow,
+        .mul_with_overflow,
+        .shl_with_overflow,
         => return air.getRefType(datas[inst].ty_pl.ty),
 
         .not,
@@ -1067,12 +1082,10 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .reduce => return air.typeOf(datas[inst].reduce.operand).childType(),
 
         .mul_add => return air.typeOf(datas[inst].pl_op.operand),
-
-        .add_with_overflow,
-        .sub_with_overflow,
-        .mul_with_overflow,
-        .shl_with_overflow,
-        => return Type.bool,
+        .select => {
+            const extra = air.extraData(Air.Bin, datas[inst].pl_op.payload).data;
+            return air.typeOf(extra.lhs);
+        },
     }
 }
 

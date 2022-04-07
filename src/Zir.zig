@@ -63,7 +63,7 @@ pub const ExtraIndex = enum(u32) {
 /// Returns the requested data, as well as the new index which is at the start of the
 /// trailers for the object.
 pub fn extraData(code: Zir, comptime T: type, index: usize) struct { data: T, end: usize } {
-    const fields = std.meta.fields(T);
+    const fields = @typeInfo(T).Struct.fields;
     var i: usize = index;
     var result: T = undefined;
     inline for (fields) |field| {
@@ -94,7 +94,8 @@ pub fn nullTerminatedString(code: Zir, index: usize) [:0]const u8 {
 
 pub fn refSlice(code: Zir, start: usize, len: usize) []Inst.Ref {
     const raw_slice = code.extra[start..][0..len];
-    return @bitCast([]Inst.Ref, raw_slice);
+    // TODO we should be able to directly `@ptrCast` the slice to the other slice type.
+    return @ptrCast([*]Inst.Ref, raw_slice.ptr)[0..len];
 }
 
 pub fn hasCompileErrors(code: Zir) bool {
@@ -464,6 +465,14 @@ pub const Inst = struct {
         /// Merge two error sets into one, `E1 || E2`.
         /// Uses the `pl_node` field with payload `Bin`.
         merge_error_sets,
+        /// Given a reference to a function and a parameter index, returns the
+        /// type of the parameter. The only usage of this instruction is for the
+        /// result location of parameters of function calls. In the case of a function's
+        /// parameter type being `anytype`, it is the type coercion's job to detect this
+        /// scenario and skip the coercion, so that semantic analysis of this instruction
+        /// is not in a position where it must create an invalid type.
+        /// Uses the `param_type` union field.
+        param_type,
         /// Turns an R-Value into a const L-Value. In other words, it takes a value,
         /// stores it in a memory location, and returns a const pointer to it. If the value
         /// is `comptime`, the memory location is global static constant data. Otherwise,
@@ -1077,6 +1086,7 @@ pub const Inst = struct {
                 .mul,
                 .mulwrap,
                 .mul_sat,
+                .param_type,
                 .ref,
                 .shl,
                 .shl_sat,
@@ -1252,6 +1262,273 @@ pub const Inst = struct {
             };
         }
 
+        /// AstGen uses this to find out if `Ref.void_value` should be used in place
+        /// of the result of a given instruction. This allows Sema to forego adding
+        /// the instruction to the map after analysis.
+        pub fn isAlwaysVoid(tag: Tag) bool {
+            return switch (tag) {
+                .breakpoint,
+                .fence,
+                .dbg_stmt,
+                .dbg_var_ptr,
+                .dbg_var_val,
+                .ensure_result_used,
+                .ensure_result_non_error,
+                .ensure_err_payload_void,
+                .set_eval_branch_quota,
+                .atomic_store,
+                .store,
+                .store_node,
+                .store_to_block_ptr,
+                .store_to_inferred_ptr,
+                .resolve_inferred_alloc,
+                .validate_array_init_ty,
+                .validate_struct_init_ty,
+                .validate_struct_init,
+                .validate_struct_init_comptime,
+                .validate_array_init,
+                .validate_array_init_comptime,
+                .@"export",
+                .export_value,
+                .set_align_stack,
+                .set_cold,
+                .set_float_mode,
+                .set_runtime_safety,
+                .memcpy,
+                .memset,
+                => true,
+
+                .param,
+                .param_comptime,
+                .param_anytype,
+                .param_anytype_comptime,
+                .add,
+                .addwrap,
+                .add_sat,
+                .alloc,
+                .alloc_mut,
+                .alloc_comptime_mut,
+                .alloc_inferred,
+                .alloc_inferred_mut,
+                .alloc_inferred_comptime,
+                .alloc_inferred_comptime_mut,
+                .make_ptr_const,
+                .array_cat,
+                .array_mul,
+                .array_type,
+                .array_type_sentinel,
+                .vector_type,
+                .elem_type,
+                .indexable_ptr_len,
+                .anyframe_type,
+                .as,
+                .as_node,
+                .bit_and,
+                .bitcast,
+                .bit_or,
+                .block,
+                .block_inline,
+                .suspend_block,
+                .loop,
+                .bool_br_and,
+                .bool_br_or,
+                .bool_not,
+                .call,
+                .cmp_lt,
+                .cmp_lte,
+                .cmp_eq,
+                .cmp_gte,
+                .cmp_gt,
+                .cmp_neq,
+                .coerce_result_ptr,
+                .error_set_decl,
+                .error_set_decl_anon,
+                .error_set_decl_func,
+                .decl_ref,
+                .decl_val,
+                .load,
+                .div,
+                .elem_ptr,
+                .elem_val,
+                .elem_ptr_node,
+                .elem_ptr_imm,
+                .elem_val_node,
+                .field_ptr,
+                .field_val,
+                .field_call_bind,
+                .field_ptr_named,
+                .field_val_named,
+                .field_call_bind_named,
+                .func,
+                .func_inferred,
+                .has_decl,
+                .int,
+                .int_big,
+                .float,
+                .float128,
+                .int_type,
+                .is_non_null,
+                .is_non_null_ptr,
+                .is_non_err,
+                .is_non_err_ptr,
+                .mod_rem,
+                .mul,
+                .mulwrap,
+                .mul_sat,
+                .param_type,
+                .ref,
+                .shl,
+                .shl_sat,
+                .shr,
+                .str,
+                .sub,
+                .subwrap,
+                .sub_sat,
+                .negate,
+                .negate_wrap,
+                .typeof,
+                .typeof_builtin,
+                .xor,
+                .optional_type,
+                .optional_payload_safe,
+                .optional_payload_unsafe,
+                .optional_payload_safe_ptr,
+                .optional_payload_unsafe_ptr,
+                .err_union_payload_safe,
+                .err_union_payload_unsafe,
+                .err_union_payload_safe_ptr,
+                .err_union_payload_unsafe_ptr,
+                .err_union_code,
+                .err_union_code_ptr,
+                .error_to_int,
+                .int_to_error,
+                .ptr_type,
+                .ptr_type_simple,
+                .enum_literal,
+                .merge_error_sets,
+                .error_union_type,
+                .bit_not,
+                .error_value,
+                .slice_start,
+                .slice_end,
+                .slice_sentinel,
+                .import,
+                .typeof_log2_int_type,
+                .log2_int_type,
+                .switch_capture,
+                .switch_capture_ref,
+                .switch_capture_multi,
+                .switch_capture_multi_ref,
+                .switch_block,
+                .switch_cond,
+                .switch_cond_ref,
+                .array_base_ptr,
+                .field_base_ptr,
+                .struct_init_empty,
+                .struct_init,
+                .struct_init_ref,
+                .struct_init_anon,
+                .struct_init_anon_ref,
+                .array_init,
+                .array_init_sent,
+                .array_init_anon,
+                .array_init_ref,
+                .array_init_sent_ref,
+                .array_init_anon_ref,
+                .union_init,
+                .field_type,
+                .field_type_ref,
+                .int_to_enum,
+                .enum_to_int,
+                .type_info,
+                .size_of,
+                .bit_size_of,
+                .ptr_to_int,
+                .align_of,
+                .bool_to_int,
+                .embed_file,
+                .error_name,
+                .sqrt,
+                .sin,
+                .cos,
+                .exp,
+                .exp2,
+                .log,
+                .log2,
+                .log10,
+                .fabs,
+                .floor,
+                .ceil,
+                .trunc,
+                .round,
+                .tag_name,
+                .reify,
+                .type_name,
+                .frame_type,
+                .frame_size,
+                .float_to_int,
+                .int_to_float,
+                .int_to_ptr,
+                .float_cast,
+                .int_cast,
+                .err_set_cast,
+                .ptr_cast,
+                .truncate,
+                .align_cast,
+                .has_field,
+                .clz,
+                .ctz,
+                .pop_count,
+                .byte_swap,
+                .bit_reverse,
+                .div_exact,
+                .div_floor,
+                .div_trunc,
+                .mod,
+                .rem,
+                .shl_exact,
+                .shr_exact,
+                .bit_offset_of,
+                .offset_of,
+                .cmpxchg_strong,
+                .cmpxchg_weak,
+                .splat,
+                .reduce,
+                .shuffle,
+                .select,
+                .atomic_load,
+                .atomic_rmw,
+                .mul_add,
+                .builtin_call,
+                .field_parent_ptr,
+                .maximum,
+                .minimum,
+                .builtin_async_call,
+                .c_import,
+                .@"resume",
+                .@"await",
+                .await_nosuspend,
+                .ret_err_value_code,
+                .extended,
+                .closure_get,
+                .closure_capture,
+                .@"break",
+                .break_inline,
+                .condbr,
+                .condbr_inline,
+                .compile_error,
+                .ret_node,
+                .ret_load,
+                .ret_tok,
+                .ret_err_value,
+                .@"unreachable",
+                .repeat,
+                .repeat_inline,
+                .panic,
+                => false,
+            };
+        }
+
         /// Used by debug safety-checking code.
         pub const data_tags = list: {
             @setEvalBranchQuota(2000);
@@ -1266,6 +1543,7 @@ pub const Inst = struct {
                 .mulwrap = .pl_node,
                 .mul_sat = .pl_node,
 
+                .param_type = .param_type,
                 .param = .pl_tok,
                 .param_comptime = .pl_tok,
                 .param_anytype = .str_tok,
@@ -1576,7 +1854,7 @@ pub const Inst = struct {
         /// `operand` is `src_node: i32`.
         ret_addr,
         /// Implements the `@src` builtin.
-        /// `operand` is payload index to `ColumnLine`.
+        /// `operand` is payload index to `LineColumn`.
         builtin_src,
         /// Implements the `@errorReturnTrace` builtin.
         /// `operand` is `src_node: i32`.
@@ -2213,6 +2491,10 @@ pub const Inst = struct {
             /// Points to a `Block`.
             payload_index: u32,
         },
+        param_type: struct {
+            callee: Ref,
+            param_index: u32,
+        },
         @"unreachable": struct {
             /// Offset from Decl AST node index.
             /// `Tag` determines which kind of AST node this points to.
@@ -2288,6 +2570,7 @@ pub const Inst = struct {
             ptr_type,
             int_type,
             bool_br,
+            param_type,
             @"unreachable",
             @"break",
             switch_capture,
@@ -2616,6 +2899,53 @@ pub const Inst = struct {
 
                 return .{
                     .item = item,
+                    .body = body,
+                };
+            }
+        }
+
+        pub const MultiProng = struct {
+            items: []const Ref,
+            body: []const Index,
+        };
+
+        pub fn getMultiProng(
+            self: SwitchBlock,
+            zir: Zir,
+            extra_end: usize,
+            prong_index: usize,
+        ) MultiProng {
+            // +1 for self.bits.has_multi_cases == true
+            var extra_index: usize = extra_end + 1;
+
+            if (self.bits.specialProng() != .none) {
+                const body_len = zir.extra[extra_index];
+                extra_index += 1;
+                const body = zir.extra[extra_index..][0..body_len];
+                extra_index += body.len;
+            }
+
+            var scalar_i: usize = 0;
+            while (scalar_i < self.bits.scalar_cases_len) : (scalar_i += 1) {
+                extra_index += 1;
+                const body_len = zir.extra[extra_index];
+                extra_index += 1;
+                extra_index += body_len;
+            }
+            var multi_i: u32 = 0;
+            while (true) : (multi_i += 1) {
+                const items_len = zir.extra[extra_index];
+                extra_index += 2;
+                const body_len = zir.extra[extra_index];
+                extra_index += 1;
+                const items = zir.refSlice(extra_index, items_len);
+                extra_index += items_len;
+                const body = zir.extra[extra_index..][0..body_len];
+                extra_index += body_len;
+
+                if (multi_i < prong_index) continue;
+                return .{
+                    .items = items,
                     .body = body,
                 };
             }

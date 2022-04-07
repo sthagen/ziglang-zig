@@ -386,18 +386,19 @@ fn dbgAdvancePCAndLine(self: *Emit, line: u32, column: u32) !void {
     const delta_line = @intCast(i32, line) - @intCast(i32, self.prev_di_line);
     const delta_pc: usize = self.code.items.len - self.prev_di_pc;
     switch (self.debug_output) {
-        .dwarf => |dbg_out| {
+        .dwarf => |dw| {
             // TODO Look into using the DWARF special opcodes to compress this data.
             // It lets you emit single-byte opcodes that add different numbers to
             // both the PC and the line number at the same time.
-            try dbg_out.dbg_line.ensureUnusedCapacity(11);
-            dbg_out.dbg_line.appendAssumeCapacity(DW.LNS.advance_pc);
-            leb128.writeULEB128(dbg_out.dbg_line.writer(), delta_pc) catch unreachable;
+            const dbg_line = &dw.dbg_line;
+            try dbg_line.ensureUnusedCapacity(11);
+            dbg_line.appendAssumeCapacity(DW.LNS.advance_pc);
+            leb128.writeULEB128(dbg_line.writer(), delta_pc) catch unreachable;
             if (delta_line != 0) {
-                dbg_out.dbg_line.appendAssumeCapacity(DW.LNS.advance_line);
-                leb128.writeILEB128(dbg_out.dbg_line.writer(), delta_line) catch unreachable;
+                dbg_line.appendAssumeCapacity(DW.LNS.advance_line);
+                leb128.writeILEB128(dbg_line.writer(), delta_line) catch unreachable;
             }
-            dbg_out.dbg_line.appendAssumeCapacity(DW.LNS.copy);
+            dbg_line.appendAssumeCapacity(DW.LNS.copy);
             self.prev_di_pc = self.code.items.len;
             self.prev_di_line = line;
             self.prev_di_column = column;
@@ -586,8 +587,8 @@ fn mirDbgLine(emit: *Emit, inst: Mir.Inst.Index) !void {
 
 fn mirDebugPrologueEnd(self: *Emit) !void {
     switch (self.debug_output) {
-        .dwarf => |dbg_out| {
-            try dbg_out.dbg_line.append(DW.LNS.set_prologue_end);
+        .dwarf => |dw| {
+            try dw.dbg_line.append(DW.LNS.set_prologue_end);
             try self.dbgAdvancePCAndLine(self.prev_di_line, self.prev_di_column);
         },
         .plan9 => {},
@@ -597,8 +598,8 @@ fn mirDebugPrologueEnd(self: *Emit) !void {
 
 fn mirDebugEpilogueBegin(self: *Emit) !void {
     switch (self.debug_output) {
-        .dwarf => |dbg_out| {
-            try dbg_out.dbg_line.append(DW.LNS.set_epilogue_begin);
+        .dwarf => |dw| {
+            try dw.dbg_line.append(DW.LNS.set_epilogue_begin);
             try self.dbgAdvancePCAndLine(self.prev_di_line, self.prev_di_column);
         },
         .plan9 => {},
@@ -650,17 +651,32 @@ fn mirLogicalImmediate(emit: *Emit, inst: Mir.Inst.Index) !void {
 
 fn mirAddSubtractShiftedRegister(emit: *Emit, inst: Mir.Inst.Index) !void {
     const tag = emit.mir.instructions.items(.tag)[inst];
-    const rrr_imm6_shift = emit.mir.instructions.items(.data)[inst].rrr_imm6_shift;
-    const rd = rrr_imm6_shift.rd;
-    const rn = rrr_imm6_shift.rn;
-    const rm = rrr_imm6_shift.rm;
-    const shift = rrr_imm6_shift.shift;
-    const imm6 = rrr_imm6_shift.imm6;
-
     switch (tag) {
-        .add_shifted_register => try emit.writeInstruction(Instruction.addShiftedRegister(rd, rn, rm, shift, imm6)),
-        .cmp_shifted_register => try emit.writeInstruction(Instruction.subsShiftedRegister(rd, rn, rm, shift, imm6)),
-        .sub_shifted_register => try emit.writeInstruction(Instruction.subShiftedRegister(rd, rn, rm, shift, imm6)),
+        .add_shifted_register,
+        .sub_shifted_register,
+        => {
+            const rrr_imm6_shift = emit.mir.instructions.items(.data)[inst].rrr_imm6_shift;
+            const rd = rrr_imm6_shift.rd;
+            const rn = rrr_imm6_shift.rn;
+            const rm = rrr_imm6_shift.rm;
+            const shift = rrr_imm6_shift.shift;
+            const imm6 = rrr_imm6_shift.imm6;
+
+            switch (tag) {
+                .add_shifted_register => try emit.writeInstruction(Instruction.addShiftedRegister(rd, rn, rm, shift, imm6)),
+                .sub_shifted_register => try emit.writeInstruction(Instruction.subShiftedRegister(rd, rn, rm, shift, imm6)),
+                else => unreachable,
+            }
+        },
+        .cmp_shifted_register => {
+            const rr_imm6_shift = emit.mir.instructions.items(.data)[inst].rr_imm6_shift;
+            const rn = rr_imm6_shift.rn;
+            const rm = rr_imm6_shift.rm;
+            const shift = rr_imm6_shift.shift;
+            const imm6 = rr_imm6_shift.imm6;
+
+            try emit.writeInstruction(Instruction.subsShiftedRegister(.xzr, rn, rm, shift, imm6));
+        },
         else => unreachable,
     }
 }
@@ -896,8 +912,13 @@ fn mirMoveRegister(emit: *Emit, inst: Mir.Inst.Index) !void {
             try emit.writeInstruction(Instruction.add(rr.rd, rr.rn, 0, false));
         },
         .mvn => {
-            const rr_imm6_shift = emit.mir.instructions.items(.data)[inst].rr_imm6_shift;
-            try emit.writeInstruction(Instruction.ornShiftedRegister(rr_imm6_shift.rd, .xzr, rr_imm6_shift.rm, rr_imm6_shift.shift, rr_imm6_shift.imm6));
+            const rr_imm6_logical_shift = emit.mir.instructions.items(.data)[inst].rr_imm6_logical_shift;
+            const rd = rr_imm6_logical_shift.rd;
+            const rm = rr_imm6_logical_shift.rm;
+            const shift = rr_imm6_logical_shift.shift;
+            const imm6 = rr_imm6_logical_shift.imm6;
+
+            try emit.writeInstruction(Instruction.ornShiftedRegister(rd, .xzr, rm, shift, imm6));
         },
         else => unreachable,
     }
