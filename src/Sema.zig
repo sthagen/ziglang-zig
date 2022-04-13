@@ -6614,7 +6614,9 @@ fn zirParam(
                         // partial type for generic functions but we still need to
                         // detect if a function parameter is a generic function
                         // to force the parent function to also be generic.
-                        break :err error.GenericPoison;
+                        if (!sema.inst_map.contains(inst)) {
+                            break :err error.GenericPoison;
+                        }
                     }
                     break :param_ty param_ty;
                 } else |err| break :err err;
@@ -12692,7 +12694,12 @@ fn finishStructInit(
     }
 
     if (is_ref) {
-        const alloc = try block.addTy(.alloc, struct_ty);
+        const target = sema.mod.getTarget();
+        const alloc_ty = try Type.ptr(sema.arena, target, .{
+            .pointee_type = struct_ty,
+            .@"addrspace" = target_util.defaultAddressSpace(target, .local),
+        });
+        const alloc = try block.addTy(.alloc, alloc_ty);
         for (field_inits) |field_init, i_usize| {
             const i = @intCast(u32, i_usize);
             const field_src = src;
