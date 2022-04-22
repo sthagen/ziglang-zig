@@ -135,10 +135,9 @@ var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{
 pub fn main() anyerror!void {
     crash_report.initialize();
 
-    var gpa_need_deinit = false;
+    const use_gpa = build_options.force_gpa or !builtin.link_libc;
     const gpa = gpa: {
-        if (build_options.force_gpa or !builtin.link_libc) {
-            gpa_need_deinit = true;
+        if (use_gpa) {
             break :gpa general_purpose_allocator.allocator();
         }
         // We would prefer to use raw libc allocator here, but cannot
@@ -148,7 +147,7 @@ pub fn main() anyerror!void {
         }
         break :gpa std.heap.raw_c_allocator;
     };
-    defer if (gpa_need_deinit) {
+    defer if (use_gpa) {
         _ = general_purpose_allocator.deinit();
     };
     var arena_instance = std.heap.ArenaAllocator.init(gpa);
@@ -160,6 +159,16 @@ pub fn main() anyerror!void {
     if (tracy.enable_allocation) {
         var gpa_tracy = tracy.tracyAllocator(gpa);
         return mainArgs(gpa_tracy.allocator(), arena, args);
+    }
+
+    // WASI: `--dir` instructs the WASM runtime to "preopen" a directory, making
+    // it available to the us, the guest program. This is the only way for us to
+    // access files/dirs on the host filesystem
+    if (builtin.os.tag == .wasi) {
+        // This sets our CWD to "/preopens/cwd"
+        // Dot-prefixed preopens like `--dir=.` are "mounted" at "/preopens/cwd"
+        // Other preopens like `--dir=lib` are "mounted" at "/"
+        try std.os.initPreopensWasi(std.heap.page_allocator, "/preopens/cwd");
     }
 
     return mainArgs(gpa, arena, args);
@@ -849,36 +858,7 @@ fn buildOutputType(
                         const next_arg = args_iter.next() orelse {
                             fatal("expected parameter after {s}", .{arg});
                         };
-                        if (mem.eql(u8, next_arg, "console")) {
-                            subsystem = .Console;
-                        } else if (mem.eql(u8, next_arg, "windows")) {
-                            subsystem = .Windows;
-                        } else if (mem.eql(u8, next_arg, "posix")) {
-                            subsystem = .Posix;
-                        } else if (mem.eql(u8, next_arg, "native")) {
-                            subsystem = .Native;
-                        } else if (mem.eql(u8, next_arg, "efi_application")) {
-                            subsystem = .EfiApplication;
-                        } else if (mem.eql(u8, next_arg, "efi_boot_service_driver")) {
-                            subsystem = .EfiBootServiceDriver;
-                        } else if (mem.eql(u8, next_arg, "efi_rom")) {
-                            subsystem = .EfiRom;
-                        } else if (mem.eql(u8, next_arg, "efi_runtime_driver")) {
-                            subsystem = .EfiRuntimeDriver;
-                        } else {
-                            fatal("invalid: --subsystem: '{s}'. Options are:\n{s}", .{
-                                next_arg,
-                                \\  console
-                                \\  windows
-                                \\  posix
-                                \\  native
-                                \\  efi_application
-                                \\  efi_boot_service_driver
-                                \\  efi_rom
-                                \\  efi_runtime_driver
-                                \\
-                            });
-                        }
+                        subsystem = try parseSubSystem(next_arg);
                     } else if (mem.eql(u8, arg, "-O")) {
                         optimize_mode_string = args_iter.next() orelse {
                             fatal("expected parameter after {s}", .{arg});
@@ -1610,6 +1590,12 @@ fn buildOutputType(
                         fatal("expected linker arg after '{s}'", .{arg});
                     }
                     try rpath_list.append(linker_args.items[i]);
+                } else if (mem.eql(u8, arg, "--subsystem")) {
+                    i += 1;
+                    if (i >= linker_args.items.len) {
+                        fatal("expected linker arg after '{s}'", .{arg});
+                    }
+                    subsystem = try parseSubSystem(linker_args.items[i]);
                 } else if (mem.eql(u8, arg, "-I") or
                     mem.eql(u8, arg, "--dynamic-linker") or
                     mem.eql(u8, arg, "-dynamic-linker"))
@@ -2540,7 +2526,7 @@ fn buildOutputType(
         pkg_tree_root.table = .{};
     }
 
-    const self_exe_path = try fs.selfExePathAlloc(arena);
+    const self_exe_path = try introspect.findZigExePath(arena);
     var zig_lib_directory: Compilation.Directory = if (override_lib_dir) |lib_dir| .{
         .path = lib_dir,
         .handle = fs.cwd().openDir(lib_dir, .{}) catch |err| {
@@ -3409,7 +3395,7 @@ pub fn cmdInit(
             }
         }
     }
-    const self_exe_path = try fs.selfExePathAlloc(arena);
+    const self_exe_path = try introspect.findZigExePath(arena);
     var zig_lib_directory = introspect.findZigLibDirFromSelfExe(arena, self_exe_path) catch |err| {
         fatal("unable to find zig installation directory: {s}\n", .{@errorName(err)});
     };
@@ -3478,18 +3464,25 @@ pub const usage_build =
     \\   Build a project from build.zig.
     \\
     \\Options:
-    \\   -h, --help             Print this help and exit
-    \\
+    \\   -fstage1                      Force using bootstrap compiler as the codegen backend
+    \\   -fno-stage1                   Prevent using bootstrap compiler as the codegen backend
+    \\   --build-file [file]           Override path to build.zig
+    \\   --cache-dir [path]            Override path to local Zig cache directory
+    \\   --global-cache-dir [path]     Override path to global Zig cache directory
+    \\   --zig-lib-dir [arg]           Override path to Zig lib directory
+    \\   --prominent-compile-errors    Output compile errors formatted for a human to read
+    \\   -h, --help                    Print this help and exit
     \\
 ;
 
 pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
     var prominent_compile_errors: bool = false;
+    var use_stage1: ?bool = null;
 
     // We want to release all the locks before executing the child process, so we make a nice
     // big block here to ensure the cleanup gets run when we extract out our argv.
     const child_argv = argv: {
-        const self_exe_path = try fs.selfExePathAlloc(arena);
+        const self_exe_path = try introspect.findZigExePath(arena);
 
         var build_file: ?[]const u8 = null;
         var override_lib_dir: ?[]const u8 = null;
@@ -3539,6 +3532,12 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
                         continue;
                     } else if (mem.eql(u8, arg, "--prominent-compile-errors")) {
                         prominent_compile_errors = true;
+                    } else if (mem.eql(u8, arg, "-fstage1")) {
+                        use_stage1 = true;
+                        try child_argv.append(arg);
+                    } else if (mem.eql(u8, arg, "-fno-stage1")) {
+                        use_stage1 = false;
+                        try child_argv.append(arg);
                     }
                 }
                 try child_argv.append(arg);
@@ -3679,6 +3678,7 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
             .optimize_mode = .Debug,
             .self_exe_path = self_exe_path,
             .thread_pool = &thread_pool,
+            .use_stage1 = use_stage1,
         }) catch |err| {
             fatal("unable to create compilation: {s}", .{@errorName(err)});
         };
@@ -3892,7 +3892,7 @@ pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void 
                 .tree_loaded = true,
                 .zir = undefined,
                 .pkg = undefined,
-                .root_decl = null,
+                .root_decl = .none,
             };
 
             file.pkg = try Package.create(gpa, null, file.sub_file_path);
@@ -4098,7 +4098,7 @@ fn fmtPathFile(
             .tree_loaded = true,
             .zir = undefined,
             .pkg = undefined,
-            .root_decl = null,
+            .root_decl = .none,
         };
 
         file.pkg = try Package.create(fmt.gpa, null, file.sub_file_path);
@@ -4757,7 +4757,7 @@ pub fn cmdAstCheck(
         .tree = undefined,
         .zir = undefined,
         .pkg = undefined,
-        .root_decl = null,
+        .root_decl = .none,
     };
     if (zig_source_file) |file_name| {
         var f = fs.cwd().openFile(file_name, .{}) catch |err| {
@@ -4910,7 +4910,7 @@ pub fn cmdChangelist(
         .tree = undefined,
         .zir = undefined,
         .pkg = undefined,
-        .root_decl = null,
+        .root_decl = .none,
     };
 
     file.pkg = try Package.create(gpa, null, file.sub_file_path);
@@ -5130,5 +5130,38 @@ fn warnAboutForeignBinaries(
                 host_name, foreign_name, tip_suffix,
             });
         },
+    }
+}
+
+fn parseSubSystem(next_arg: []const u8) !std.Target.SubSystem {
+    if (mem.eql(u8, next_arg, "console")) {
+        return .Console;
+    } else if (mem.eql(u8, next_arg, "windows")) {
+        return .Windows;
+    } else if (mem.eql(u8, next_arg, "posix")) {
+        return .Posix;
+    } else if (mem.eql(u8, next_arg, "native")) {
+        return .Native;
+    } else if (mem.eql(u8, next_arg, "efi_application")) {
+        return .EfiApplication;
+    } else if (mem.eql(u8, next_arg, "efi_boot_service_driver")) {
+        return .EfiBootServiceDriver;
+    } else if (mem.eql(u8, next_arg, "efi_rom")) {
+        return .EfiRom;
+    } else if (mem.eql(u8, next_arg, "efi_runtime_driver")) {
+        return .EfiRuntimeDriver;
+    } else {
+        fatal("invalid: --subsystem: '{s}'. Options are:\n{s}", .{
+            next_arg,
+            \\  console
+            \\  windows
+            \\  posix
+            \\  native
+            \\  efi_application
+            \\  efi_boot_service_driver
+            \\  efi_rom
+            \\  efi_runtime_driver
+            \\
+        });
     }
 }

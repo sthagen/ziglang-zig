@@ -47,7 +47,7 @@ fn testReadLink(dir: Dir, target_path: []const u8, symlink_path: []const u8) !vo
 
 test "accessAbsolute" {
     if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
-    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, ".");
+    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp = tmpDir(.{});
     defer tmp.cleanup();
@@ -66,7 +66,7 @@ test "accessAbsolute" {
 
 test "openDirAbsolute" {
     if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
-    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, ".");
+    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp = tmpDir(.{});
     defer tmp.cleanup();
@@ -103,7 +103,7 @@ test "openDir cwd parent .." {
 
 test "readLinkAbsolute" {
     if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
-    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, ".");
+    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp = tmpDir(.{});
     defer tmp.cleanup();
@@ -434,9 +434,6 @@ test "Dir.rename files" {
 }
 
 test "Dir.rename directories" {
-    // TODO: Fix on Windows, see https://github.com/ziglang/zig/issues/6364
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
     var tmp_dir = tmpDir(.{});
     defer tmp_dir.cleanup();
 
@@ -538,7 +535,7 @@ test "rename" {
 
 test "renameAbsolute" {
     if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
-    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, ".");
+    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp_dir = tmpDir(.{});
     defer tmp_dir.cleanup();
@@ -611,6 +608,16 @@ test "makePath, put some files in it, deleteTree" {
     } else |err| {
         try testing.expect(err == error.FileNotFound);
     }
+}
+
+test "makePath in a directory that no longer exists" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // Windows returns FileBusy if attempting to remove an open dir
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.parent_dir.deleteTree(&tmp.sub_path);
+
+    try testing.expectError(error.FileNotFound, tmp.dir.makePath("sub-path"));
 }
 
 test "writev, readv" {
@@ -973,7 +980,7 @@ test "open file with exclusive nonblocking lock twice (absolute paths)" {
 
 test "walker" {
     if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
-    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, ".");
+    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp = tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -1024,7 +1031,7 @@ test "walker" {
 
 test ". and .. in fs.Dir functions" {
     if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
-    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, ".");
+    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp = tmpDir(.{});
     defer tmp.cleanup();
@@ -1053,7 +1060,7 @@ test ". and .. in fs.Dir functions" {
 
 test ". and .. in absolute functions" {
     if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
-    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, ".");
+    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp = tmpDir(.{});
     defer tmp.cleanup();

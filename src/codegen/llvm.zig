@@ -21,6 +21,7 @@ const Value = @import("../value.zig").Value;
 const Type = @import("../type.zig").Type;
 const LazySrcLoc = Module.LazySrcLoc;
 const CType = @import("../type.zig").CType;
+const x86_64_abi = @import("../arch/x86_64/abi.zig");
 
 const Error = error{ OutOfMemory, CodegenFail };
 
@@ -161,6 +162,7 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![:0]u8 {
 
 pub const Object = struct {
     gpa: Allocator,
+    module: *Module,
     llvm_module: *const llvm.Module,
     di_builder: ?*llvm.DIBuilder,
     /// One of these mappings:
@@ -181,7 +183,7 @@ pub const Object = struct {
     ///   version of the name and incorrectly get function not found in the llvm module.
     /// * it works for functions not all globals.
     /// Therefore, this table keeps track of the mapping.
-    decl_map: std.AutoHashMapUnmanaged(*const Module.Decl, *const llvm.Value),
+    decl_map: std.AutoHashMapUnmanaged(Module.Decl.Index, *const llvm.Value),
     /// Maps Zig types to LLVM types. The table memory itself is backed by the GPA of
     /// the compiler, but the Type/Value memory here is backed by `type_map_arena`.
     /// TODO we need to remove entries from this map in response to incremental compilation
@@ -340,6 +342,7 @@ pub const Object = struct {
 
         return Object{
             .gpa = gpa,
+            .module = options.module.?,
             .llvm_module = llvm_module,
             .di_map = .{},
             .di_builder = opt_di_builder,
@@ -469,7 +472,12 @@ pub const Object = struct {
         _ = builder.buildRet(is_lt);
     }
 
-    pub fn flushModule(self: *Object, comp: *Compilation) !void {
+    pub fn flushModule(self: *Object, comp: *Compilation, prog_node: *std.Progress.Node) !void {
+        var sub_prog_node = prog_node.start("LLVM Emit Object", 0);
+        sub_prog_node.activate();
+        sub_prog_node.context.refresh();
+        defer sub_prog_node.end();
+
         try self.genErrorNameTable(comp);
         try self.genCmpLtErrorsLenFunction(comp);
 
@@ -563,18 +571,20 @@ pub const Object = struct {
         air: Air,
         liveness: Liveness,
     ) !void {
-        const decl = func.owner_decl;
+        const decl_index = func.owner_decl;
+        const decl = module.declPtr(decl_index);
 
         var dg: DeclGen = .{
             .context = o.context,
             .object = o,
             .module = module,
+            .decl_index = decl_index,
             .decl = decl,
             .err_msg = null,
             .gpa = module.gpa,
         };
 
-        const llvm_func = try dg.resolveLlvmFunction(decl);
+        const llvm_func = try dg.resolveLlvmFunction(decl_index);
 
         if (module.align_stack_fns.get(func)) |align_info| {
             dg.addFnAttrInt(llvm_func, "alignstack", align_info.alignment);
@@ -627,7 +637,7 @@ pub const Object = struct {
 
             const line_number = decl.src_line + 1;
             const is_internal_linkage = decl.val.tag() != .extern_fn and
-                !dg.module.decl_exports.contains(decl);
+                !dg.module.decl_exports.contains(decl_index);
             const noret_bit: c_uint = if (fn_info.return_type.isNoReturn())
                 llvm.DIFlags.NoReturn
             else
@@ -679,48 +689,51 @@ pub const Object = struct {
         fg.genBody(air.getMainBody()) catch |err| switch (err) {
             error.CodegenFail => {
                 decl.analysis = .codegen_failure;
-                try module.failed_decls.put(module.gpa, decl, dg.err_msg.?);
+                try module.failed_decls.put(module.gpa, decl_index, dg.err_msg.?);
                 dg.err_msg = null;
                 return;
             },
             else => |e| return e,
         };
 
-        const decl_exports = module.decl_exports.get(decl) orelse &[0]*Module.Export{};
-        try o.updateDeclExports(module, decl, decl_exports);
+        const decl_exports = module.decl_exports.get(decl_index) orelse &[0]*Module.Export{};
+        try o.updateDeclExports(module, decl_index, decl_exports);
     }
 
-    pub fn updateDecl(self: *Object, module: *Module, decl: *Module.Decl) !void {
+    pub fn updateDecl(self: *Object, module: *Module, decl_index: Module.Decl.Index) !void {
+        const decl = module.declPtr(decl_index);
         var dg: DeclGen = .{
             .context = self.context,
             .object = self,
             .module = module,
             .decl = decl,
+            .decl_index = decl_index,
             .err_msg = null,
             .gpa = module.gpa,
         };
         dg.genDecl() catch |err| switch (err) {
             error.CodegenFail => {
                 decl.analysis = .codegen_failure;
-                try module.failed_decls.put(module.gpa, decl, dg.err_msg.?);
+                try module.failed_decls.put(module.gpa, decl_index, dg.err_msg.?);
                 dg.err_msg = null;
                 return;
             },
             else => |e| return e,
         };
-        const decl_exports = module.decl_exports.get(decl) orelse &[0]*Module.Export{};
-        try self.updateDeclExports(module, decl, decl_exports);
+        const decl_exports = module.decl_exports.get(decl_index) orelse &[0]*Module.Export{};
+        try self.updateDeclExports(module, decl_index, decl_exports);
     }
 
     pub fn updateDeclExports(
         self: *Object,
-        module: *const Module,
-        decl: *const Module.Decl,
+        module: *Module,
+        decl_index: Module.Decl.Index,
         exports: []const *Module.Export,
     ) !void {
         // If the module does not already have the function, we ignore this function call
         // because we call `updateDeclExports` at the end of `updateFunc` and `updateDecl`.
-        const llvm_global = self.decl_map.get(decl) orelse return;
+        const llvm_global = self.decl_map.get(decl_index) orelse return;
+        const decl = module.declPtr(decl_index);
         if (decl.isExtern()) {
             llvm_global.setValueName(decl.name);
             llvm_global.setUnnamedAddr(.False);
@@ -793,7 +806,7 @@ pub const Object = struct {
                 }
             }
         } else {
-            const fqn = try decl.getFullyQualifiedName(module.gpa);
+            const fqn = try decl.getFullyQualifiedName(module);
             defer module.gpa.free(fqn);
             llvm_global.setValueName2(fqn.ptr, fqn.len);
             llvm_global.setLinkage(.Internal);
@@ -809,8 +822,8 @@ pub const Object = struct {
         }
     }
 
-    pub fn freeDecl(self: *Object, decl: *Module.Decl) void {
-        const llvm_value = self.decl_map.get(decl) orelse return;
+    pub fn freeDecl(self: *Object, decl_index: Module.Decl.Index) void {
+        const llvm_value = self.decl_map.get(decl_index) orelse return;
         llvm_value.deleteGlobal();
     }
 
@@ -842,7 +855,7 @@ pub const Object = struct {
         const gpa = o.gpa;
         // Be careful not to reference this `gop` variable after any recursive calls
         // to `lowerDebugType`.
-        const gop = try o.di_type_map.getOrPutContext(gpa, ty, .{ .target = o.target });
+        const gop = try o.di_type_map.getOrPutContext(gpa, ty, .{ .mod = o.module });
         if (gop.found_existing) {
             const annotated = gop.value_ptr.*;
             const di_type = annotated.toDIType();
@@ -855,7 +868,7 @@ pub const Object = struct {
             };
             return o.lowerDebugTypeImpl(entry, resolve, di_type);
         }
-        errdefer assert(o.di_type_map.orderedRemoveContext(ty, .{ .target = o.target }));
+        errdefer assert(o.di_type_map.orderedRemoveContext(ty, .{ .mod = o.module }));
         // The Type memory is ephemeral; since we want to store a longer-lived
         // reference, we need to copy it here.
         gop.key_ptr.* = try ty.copy(o.type_map_arena.allocator());
@@ -886,7 +899,7 @@ pub const Object = struct {
             .Int => {
                 const info = ty.intInfo(target);
                 assert(info.bits != 0);
-                const name = try ty.nameAlloc(gpa, target);
+                const name = try ty.nameAlloc(gpa, o.module);
                 defer gpa.free(name);
                 const dwarf_encoding: c_uint = switch (info.signedness) {
                     .signed => DW.ATE.signed,
@@ -897,13 +910,14 @@ pub const Object = struct {
                 return di_type;
             },
             .Enum => {
-                const owner_decl = ty.getOwnerDecl();
+                const owner_decl_index = ty.getOwnerDecl();
+                const owner_decl = o.module.declPtr(owner_decl_index);
 
                 if (!ty.hasRuntimeBitsIgnoreComptime()) {
-                    const enum_di_ty = try o.makeEmptyNamespaceDIType(owner_decl);
+                    const enum_di_ty = try o.makeEmptyNamespaceDIType(owner_decl_index);
                     // The recursive call to `lowerDebugType` via `makeEmptyNamespaceDIType`
                     // means we can't use `gop` anymore.
-                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(enum_di_ty), .{ .target = o.target });
+                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(enum_di_ty), .{ .mod = o.module });
                     return enum_di_ty;
                 }
 
@@ -933,7 +947,7 @@ pub const Object = struct {
                 const di_file = try o.getDIFile(gpa, owner_decl.src_namespace.file_scope);
                 const di_scope = try o.namespaceToDebugScope(owner_decl.src_namespace);
 
-                const name = try ty.nameAlloc(gpa, target);
+                const name = try ty.nameAlloc(gpa, o.module);
                 defer gpa.free(name);
                 var buffer: Type.Payload.Bits = undefined;
                 const int_ty = ty.intTagType(&buffer);
@@ -951,12 +965,12 @@ pub const Object = struct {
                     "",
                 );
                 // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
-                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(enum_di_ty), .{ .target = o.target });
+                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(enum_di_ty), .{ .mod = o.module });
                 return enum_di_ty;
             },
             .Float => {
                 const bits = ty.floatBits(target);
-                const name = try ty.nameAlloc(gpa, target);
+                const name = try ty.nameAlloc(gpa, o.module);
                 defer gpa.free(name);
                 const di_type = dib.createBasicType(name, bits, DW.ATE.float);
                 gop.value_ptr.* = AnnotatedDITypePtr.initFull(di_type);
@@ -1004,7 +1018,7 @@ pub const Object = struct {
                     const bland_ptr_ty = Type.initPayload(&payload.base);
                     const ptr_di_ty = try o.lowerDebugType(bland_ptr_ty, resolve);
                     // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
-                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.init(ptr_di_ty, resolve), .{ .target = o.target });
+                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.init(ptr_di_ty, resolve), .{ .mod = o.module });
                     return ptr_di_ty;
                 }
 
@@ -1013,7 +1027,7 @@ pub const Object = struct {
                     const ptr_ty = ty.slicePtrFieldType(&buf);
                     const len_ty = Type.usize;
 
-                    const name = try ty.nameAlloc(gpa, target);
+                    const name = try ty.nameAlloc(gpa, o.module);
                     defer gpa.free(name);
                     const di_file: ?*llvm.DIFile = null;
                     const line = 0;
@@ -1084,12 +1098,12 @@ pub const Object = struct {
                     );
                     dib.replaceTemporary(fwd_decl, full_di_ty);
                     // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
-                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(full_di_ty), .{ .target = o.target });
+                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(full_di_ty), .{ .mod = o.module });
                     return full_di_ty;
                 }
 
                 const elem_di_ty = try o.lowerDebugType(ptr_info.pointee_type, .fwd);
-                const name = try ty.nameAlloc(gpa, target);
+                const name = try ty.nameAlloc(gpa, o.module);
                 defer gpa.free(name);
                 const ptr_di_ty = dib.createPointerType(
                     elem_di_ty,
@@ -1098,7 +1112,7 @@ pub const Object = struct {
                     name,
                 );
                 // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
-                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(ptr_di_ty), .{ .target = o.target });
+                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(ptr_di_ty), .{ .mod = o.module });
                 return ptr_di_ty;
             },
             .Opaque => {
@@ -1107,9 +1121,10 @@ pub const Object = struct {
                     gop.value_ptr.* = AnnotatedDITypePtr.initFull(di_ty);
                     return di_ty;
                 }
-                const name = try ty.nameAlloc(gpa, target);
+                const name = try ty.nameAlloc(gpa, o.module);
                 defer gpa.free(name);
-                const owner_decl = ty.getOwnerDecl();
+                const owner_decl_index = ty.getOwnerDecl();
+                const owner_decl = o.module.declPtr(owner_decl_index);
                 const opaque_di_ty = dib.createForwardDeclType(
                     DW.TAG.structure_type,
                     name,
@@ -1119,7 +1134,7 @@ pub const Object = struct {
                 );
                 // The recursive call to `lowerDebugType` va `namespaceToDebugScope`
                 // means we can't use `gop` anymore.
-                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(opaque_di_ty), .{ .target = o.target });
+                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(opaque_di_ty), .{ .mod = o.module });
                 return opaque_di_ty;
             },
             .Array => {
@@ -1130,7 +1145,7 @@ pub const Object = struct {
                     @intCast(c_int, ty.arrayLen()),
                 );
                 // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
-                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(array_di_ty), .{ .target = o.target });
+                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(array_di_ty), .{ .mod = o.module });
                 return array_di_ty;
             },
             .Vector => {
@@ -1141,11 +1156,11 @@ pub const Object = struct {
                     ty.vectorLen(),
                 );
                 // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
-                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(vector_di_ty), .{ .target = o.target });
+                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(vector_di_ty), .{ .mod = o.module });
                 return vector_di_ty;
             },
             .Optional => {
-                const name = try ty.nameAlloc(gpa, target);
+                const name = try ty.nameAlloc(gpa, o.module);
                 defer gpa.free(name);
                 var buf: Type.Payload.ElemType = undefined;
                 const child_ty = ty.optionalChild(&buf);
@@ -1157,7 +1172,7 @@ pub const Object = struct {
                 if (ty.isPtrLikeOptional()) {
                     const ptr_di_ty = try o.lowerDebugType(child_ty, resolve);
                     // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
-                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(ptr_di_ty), .{ .target = o.target });
+                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(ptr_di_ty), .{ .mod = o.module });
                     return ptr_di_ty;
                 }
 
@@ -1230,7 +1245,7 @@ pub const Object = struct {
                 );
                 dib.replaceTemporary(fwd_decl, full_di_ty);
                 // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
-                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(full_di_ty), .{ .target = o.target });
+                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(full_di_ty), .{ .mod = o.module });
                 return full_di_ty;
             },
             .ErrorUnion => {
@@ -1239,10 +1254,10 @@ pub const Object = struct {
                 if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
                     const err_set_di_ty = try o.lowerDebugType(err_set_ty, .full);
                     // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
-                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(err_set_di_ty), .{ .target = o.target });
+                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(err_set_di_ty), .{ .mod = o.module });
                     return err_set_di_ty;
                 }
-                const name = try ty.nameAlloc(gpa, target);
+                const name = try ty.nameAlloc(gpa, o.module);
                 defer gpa.free(name);
                 const di_file: ?*llvm.DIFile = null;
                 const line = 0;
@@ -1327,7 +1342,7 @@ pub const Object = struct {
                 );
                 dib.replaceTemporary(fwd_decl, full_di_ty);
                 // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
-                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(full_di_ty), .{ .target = o.target });
+                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(full_di_ty), .{ .mod = o.module });
                 return full_di_ty;
             },
             .ErrorSet => {
@@ -1339,7 +1354,7 @@ pub const Object = struct {
             },
             .Struct => {
                 const compile_unit_scope = o.di_compile_unit.?.toScope();
-                const name = try ty.nameAlloc(gpa, target);
+                const name = try ty.nameAlloc(gpa, o.module);
                 defer gpa.free(name);
 
                 if (ty.castTag(.@"struct")) |payload| {
@@ -1426,7 +1441,7 @@ pub const Object = struct {
                     );
                     dib.replaceTemporary(fwd_decl, full_di_ty);
                     // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
-                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(full_di_ty), .{ .target = o.target });
+                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(full_di_ty), .{ .mod = o.module });
                     return full_di_ty;
                 }
 
@@ -1440,23 +1455,23 @@ pub const Object = struct {
                         // into. Therefore we can satisfy this by making an empty namespace,
                         // rather than changing the frontend to unnecessarily resolve the
                         // struct field types.
-                        const owner_decl = ty.getOwnerDecl();
-                        const struct_di_ty = try o.makeEmptyNamespaceDIType(owner_decl);
+                        const owner_decl_index = ty.getOwnerDecl();
+                        const struct_di_ty = try o.makeEmptyNamespaceDIType(owner_decl_index);
                         dib.replaceTemporary(fwd_decl, struct_di_ty);
                         // The recursive call to `lowerDebugType` via `makeEmptyNamespaceDIType`
                         // means we can't use `gop` anymore.
-                        try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(struct_di_ty), .{ .target = o.target });
+                        try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(struct_di_ty), .{ .mod = o.module });
                         return struct_di_ty;
                     }
                 }
 
                 if (!ty.hasRuntimeBitsIgnoreComptime()) {
-                    const owner_decl = ty.getOwnerDecl();
-                    const struct_di_ty = try o.makeEmptyNamespaceDIType(owner_decl);
+                    const owner_decl_index = ty.getOwnerDecl();
+                    const struct_di_ty = try o.makeEmptyNamespaceDIType(owner_decl_index);
                     dib.replaceTemporary(fwd_decl, struct_di_ty);
                     // The recursive call to `lowerDebugType` via `makeEmptyNamespaceDIType`
                     // means we can't use `gop` anymore.
-                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(struct_di_ty), .{ .target = o.target });
+                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(struct_di_ty), .{ .mod = o.module });
                     return struct_di_ty;
                 }
 
@@ -1511,14 +1526,14 @@ pub const Object = struct {
                 );
                 dib.replaceTemporary(fwd_decl, full_di_ty);
                 // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
-                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(full_di_ty), .{ .target = o.target });
+                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(full_di_ty), .{ .mod = o.module });
                 return full_di_ty;
             },
             .Union => {
                 const compile_unit_scope = o.di_compile_unit.?.toScope();
-                const owner_decl = ty.getOwnerDecl();
+                const owner_decl_index = ty.getOwnerDecl();
 
-                const name = try ty.nameAlloc(gpa, target);
+                const name = try ty.nameAlloc(gpa, o.module);
                 defer gpa.free(name);
 
                 const fwd_decl = opt_fwd_decl orelse blk: {
@@ -1535,11 +1550,11 @@ pub const Object = struct {
                 };
 
                 if (!ty.hasRuntimeBitsIgnoreComptime()) {
-                    const union_di_ty = try o.makeEmptyNamespaceDIType(owner_decl);
+                    const union_di_ty = try o.makeEmptyNamespaceDIType(owner_decl_index);
                     dib.replaceTemporary(fwd_decl, union_di_ty);
                     // The recursive call to `lowerDebugType` via `makeEmptyNamespaceDIType`
                     // means we can't use `gop` anymore.
-                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(union_di_ty), .{ .target = o.target });
+                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(union_di_ty), .{ .mod = o.module });
                     return union_di_ty;
                 }
 
@@ -1567,7 +1582,7 @@ pub const Object = struct {
                     dib.replaceTemporary(fwd_decl, full_di_ty);
                     // The recursive call to `lowerDebugType` via `makeEmptyNamespaceDIType`
                     // means we can't use `gop` anymore.
-                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(full_di_ty), .{ .target = o.target });
+                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(full_di_ty), .{ .mod = o.module });
                     return full_di_ty;
                 }
 
@@ -1621,7 +1636,7 @@ pub const Object = struct {
                 if (layout.tag_size == 0) {
                     dib.replaceTemporary(fwd_decl, union_di_ty);
                     // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
-                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(union_di_ty), .{ .target = o.target });
+                    try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(union_di_ty), .{ .mod = o.module });
                     return union_di_ty;
                 }
 
@@ -1680,7 +1695,7 @@ pub const Object = struct {
                 );
                 dib.replaceTemporary(fwd_decl, full_di_ty);
                 // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
-                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(full_di_ty), .{ .target = o.target });
+                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(full_di_ty), .{ .mod = o.module });
                 return full_di_ty;
             },
             .Fn => {
@@ -1728,7 +1743,7 @@ pub const Object = struct {
                     0,
                 );
                 // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
-                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(fn_di_ty), .{ .target = o.target });
+                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(fn_di_ty), .{ .mod = o.module });
                 return fn_di_ty;
             },
             .ComptimeInt => unreachable,
@@ -1757,7 +1772,8 @@ pub const Object = struct {
     /// This is to be used instead of void for debug info types, to avoid tripping
     /// Assertion `!isa<DIType>(Scope) && "shouldn't make a namespace scope for a type"'
     /// when targeting CodeView (Windows).
-    fn makeEmptyNamespaceDIType(o: *Object, decl: *const Module.Decl) !*llvm.DIType {
+    fn makeEmptyNamespaceDIType(o: *Object, decl_index: Module.Decl.Index) !*llvm.DIType {
+        const decl = o.module.declPtr(decl_index);
         const fields: [0]*llvm.DIType = .{};
         return o.di_builder.?.createStructType(
             try o.namespaceToDebugScope(decl.src_namespace),
@@ -1782,6 +1798,7 @@ pub const DeclGen = struct {
     object: *Object,
     module: *Module,
     decl: *Module.Decl,
+    decl_index: Module.Decl.Index,
     gpa: Allocator,
     err_msg: ?*Module.ErrorMsg,
 
@@ -1799,6 +1816,7 @@ pub const DeclGen = struct {
 
     fn genDecl(dg: *DeclGen) !void {
         const decl = dg.decl;
+        const decl_index = dg.decl_index;
         assert(decl.has_tv);
 
         log.debug("gen: {s} type: {}, value: {}", .{
@@ -1812,7 +1830,7 @@ pub const DeclGen = struct {
             _ = try dg.resolveLlvmFunction(extern_fn.data.owner_decl);
         } else {
             const target = dg.module.getTarget();
-            var global = try dg.resolveGlobalDecl(decl);
+            var global = try dg.resolveGlobalDecl(decl_index);
             global.setAlignment(decl.getAlignment(target));
             assert(decl.has_tv);
             const init_val = if (decl.val.castTag(.variable)) |payload| init_val: {
@@ -1853,7 +1871,7 @@ pub const DeclGen = struct {
                     // old uses.
                     const new_global_ptr = new_global.constBitCast(global.typeOf());
                     global.replaceAllUsesWith(new_global_ptr);
-                    dg.object.decl_map.putAssumeCapacity(decl, new_global);
+                    dg.object.decl_map.putAssumeCapacity(decl_index, new_global);
                     new_global.takeName(global);
                     global.deleteGlobal();
                     global = new_global;
@@ -1864,7 +1882,7 @@ pub const DeclGen = struct {
                 const di_file = try dg.object.getDIFile(dg.gpa, decl.src_namespace.file_scope);
 
                 const line_number = decl.src_line + 1;
-                const is_internal_linkage = !dg.module.decl_exports.contains(decl);
+                const is_internal_linkage = !dg.module.decl_exports.contains(decl_index);
                 const di_global = dib.createGlobalVariable(
                     di_file.toScope(),
                     decl.name,
@@ -1883,12 +1901,10 @@ pub const DeclGen = struct {
     /// If the llvm function does not exist, create it.
     /// Note that this can be called before the function's semantic analysis has
     /// completed, so if any attributes rely on that, they must be done in updateFunc, not here.
-    fn resolveLlvmFunction(dg: *DeclGen, decl: *Module.Decl) !*const llvm.Value {
-        return dg.resolveLlvmFunctionExtra(decl, decl.ty);
-    }
-
-    fn resolveLlvmFunctionExtra(dg: *DeclGen, decl: *Module.Decl, zig_fn_type: Type) !*const llvm.Value {
-        const gop = try dg.object.decl_map.getOrPut(dg.gpa, decl);
+    fn resolveLlvmFunction(dg: *DeclGen, decl_index: Module.Decl.Index) !*const llvm.Value {
+        const decl = dg.module.declPtr(decl_index);
+        const zig_fn_type = decl.ty;
+        const gop = try dg.object.decl_map.getOrPut(dg.gpa, decl_index);
         if (gop.found_existing) return gop.value_ptr.*;
 
         assert(decl.has_tv);
@@ -1898,7 +1914,7 @@ pub const DeclGen = struct {
 
         const fn_type = try dg.llvmType(zig_fn_type);
 
-        const fqn = try decl.getFullyQualifiedName(dg.gpa);
+        const fqn = try decl.getFullyQualifiedName(dg.module);
         defer dg.gpa.free(fqn);
 
         const llvm_addrspace = dg.llvmAddressSpace(decl.@"addrspace");
@@ -1991,12 +2007,13 @@ pub const DeclGen = struct {
         // TODO add target-cpu and target-features fn attributes
     }
 
-    fn resolveGlobalDecl(dg: *DeclGen, decl: *Module.Decl) Error!*const llvm.Value {
-        const gop = try dg.object.decl_map.getOrPut(dg.gpa, decl);
+    fn resolveGlobalDecl(dg: *DeclGen, decl_index: Module.Decl.Index) Error!*const llvm.Value {
+        const gop = try dg.object.decl_map.getOrPut(dg.gpa, decl_index);
         if (gop.found_existing) return gop.value_ptr.*;
-        errdefer assert(dg.object.decl_map.remove(decl));
+        errdefer assert(dg.object.decl_map.remove(decl_index));
 
-        const fqn = try decl.getFullyQualifiedName(dg.gpa);
+        const decl = dg.module.declPtr(decl_index);
+        const fqn = try decl.getFullyQualifiedName(dg.module);
         defer dg.gpa.free(fqn);
 
         const llvm_type = try dg.llvmType(decl.ty);
@@ -2117,7 +2134,7 @@ pub const DeclGen = struct {
             },
             .Opaque => switch (t.tag()) {
                 .@"opaque" => {
-                    const gop = try dg.object.type_map.getOrPutContext(gpa, t, .{ .target = target });
+                    const gop = try dg.object.type_map.getOrPutContext(gpa, t, .{ .mod = dg.module });
                     if (gop.found_existing) return gop.value_ptr.*;
 
                     // The Type memory is ephemeral; since we want to store a longer-lived
@@ -2125,7 +2142,7 @@ pub const DeclGen = struct {
                     gop.key_ptr.* = try t.copy(dg.object.type_map_arena.allocator());
 
                     const opaque_obj = t.castTag(.@"opaque").?.data;
-                    const name = try opaque_obj.getFullyQualifiedName(gpa);
+                    const name = try opaque_obj.getFullyQualifiedName(dg.module);
                     defer gpa.free(name);
 
                     const llvm_struct_ty = dg.context.structCreateNamed(name);
@@ -2186,7 +2203,7 @@ pub const DeclGen = struct {
                 return dg.context.intType(16);
             },
             .Struct => {
-                const gop = try dg.object.type_map.getOrPutContext(gpa, t, .{ .target = target });
+                const gop = try dg.object.type_map.getOrPutContext(gpa, t, .{ .mod = dg.module });
                 if (gop.found_existing) return gop.value_ptr.*;
 
                 // The Type memory is ephemeral; since we want to store a longer-lived
@@ -2255,7 +2272,7 @@ pub const DeclGen = struct {
                     return int_llvm_ty;
                 }
 
-                const name = try struct_obj.getFullyQualifiedName(gpa);
+                const name = try struct_obj.getFullyQualifiedName(dg.module);
                 defer gpa.free(name);
 
                 const llvm_struct_ty = dg.context.structCreateNamed(name);
@@ -2309,7 +2326,7 @@ pub const DeclGen = struct {
                 return llvm_struct_ty;
             },
             .Union => {
-                const gop = try dg.object.type_map.getOrPutContext(gpa, t, .{ .target = target });
+                const gop = try dg.object.type_map.getOrPutContext(gpa, t, .{ .mod = dg.module });
                 if (gop.found_existing) return gop.value_ptr.*;
 
                 // The Type memory is ephemeral; since we want to store a longer-lived
@@ -2325,7 +2342,7 @@ pub const DeclGen = struct {
                     return enum_tag_llvm_ty;
                 }
 
-                const name = try union_obj.getFullyQualifiedName(gpa);
+                const name = try union_obj.getFullyQualifiedName(dg.module);
                 defer gpa.free(name);
 
                 const llvm_union_ty = dg.context.structCreateNamed(name);
@@ -2375,27 +2392,20 @@ pub const DeclGen = struct {
             },
             .Fn => {
                 const fn_info = t.fnInfo();
-                const sret = firstParamSRet(fn_info, target);
-                const return_type = fn_info.return_type;
-                const llvm_sret_ty = if (return_type.hasRuntimeBitsIgnoreComptime())
-                    try dg.llvmType(return_type)
-                else
-                    dg.context.voidType();
-                const llvm_ret_ty = if (sret) dg.context.voidType() else llvm_sret_ty;
+                const llvm_ret_ty = try lowerFnRetTy(dg, fn_info);
 
                 var llvm_params = std.ArrayList(*const llvm.Type).init(dg.gpa);
                 defer llvm_params.deinit();
 
-                if (sret) {
+                if (firstParamSRet(fn_info, target)) {
+                    const llvm_sret_ty = try dg.llvmType(fn_info.return_type);
                     try llvm_params.append(llvm_sret_ty.pointerType(0));
                 }
 
                 for (fn_info.param_types) |param_ty| {
                     if (!param_ty.hasRuntimeBitsIgnoreComptime()) continue;
 
-                    const raw_llvm_ty = try dg.llvmType(param_ty);
-                    const actual_llvm_ty = if (!isByRef(param_ty)) raw_llvm_ty else raw_llvm_ty.pointerType(0);
-                    try llvm_params.append(actual_llvm_ty);
+                    try llvm_params.append(try lowerFnParamTy(dg, fn_info.cc, param_ty));
                 }
 
                 return llvm.functionType(
@@ -2434,7 +2444,7 @@ pub const DeclGen = struct {
             // TODO this duplicates code with Pointer but they should share the handling
             // of the tv.val.tag() and then Int should do extra constPtrToInt on top
             .Int => switch (tv.val.tag()) {
-                .decl_ref_mut => return lowerDeclRefValue(dg, tv, tv.val.castTag(.decl_ref_mut).?.data.decl),
+                .decl_ref_mut => return lowerDeclRefValue(dg, tv, tv.val.castTag(.decl_ref_mut).?.data.decl_index),
                 .decl_ref => return lowerDeclRefValue(dg, tv, tv.val.castTag(.decl_ref).?.data),
                 else => {
                     var bigint_space: Value.BigIntSpace = undefined;
@@ -2519,12 +2529,13 @@ pub const DeclGen = struct {
                 }
             },
             .Pointer => switch (tv.val.tag()) {
-                .decl_ref_mut => return lowerDeclRefValue(dg, tv, tv.val.castTag(.decl_ref_mut).?.data.decl),
+                .decl_ref_mut => return lowerDeclRefValue(dg, tv, tv.val.castTag(.decl_ref_mut).?.data.decl_index),
                 .decl_ref => return lowerDeclRefValue(dg, tv, tv.val.castTag(.decl_ref).?.data),
                 .variable => {
-                    const decl = tv.val.castTag(.variable).?.data.owner_decl;
-                    decl.markAlive();
-                    const val = try dg.resolveGlobalDecl(decl);
+                    const decl_index = tv.val.castTag(.variable).?.data.owner_decl;
+                    const decl = dg.module.declPtr(decl_index);
+                    dg.module.markDeclAlive(decl);
+                    const val = try dg.resolveGlobalDecl(decl_index);
                     const llvm_var_type = try dg.llvmType(tv.ty);
                     const llvm_addrspace = dg.llvmAddressSpace(decl.@"addrspace");
                     const llvm_type = llvm_var_type.pointerType(llvm_addrspace);
@@ -2678,13 +2689,14 @@ pub const DeclGen = struct {
                 return dg.context.constStruct(&fields, fields.len, .False);
             },
             .Fn => {
-                const fn_decl = switch (tv.val.tag()) {
+                const fn_decl_index = switch (tv.val.tag()) {
                     .extern_fn => tv.val.castTag(.extern_fn).?.data.owner_decl,
                     .function => tv.val.castTag(.function).?.data.owner_decl,
                     else => unreachable,
                 };
-                fn_decl.markAlive();
-                return dg.resolveLlvmFunction(fn_decl);
+                const fn_decl = dg.module.declPtr(fn_decl_index);
+                dg.module.markDeclAlive(fn_decl);
+                return dg.resolveLlvmFunction(fn_decl_index);
             },
             .ErrorSet => {
                 const llvm_ty = try dg.llvmType(tv.ty);
@@ -2906,7 +2918,7 @@ pub const DeclGen = struct {
                     });
                 }
                 const union_obj = tv.ty.cast(Type.Payload.Union).?.data;
-                const field_index = union_obj.tag_ty.enumTagFieldIndex(tag_and_val.tag, target).?;
+                const field_index = union_obj.tag_ty.enumTagFieldIndex(tag_and_val.tag, dg.module).?;
                 assert(union_obj.haveFieldTypes());
                 const field_ty = union_obj.fields.values()[field_index].ty;
                 const payload = p: {
@@ -3044,17 +3056,22 @@ pub const DeclGen = struct {
         llvm_ptr: *const llvm.Value,
     };
 
-    fn lowerParentPtrDecl(dg: *DeclGen, ptr_val: Value, decl: *Module.Decl, ptr_child_ty: Type) Error!*const llvm.Value {
-        decl.markAlive();
+    fn lowerParentPtrDecl(
+        dg: *DeclGen,
+        ptr_val: Value,
+        decl_index: Module.Decl.Index,
+        ptr_child_ty: Type,
+    ) Error!*const llvm.Value {
+        const decl = dg.module.declPtr(decl_index);
+        dg.module.markDeclAlive(decl);
         var ptr_ty_payload: Type.Payload.ElemType = .{
             .base = .{ .tag = .single_mut_pointer },
             .data = decl.ty,
         };
         const ptr_ty = Type.initPayload(&ptr_ty_payload.base);
-        const llvm_ptr = try dg.lowerDeclRefValue(.{ .ty = ptr_ty, .val = ptr_val }, decl);
+        const llvm_ptr = try dg.lowerDeclRefValue(.{ .ty = ptr_ty, .val = ptr_val }, decl_index);
 
-        const target = dg.module.getTarget();
-        if (ptr_child_ty.eql(decl.ty, target)) {
+        if (ptr_child_ty.eql(decl.ty, dg.module)) {
             return llvm_ptr;
         } else {
             return llvm_ptr.constBitCast((try dg.llvmType(ptr_child_ty)).pointerType(0));
@@ -3066,7 +3083,7 @@ pub const DeclGen = struct {
         var bitcast_needed: bool = undefined;
         const llvm_ptr = switch (ptr_val.tag()) {
             .decl_ref_mut => {
-                const decl = ptr_val.castTag(.decl_ref_mut).?.data.decl;
+                const decl = ptr_val.castTag(.decl_ref_mut).?.data.decl_index;
                 return dg.lowerParentPtrDecl(ptr_val, decl, ptr_child_ty);
             },
             .decl_ref => {
@@ -3118,7 +3135,7 @@ pub const DeclGen = struct {
                     },
                     .Struct => {
                         const field_ty = parent_ty.structFieldType(field_index);
-                        bitcast_needed = !field_ty.eql(ptr_child_ty, target);
+                        bitcast_needed = !field_ty.eql(ptr_child_ty, dg.module);
 
                         var ty_buf: Type.Payload.Pointer = undefined;
                         const llvm_field_index = llvmFieldIndex(parent_ty, field_index, target, &ty_buf).?;
@@ -3134,7 +3151,7 @@ pub const DeclGen = struct {
             .elem_ptr => blk: {
                 const elem_ptr = ptr_val.castTag(.elem_ptr).?.data;
                 const parent_llvm_ptr = try dg.lowerParentPtr(elem_ptr.array_ptr, elem_ptr.elem_ty);
-                bitcast_needed = !elem_ptr.elem_ty.eql(ptr_child_ty, target);
+                bitcast_needed = !elem_ptr.elem_ty.eql(ptr_child_ty, dg.module);
 
                 const llvm_usize = try dg.llvmType(Type.usize);
                 const indices: [1]*const llvm.Value = .{
@@ -3148,7 +3165,7 @@ pub const DeclGen = struct {
                 var buf: Type.Payload.ElemType = undefined;
 
                 const payload_ty = opt_payload_ptr.container_ty.optionalChild(&buf);
-                bitcast_needed = !payload_ty.eql(ptr_child_ty, target);
+                bitcast_needed = !payload_ty.eql(ptr_child_ty, dg.module);
 
                 if (!payload_ty.hasRuntimeBitsIgnoreComptime() or payload_ty.isPtrLikeOptional()) {
                     // In this case, we represent pointer to optional the same as pointer
@@ -3168,7 +3185,7 @@ pub const DeclGen = struct {
                 const parent_llvm_ptr = try dg.lowerParentPtr(eu_payload_ptr.container_ptr, eu_payload_ptr.container_ty);
 
                 const payload_ty = eu_payload_ptr.container_ty.errorUnionPayload();
-                bitcast_needed = !payload_ty.eql(ptr_child_ty, target);
+                bitcast_needed = !payload_ty.eql(ptr_child_ty, dg.module);
 
                 if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
                     // In this case, we represent pointer to error union the same as pointer
@@ -3196,15 +3213,14 @@ pub const DeclGen = struct {
     fn lowerDeclRefValue(
         self: *DeclGen,
         tv: TypedValue,
-        decl: *Module.Decl,
+        decl_index: Module.Decl.Index,
     ) Error!*const llvm.Value {
-        const target = self.module.getTarget();
         if (tv.ty.isSlice()) {
             var buf: Type.SlicePtrFieldTypeBuffer = undefined;
             const ptr_ty = tv.ty.slicePtrFieldType(&buf);
             var slice_len: Value.Payload.U64 = .{
                 .base = .{ .tag = .int_u64 },
-                .data = tv.val.sliceLen(target),
+                .data = tv.val.sliceLen(self.module),
             };
             const fields: [2]*const llvm.Value = .{
                 try self.genTypedValue(.{
@@ -3224,8 +3240,9 @@ pub const DeclGen = struct {
         // const bar = foo;
         // ... &bar;
         // `bar` is just an alias and we actually want to lower a reference to `foo`.
+        const decl = self.module.declPtr(decl_index);
         if (decl.val.castTag(.function)) |func| {
-            if (func.data.owner_decl != decl) {
+            if (func.data.owner_decl != decl_index) {
                 return self.lowerDeclRefValue(tv, func.data.owner_decl);
             }
         }
@@ -3235,12 +3252,12 @@ pub const DeclGen = struct {
             return self.lowerPtrToVoid(tv.ty);
         }
 
-        decl.markAlive();
+        self.module.markDeclAlive(decl);
 
         const llvm_val = if (is_fn_body)
-            try self.resolveLlvmFunction(decl)
+            try self.resolveLlvmFunction(decl_index)
         else
-            try self.resolveGlobalDecl(decl);
+            try self.resolveGlobalDecl(decl_index);
 
         const llvm_type = try self.llvmType(tv.ty);
         if (tv.ty.zigTypeTag() == .Int) {
@@ -3657,7 +3674,7 @@ pub const FuncGen = struct {
     fn airCall(self: *FuncGen, inst: Air.Inst.Index, attr: llvm.CallAttr) !?*const llvm.Value {
         const pl_op = self.air.instructions.items(.data)[inst].pl_op;
         const extra = self.air.extraData(Air.Call, pl_op.payload);
-        const args = @bitCast([]const Air.Inst.Ref, self.air.extra[extra.end..][0..extra.data.args_len]);
+        const args = @ptrCast([]const Air.Inst.Ref, self.air.extra[extra.end..][0..extra.data.args_len]);
         const callee_ty = self.air.typeOf(pl_op.operand);
         const zig_fn_ty = switch (callee_ty.zigTypeTag()) {
             .Fn => callee_ty,
@@ -3681,24 +3698,45 @@ pub const FuncGen = struct {
             break :blk ret_ptr;
         };
 
-        if (fn_info.is_var_args) {
-            for (args) |arg| {
-                try llvm_args.append(try self.resolveInst(arg));
-            }
-        } else {
-            for (args) |arg, i| {
-                const param_ty = fn_info.param_types[i];
-                if (!param_ty.hasRuntimeBitsIgnoreComptime()) continue;
+        for (args) |arg| {
+            const param_ty = self.air.typeOf(arg);
+            if (!param_ty.hasRuntimeBitsIgnoreComptime()) continue;
 
-                try llvm_args.append(try self.resolveInst(arg));
+            const llvm_arg = try self.resolveInst(arg);
+            const abi_llvm_ty = try lowerFnParamTy(self.dg, fn_info.cc, param_ty);
+            const param_llvm_ty = llvm_arg.typeOf();
+            if (abi_llvm_ty == param_llvm_ty) {
+                try llvm_args.append(llvm_arg);
+                continue;
             }
+
+            // In this case the function param type is honoring the calling convention
+            // by having a different LLVM type than the usual one. We solve this here
+            // at the callsite by bitcasting a pointer to our canonical type, then
+            // loading it if necessary.
+            const alignment = param_ty.abiAlignment(target);
+            const ptr_abi_ty = abi_llvm_ty.pointerType(0);
+
+            const casted_ptr = if (isByRef(param_ty))
+                self.builder.buildBitCast(llvm_arg, ptr_abi_ty, "")
+            else p: {
+                const arg_ptr = self.buildAlloca(param_llvm_ty);
+                arg_ptr.setAlignment(alignment);
+                const store_inst = self.builder.buildStore(llvm_arg, arg_ptr);
+                store_inst.setAlignment(alignment);
+                break :p self.builder.buildBitCast(arg_ptr, ptr_abi_ty, "");
+            };
+
+            const load_inst = self.builder.buildLoad(casted_ptr, "");
+            load_inst.setAlignment(alignment);
+            try llvm_args.append(load_inst);
         }
 
         const call = self.builder.buildCall(
             llvm_fn,
             llvm_args.items.ptr,
             @intCast(c_uint, llvm_args.items.len),
-            toLlvmCallConv(zig_fn_ty.fnCallingConvention(), target),
+            toLlvmCallConv(fn_info.cc, target),
             attr,
             "",
         );
@@ -3712,8 +3750,9 @@ pub const FuncGen = struct {
             return null;
         }
 
+        const llvm_ret_ty = try self.dg.llvmType(return_type);
+
         if (ret_ptr) |rp| {
-            const llvm_ret_ty = try self.dg.llvmType(return_type);
             call.setCallSret(llvm_ret_ty);
             if (isByRef(return_type)) {
                 return rp;
@@ -3725,10 +3764,31 @@ pub const FuncGen = struct {
             }
         }
 
+        const abi_ret_ty = try lowerFnRetTy(self.dg, fn_info);
+
+        if (abi_ret_ty != llvm_ret_ty) {
+            // In this case the function return type is honoring the calling convention by having
+            // a different LLVM type than the usual one. We solve this here at the callsite
+            // by bitcasting a pointer to our canonical type, then loading it if necessary.
+            const rp = self.buildAlloca(llvm_ret_ty);
+            const alignment = return_type.abiAlignment(target);
+            rp.setAlignment(alignment);
+            const ptr_abi_ty = abi_ret_ty.pointerType(0);
+            const casted_ptr = self.builder.buildBitCast(rp, ptr_abi_ty, "");
+            const store_inst = self.builder.buildStore(call, casted_ptr);
+            store_inst.setAlignment(alignment);
+            if (isByRef(return_type)) {
+                return rp;
+            } else {
+                const load_inst = self.builder.buildLoad(rp, "");
+                load_inst.setAlignment(alignment);
+                return load_inst;
+            }
+        }
+
         if (isByRef(return_type)) {
             // our by-ref status disagrees with sret so we must allocate, store,
             // and return the allocation pointer.
-            const llvm_ret_ty = try self.dg.llvmType(return_type);
             const rp = self.buildAlloca(llvm_ret_ty);
             const alignment = return_type.abiAlignment(target);
             rp.setAlignment(alignment);
@@ -3758,8 +3818,26 @@ pub const FuncGen = struct {
             _ = self.builder.buildRetVoid();
             return null;
         }
+        const fn_info = self.dg.decl.ty.fnInfo();
+        const abi_ret_ty = try lowerFnRetTy(self.dg, fn_info);
         const operand = try self.resolveInst(un_op);
-        _ = self.builder.buildRet(operand);
+        const llvm_ret_ty = operand.typeOf();
+        if (abi_ret_ty == llvm_ret_ty) {
+            _ = self.builder.buildRet(operand);
+            return null;
+        }
+
+        const target = self.dg.module.getTarget();
+        const alignment = ret_ty.abiAlignment(target);
+        const ptr_abi_ty = abi_ret_ty.pointerType(0);
+        const rp = self.buildAlloca(llvm_ret_ty);
+        rp.setAlignment(alignment);
+        const store_inst = self.builder.buildStore(operand, rp);
+        store_inst.setAlignment(alignment);
+        const casted_ptr = self.builder.buildBitCast(rp, ptr_abi_ty, "");
+        const load_inst = self.builder.buildLoad(casted_ptr, "");
+        load_inst.setAlignment(alignment);
+        _ = self.builder.buildRet(load_inst);
         return null;
     }
 
@@ -3771,9 +3849,16 @@ pub const FuncGen = struct {
             _ = self.builder.buildRetVoid();
             return null;
         }
-        const target = self.dg.module.getTarget();
         const ptr = try self.resolveInst(un_op);
-        const loaded = self.builder.buildLoad(ptr, "");
+        const target = self.dg.module.getTarget();
+        const fn_info = self.dg.decl.ty.fnInfo();
+        const abi_ret_ty = try lowerFnRetTy(self.dg, fn_info);
+        const llvm_ret_ty = try self.dg.llvmType(ret_ty);
+        const casted_ptr = if (abi_ret_ty == llvm_ret_ty) ptr else p: {
+            const ptr_abi_ty = abi_ret_ty.pointerType(0);
+            break :p self.builder.buildBitCast(ptr, ptr_abi_ty, "");
+        };
+        const loaded = self.builder.buildLoad(casted_ptr, "");
         loaded.setAlignment(ret_ty.abiAlignment(target));
         _ = self.builder.buildRet(loaded);
         return null;
@@ -4037,7 +4122,7 @@ pub const FuncGen = struct {
 
         while (case_i < switch_br.data.cases_len) : (case_i += 1) {
             const case = self.air.extraData(Air.SwitchBr.Case, extra_index);
-            const items = @bitCast([]const Air.Inst.Ref, self.air.extra[case.end..][0..case.data.items_len]);
+            const items = @ptrCast([]const Air.Inst.Ref, self.air.extra[case.end..][0..case.data.items_len]);
             const case_body = self.air.extra[case.end + items.len ..][0..case.data.body_len];
             extra_index = case.end + case.data.items_len + case_body.len;
 
@@ -4400,7 +4485,8 @@ pub const FuncGen = struct {
         const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
 
         const func = self.air.values[ty_pl.payload].castTag(.function).?.data;
-        const decl = func.owner_decl;
+        const decl_index = func.owner_decl;
+        const decl = self.dg.module.declPtr(decl_index);
         const di_file = try self.dg.object.getDIFile(self.gpa, decl.src_namespace.file_scope);
         self.di_file = di_file;
         const line_number = decl.src_line + 1;
@@ -4412,10 +4498,10 @@ pub const FuncGen = struct {
             .base_line = self.base_line,
         });
 
-        const fqn = try decl.getFullyQualifiedName(self.gpa);
+        const fqn = try decl.getFullyQualifiedName(self.dg.module);
         defer self.gpa.free(fqn);
 
-        const is_internal_linkage = !self.dg.module.decl_exports.contains(decl);
+        const is_internal_linkage = !self.dg.module.decl_exports.contains(decl_index);
         const subprogram = dib.createFunction(
             di_file.toScope(),
             decl.name,
@@ -4442,7 +4528,8 @@ pub const FuncGen = struct {
         const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
 
         const func = self.air.values[ty_pl.payload].castTag(.function).?.data;
-        const decl = func.owner_decl;
+        const mod = self.dg.module;
+        const decl = mod.declPtr(func.owner_decl);
         const di_file = try self.dg.object.getDIFile(self.gpa, decl.src_namespace.file_scope);
         self.di_file = di_file;
         const old = self.dbg_inlined.pop();
@@ -4538,9 +4625,9 @@ pub const FuncGen = struct {
 
         if (!is_volatile and self.liveness.isUnused(inst)) return null;
 
-        const outputs = @bitCast([]const Air.Inst.Ref, self.air.extra[extra_i..][0..extra.data.outputs_len]);
+        const outputs = @ptrCast([]const Air.Inst.Ref, self.air.extra[extra_i..][0..extra.data.outputs_len]);
         extra_i += outputs.len;
-        const inputs = @bitCast([]const Air.Inst.Ref, self.air.extra[extra_i..][0..extra.data.inputs_len]);
+        const inputs = @ptrCast([]const Air.Inst.Ref, self.air.extra[extra_i..][0..extra.data.inputs_len]);
         extra_i += inputs.len;
 
         if (outputs.len > 1) {
@@ -4637,6 +4724,7 @@ pub const FuncGen = struct {
             switch (state) {
                 .start => switch (byte) {
                     '%' => state = .percent,
+                    '$' => try rendered_template.appendSlice("$$"),
                     else => try rendered_template.append(byte),
                 },
                 .percent => switch (byte) {
@@ -4731,10 +4819,11 @@ pub const FuncGen = struct {
         var buf: Type.Payload.ElemType = undefined;
         const payload_ty = optional_ty.optionalChild(&buf);
         if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
+            const loaded = if (operand_is_ptr) self.builder.buildLoad(operand, "") else operand;
             if (invert) {
-                return self.builder.buildNot(operand, "");
+                return self.builder.buildNot(loaded, "");
             } else {
-                return operand;
+                return loaded;
             }
         }
 
@@ -4783,12 +4872,16 @@ pub const FuncGen = struct {
         const ty_op = self.air.instructions.items(.data)[inst].ty_op;
         const operand = try self.resolveInst(ty_op.operand);
         const optional_ty = self.air.typeOf(ty_op.operand).childType();
+        const result_ty = self.air.getRefType(ty_op.ty);
         var buf: Type.Payload.ElemType = undefined;
         const payload_ty = optional_ty.optionalChild(&buf);
         if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
             // We have a pointer to a zero-bit value and we need to return
             // a pointer to a zero-bit value.
-            return operand;
+
+            // TODO once we update to LLVM 14 this bitcast won't be necessary.
+            const res_ptr_ty = try self.dg.llvmType(result_ty);
+            return self.builder.buildBitCast(operand, res_ptr_ty, "");
         }
         if (optional_ty.isPtrLikeOptional()) {
             // The payload and the optional are the same value.
@@ -4806,13 +4899,17 @@ pub const FuncGen = struct {
         const ty_op = self.air.instructions.items(.data)[inst].ty_op;
         const operand = try self.resolveInst(ty_op.operand);
         const optional_ty = self.air.typeOf(ty_op.operand).childType();
+        const result_ty = self.air.getRefType(ty_op.ty);
         var buf: Type.Payload.ElemType = undefined;
         const payload_ty = optional_ty.optionalChild(&buf);
         const non_null_bit = self.context.intType(1).constAllOnes();
         if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
             // We have a pointer to a i1. We need to set it to 1 and then return the same pointer.
             _ = self.builder.buildStore(non_null_bit, operand);
-            return operand;
+
+            // TODO once we update to LLVM 14 this bitcast won't be necessary.
+            const res_ptr_ty = try self.dg.llvmType(result_ty);
+            return self.builder.buildBitCast(operand, res_ptr_ty, "");
         }
         if (optional_ty.isPtrLikeOptional()) {
             // The payload and the optional are the same value.
@@ -4871,7 +4968,13 @@ pub const FuncGen = struct {
         const target = self.dg.module.getTarget();
         const offset: u8 = if (payload_ty.abiAlignment(target) > Type.anyerror.abiSize(target)) 2 else 1;
 
-        if (!payload_ty.hasRuntimeBitsIgnoreComptime()) return null;
+        if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
+            if (!operand_is_ptr) return null;
+
+            // TODO once we update to LLVM 14 this bitcast won't be necessary.
+            const res_ptr_ty = try self.dg.llvmType(result_ty);
+            return self.builder.buildBitCast(operand, res_ptr_ty, "");
+        }
         if (operand_is_ptr or isByRef(payload_ty)) {
             return self.builder.buildStructGEP(operand, offset, "");
         }
@@ -5866,7 +5969,7 @@ pub const FuncGen = struct {
         if (self.dg.object.di_builder) |dib| {
             const src_index = self.getSrcArgIndex(self.arg_index - 1);
             const func = self.dg.decl.getFunction().?;
-            const lbrace_line = func.owner_decl.src_line + func.lbrace_line + 1;
+            const lbrace_line = self.dg.module.declPtr(func.owner_decl).src_line + func.lbrace_line + 1;
             const lbrace_col = func.lbrace_column + 1;
             const di_local_var = dib.createParameterVariable(
                 self.di_scope.?,
@@ -6409,8 +6512,9 @@ pub const FuncGen = struct {
         const operand = try self.resolveInst(un_op);
         const enum_ty = self.air.typeOf(un_op);
 
+        const mod = self.dg.module;
         const llvm_fn_name = try std.fmt.allocPrintZ(arena, "__zig_tag_name_{s}", .{
-            try enum_ty.getOwnerDecl().getFullyQualifiedName(arena),
+            try mod.declPtr(enum_ty.getOwnerDecl()).getFullyQualifiedName(mod),
         });
 
         const llvm_fn = try self.getEnumTagNameFunction(enum_ty, llvm_fn_name);
@@ -6596,7 +6700,7 @@ pub const FuncGen = struct {
 
         for (values) |*val, i| {
             var buf: Value.ElemValueBuffer = undefined;
-            const elem = mask.elemValueBuffer(i, &buf);
+            const elem = mask.elemValueBuffer(self.dg.module, i, &buf);
             if (elem.isUndef()) {
                 val.* = llvm_i32.getUndef();
             } else {
@@ -6660,7 +6764,7 @@ pub const FuncGen = struct {
         const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
         const result_ty = self.air.typeOfIndex(inst);
         const len = @intCast(usize, result_ty.arrayLen());
-        const elements = @bitCast([]const Air.Inst.Ref, self.air.extra[ty_pl.payload..][0..len]);
+        const elements = @ptrCast([]const Air.Inst.Ref, self.air.extra[ty_pl.payload..][0..len]);
         const llvm_result_ty = try self.dg.llvmType(result_ty);
         const target = self.dg.module.getTarget();
 
@@ -7204,7 +7308,7 @@ pub const FuncGen = struct {
         return self.builder.buildInBoundsGEP(base_ptr, &indices, indices.len, "");
     }
 
-    fn getIntrinsic(self: *FuncGen, name: []const u8, types: []*const llvm.Type) *const llvm.Value {
+    fn getIntrinsic(self: *FuncGen, name: []const u8, types: []const *const llvm.Type) *const llvm.Value {
         const id = llvm.lookupIntrinsicID(name.ptr, name.len);
         assert(id != 0);
         return self.llvmModule().getIntrinsicDeclaration(id, types.ptr, types.len);
@@ -7669,20 +7773,211 @@ fn llvmFieldIndex(
         return null;
     }
 }
+
 fn firstParamSRet(fn_info: Type.Payload.Function.Data, target: std.Target) bool {
     switch (fn_info.cc) {
         .Unspecified, .Inline => return isByRef(fn_info.return_type),
-        .C => {},
+        .C => switch (target.cpu.arch) {
+            .mips, .mipsel => return false,
+            .x86_64 => switch (target.os.tag) {
+                .windows => return x86_64_abi.classifyWindows(fn_info.return_type, target) == .memory,
+                else => return x86_64_abi.classifySystemV(fn_info.return_type, target)[0] == .memory,
+            },
+            else => return false, // TODO investigate C ABI for other architectures
+        },
         else => return false,
     }
-    const x86_64_abi = @import("../arch/x86_64/abi.zig");
-    switch (target.cpu.arch) {
-        .mips, .mipsel => return false,
-        .x86_64 => switch (target.os.tag) {
-            .windows => return x86_64_abi.classifyWindows(fn_info.return_type, target) == .memory,
-            else => return x86_64_abi.classifySystemV(fn_info.return_type, target)[0] == .memory,
+}
+
+/// In order to support the C calling convention, some return types need to be lowered
+/// completely differently in the function prototype to honor the C ABI, and then
+/// be effectively bitcasted to the actual return type.
+fn lowerFnRetTy(dg: *DeclGen, fn_info: Type.Payload.Function.Data) !*const llvm.Type {
+    if (!fn_info.return_type.hasRuntimeBitsIgnoreComptime()) {
+        return dg.context.voidType();
+    }
+    const target = dg.module.getTarget();
+    switch (fn_info.cc) {
+        .Unspecified, .Inline => {
+            if (isByRef(fn_info.return_type)) {
+                return dg.context.voidType();
+            } else {
+                return dg.llvmType(fn_info.return_type);
+            }
         },
-        else => return false, // TODO investigate C ABI for other architectures
+        .C => {
+            const is_scalar = switch (fn_info.return_type.zigTypeTag()) {
+                .Void,
+                .Bool,
+                .NoReturn,
+                .Int,
+                .Float,
+                .Pointer,
+                .Optional,
+                .ErrorSet,
+                .Enum,
+                .AnyFrame,
+                .Vector,
+                => true,
+
+                else => false,
+            };
+            switch (target.cpu.arch) {
+                .mips, .mipsel => return dg.llvmType(fn_info.return_type),
+                .x86_64 => switch (target.os.tag) {
+                    .windows => switch (x86_64_abi.classifyWindows(fn_info.return_type, target)) {
+                        .integer => {
+                            if (is_scalar) {
+                                return dg.llvmType(fn_info.return_type);
+                            } else {
+                                const abi_size = fn_info.return_type.abiSize(target);
+                                return dg.context.intType(@intCast(c_uint, abi_size * 8));
+                            }
+                        },
+                        .memory => return dg.context.voidType(),
+                        .sse => return dg.llvmType(fn_info.return_type),
+                        else => unreachable,
+                    },
+                    else => {
+                        if (is_scalar) {
+                            return dg.llvmType(fn_info.return_type);
+                        }
+                        const classes = x86_64_abi.classifySystemV(fn_info.return_type, target);
+                        if (classes[0] == .memory) {
+                            return dg.context.voidType();
+                        }
+                        var llvm_types_buffer: [8]*const llvm.Type = undefined;
+                        var llvm_types_index: u32 = 0;
+                        for (classes) |class| {
+                            switch (class) {
+                                .integer => {
+                                    llvm_types_buffer[llvm_types_index] = dg.context.intType(64);
+                                    llvm_types_index += 1;
+                                },
+                                .sse => {
+                                    @panic("TODO");
+                                },
+                                .sseup => {
+                                    @panic("TODO");
+                                },
+                                .x87 => {
+                                    @panic("TODO");
+                                },
+                                .x87up => {
+                                    @panic("TODO");
+                                },
+                                .complex_x87 => {
+                                    @panic("TODO");
+                                },
+                                .memory => unreachable, // handled above
+                                .none => break,
+                            }
+                        }
+                        if (classes[0] == .integer and classes[1] == .none) {
+                            return llvm_types_buffer[0];
+                        }
+                        return dg.context.structType(&llvm_types_buffer, llvm_types_index, .False);
+                    },
+                },
+                // TODO investigate C ABI for other architectures
+                else => return dg.llvmType(fn_info.return_type),
+            }
+        },
+        else => return dg.llvmType(fn_info.return_type),
+    }
+}
+
+fn lowerFnParamTy(dg: *DeclGen, cc: std.builtin.CallingConvention, ty: Type) !*const llvm.Type {
+    assert(ty.hasRuntimeBitsIgnoreComptime());
+    const target = dg.module.getTarget();
+    switch (cc) {
+        .Unspecified, .Inline => {
+            const raw_llvm_ty = try dg.llvmType(ty);
+            if (isByRef(ty)) {
+                return raw_llvm_ty.pointerType(0);
+            } else {
+                return raw_llvm_ty;
+            }
+        },
+        .C => {
+            const is_scalar = switch (ty.zigTypeTag()) {
+                .Void,
+                .Bool,
+                .NoReturn,
+                .Int,
+                .Float,
+                .Pointer,
+                .Optional,
+                .ErrorSet,
+                .Enum,
+                .AnyFrame,
+                .Vector,
+                => true,
+
+                else => false,
+            };
+            switch (target.cpu.arch) {
+                .mips, .mipsel => return dg.llvmType(ty),
+                .x86_64 => switch (target.os.tag) {
+                    .windows => switch (x86_64_abi.classifyWindows(ty, target)) {
+                        .integer => {
+                            if (is_scalar) {
+                                return dg.llvmType(ty);
+                            } else {
+                                const abi_size = ty.abiSize(target);
+                                return dg.context.intType(@intCast(c_uint, abi_size * 8));
+                            }
+                        },
+                        .memory => return (try dg.llvmType(ty)).pointerType(0),
+                        .sse => return dg.llvmType(ty),
+                        else => unreachable,
+                    },
+                    else => {
+                        if (is_scalar) {
+                            return dg.llvmType(ty);
+                        }
+                        const classes = x86_64_abi.classifySystemV(ty, target);
+                        if (classes[0] == .memory) {
+                            return (try dg.llvmType(ty)).pointerType(0);
+                        }
+                        var llvm_types_buffer: [8]*const llvm.Type = undefined;
+                        var llvm_types_index: u32 = 0;
+                        for (classes) |class| {
+                            switch (class) {
+                                .integer => {
+                                    llvm_types_buffer[llvm_types_index] = dg.context.intType(64);
+                                    llvm_types_index += 1;
+                                },
+                                .sse => {
+                                    @panic("TODO");
+                                },
+                                .sseup => {
+                                    @panic("TODO");
+                                },
+                                .x87 => {
+                                    @panic("TODO");
+                                },
+                                .x87up => {
+                                    @panic("TODO");
+                                },
+                                .complex_x87 => {
+                                    @panic("TODO");
+                                },
+                                .memory => unreachable, // handled above
+                                .none => break,
+                            }
+                        }
+                        if (classes[0] == .integer and classes[1] == .none) {
+                            return llvm_types_buffer[0];
+                        }
+                        return dg.context.structType(&llvm_types_buffer, llvm_types_index, .False);
+                    },
+                },
+                // TODO investigate C ABI for other architectures
+                else => return dg.llvmType(ty),
+            }
+        },
+        else => return dg.llvmType(ty),
     }
 }
 

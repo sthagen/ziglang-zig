@@ -1308,9 +1308,9 @@ pub const Dir = struct {
                     if (end_index == sub_path.len) return;
                 },
                 error.FileNotFound => {
-                    if (end_index == 0) return err;
                     // march end_index backward until next path component
                     while (true) {
+                        if (end_index == 0) return err;
                         end_index -= 1;
                         if (path.isSep(sub_path[end_index])) break;
                     }
@@ -2643,6 +2643,7 @@ pub fn selfExePath(out_buffer: []u8) SelfExePathError![]u8 {
             const end_index = std.unicode.utf16leToUtf8(out_buffer, utf16le_slice) catch unreachable;
             return out_buffer[0..end_index];
         },
+        .wasi => @compileError("std.fs.selfExePath not supported for WASI. Use std.fs.selfExePathAlloc instead."),
         else => @compileError("std.fs.selfExePath not supported for this target"),
     }
 }

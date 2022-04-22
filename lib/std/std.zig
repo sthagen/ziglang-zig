@@ -29,6 +29,7 @@ pub const PackedIntSliceEndian = @import("packed_int_array.zig").PackedIntSliceE
 pub const PriorityQueue = @import("priority_queue.zig").PriorityQueue;
 pub const PriorityDequeue = @import("priority_dequeue.zig").PriorityDequeue;
 pub const Progress = @import("Progress.zig");
+pub const SegmentedList = @import("segmented_list.zig").SegmentedList;
 pub const SemanticVersion = @import("SemanticVersion.zig");
 pub const SinglyLinkedList = @import("linked_list.zig").SinglyLinkedList;
 pub const StaticBitSet = bit_set.StaticBitSet;
@@ -39,6 +40,7 @@ pub const StringArrayHashMapUnmanaged = array_hash_map.StringArrayHashMapUnmanag
 pub const TailQueue = @import("linked_list.zig").TailQueue;
 pub const Target = @import("target.zig").Target;
 pub const Thread = @import("Thread.zig");
+pub const Treap = @import("treap.zig").Treap;
 pub const Tz = @import("tz.zig").Tz;
 
 pub const array_hash_map = @import("array_hash_map.zig");

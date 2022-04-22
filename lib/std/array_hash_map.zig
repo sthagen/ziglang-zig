@@ -66,11 +66,11 @@ pub fn hashString(s: []const u8) u32 {
 /// the alternative `std.HashMap`.
 /// Context must be a struct type with two member functions:
 ///   hash(self, K) u32
-///   eql(self, K, K) bool
+///   eql(self, K, K, usize) bool
 /// Adapted variants of many functions are provided.  These variants
 /// take a pseudo key instead of a key.  Their context must have the functions:
 ///   hash(self, PseudoKey) u32
-///   eql(self, PseudoKey, K) bool
+///   eql(self, PseudoKey, K, usize) bool
 pub fn ArrayHashMap(
     comptime K: type,
     comptime V: type,
@@ -185,7 +185,7 @@ pub fn ArrayHashMap(
             return self.unmanaged.getOrPutContext(self.allocator, key, self.ctx);
         }
         pub fn getOrPutAdapted(self: *Self, key: anytype, ctx: anytype) !GetOrPutResult {
-            return self.unmanaged.getOrPutContextAdapted(key, ctx, self.ctx);
+            return self.unmanaged.getOrPutContextAdapted(self.allocator, key, ctx, self.ctx);
         }
 
         /// If there is an existing item with `key`, then the result
@@ -798,7 +798,7 @@ pub fn ArrayHashMapUnmanaged(
             allocator: Allocator,
             additional_capacity: usize,
         ) !void {
-            if (@sizeOf(ByIndexContext) != 0)
+            if (@sizeOf(Context) != 0)
                 @compileError("Cannot infer context " ++ @typeName(Context) ++ ", call ensureTotalCapacityContext instead.");
             return self.ensureUnusedCapacityContext(allocator, additional_capacity, undefined);
         }

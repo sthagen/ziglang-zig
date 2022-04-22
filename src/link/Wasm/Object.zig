@@ -133,6 +133,9 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     gpa.free(self.memories);
     gpa.free(self.globals);
     gpa.free(self.exports);
+    for (self.elements) |el| {
+        gpa.free(el.func_indexes);
+    }
     gpa.free(self.elements);
     gpa.free(self.features);
     for (self.relocations.values()) |val| {
@@ -309,7 +312,8 @@ fn Parser(comptime ReaderType: type) type {
             var section_index: u32 = 0;
             while (self.reader.reader().readByte()) |byte| : (section_index += 1) {
                 const len = try readLeb(u32, self.reader.reader());
-                const reader = std.io.limitedReader(self.reader.reader(), len).reader();
+                var limited_reader = std.io.limitedReader(self.reader.reader(), len);
+                const reader = limited_reader.reader();
                 switch (@intToEnum(std.wasm.Section, byte)) {
                     .custom => {
                         const name_len = try readLeb(u32, reader);
@@ -848,15 +852,12 @@ pub fn parseIntoAtoms(self: *Object, gpa: Allocator, object_index: u16, wasm_bin
                 reloc.offset -= relocatable_data.offset;
                 try atom.relocs.append(gpa, reloc);
 
-                // TODO: Automatically append the target symbol to the indirect
-                // function table when the relocation is a table index.
-                //
-                // if (relocation.isTableIndex()) {
-                //     try wasm_bin.elements.appendSymbol(gpa, .{
-                //         .file = object_index,
-                //         .sym_index = relocation.index,
-                //     });
-                // }
+                if (relocation.isTableIndex()) {
+                    try wasm_bin.function_table.putNoClobber(gpa, .{
+                        .file = object_index,
+                        .index = relocation.index,
+                    }, 0);
+                }
             }
         }
 
@@ -865,11 +866,6 @@ pub fn parseIntoAtoms(self: *Object, gpa: Allocator, object_index: u16, wasm_bin
 
         const segment: *Wasm.Segment = &wasm_bin.segments.items[final_index];
         segment.alignment = std.math.max(segment.alignment, atom.alignment);
-        segment.size = std.mem.alignForwardGeneric(
-            u32,
-            std.mem.alignForwardGeneric(u32, segment.size, atom.alignment) + atom.size,
-            segment.alignment,
-        );
 
         if (wasm_bin.atoms.getPtr(final_index)) |last| {
             last.*.next = atom;

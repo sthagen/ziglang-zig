@@ -49,6 +49,7 @@ gpa: Allocator,
 air: Air,
 liveness: Liveness,
 bin_file: *link.File,
+debug_output: DebugInfoOutput,
 target: *const std.Target,
 mod_fn: *const Module.Fn,
 err_msg: ?*ErrorMsg,
@@ -72,6 +73,12 @@ end_di_column: u32,
 /// To perform the reloc, write 32-bit signed little-endian integer
 /// which is a relative jump, based on the address following the reloc.
 exitlude_jump_relocs: std.ArrayListUnmanaged(usize) = .{},
+
+/// For every argument, we postpone the creation of debug info for
+/// later after all Mir instructions have been generated. Only then we
+/// will know saved_regs_stack_space which is necessary in order to
+/// address parameters passed on the stack.
+dbg_arg_relocs: std.ArrayListUnmanaged(DbgArgReloc) = .{},
 
 /// Whenever there is a runtime branch, we push a Branch onto this stack,
 /// and pop it off when the runtime branch joins. This provides an "overlay"
@@ -244,6 +251,11 @@ const BigTomb = struct {
     }
 };
 
+const DbgArgReloc = struct {
+    inst: Air.Inst.Index,
+    index: u32,
+};
+
 const Self = @This();
 
 pub fn generate(
@@ -259,8 +271,10 @@ pub fn generate(
         @panic("Attempted to compile for architecture that was disabled by build configuration");
     }
 
-    assert(module_fn.owner_decl.has_tv);
-    const fn_type = module_fn.owner_decl.ty;
+    const mod = bin_file.options.module.?;
+    const fn_owner_decl = mod.declPtr(module_fn.owner_decl);
+    assert(fn_owner_decl.has_tv);
+    const fn_type = fn_owner_decl.ty;
 
     var branch_stack = std.ArrayList(Branch).init(bin_file.allocator);
     defer {
@@ -276,6 +290,7 @@ pub fn generate(
         .liveness = liveness,
         .target = &bin_file.options.target,
         .bin_file = bin_file,
+        .debug_output = debug_output,
         .mod_fn = module_fn,
         .err_msg = null,
         .args = undefined, // populated after `resolveCallingConventionValues`
@@ -291,6 +306,7 @@ pub fn generate(
     defer function.stack.deinit(bin_file.allocator);
     defer function.blocks.deinit(bin_file.allocator);
     defer function.exitlude_jump_relocs.deinit(bin_file.allocator);
+    defer function.dbg_arg_relocs.deinit(bin_file.allocator);
 
     var call_info = function.resolveCallingConventionValues(fn_type) catch |err| switch (err) {
         error.CodegenFail => return FnResult{ .fail = function.err_msg.? },
@@ -314,6 +330,10 @@ pub fn generate(
         else => |e| return e,
     };
 
+    for (function.dbg_arg_relocs.items) |reloc| {
+        try function.genArgDbgInfo(reloc.inst, reloc.index, call_info.stack_byte_count);
+    }
+
     var mir = Mir{
         .instructions = function.mir_instructions.toOwnedSlice(),
         .extra = function.mir_extra.toOwnedSlice(bin_file.allocator),
@@ -323,7 +343,6 @@ pub fn generate(
     var emit = Emit{
         .mir = mir,
         .bin_file = bin_file,
-        .function = &function,
         .debug_output = debug_output,
         .target = &bin_file.options.target,
         .src_loc = src_loc,
@@ -821,9 +840,9 @@ fn allocMemPtr(self: *Self, inst: Air.Inst.Index) !u32 {
         return @as(u32, 0);
     }
 
-    const target = self.target.*;
     const abi_size = math.cast(u32, elem_ty.abiSize(self.target.*)) catch {
-        return self.fail("type '{}' too big to fit into stack frame", .{elem_ty.fmt(target)});
+        const mod = self.bin_file.options.module.?;
+        return self.fail("type '{}' too big to fit into stack frame", .{elem_ty.fmt(mod)});
     };
     // TODO swap this for inst.ty.ptrAlign
     const abi_align = elem_ty.abiAlignment(self.target.*);
@@ -832,9 +851,9 @@ fn allocMemPtr(self: *Self, inst: Air.Inst.Index) !u32 {
 
 fn allocRegOrMem(self: *Self, inst: Air.Inst.Index, reg_ok: bool) !MCValue {
     const elem_ty = self.air.typeOfIndex(inst);
-    const target = self.target.*;
     const abi_size = math.cast(u32, elem_ty.abiSize(self.target.*)) catch {
-        return self.fail("type '{}' too big to fit into stack frame", .{elem_ty.fmt(target)});
+        const mod = self.bin_file.options.module.?;
+        return self.fail("type '{}' too big to fit into stack frame", .{elem_ty.fmt(mod)});
     };
     const abi_align = elem_ty.abiAlignment(self.target.*);
     if (abi_align > self.stack_align)
@@ -1187,7 +1206,8 @@ fn minMax(
         .Float => return self.fail("TODO ARM min/max on floats", .{}),
         .Vector => return self.fail("TODO ARM min/max on vectors", .{}),
         .Int => {
-            assert(lhs_ty.eql(rhs_ty, self.target.*));
+            const mod = self.bin_file.options.module.?;
+            assert(lhs_ty.eql(rhs_ty, mod));
             const int_info = lhs_ty.intInfo(self.target.*);
             if (int_info.bits <= 32) {
                 const lhs_is_register = lhs == .register;
@@ -1355,7 +1375,8 @@ fn airOverflow(self: *Self, inst: Air.Inst.Index) !void {
         switch (lhs_ty.zigTypeTag()) {
             .Vector => return self.fail("TODO implement add_with_overflow/sub_with_overflow for vectors", .{}),
             .Int => {
-                assert(lhs_ty.eql(rhs_ty, self.target.*));
+                const mod = self.bin_file.options.module.?;
+                assert(lhs_ty.eql(rhs_ty, mod));
                 const int_info = lhs_ty.intInfo(self.target.*);
                 if (int_info.bits < 32) {
                     const stack_offset = try self.allocMem(inst, tuple_size, tuple_align);
@@ -1455,7 +1476,8 @@ fn airMulWithOverflow(self: *Self, inst: Air.Inst.Index) !void {
         switch (lhs_ty.zigTypeTag()) {
             .Vector => return self.fail("TODO implement mul_with_overflow for vectors", .{}),
             .Int => {
-                assert(lhs_ty.eql(rhs_ty, self.target.*));
+                const mod = self.bin_file.options.module.?;
+                assert(lhs_ty.eql(rhs_ty, mod));
                 const int_info = lhs_ty.intInfo(self.target.*);
                 if (int_info.bits <= 16) {
                     const stack_offset = try self.allocMem(inst, tuple_size, tuple_align);
@@ -2665,7 +2687,6 @@ fn binOp(
     lhs_ty: Type,
     rhs_ty: Type,
 ) InnerError!MCValue {
-    const target = self.target.*;
     switch (tag) {
         .add,
         .sub,
@@ -2675,7 +2696,8 @@ fn binOp(
                 .Float => return self.fail("TODO ARM binary operations on floats", .{}),
                 .Vector => return self.fail("TODO ARM binary operations on vectors", .{}),
                 .Int => {
-                    assert(lhs_ty.eql(rhs_ty, target));
+                    const mod = self.bin_file.options.module.?;
+                    assert(lhs_ty.eql(rhs_ty, mod));
                     const int_info = lhs_ty.intInfo(self.target.*);
                     if (int_info.bits <= 32) {
                         // Only say yes if the operation is
@@ -2723,7 +2745,8 @@ fn binOp(
                 .Float => return self.fail("TODO ARM binary operations on floats", .{}),
                 .Vector => return self.fail("TODO ARM binary operations on vectors", .{}),
                 .Int => {
-                    assert(lhs_ty.eql(rhs_ty, target));
+                    const mod = self.bin_file.options.module.?;
+                    assert(lhs_ty.eql(rhs_ty, mod));
                     const int_info = lhs_ty.intInfo(self.target.*);
                     if (int_info.bits <= 32) {
                         // TODO add optimisations for multiplication
@@ -2777,7 +2800,8 @@ fn binOp(
             switch (lhs_ty.zigTypeTag()) {
                 .Vector => return self.fail("TODO ARM binary operations on vectors", .{}),
                 .Int => {
-                    assert(lhs_ty.eql(rhs_ty, target));
+                    const mod = self.bin_file.options.module.?;
+                    assert(lhs_ty.eql(rhs_ty, mod));
                     const int_info = lhs_ty.intInfo(self.target.*);
                     if (int_info.bits <= 32) {
                         const lhs_immediate_ok = lhs == .immediate and Instruction.Operand.fromU32(lhs.immediate) != null;
@@ -3074,6 +3098,92 @@ fn genInlineMemcpy(
     // end:
 }
 
+/// Adds a Type to the .debug_info at the current position. The bytes will be populated later,
+/// after codegen for this symbol is done.
+fn addDbgInfoTypeReloc(self: *Self, ty: Type) error{OutOfMemory}!void {
+    switch (self.debug_output) {
+        .dwarf => |dw| {
+            assert(ty.hasRuntimeBits());
+            const dbg_info = &dw.dbg_info;
+            const index = dbg_info.items.len;
+            try dbg_info.resize(index + 4); // DW.AT.type,  DW.FORM.ref4
+            const mod = self.bin_file.options.module.?;
+            const atom = switch (self.bin_file.tag) {
+                .elf => &mod.declPtr(self.mod_fn.owner_decl).link.elf.dbg_info_atom,
+                .macho => unreachable,
+                else => unreachable,
+            };
+            try dw.addTypeReloc(atom, ty, @intCast(u32, index), null);
+        },
+        .plan9 => {},
+        .none => {},
+    }
+}
+
+fn genArgDbgInfo(self: *Self, inst: Air.Inst.Index, arg_index: u32, stack_byte_count: u32) error{OutOfMemory}!void {
+    const prologue_stack_space = stack_byte_count + self.saved_regs_stack_space;
+
+    const mcv = self.args[arg_index];
+    const ty = self.air.instructions.items(.data)[inst].ty;
+    const name = self.mod_fn.getParamName(arg_index);
+    const name_with_null = name.ptr[0 .. name.len + 1];
+
+    switch (mcv) {
+        .register => |reg| {
+            switch (self.debug_output) {
+                .dwarf => |dw| {
+                    const dbg_info = &dw.dbg_info;
+                    try dbg_info.ensureUnusedCapacity(3);
+                    dbg_info.appendAssumeCapacity(@enumToInt(link.File.Dwarf.AbbrevKind.parameter));
+                    dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                        1, // ULEB128 dwarf expression length
+                        reg.dwarfLocOp(),
+                    });
+                    try dbg_info.ensureUnusedCapacity(5 + name_with_null.len);
+                    try self.addDbgInfoTypeReloc(ty); // DW.AT.type,  DW.FORM.ref4
+                    dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT.name, DW.FORM.string
+                },
+                .plan9 => {},
+                .none => {},
+            }
+        },
+        .stack_offset,
+        .stack_argument_offset,
+        => {
+            switch (self.debug_output) {
+                .dwarf => |dw| {
+                    // const abi_size = @intCast(u32, ty.abiSize(self.target.*));
+                    const adjusted_stack_offset = switch (mcv) {
+                        .stack_offset => |offset| -@intCast(i32, offset),
+                        .stack_argument_offset => |offset| @intCast(i32, prologue_stack_space - offset),
+                        else => unreachable,
+                    };
+
+                    const dbg_info = &dw.dbg_info;
+                    try dbg_info.append(@enumToInt(link.File.Dwarf.AbbrevKind.parameter));
+
+                    // Get length of the LEB128 stack offset
+                    var counting_writer = std.io.countingWriter(std.io.null_writer);
+                    leb128.writeILEB128(counting_writer.writer(), adjusted_stack_offset) catch unreachable;
+
+                    // DW.AT.location, DW.FORM.exprloc
+                    // ULEB128 dwarf expression length
+                    try leb128.writeULEB128(dbg_info.writer(), counting_writer.bytes_written + 1);
+                    try dbg_info.append(DW.OP.breg11);
+                    try leb128.writeILEB128(dbg_info.writer(), adjusted_stack_offset);
+
+                    try dbg_info.ensureUnusedCapacity(5 + name_with_null.len);
+                    try self.addDbgInfoTypeReloc(ty); // DW.AT.type,  DW.FORM.ref4
+                    dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT.name, DW.FORM.string
+                },
+                .plan9 => {},
+                .none => {},
+            }
+        },
+        else => unreachable, // not a possible argument
+    }
+}
+
 fn airArg(self: *Self, inst: Air.Inst.Index) !void {
     const arg_index = self.arg_index;
     self.arg_index += 1;
@@ -3094,13 +3204,9 @@ fn airArg(self: *Self, inst: Air.Inst.Index) !void {
         else => result,
     };
 
-    _ = try self.addInst(.{
-        .tag = .dbg_arg,
-        .cond = undefined,
-        .data = .{ .dbg_arg_info = .{
-            .air_inst = inst,
-            .arg_index = arg_index,
-        } },
+    try self.dbg_arg_relocs.append(self.gpa, .{
+        .inst = inst,
+        .index = arg_index,
     });
 
     if (self.liveness.isUnused(inst))
@@ -3144,7 +3250,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallOptions.
     const pl_op = self.air.instructions.items(.data)[inst].pl_op;
     const callee = pl_op.operand;
     const extra = self.air.extraData(Air.Call, pl_op.payload);
-    const args = @bitCast([]const Air.Inst.Ref, self.air.extra[extra.end..][0..extra.data.args_len]);
+    const args = @ptrCast([]const Air.Inst.Ref, self.air.extra[extra.end..][0..extra.data.args_len]);
     const ty = self.air.typeOf(callee);
 
     const fn_ty = switch (ty.zigTypeTag()) {
@@ -3220,11 +3326,13 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallOptions.
                     const func = func_payload.data;
                     const ptr_bits = self.target.cpu.arch.ptrBitWidth();
                     const ptr_bytes: u64 = @divExact(ptr_bits, 8);
+                    const mod = self.bin_file.options.module.?;
+                    const fn_owner_decl = mod.declPtr(func.owner_decl);
                     const got_addr = if (self.bin_file.cast(link.File.Elf)) |elf_file| blk: {
                         const got = &elf_file.program_headers.items[elf_file.phdr_got_index.?];
-                        break :blk @intCast(u32, got.p_vaddr + func.owner_decl.link.elf.offset_table_index * ptr_bytes);
+                        break :blk @intCast(u32, got.p_vaddr + fn_owner_decl.link.elf.offset_table_index * ptr_bytes);
                     } else if (self.bin_file.cast(link.File.Coff)) |coff_file|
-                        coff_file.offset_table_virtual_address + func.owner_decl.link.coff.offset_table_index * ptr_bytes
+                        coff_file.offset_table_virtual_address + fn_owner_decl.link.coff.offset_table_index * ptr_bytes
                     else
                         unreachable;
 
@@ -3650,7 +3758,10 @@ fn airCondBr(self: *Self, inst: Air.Inst.Index) !void {
         // TODO track the new register / stack allocation
     }
 
-    self.branch_stack.pop().deinit(self.gpa);
+    {
+        var item = self.branch_stack.pop();
+        item.deinit(self.gpa);
+    }
 
     // We already took care of pl_op.operand earlier, so we're going
     // to pass .none here
@@ -3951,9 +4062,9 @@ fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
     const is_volatile = @truncate(u1, extra.data.flags >> 31) != 0;
     const clobbers_len = @truncate(u31, extra.data.flags);
     var extra_i: usize = extra.end;
-    const outputs = @bitCast([]const Air.Inst.Ref, self.air.extra[extra_i..][0..extra.data.outputs_len]);
+    const outputs = @ptrCast([]const Air.Inst.Ref, self.air.extra[extra_i..][0..extra.data.outputs_len]);
     extra_i += outputs.len;
-    const inputs = @bitCast([]const Air.Inst.Ref, self.air.extra[extra_i..][0..extra.data.inputs_len]);
+    const inputs = @ptrCast([]const Air.Inst.Ref, self.air.extra[extra_i..][0..extra.data.inputs_len]);
     extra_i += inputs.len;
 
     const dead = !is_volatile and self.liveness.isUnused(inst);
@@ -4735,7 +4846,7 @@ fn airAggregateInit(self: *Self, inst: Air.Inst.Index) !void {
     const vector_ty = self.air.typeOfIndex(inst);
     const len = vector_ty.vectorLen();
     const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
-    const elements = @bitCast([]const Air.Inst.Ref, self.air.extra[ty_pl.payload..][0..len]);
+    const elements = @ptrCast([]const Air.Inst.Ref, self.air.extra[ty_pl.payload..][0..len]);
     const result: MCValue = res: {
         if (self.liveness.isUnused(inst)) break :res MCValue.dead;
         return self.fail("TODO implement airAggregateInit for arm", .{});
@@ -4823,11 +4934,14 @@ fn getResolvedInstValue(self: *Self, inst: Air.Inst.Index) MCValue {
     }
 }
 
-fn lowerDeclRef(self: *Self, tv: TypedValue, decl: *Module.Decl) InnerError!MCValue {
+fn lowerDeclRef(self: *Self, tv: TypedValue, decl_index: Module.Decl.Index) InnerError!MCValue {
     const ptr_bits = self.target.cpu.arch.ptrBitWidth();
     const ptr_bytes: u64 = @divExact(ptr_bits, 8);
 
-    decl.alive = true;
+    const mod = self.bin_file.options.module.?;
+    const decl = mod.declPtr(decl_index);
+    mod.markDeclAlive(decl);
+
     if (self.bin_file.cast(link.File.Elf)) |elf_file| {
         const got = &elf_file.program_headers.items[elf_file.phdr_got_index.?];
         const got_addr = got.p_vaddr + decl.link.elf.offset_table_index * ptr_bytes;
@@ -4838,7 +4952,7 @@ fn lowerDeclRef(self: *Self, tv: TypedValue, decl: *Module.Decl) InnerError!MCVa
         const got_addr = coff_file.offset_table_virtual_address + decl.link.coff.offset_table_index * ptr_bytes;
         return MCValue{ .memory = got_addr };
     } else if (self.bin_file.cast(link.File.Plan9)) |p9| {
-        try p9.seeDecl(decl);
+        try p9.seeDecl(decl_index);
         const got_addr = p9.bases.data + decl.link.plan9.got_index.? * ptr_bytes;
         return MCValue{ .memory = got_addr };
     } else {
@@ -4875,7 +4989,7 @@ fn genTypedValue(self: *Self, typed_value: TypedValue) InnerError!MCValue {
         return self.lowerDeclRef(typed_value, payload.data);
     }
     if (typed_value.val.castTag(.decl_ref_mut)) |payload| {
-        return self.lowerDeclRef(typed_value, payload.data.decl);
+        return self.lowerDeclRef(typed_value, payload.data.decl_index);
     }
     const target = self.target.*;
 

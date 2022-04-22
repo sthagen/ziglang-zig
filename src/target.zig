@@ -455,7 +455,8 @@ pub fn classifyCompilerRtLibName(target: std.Target, name: []const u8) CompilerR
 }
 
 pub fn hasDebugInfo(target: std.Target) bool {
-    return !target.cpu.arch.isWasm();
+    _ = target;
+    return true;
 }
 
 pub fn defaultCompilerRtOptimizeMode(target: std.Target) std.builtin.Mode {
@@ -669,6 +670,7 @@ pub fn defaultFunctionAlignment(target: std.Target) u32 {
     return switch (target.cpu.arch) {
         .arm, .armeb => 4,
         .aarch64, .aarch64_32, .aarch64_be => 4,
+        .sparc, .sparcel, .sparcv9 => 4,
         .riscv64 => 2,
         else => 1,
     };

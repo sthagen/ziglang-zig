@@ -7,7 +7,7 @@ const Value = @import("value.zig").Value;
 const Air = @import("Air.zig");
 const Liveness = @import("Liveness.zig");
 
-pub fn dump(gpa: Allocator, air: Air, liveness: Liveness) void {
+pub fn dump(module: *Module, air: Air, liveness: Liveness) void {
     const instruction_bytes = air.instructions.len *
         // Here we don't use @sizeOf(Air.Inst.Data) because it would include
         // the debug safety tag but we want to measure release size.
@@ -41,11 +41,12 @@ pub fn dump(gpa: Allocator, air: Air, liveness: Liveness) void {
         liveness.special.count(), fmtIntSizeBin(liveness_special_bytes),
     });
     // zig fmt: on
-    var arena = std.heap.ArenaAllocator.init(gpa);
+    var arena = std.heap.ArenaAllocator.init(module.gpa);
     defer arena.deinit();
 
     var writer: Writer = .{
-        .gpa = gpa,
+        .module = module,
+        .gpa = module.gpa,
         .arena = arena.allocator(),
         .air = air,
         .liveness = liveness,
@@ -58,6 +59,7 @@ pub fn dump(gpa: Allocator, air: Air, liveness: Liveness) void {
 }
 
 const Writer = struct {
+    module: *Module,
     gpa: Allocator,
     arena: Allocator,
     air: Air,
@@ -328,7 +330,7 @@ const Writer = struct {
         const ty_pl = w.air.instructions.items(.data)[inst].ty_pl;
         const vector_ty = w.air.getRefType(ty_pl.ty);
         const len = @intCast(usize, vector_ty.arrayLen());
-        const elements = @bitCast([]const Air.Inst.Ref, w.air.extra[ty_pl.payload..][0..len]);
+        const elements = @ptrCast([]const Air.Inst.Ref, w.air.extra[ty_pl.payload..][0..len]);
 
         try s.print("{}, [", .{vector_ty.fmtDebug()});
         for (elements) |elem, i| {
@@ -533,9 +535,9 @@ const Writer = struct {
             try s.writeAll(", volatile");
         }
 
-        const outputs = @bitCast([]const Air.Inst.Ref, w.air.extra[extra_i..][0..extra.data.outputs_len]);
+        const outputs = @ptrCast([]const Air.Inst.Ref, w.air.extra[extra_i..][0..extra.data.outputs_len]);
         extra_i += outputs.len;
-        const inputs = @bitCast([]const Air.Inst.Ref, w.air.extra[extra_i..][0..extra.data.inputs_len]);
+        const inputs = @ptrCast([]const Air.Inst.Ref, w.air.extra[extra_i..][0..extra.data.inputs_len]);
         extra_i += inputs.len;
 
         for (outputs) |output| {
@@ -591,7 +593,8 @@ const Writer = struct {
     fn writeDbgInline(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {
         const ty_pl = w.air.instructions.items(.data)[inst].ty_pl;
         const function = w.air.values[ty_pl.payload].castTag(.function).?.data;
-        try s.print("{s}", .{function.owner_decl.name});
+        const owner_decl = w.module.declPtr(function.owner_decl);
+        try s.print("{s}", .{owner_decl.name});
     }
 
     fn writeDbgVar(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {
@@ -604,7 +607,7 @@ const Writer = struct {
     fn writeCall(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {
         const pl_op = w.air.instructions.items(.data)[inst].pl_op;
         const extra = w.air.extraData(Air.Call, pl_op.payload);
-        const args = @bitCast([]const Air.Inst.Ref, w.air.extra[extra.end..][0..extra.data.args_len]);
+        const args = @ptrCast([]const Air.Inst.Ref, w.air.extra[extra.end..][0..extra.data.args_len]);
         try w.writeOperand(s, inst, 0, pl_op.operand);
         try s.writeAll(", [");
         for (args) |arg, i| {
@@ -674,7 +677,7 @@ const Writer = struct {
 
         while (case_i < switch_br.data.cases_len) : (case_i += 1) {
             const case = w.air.extraData(Air.SwitchBr.Case, extra_index);
-            const items = @bitCast([]const Air.Inst.Ref, w.air.extra[case.end..][0..case.data.items_len]);
+            const items = @ptrCast([]const Air.Inst.Ref, w.air.extra[case.end..][0..case.data.items_len]);
             const case_body = w.air.extra[case.end + items.len ..][0..case.data.body_len];
             extra_index = case.end + case.data.items_len + case_body.len;
 

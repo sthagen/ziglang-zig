@@ -30,10 +30,8 @@ pub const LineInfo = struct {
     line: u64,
     column: u64,
     file_name: []const u8,
-    allocator: ?mem.Allocator,
 
-    pub fn deinit(self: LineInfo) void {
-        const allocator = self.allocator orelse return;
+    pub fn deinit(self: LineInfo, allocator: mem.Allocator) void {
         allocator.free(self.file_name);
     }
 };
@@ -43,15 +41,22 @@ pub const SymbolInfo = struct {
     compile_unit_name: []const u8 = "???",
     line_info: ?LineInfo = null,
 
-    pub fn deinit(self: @This()) void {
+    pub fn deinit(self: SymbolInfo, allocator: mem.Allocator) void {
         if (self.line_info) |li| {
-            li.deinit();
+            li.deinit(allocator);
         }
     }
 };
 const PdbOrDwarf = union(enum) {
     pdb: pdb.Pdb,
     dwarf: DW.DwarfInfo,
+
+    fn deinit(self: *PdbOrDwarf, allocator: mem.Allocator) void {
+        switch (self.*) {
+            .pdb => |*inner| inner.deinit(),
+            .dwarf => |*inner| inner.deinit(allocator),
+        }
+    }
 };
 
 var stderr_mutex = std.Thread.Mutex{};
@@ -113,6 +118,13 @@ pub fn detectTTYConfig() TTY.Config {
 /// TODO multithreaded awareness
 pub fn dumpCurrentStackTrace(start_addr: ?usize) void {
     nosuspend {
+        if (comptime builtin.target.isWasm()) {
+            if (native_os == .wasi) {
+                const stderr = io.getStdErr().writer();
+                stderr.print("Unable to dump stack trace: not implemented for Wasm\n", .{}) catch return;
+            }
+            return;
+        }
         const stderr = io.getStdErr().writer();
         if (builtin.strip_debug_info) {
             stderr.print("Unable to dump stack trace: debug info stripped\n", .{}) catch return;
@@ -134,6 +146,13 @@ pub fn dumpCurrentStackTrace(start_addr: ?usize) void {
 /// TODO multithreaded awareness
 pub fn dumpStackTraceFromBase(bp: usize, ip: usize) void {
     nosuspend {
+        if (comptime builtin.target.isWasm()) {
+            if (native_os == .wasi) {
+                const stderr = io.getStdErr().writer();
+                stderr.print("Unable to dump stack trace: not implemented for Wasm\n", .{}) catch return;
+            }
+            return;
+        }
         const stderr = io.getStdErr().writer();
         if (builtin.strip_debug_info) {
             stderr.print("Unable to dump stack trace: debug info stripped\n", .{}) catch return;
@@ -204,6 +223,13 @@ pub fn captureStackTrace(first_address: ?usize, stack_trace: *std.builtin.StackT
 /// TODO multithreaded awareness
 pub fn dumpStackTrace(stack_trace: std.builtin.StackTrace) void {
     nosuspend {
+        if (comptime builtin.target.isWasm()) {
+            if (native_os == .wasi) {
+                const stderr = io.getStdErr().writer();
+                stderr.print("Unable to dump stack trace: not implemented for Wasm\n", .{}) catch return;
+            }
+            return;
+        }
         const stderr = io.getStdErr().writer();
         if (builtin.strip_debug_info) {
             stderr.print("Unable to dump stack trace: debug info stripped\n", .{}) catch return;
@@ -656,7 +682,6 @@ test "machoSearchSymbols" {
     try testing.expectEqual(&symbols[2], machoSearchSymbols(&symbols, 5000).?);
 }
 
-/// TODO resources https://github.com/ziglang/zig/issues/4353
 pub fn printSourceAtAddress(debug_info: *DebugInfo, out_stream: anytype, address: usize, tty_config: TTY.Config) !void {
     const module = debug_info.getModuleForAddress(address) catch |err| switch (err) {
         error.MissingDebugInfo, error.InvalidDebugInfo => {
@@ -673,8 +698,8 @@ pub fn printSourceAtAddress(debug_info: *DebugInfo, out_stream: anytype, address
         else => return err,
     };
 
-    const symbol_info = try module.getSymbolAtAddress(address);
-    defer symbol_info.deinit();
+    const symbol_info = try module.getSymbolAtAddress(debug_info.allocator, address);
+    defer symbol_info.deinit(debug_info.allocator);
 
     return printLineInfo(
         out_stream,
@@ -742,7 +767,6 @@ pub const OpenSelfDebugInfoError = error{
     UnsupportedOperatingSystem,
 };
 
-/// TODO resources https://github.com/ziglang/zig/issues/4353
 pub fn openSelfDebugInfo(allocator: mem.Allocator) anyerror!DebugInfo {
     nosuspend {
         if (builtin.strip_debug_info)
@@ -767,13 +791,13 @@ pub fn openSelfDebugInfo(allocator: mem.Allocator) anyerror!DebugInfo {
 
 /// This takes ownership of coff_file: users of this function should not close
 /// it themselves, even on error.
-/// TODO resources https://github.com/ziglang/zig/issues/4353
 /// TODO it's weird to take ownership even on error, rework this code.
 fn readCoffDebugInfo(allocator: mem.Allocator, coff_file: File) !ModuleDebugInfo {
     nosuspend {
         errdefer coff_file.close();
 
         const coff_obj = try allocator.create(coff.Coff);
+        errdefer allocator.destroy(coff_obj);
         coff_obj.* = coff.Coff.init(allocator, coff_file);
 
         var di = ModuleDebugInfo{
@@ -836,7 +860,6 @@ fn chopSlice(ptr: []const u8, offset: u64, size: u64) ![]const u8 {
 
 /// This takes ownership of elf_file: users of this function should not close
 /// it themselves, even on error.
-/// TODO resources https://github.com/ziglang/zig/issues/4353
 /// TODO it's weird to take ownership even on error, rework this code.
 pub fn readElfDebugInfo(allocator: mem.Allocator, elf_file: File) !ModuleDebugInfo {
     nosuspend {
@@ -910,7 +933,6 @@ pub fn readElfDebugInfo(allocator: mem.Allocator, elf_file: File) !ModuleDebugIn
     }
 }
 
-/// TODO resources https://github.com/ziglang/zig/issues/4353
 /// This takes ownership of macho_file: users of this function should not close
 /// it themselves, even on error.
 /// TODO it's weird to take ownership even on error, rework this code.
@@ -1123,7 +1145,12 @@ pub const DebugInfo = struct {
     }
 
     pub fn deinit(self: *DebugInfo) void {
-        // TODO: resources https://github.com/ziglang/zig/issues/4353
+        var it = self.address_map.iterator();
+        while (it.next()) |entry| {
+            const mdi = entry.value_ptr.*;
+            mdi.deinit(self.allocator);
+            self.allocator.destroy(mdi);
+        }
         self.address_map.deinit();
     }
 
@@ -1134,6 +1161,8 @@ pub const DebugInfo = struct {
             return self.lookupModuleWin32(address);
         } else if (native_os == .haiku) {
             return self.lookupModuleHaiku(address);
+        } else if (comptime builtin.target.isWasm()) {
+            return self.lookupModuleWasm(address);
         } else {
             return self.lookupModuleDl(address);
         }
@@ -1349,12 +1378,18 @@ pub const DebugInfo = struct {
         _ = address;
         @panic("TODO implement lookup module for Haiku");
     }
+
+    fn lookupModuleWasm(self: *DebugInfo, address: usize) !*ModuleDebugInfo {
+        _ = self;
+        _ = address;
+        @panic("TODO implement lookup module for Wasm");
+    }
 };
 
 pub const ModuleDebugInfo = switch (native_os) {
     .macos, .ios, .watchos, .tvos => struct {
         base_address: usize,
-        mapped_memory: []const u8,
+        mapped_memory: []align(mem.page_size) const u8,
         symbols: []const MachoSymbol,
         strings: [:0]const u8,
         ofiles: OFileTable,
@@ -1365,11 +1400,19 @@ pub const ModuleDebugInfo = switch (native_os) {
             addr_table: std.StringHashMap(u64),
         };
 
-        pub fn allocator(self: @This()) mem.Allocator {
-            return self.ofiles.allocator;
+        fn deinit(self: *@This(), allocator: mem.Allocator) void {
+            var it = self.ofiles.iterator();
+            while (it.next()) |entry| {
+                const ofile = entry.value_ptr;
+                ofile.di.deinit(allocator);
+                ofile.addr_table.deinit();
+            }
+            self.ofiles.deinit();
+            allocator.free(self.symbols);
+            os.munmap(self.mapped_memory);
         }
 
-        fn loadOFile(self: *@This(), o_file_path: []const u8) !OFileInfo {
+        fn loadOFile(self: *@This(), allocator: mem.Allocator, o_file_path: []const u8) !OFileInfo {
             const o_file = try fs.cwd().openFile(o_file_path, .{ .intended_io_mode = .blocking });
             const mapped_mem = try mapWholeFile(o_file);
 
@@ -1421,7 +1464,7 @@ pub const ModuleDebugInfo = switch (native_os) {
             )[0..symtabcmd.?.nsyms];
 
             // TODO handle tentative (common) symbols
-            var addr_table = std.StringHashMap(u64).init(self.allocator());
+            var addr_table = std.StringHashMap(u64).init(allocator);
             try addr_table.ensureTotalCapacity(@intCast(u32, symtab.len));
             for (symtab) |sym| {
                 if (sym.n_strx == 0) continue;
@@ -1490,7 +1533,7 @@ pub const ModuleDebugInfo = switch (native_os) {
                     null,
             };
 
-            try DW.openDwarfDebugInfo(&di, self.allocator());
+            try DW.openDwarfDebugInfo(&di, allocator);
             var info = OFileInfo{
                 .di = di,
                 .addr_table = addr_table,
@@ -1502,7 +1545,7 @@ pub const ModuleDebugInfo = switch (native_os) {
             return info;
         }
 
-        pub fn getSymbolAtAddress(self: *@This(), address: usize) !SymbolInfo {
+        pub fn getSymbolAtAddress(self: *@This(), allocator: mem.Allocator, address: usize) !SymbolInfo {
             nosuspend {
                 // Translate the VA into an address into this object
                 const relocated_address = address - self.base_address;
@@ -1519,7 +1562,7 @@ pub const ModuleDebugInfo = switch (native_os) {
 
                 // Check if its debug infos are already in the cache
                 var o_file_info = self.ofiles.get(o_file_path) orelse
-                    (self.loadOFile(o_file_path) catch |err| switch (err) {
+                    (self.loadOFile(allocator, o_file_path) catch |err| switch (err) {
                     error.FileNotFound,
                     error.MissingDebugInfo,
                     error.InvalidDebugInfo,
@@ -1539,10 +1582,17 @@ pub const ModuleDebugInfo = switch (native_os) {
                 if (o_file_di.findCompileUnit(relocated_address_o)) |compile_unit| {
                     return SymbolInfo{
                         .symbol_name = o_file_di.getSymbolName(relocated_address_o) orelse "???",
-                        .compile_unit_name = compile_unit.die.getAttrString(o_file_di, DW.AT.name) catch |err| switch (err) {
+                        .compile_unit_name = compile_unit.die.getAttrString(
+                            o_file_di,
+                            DW.AT.name,
+                        ) catch |err| switch (err) {
                             error.MissingDebugInfo, error.InvalidDebugInfo => "???",
                         },
-                        .line_info = o_file_di.getLineNumberInfo(compile_unit.*, relocated_address_o + addr_off) catch |err| switch (err) {
+                        .line_info = o_file_di.getLineNumberInfo(
+                            allocator,
+                            compile_unit.*,
+                            relocated_address_o + addr_off,
+                        ) catch |err| switch (err) {
                             error.MissingDebugInfo, error.InvalidDebugInfo => null,
                             else => return err,
                         },
@@ -1563,18 +1613,20 @@ pub const ModuleDebugInfo = switch (native_os) {
         debug_data: PdbOrDwarf,
         coff: *coff.Coff,
 
-        pub fn allocator(self: @This()) mem.Allocator {
-            return self.coff.allocator;
+        fn deinit(self: *@This(), allocator: mem.Allocator) void {
+            self.debug_data.deinit(allocator);
+            self.coff.deinit();
+            allocator.destroy(self.coff);
         }
 
-        pub fn getSymbolAtAddress(self: *@This(), address: usize) !SymbolInfo {
+        pub fn getSymbolAtAddress(self: *@This(), allocator: mem.Allocator, address: usize) !SymbolInfo {
             // Translate the VA into an address into this object
             const relocated_address = address - self.base_address;
 
             switch (self.debug_data) {
                 .dwarf => |*dwarf| {
                     const dwarf_address = relocated_address + self.coff.pe_header.image_base;
-                    return getSymbolFromDwarf(dwarf_address, dwarf);
+                    return getSymbolFromDwarf(allocator, dwarf_address, dwarf);
                 },
                 .pdb => {
                     // fallthrough to pdb handling
@@ -1620,25 +1672,43 @@ pub const ModuleDebugInfo = switch (native_os) {
     .linux, .netbsd, .freebsd, .dragonfly, .openbsd, .haiku, .solaris => struct {
         base_address: usize,
         dwarf: DW.DwarfInfo,
-        mapped_memory: []const u8,
+        mapped_memory: []align(mem.page_size) const u8,
 
-        pub fn getSymbolAtAddress(self: *@This(), address: usize) !SymbolInfo {
+        fn deinit(self: *@This(), allocator: mem.Allocator) void {
+            self.dwarf.deinit(allocator);
+            os.munmap(self.mapped_memory);
+        }
+
+        pub fn getSymbolAtAddress(self: *@This(), allocator: mem.Allocator, address: usize) !SymbolInfo {
             // Translate the VA into an address into this object
             const relocated_address = address - self.base_address;
-            return getSymbolFromDwarf(relocated_address, &self.dwarf);
+            return getSymbolFromDwarf(allocator, relocated_address, &self.dwarf);
+        }
+    },
+    .wasi => struct {
+        fn deinit(self: *@This(), allocator: mem.Allocator) void {
+            _ = self;
+            _ = allocator;
+        }
+
+        pub fn getSymbolAtAddress(self: *@This(), allocator: mem.Allocator, address: usize) !SymbolInfo {
+            _ = self;
+            _ = allocator;
+            _ = address;
+            return SymbolInfo{};
         }
     },
     else => DW.DwarfInfo,
 };
 
-fn getSymbolFromDwarf(address: u64, di: *DW.DwarfInfo) !SymbolInfo {
+fn getSymbolFromDwarf(allocator: mem.Allocator, address: u64, di: *DW.DwarfInfo) !SymbolInfo {
     if (nosuspend di.findCompileUnit(address)) |compile_unit| {
         return SymbolInfo{
             .symbol_name = nosuspend di.getSymbolName(address) orelse "???",
             .compile_unit_name = compile_unit.die.getAttrString(di, DW.AT.name) catch |err| switch (err) {
                 error.MissingDebugInfo, error.InvalidDebugInfo => "???",
             },
-            .line_info = nosuspend di.getLineNumberInfo(compile_unit.*, address) catch |err| switch (err) {
+            .line_info = nosuspend di.getLineNumberInfo(allocator, compile_unit.*, address) catch |err| switch (err) {
                 error.MissingDebugInfo, error.InvalidDebugInfo => null,
                 else => return err,
             },
@@ -1858,4 +1928,17 @@ pub fn dumpStackPointerAddr(prefix: []const u8) void {
         : [argc] "={rsp}" (-> usize),
     );
     std.debug.print("{} sp = 0x{x}\n", .{ prefix, sp });
+}
+
+test "#4353: std.debug should manage resources correctly" {
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+
+    const writer = std.io.null_writer;
+    var di = try openSelfDebugInfo(testing.allocator);
+    defer di.deinit();
+    try printSourceAtAddress(&di, writer, showMyTrace(), detectTTYConfig());
+}
+
+noinline fn showMyTrace() usize {
+    return @returnAddress();
 }

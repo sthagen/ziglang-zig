@@ -131,9 +131,7 @@ const DebugInfo = struct {
         allocator.free(self.debug_line);
         allocator.free(self.debug_line_str);
         allocator.free(self.debug_ranges);
-        self.inner.abbrev_table_list.deinit();
-        self.inner.compile_unit_list.deinit();
-        self.inner.func_list.deinit();
+        self.inner.deinit(allocator);
     }
 };
 
@@ -492,7 +490,8 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, macho_file: *MachO) !
             mem.copy(u8, atom.code.items, code);
         }
 
-        try atom.parseRelocs(relocs, .{
+        // TODO stage2 bug: @alignCast shouldn't be needed
+        try atom.parseRelocs(@alignCast(@alignOf(macho.relocation_info), relocs), .{
             .base_addr = sect.addr,
             .allocator = allocator,
             .object = self,
@@ -625,7 +624,6 @@ pub fn parseDataInCode(self: *Object, allocator: Allocator) !void {
     while (true) {
         const dice = reader.readStruct(macho.data_in_code_entry) catch |err| switch (err) {
             error.EndOfStream => break,
-            else => |e| return e,
         };
         try self.data_in_code_entries.append(allocator, dice);
     }

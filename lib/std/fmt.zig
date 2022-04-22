@@ -766,12 +766,10 @@ fn formatFloatValue(
     } else if (comptime std.mem.eql(u8, fmt, "d")) {
         formatFloatDecimal(value, options, buf_stream.writer()) catch |err| switch (err) {
             error.NoSpaceLeft => unreachable,
-            else => |e| return e,
         };
     } else if (comptime std.mem.eql(u8, fmt, "x")) {
         formatFloatHexadecimal(value, options, buf_stream.writer()) catch |err| switch (err) {
             error.NoSpaceLeft => unreachable,
-            else => |e| return e,
         };
     } else {
         @compileError("Unsupported format string '" ++ fmt ++ "' for type '" ++ @typeName(@TypeOf(value)) ++ "'");
@@ -968,10 +966,10 @@ pub fn formatUnicodeCodepoint(
     writer: anytype,
 ) !void {
     var buf: [4]u8 = undefined;
-    const len = std.unicode.utf8Encode(c, &buf) catch |err| switch (err) {
+    const len = unicode.utf8Encode(c, &buf) catch |err| switch (err) {
         error.Utf8CannotEncodeSurrogateHalf, error.CodepointTooLarge => {
-            // In case of error output the replacement char U+FFFD
-            return formatBuf(&[_]u8{ 0xef, 0xbf, 0xbd }, options, writer);
+            const len = unicode.utf8Encode(unicode.replacement_character, &buf) catch unreachable;
+            return formatBuf(buf[0..len], options, writer);
         },
     };
     return formatBuf(buf[0..len], options, writer);

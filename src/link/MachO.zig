@@ -247,14 +247,14 @@ unnamed_const_atoms: UnnamedConstTable = .{},
 /// We store them here so that we can properly dispose of any allocated
 /// memory within the atom in the incremental linker.
 /// TODO consolidate this.
-decls: std.AutoArrayHashMapUnmanaged(*Module.Decl, ?MatchingSection) = .{},
+decls: std.AutoArrayHashMapUnmanaged(Module.Decl.Index, ?MatchingSection) = .{},
 
 const Entry = struct {
     target: Atom.Relocation.Target,
     atom: *Atom,
 };
 
-const UnnamedConstTable = std.AutoHashMapUnmanaged(*Module.Decl, std.ArrayListUnmanaged(*Atom));
+const UnnamedConstTable = std.AutoHashMapUnmanaged(Module.Decl.Index, std.ArrayListUnmanaged(*Atom));
 
 const PendingUpdate = union(enum) {
     resolve_undef: u32,
@@ -321,7 +321,6 @@ pub fn openPath(allocator: Allocator, options: link.Options) !*MachO {
         // TODO this intermediary_basename isn't enough; in the case of `zig build-exe`,
         // we also want to put the intermediary object file in the cache while the
         // main emit directory is the cwd.
-        self.llvm_object = try LlvmObject.create(allocator, options);
         self.base.intermediary_basename = try std.fmt.allocPrint(allocator, "{s}{s}", .{
             emit.sub_path, options.object_format.fileExt(options.target.cpu.arch),
         });
@@ -419,33 +418,34 @@ pub fn createEmpty(gpa: Allocator, options: link.Options) !*MachO {
     return self;
 }
 
-pub fn flush(self: *MachO, comp: *Compilation) !void {
+pub fn flush(self: *MachO, comp: *Compilation, prog_node: *std.Progress.Node) !void {
     if (self.base.options.emit == null) {
         if (build_options.have_llvm) {
             if (self.llvm_object) |llvm_object| {
-                return try llvm_object.flushModule(comp);
+                try llvm_object.flushModule(comp, prog_node);
             }
         }
         return;
     }
+
     if (self.base.options.output_mode == .Lib and self.base.options.link_mode == .Static) {
         if (build_options.have_llvm) {
-            return self.base.linkAsArchive(comp);
+            return self.base.linkAsArchive(comp, prog_node);
         } else {
             log.err("TODO: non-LLVM archiver for MachO object files", .{});
             return error.TODOImplementWritingStaticLibFiles;
         }
     }
-    try self.flushModule(comp);
+    try self.flushModule(comp, prog_node);
 }
 
-pub fn flushModule(self: *MachO, comp: *Compilation) !void {
+pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.Node) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     const use_stage1 = build_options.is_stage1 and self.base.options.use_stage1;
     if (!use_stage1 and self.base.options.output_mode == .Obj)
-        return self.flushObject(comp);
+        return self.flushObject(comp, prog_node);
 
     var arena_allocator = std.heap.ArenaAllocator.init(self.base.allocator);
     defer arena_allocator.deinit();
@@ -482,7 +482,7 @@ pub fn flushModule(self: *MachO, comp: *Compilation) !void {
 
         const obj_basename = self.base.intermediary_basename orelse break :blk null;
 
-        try self.flushObject(comp);
+        try self.flushObject(comp, prog_node);
 
         if (fs.path.dirname(full_out_path)) |dirname| {
             break :blk try fs.path.join(arena, &.{ dirname, obj_basename });
@@ -490,6 +490,10 @@ pub fn flushModule(self: *MachO, comp: *Compilation) !void {
             break :blk obj_basename;
         }
     } else null;
+
+    var sub_prog_node = prog_node.start("MachO Flush", 0);
+    sub_prog_node.activate();
+    defer sub_prog_node.end();
 
     const is_lib = self.base.options.output_mode == .Lib;
     const is_dyn_lib = self.base.options.link_mode == .Dynamic and is_lib;
@@ -1111,12 +1115,13 @@ pub fn flushModule(self: *MachO, comp: *Compilation) !void {
     self.cold_start = false;
 }
 
-pub fn flushObject(self: *MachO, comp: *Compilation) !void {
+pub fn flushObject(self: *MachO, comp: *Compilation, prog_node: *std.Progress.Node) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     if (build_options.have_llvm)
-        if (self.llvm_object) |llvm_object| return llvm_object.flushModule(comp);
+        if (self.llvm_object) |llvm_object|
+            return llvm_object.flushModule(comp, prog_node);
 
     return error.TODOImplementWritingObjFiles;
 }
@@ -1316,6 +1321,9 @@ pub fn parseDylib(self: *MachO, path: []const u8, opts: DylibCreateOpts) ParseDy
     dylib.parse(self.base.allocator, self.base.options.target, opts.dependent_libs) catch |err| switch (err) {
         error.EndOfStream, error.NotDylib => {
             try file.seekTo(0);
+
+            // TODO https://github.com/ziglang/zig/issues/11367
+            if (@import("builtin").zig_backend != .stage1) return error.Unexpected;
 
             var lib_stub = LibStub.loadFromFile(self.base.allocator, file) catch {
                 dylib.deinit(self.base.allocator);
@@ -3442,10 +3450,15 @@ pub fn deinit(self: *MachO) void {
         }
         self.atom_free_lists.deinit(self.base.allocator);
     }
-    for (self.decls.keys()) |decl| {
-        decl.link.macho.deinit(self.base.allocator);
+    if (self.base.options.module) |mod| {
+        for (self.decls.keys()) |decl_index| {
+            const decl = mod.declPtr(decl_index);
+            decl.link.macho.deinit(self.base.allocator);
+        }
+        self.decls.deinit(self.base.allocator);
+    } else {
+        assert(self.decls.count() == 0);
     }
-    self.decls.deinit(self.base.allocator);
 
     {
         var it = self.unnamed_const_atoms.valueIterator();
@@ -3471,6 +3484,9 @@ pub fn closeFiles(self: MachO) void {
     }
     for (self.dylibs.items) |dylib| {
         dylib.file.close();
+    }
+    if (self.d_sym) |ds| {
+        ds.file.close();
     }
 }
 
@@ -3640,13 +3656,14 @@ pub fn allocateTlvPtrEntry(self: *MachO, target: Atom.Relocation.Target) !u32 {
     return index;
 }
 
-pub fn allocateDeclIndexes(self: *MachO, decl: *Module.Decl) !void {
+pub fn allocateDeclIndexes(self: *MachO, decl_index: Module.Decl.Index) !void {
     if (self.llvm_object) |_| return;
+    const decl = self.base.options.module.?.declPtr(decl_index);
     if (decl.link.macho.local_sym_index != 0) return;
 
     decl.link.macho.local_sym_index = try self.allocateLocalSymbol();
     try self.atom_by_index_table.putNoClobber(self.base.allocator, decl.link.macho.local_sym_index, &decl.link.macho);
-    try self.decls.putNoClobber(self.base.allocator, decl, null);
+    try self.decls.putNoClobber(self.base.allocator, decl_index, null);
 
     const got_target = .{ .local = decl.link.macho.local_sym_index };
     const got_index = try self.allocateGotEntry(got_target);
@@ -3664,8 +3681,9 @@ pub fn updateFunc(self: *MachO, module: *Module, func: *Module.Fn, air: Air, liv
     const tracy = trace(@src());
     defer tracy.end();
 
-    const decl = func.owner_decl;
-    self.freeUnnamedConsts(decl);
+    const decl_index = func.owner_decl;
+    const decl = module.declPtr(decl_index);
+    self.freeUnnamedConsts(decl_index);
 
     // TODO clearing the code and relocs buffer should probably be orchestrated
     // in a different, smarter, more automatic way somewhere else, in a more centralised
@@ -3678,7 +3696,7 @@ pub fn updateFunc(self: *MachO, module: *Module, func: *Module.Fn, air: Air, liv
     defer code_buffer.deinit();
 
     var decl_state = if (self.d_sym) |*d_sym|
-        try d_sym.dwarf.initDeclState(decl)
+        try d_sym.dwarf.initDeclState(module, decl)
     else
         null;
     defer if (decl_state) |*ds| ds.deinit();
@@ -3696,12 +3714,12 @@ pub fn updateFunc(self: *MachO, module: *Module, func: *Module.Fn, air: Air, liv
         },
         .fail => |em| {
             decl.analysis = .codegen_failure;
-            try module.failed_decls.put(module.gpa, decl, em);
+            try module.failed_decls.put(module.gpa, decl_index, em);
             return;
         },
     }
 
-    const symbol = try self.placeDecl(decl, decl.link.macho.code.items.len);
+    const symbol = try self.placeDecl(decl_index, decl.link.macho.code.items.len);
 
     if (decl_state) |*ds| {
         try self.d_sym.?.dwarf.commitDeclState(
@@ -3716,22 +3734,23 @@ pub fn updateFunc(self: *MachO, module: *Module, func: *Module.Fn, air: Air, liv
 
     // Since we updated the vaddr and the size, each corresponding export symbol also
     // needs to be updated.
-    const decl_exports = module.decl_exports.get(decl) orelse &[0]*Module.Export{};
-    try self.updateDeclExports(module, decl, decl_exports);
+    const decl_exports = module.decl_exports.get(decl_index) orelse &[0]*Module.Export{};
+    try self.updateDeclExports(module, decl_index, decl_exports);
 }
 
-pub fn lowerUnnamedConst(self: *MachO, typed_value: TypedValue, decl: *Module.Decl) !u32 {
+pub fn lowerUnnamedConst(self: *MachO, typed_value: TypedValue, decl_index: Module.Decl.Index) !u32 {
     var code_buffer = std.ArrayList(u8).init(self.base.allocator);
     defer code_buffer.deinit();
 
     const module = self.base.options.module.?;
-    const gop = try self.unnamed_const_atoms.getOrPut(self.base.allocator, decl);
+    const gop = try self.unnamed_const_atoms.getOrPut(self.base.allocator, decl_index);
     if (!gop.found_existing) {
         gop.value_ptr.* = .{};
     }
     const unnamed_consts = gop.value_ptr;
 
-    const decl_name = try decl.getFullyQualifiedName(self.base.allocator);
+    const decl = module.declPtr(decl_index);
+    const decl_name = try decl.getFullyQualifiedName(module);
     defer self.base.allocator.free(decl_name);
 
     const name_str_index = blk: {
@@ -3757,7 +3776,7 @@ pub fn lowerUnnamedConst(self: *MachO, typed_value: TypedValue, decl: *Module.De
         .appended => code_buffer.items,
         .fail => |em| {
             decl.analysis = .codegen_failure;
-            try module.failed_decls.put(module.gpa, decl, em);
+            try module.failed_decls.put(module.gpa, decl_index, em);
             log.err("{s}", .{em.msg});
             return error.AnalysisFail;
         },
@@ -3788,15 +3807,17 @@ pub fn lowerUnnamedConst(self: *MachO, typed_value: TypedValue, decl: *Module.De
     return atom.local_sym_index;
 }
 
-pub fn updateDecl(self: *MachO, module: *Module, decl: *Module.Decl) !void {
+pub fn updateDecl(self: *MachO, module: *Module, decl_index: Module.Decl.Index) !void {
     if (build_options.skip_non_native and builtin.object_format != .macho) {
         @panic("Attempted to compile for object format that was disabled by build configuration");
     }
     if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object| return llvm_object.updateDecl(module, decl);
+        if (self.llvm_object) |llvm_object| return llvm_object.updateDecl(module, decl_index);
     }
     const tracy = trace(@src());
     defer tracy.end();
+
+    const decl = module.declPtr(decl_index);
 
     if (decl.val.tag() == .extern_fn) {
         return; // TODO Should we do more when front-end analyzed extern decl?
@@ -3812,7 +3833,7 @@ pub fn updateDecl(self: *MachO, module: *Module, decl: *Module.Decl) !void {
     defer code_buffer.deinit();
 
     var decl_state: ?Dwarf.DeclState = if (self.d_sym) |*d_sym|
-        try d_sym.dwarf.initDeclState(decl)
+        try d_sym.dwarf.initDeclState(module, decl)
     else
         null;
     defer if (decl_state) |*ds| ds.deinit();
@@ -3850,12 +3871,12 @@ pub fn updateDecl(self: *MachO, module: *Module, decl: *Module.Decl) !void {
             },
             .fail => |em| {
                 decl.analysis = .codegen_failure;
-                try module.failed_decls.put(module.gpa, decl, em);
+                try module.failed_decls.put(module.gpa, decl_index, em);
                 return;
             },
         }
     };
-    const symbol = try self.placeDecl(decl, code.len);
+    const symbol = try self.placeDecl(decl_index, code.len);
 
     if (decl_state) |*ds| {
         try self.d_sym.?.dwarf.commitDeclState(
@@ -3870,13 +3891,13 @@ pub fn updateDecl(self: *MachO, module: *Module, decl: *Module.Decl) !void {
 
     // Since we updated the vaddr and the size, each corresponding export symbol also
     // needs to be updated.
-    const decl_exports = module.decl_exports.get(decl) orelse &[0]*Module.Export{};
-    try self.updateDeclExports(module, decl, decl_exports);
+    const decl_exports = module.decl_exports.get(decl_index) orelse &[0]*Module.Export{};
+    try self.updateDeclExports(module, decl_index, decl_exports);
 }
 
 /// Checks if the value, or any of its embedded values stores a pointer, and thus requires
 /// a rebase opcode for the dynamic linker.
-fn needsPointerRebase(ty: Type, val: Value, target: std.Target) bool {
+fn needsPointerRebase(ty: Type, val: Value, mod: *Module) bool {
     if (ty.zigTypeTag() == .Fn) {
         return false;
     }
@@ -3891,8 +3912,8 @@ fn needsPointerRebase(ty: Type, val: Value, target: std.Target) bool {
             if (ty.arrayLen() == 0) return false;
             const elem_ty = ty.childType();
             var elem_value_buf: Value.ElemValueBuffer = undefined;
-            const elem_val = val.elemValueBuffer(0, &elem_value_buf);
-            return needsPointerRebase(elem_ty, elem_val, target);
+            const elem_val = val.elemValueBuffer(mod, 0, &elem_value_buf);
+            return needsPointerRebase(elem_ty, elem_val, mod);
         },
         .Struct => {
             const fields = ty.structFields().values();
@@ -3900,7 +3921,7 @@ fn needsPointerRebase(ty: Type, val: Value, target: std.Target) bool {
             if (val.castTag(.aggregate)) |payload| {
                 const field_values = payload.data;
                 for (field_values) |field_val, i| {
-                    if (needsPointerRebase(fields[i].ty, field_val, target)) return true;
+                    if (needsPointerRebase(fields[i].ty, field_val, mod)) return true;
                 } else return false;
             } else return false;
         },
@@ -3909,18 +3930,18 @@ fn needsPointerRebase(ty: Type, val: Value, target: std.Target) bool {
                 const sub_val = payload.data;
                 var buffer: Type.Payload.ElemType = undefined;
                 const sub_ty = ty.optionalChild(&buffer);
-                return needsPointerRebase(sub_ty, sub_val, target);
+                return needsPointerRebase(sub_ty, sub_val, mod);
             } else return false;
         },
         .Union => {
             const union_obj = val.cast(Value.Payload.Union).?.data;
-            const active_field_ty = ty.unionFieldType(union_obj.tag, target);
-            return needsPointerRebase(active_field_ty, union_obj.val, target);
+            const active_field_ty = ty.unionFieldType(union_obj.tag, mod);
+            return needsPointerRebase(active_field_ty, union_obj.val, mod);
         },
         .ErrorUnion => {
             if (val.castTag(.eu_payload)) |payload| {
                 const payload_ty = ty.errorUnionPayload();
-                return needsPointerRebase(payload_ty, payload.data, target);
+                return needsPointerRebase(payload_ty, payload.data, mod);
             } else return false;
         },
         else => return false,
@@ -3930,6 +3951,7 @@ fn needsPointerRebase(ty: Type, val: Value, target: std.Target) bool {
 fn getMatchingSectionAtom(self: *MachO, atom: *Atom, name: []const u8, ty: Type, val: Value) !MatchingSection {
     const code = atom.code.items;
     const target = self.base.options.target;
+    const mod = self.base.options.module.?;
     const alignment = ty.abiAlignment(target);
     const align_log_2 = math.log2(alignment);
     const zig_ty = ty.zigTypeTag();
@@ -3957,7 +3979,7 @@ fn getMatchingSectionAtom(self: *MachO, atom: *Atom, name: []const u8, ty: Type,
             };
         }
 
-        if (needsPointerRebase(ty, val, target)) {
+        if (needsPointerRebase(ty, val, mod)) {
             break :blk (try self.getMatchingSection(.{
                 .segname = makeStaticString("__DATA_CONST"),
                 .sectname = makeStaticString("__const"),
@@ -4013,15 +4035,17 @@ fn getMatchingSectionAtom(self: *MachO, atom: *Atom, name: []const u8, ty: Type,
     return match;
 }
 
-fn placeDecl(self: *MachO, decl: *Module.Decl, code_len: usize) !*macho.nlist_64 {
+fn placeDecl(self: *MachO, decl_index: Module.Decl.Index, code_len: usize) !*macho.nlist_64 {
+    const module = self.base.options.module.?;
+    const decl = module.declPtr(decl_index);
     const required_alignment = decl.ty.abiAlignment(self.base.options.target);
     assert(decl.link.macho.local_sym_index != 0); // Caller forgot to call allocateDeclIndexes()
     const symbol = &self.locals.items[decl.link.macho.local_sym_index];
 
-    const sym_name = try decl.getFullyQualifiedName(self.base.allocator);
+    const sym_name = try decl.getFullyQualifiedName(module);
     defer self.base.allocator.free(sym_name);
 
-    const decl_ptr = self.decls.getPtr(decl).?;
+    const decl_ptr = self.decls.getPtr(decl_index).?;
     if (decl_ptr.* == null) {
         decl_ptr.* = try self.getMatchingSectionAtom(&decl.link.macho, sym_name, decl.ty, decl.val);
     }
@@ -4089,19 +4113,20 @@ pub fn updateDeclLineNumber(self: *MachO, module: *Module, decl: *const Module.D
 pub fn updateDeclExports(
     self: *MachO,
     module: *Module,
-    decl: *Module.Decl,
+    decl_index: Module.Decl.Index,
     exports: []const *Module.Export,
 ) !void {
     if (build_options.skip_non_native and builtin.object_format != .macho) {
         @panic("Attempted to compile for object format that was disabled by build configuration");
     }
     if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object| return llvm_object.updateDeclExports(module, decl, exports);
+        if (self.llvm_object) |llvm_object| return llvm_object.updateDeclExports(module, decl_index, exports);
     }
     const tracy = trace(@src());
     defer tracy.end();
 
     try self.globals.ensureUnusedCapacity(self.base.allocator, exports.len);
+    const decl = module.declPtr(decl_index);
     if (decl.link.macho.local_sym_index == 0) return;
     const decl_sym = &self.locals.items[decl.link.macho.local_sym_index];
 
@@ -4238,9 +4263,8 @@ pub fn deleteExport(self: *MachO, exp: Export) void {
     global.n_value = 0;
 }
 
-fn freeUnnamedConsts(self: *MachO, decl: *Module.Decl) void {
-    log.debug("freeUnnamedConsts for decl {*}", .{decl});
-    const unnamed_consts = self.unnamed_const_atoms.getPtr(decl) orelse return;
+fn freeUnnamedConsts(self: *MachO, decl_index: Module.Decl.Index) void {
+    const unnamed_consts = self.unnamed_const_atoms.getPtr(decl_index) orelse return;
     for (unnamed_consts.items) |atom| {
         self.freeAtom(atom, .{
             .seg = self.text_segment_cmd_index.?,
@@ -4255,15 +4279,17 @@ fn freeUnnamedConsts(self: *MachO, decl: *Module.Decl) void {
     unnamed_consts.clearAndFree(self.base.allocator);
 }
 
-pub fn freeDecl(self: *MachO, decl: *Module.Decl) void {
+pub fn freeDecl(self: *MachO, decl_index: Module.Decl.Index) void {
     if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object| return llvm_object.freeDecl(decl);
+        if (self.llvm_object) |llvm_object| return llvm_object.freeDecl(decl_index);
     }
+    const mod = self.base.options.module.?;
+    const decl = mod.declPtr(decl_index);
     log.debug("freeDecl {*}", .{decl});
-    const kv = self.decls.fetchSwapRemove(decl);
+    const kv = self.decls.fetchSwapRemove(decl_index);
     if (kv.?.value) |match| {
         self.freeAtom(&decl.link.macho, match, false);
-        self.freeUnnamedConsts(decl);
+        self.freeUnnamedConsts(decl_index);
     }
     // Appending to free lists is allowed to fail because the free lists are heuristics based anyway.
     if (decl.link.macho.local_sym_index != 0) {
@@ -4274,6 +4300,11 @@ pub fn freeDecl(self: *MachO, decl: *Module.Decl) void {
             self.got_entries_free_list.append(self.base.allocator, @intCast(u32, got_index)) catch {};
             self.got_entries.items[got_index] = .{ .target = .{ .local = 0 }, .atom = undefined };
             _ = self.got_entries_table.swapRemove(.{ .local = decl.link.macho.local_sym_index });
+
+            if (self.d_sym) |*d_sym| {
+                d_sym.swapRemoveRelocs(decl.link.macho.local_sym_index);
+            }
+
             log.debug("  adding GOT index {d} to free list (target local@{d})", .{
                 got_index,
                 decl.link.macho.local_sym_index,
@@ -4290,7 +4321,10 @@ pub fn freeDecl(self: *MachO, decl: *Module.Decl) void {
     }
 }
 
-pub fn getDeclVAddr(self: *MachO, decl: *const Module.Decl, reloc_info: File.RelocInfo) !u64 {
+pub fn getDeclVAddr(self: *MachO, decl_index: Module.Decl.Index, reloc_info: File.RelocInfo) !u64 {
+    const mod = self.base.options.module.?;
+    const decl = mod.declPtr(decl_index);
+
     assert(self.llvm_object == null);
     assert(decl.link.macho.local_sym_index != 0);
 
@@ -5739,7 +5773,6 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
     while (true) {
         const inst = reader.readByte() catch |err| switch (err) {
             error.EndOfStream => break,
-            else => return err,
         };
         const opcode: u8 = inst & macho.BIND_OPCODE_MASK;
 
@@ -5867,7 +5900,7 @@ fn writeFunctionStarts(self: *MachO) !void {
     mem.set(u8, buffer, 0);
 
     var stream = std.io.fixedBufferStream(buffer);
-    var writer = stream.writer();
+    const writer = stream.writer();
 
     for (offsets.items) |offset| {
         try std.leb.writeULEB128(writer, offset);
@@ -6228,7 +6261,8 @@ fn writeLoadCommands(self: *MachO) !void {
 
     var buffer = try self.base.allocator.alloc(u8, sizeofcmds);
     defer self.base.allocator.free(buffer);
-    var writer = std.io.fixedBufferStream(buffer).writer();
+    var fib = std.io.fixedBufferStream(buffer);
+    const writer = fib.writer();
     for (self.load_commands.items) |lc| {
         try lc.write(writer);
     }
@@ -6408,7 +6442,7 @@ fn snapshotState(self: *MachO) !void {
         error.Unseekable => try out_file.writer().writeByte('['),
         else => |e| return e,
     }
-    var writer = out_file.writer();
+    const writer = out_file.writer();
 
     var snapshot = Snapshot{
         .timestamp = std.time.nanoTimestamp(),
