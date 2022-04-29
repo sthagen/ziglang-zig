@@ -694,11 +694,11 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) InnerEr
         .bool_and => return boolBinOp(gz, scope, rl, node, .bool_br_and),
         .bool_or  => return boolBinOp(gz, scope, rl, node, .bool_br_or),
 
-        .bool_not => return boolNot(gz, scope, rl, node),
-        .bit_not  => return bitNot(gz, scope, rl, node),
+        .bool_not => return simpleUnOp(gz, scope, rl, node, bool_rl, node_datas[node].lhs, .bool_not),
+        .bit_not  => return simpleUnOp(gz, scope, rl, node, .none, node_datas[node].lhs, .bit_not),
 
-        .negation      => return negation(gz, scope, rl, node, .negate),
-        .negation_wrap => return negation(gz, scope, rl, node, .negate_wrap),
+        .negation      => return   negation(gz, scope, rl, node),
+        .negation_wrap => return simpleUnOp(gz, scope, rl, node, .none, node_datas[node].lhs, .negate_wrap),
 
         .identifier => return identifier(gz, scope, rl, node),
 
@@ -748,7 +748,7 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) InnerEr
         },
         .@"return" => return ret(gz, scope, node),
         .field_access => return fieldAccess(gz, scope, rl, node),
-        .float_literal => return floatLiteral(gz, rl, node),
+        .float_literal => return floatLiteral(gz, rl, node, .positive),
 
         .if_simple => return ifExpr(gz, scope, rl.br(), node, tree.ifSimple(node)),
         .@"if" => return ifExpr(gz, scope, rl.br(), node, tree.ifFull(node)),
@@ -2237,7 +2237,6 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
             .field_call_bind,
             .field_ptr_named,
             .field_val_named,
-            .field_call_bind_named,
             .func,
             .func_inferred,
             .int,
@@ -2329,6 +2328,7 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
             .sqrt,
             .sin,
             .cos,
+            .tan,
             .exp,
             .exp2,
             .log,
@@ -3027,42 +3027,6 @@ fn assignShiftSat(gz: *GenZir, scope: *Scope, infix_node: Ast.Node.Index) InnerE
         .rhs = rhs,
     });
     _ = try gz.addBin(.store, lhs_ptr, result);
-}
-
-fn boolNot(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) InnerError!Zir.Inst.Ref {
-    const astgen = gz.astgen;
-    const tree = astgen.tree;
-    const node_datas = tree.nodes.items(.data);
-
-    const operand = try expr(gz, scope, bool_rl, node_datas[node].lhs);
-    const result = try gz.addUnNode(.bool_not, operand, node);
-    return rvalue(gz, rl, result, node);
-}
-
-fn bitNot(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) InnerError!Zir.Inst.Ref {
-    const astgen = gz.astgen;
-    const tree = astgen.tree;
-    const node_datas = tree.nodes.items(.data);
-
-    const operand = try expr(gz, scope, .none, node_datas[node].lhs);
-    const result = try gz.addUnNode(.bit_not, operand, node);
-    return rvalue(gz, rl, result, node);
-}
-
-fn negation(
-    gz: *GenZir,
-    scope: *Scope,
-    rl: ResultLoc,
-    node: Ast.Node.Index,
-    tag: Zir.Inst.Tag,
-) InnerError!Zir.Inst.Ref {
-    const astgen = gz.astgen;
-    const tree = astgen.tree;
-    const node_datas = tree.nodes.items(.data);
-
-    const operand = try expr(gz, scope, .none, node_datas[node].lhs);
-    const result = try gz.addUnNode(tag, operand, node);
-    return rvalue(gz, rl, result, node);
 }
 
 fn ptrType(
@@ -6728,14 +6692,16 @@ fn integerLiteral(gz: *GenZir, rl: ResultLoc, node: Ast.Node.Index) InnerError!Z
     return rvalue(gz, rl, result, node);
 }
 
-fn floatLiteral(gz: *GenZir, rl: ResultLoc, node: Ast.Node.Index) InnerError!Zir.Inst.Ref {
+const Sign = enum { negative, positive };
+
+fn floatLiteral(gz: *GenZir, rl: ResultLoc, node: Ast.Node.Index, sign: Sign) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
     const main_tokens = tree.nodes.items(.main_token);
 
     const main_token = main_tokens[node];
     const bytes = tree.tokenSlice(main_token);
-    const float_number: f128 = if (bytes.len > 2 and bytes[1] == 'x') hex: {
+    const unsigned_float_number: f128 = if (bytes.len > 2 and bytes[1] == 'x') hex: {
         assert(bytes[0] == '0'); // validated by tokenizer
         break :hex std.fmt.parseHexFloat(f128, bytes) catch |err| switch (err) {
             error.InvalidCharacter => unreachable, // validated by tokenizer
@@ -6743,6 +6709,10 @@ fn floatLiteral(gz: *GenZir, rl: ResultLoc, node: Ast.Node.Index) InnerError!Zir
         };
     } else std.fmt.parseFloat(f128, bytes) catch |err| switch (err) {
         error.InvalidCharacter => unreachable, // validated by tokenizer
+    };
+    const float_number = switch (sign) {
+        .negative => -unsigned_float_number,
+        .positive => unsigned_float_number,
     };
     // If the value fits into a f64 without losing any precision, store it that way.
     @setFloatMode(.Strict);
@@ -7259,6 +7229,7 @@ fn builtinCall(
         .sqrt                  => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .sqrt),
         .sin                   => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .sin),
         .cos                   => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .cos),
+        .tan                   => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .tan),
         .exp                   => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .exp),
         .exp2                  => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .exp2),
         .log                   => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .log),
@@ -7650,6 +7621,29 @@ fn simpleUnOp(
     return rvalue(gz, rl, result, node);
 }
 
+fn negation(
+    gz: *GenZir,
+    scope: *Scope,
+    rl: ResultLoc,
+    node: Ast.Node.Index,
+) InnerError!Zir.Inst.Ref {
+    const astgen = gz.astgen;
+    const tree = astgen.tree;
+    const node_tags = tree.nodes.items(.tag);
+    const node_datas = tree.nodes.items(.data);
+
+    // Check for float literal as the sub-expression because we want to preserve
+    // its negativity rather than having it go through comptime subtraction.
+    const operand_node = node_datas[node].lhs;
+    if (node_tags[operand_node] == .float_literal) {
+        return floatLiteral(gz, rl, operand_node, .negative);
+    }
+
+    const operand = try expr(gz, scope, .none, operand_node);
+    const result = try gz.addUnNode(.negate, operand, node);
+    return rvalue(gz, rl, result, node);
+}
+
 fn cmpxchg(
     gz: *GenZir,
     scope: *Scope,
@@ -7947,7 +7941,8 @@ fn calleeExpr(
             if (std.mem.eql(u8, builtin_name, "@field") and params.len == 2) {
                 const lhs = try expr(gz, scope, .ref, params[0]);
                 const field_name = try comptimeExpr(gz, scope, .{ .ty = .const_slice_u8_type }, params[1]);
-                return gz.addPlNode(.field_call_bind_named, node, Zir.Inst.FieldNamed{
+                return gz.addExtendedPayload(.field_call_bind_named, Zir.Inst.FieldNamedNode{
+                    .node = gz.nodeIndexToRelative(node),
                     .lhs = lhs,
                     .field_name = field_name,
                 });
