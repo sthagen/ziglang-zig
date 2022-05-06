@@ -340,6 +340,10 @@ pub const Object = struct {
 
         llvm_module.setModuleDataLayout(target_data);
 
+        if (options.pic) llvm_module.setModulePICLevel();
+        if (options.pie) llvm_module.setModulePIELevel();
+        if (code_model != .Default) llvm_module.setModuleCodeModel(code_model);
+
         return Object{
             .gpa = gpa,
             .module = options.module.?,
@@ -472,6 +476,19 @@ pub const Object = struct {
         _ = builder.buildRet(is_lt);
     }
 
+    fn genModuleLevelAssembly(object: *Object, comp: *Compilation) !void {
+        const mod = comp.bin_file.options.module.?;
+        if (mod.global_assembly.count() == 0) return;
+        var buffer = std.ArrayList(u8).init(comp.gpa);
+        defer buffer.deinit();
+        var it = mod.global_assembly.iterator();
+        while (it.next()) |kv| {
+            try buffer.appendSlice(kv.value_ptr.*);
+            try buffer.append('\n');
+        }
+        object.llvm_module.setModuleInlineAsm2(buffer.items.ptr, buffer.items.len - 1);
+    }
+
     pub fn flushModule(self: *Object, comp: *Compilation, prog_node: *std.Progress.Node) !void {
         var sub_prog_node = prog_node.start("LLVM Emit Object", 0);
         sub_prog_node.activate();
@@ -480,6 +497,7 @@ pub const Object = struct {
 
         try self.genErrorNameTable(comp);
         try self.genCmpLtErrorsLenFunction(comp);
+        try self.genModuleLevelAssembly(comp);
 
         if (self.di_builder) |dib| {
             // When lowering debug info for pointers, we emitted the element types as
@@ -626,7 +644,17 @@ pub const Object = struct {
             if (!param_ty.hasRuntimeBitsIgnoreComptime()) continue;
 
             const llvm_arg_i = @intCast(c_uint, args.items.len) + param_offset;
-            try args.append(llvm_func.getParam(llvm_arg_i));
+            const param = llvm_func.getParam(llvm_arg_i);
+            // It is possible for the calling convention to make the argument's by-reference nature
+            // disagree with our canonical value for it, in which case we must dereference here.
+            const need_deref = !param_ty.isPtrAtRuntime() and !isByRef(param_ty) and
+                (param.typeOf().getTypeKind() == .Pointer);
+            const loaded_param = if (!need_deref) param else l: {
+                const load_inst = builder.buildLoad(param, "");
+                load_inst.setAlignment(param_ty.abiAlignment(target));
+                break :l load_inst;
+            };
+            try args.append(loaded_param);
         }
 
         var di_file: ?*llvm.DIFile = null;
@@ -3725,6 +3753,19 @@ pub const FuncGen = struct {
                 arg_ptr.setAlignment(alignment);
                 const store_inst = self.builder.buildStore(llvm_arg, arg_ptr);
                 store_inst.setAlignment(alignment);
+
+                if (abi_llvm_ty.getTypeKind() == .Pointer) {
+                    // In this case, the calling convention wants a pointer, but
+                    // we have a value.
+                    if (arg_ptr.typeOf() == abi_llvm_ty) {
+                        try llvm_args.append(arg_ptr);
+                        continue;
+                    }
+                    const casted_ptr = self.builder.buildBitCast(arg_ptr, abi_llvm_ty, "");
+                    try llvm_args.append(casted_ptr);
+                    continue;
+                }
+
                 break :p self.builder.buildBitCast(arg_ptr, ptr_abi_ty, "");
             };
 
@@ -4577,6 +4618,10 @@ pub const FuncGen = struct {
         const operand_ty = self.air.typeOf(pl_op.operand);
         const name = self.air.nullTerminatedString(pl_op.payload);
 
+        if (needDbgVarWorkaround(self.dg, operand_ty)) {
+            return null;
+        }
+
         const di_local_var = dib.createAutoVariable(
             self.di_scope.?,
             name.ptr,
@@ -4638,14 +4683,19 @@ pub const FuncGen = struct {
         var llvm_param_i: usize = 0;
         var total_i: usize = 0;
 
+        var name_map: std.StringArrayHashMapUnmanaged(void) = .{};
+        try name_map.ensureUnusedCapacity(arena, outputs.len + inputs.len);
+
         for (outputs) |output| {
             if (output != .none) {
                 return self.todo("implement inline asm with non-returned output", .{});
             }
+            const extra_bytes = std.mem.sliceAsBytes(self.air.extra[extra_i..]);
             const constraint = std.mem.sliceTo(std.mem.sliceAsBytes(self.air.extra[extra_i..]), 0);
+            const name = std.mem.sliceTo(extra_bytes[constraint.len + 1 ..], 0);
             // This equation accounts for the fact that even if we have exactly 4 bytes
             // for the string, we still use the next u32 for the null terminator.
-            extra_i += constraint.len / 4 + 1;
+            extra_i += (constraint.len + name.len + (2 + 3)) / 4;
 
             try llvm_constraints.ensureUnusedCapacity(self.gpa, constraint.len + 1);
             if (total_i != 0) {
@@ -4654,17 +4704,17 @@ pub const FuncGen = struct {
             llvm_constraints.appendAssumeCapacity('=');
             llvm_constraints.appendSliceAssumeCapacity(constraint[1..]);
 
+            name_map.putAssumeCapacityNoClobber(name, {});
             total_i += 1;
         }
 
-        const input_start_extra_i = extra_i;
         for (inputs) |input| {
-            const input_bytes = std.mem.sliceAsBytes(self.air.extra[extra_i..]);
-            const constraint = std.mem.sliceTo(input_bytes, 0);
-            const input_name = std.mem.sliceTo(input_bytes[constraint.len + 1 ..], 0);
+            const extra_bytes = std.mem.sliceAsBytes(self.air.extra[extra_i..]);
+            const constraint = std.mem.sliceTo(extra_bytes, 0);
+            const name = std.mem.sliceTo(extra_bytes[constraint.len + 1 ..], 0);
             // This equation accounts for the fact that even if we have exactly 4 bytes
             // for the string, we still use the next u32 for the null terminator.
-            extra_i += (constraint.len + input_name.len + 1) / 4 + 1;
+            extra_i += (constraint.len + name.len + (2 + 3)) / 4;
 
             const arg_llvm_value = try self.resolveInst(input);
 
@@ -4677,6 +4727,7 @@ pub const FuncGen = struct {
             }
             llvm_constraints.appendSliceAssumeCapacity(constraint);
 
+            name_map.putAssumeCapacityNoClobber(name, {});
             llvm_param_i += 1;
             total_i += 1;
         }
@@ -4739,20 +4790,11 @@ pub const FuncGen = struct {
                         const name = asm_source[name_start..i];
                         state = .start;
 
-                        extra_i = input_start_extra_i;
-                        for (inputs) |_, input_i| {
-                            const input_bytes = std.mem.sliceAsBytes(self.air.extra[extra_i..]);
-                            const constraint = std.mem.sliceTo(input_bytes, 0);
-                            const input_name = std.mem.sliceTo(input_bytes[constraint.len + 1 ..], 0);
-                            extra_i += (constraint.len + input_name.len + 1) / 4 + 1;
-
-                            if (std.mem.eql(u8, name, input_name)) {
-                                try rendered_template.writer().print("{d}", .{input_i});
-                                break;
-                            }
-                        } else {
-                            return self.todo("TODO validate asm in Sema", .{});
-                        }
+                        const index = name_map.getIndex(name) orelse {
+                            // we should validate the assembly in Sema; by now it is too late
+                            return self.todo("unknown input or output name: '{s}'", .{name});
+                        };
+                        try rendered_template.writer().print("{d}", .{index});
                     },
                     else => {},
                 },
@@ -6150,6 +6192,10 @@ pub const FuncGen = struct {
 
         const inst_ty = self.air.typeOfIndex(inst);
         if (self.dg.object.di_builder) |dib| {
+            if (needDbgVarWorkaround(self.dg, inst_ty)) {
+                return arg_val;
+            }
+
             const src_index = self.getSrcArgIndex(self.arg_index - 1);
             const func = self.dg.decl.getFunction().?;
             const lbrace_line = self.dg.module.declPtr(func.owner_decl).src_line + func.lbrace_line + 1;
@@ -7574,7 +7620,7 @@ pub const FuncGen = struct {
         const size_bytes = elem_ty.abiSize(target);
         _ = self.builder.buildMemCpy(
             self.builder.buildBitCast(ptr, llvm_ptr_u8, ""),
-            ptr_ty.ptrAlignment(target),
+            ptr_alignment,
             self.builder.buildBitCast(elem, llvm_ptr_u8, ""),
             elem_ty.abiAlignment(target),
             self.context.intType(Type.usize.intInfo(target).bits).constInt(size_bytes, .False),
@@ -7908,6 +7954,8 @@ fn llvmFieldIndex(
 }
 
 fn firstParamSRet(fn_info: Type.Payload.Function.Data, target: std.Target) bool {
+    if (!fn_info.return_type.hasRuntimeBitsIgnoreComptime()) return false;
+
     switch (fn_info.cc) {
         .Unspecified, .Inline => return isByRef(fn_info.return_type),
         .C => switch (target.cpu.arch) {
@@ -8007,7 +8055,8 @@ fn lowerFnRetTy(dg: *DeclGen, fn_info: Type.Payload.Function.Data) !*const llvm.
                             }
                         }
                         if (classes[0] == .integer and classes[1] == .none) {
-                            return llvm_types_buffer[0];
+                            const abi_size = fn_info.return_type.abiSize(target);
+                            return dg.context.intType(@intCast(c_uint, abi_size * 8));
                         }
                         return dg.context.structType(&llvm_types_buffer, llvm_types_index, .False);
                     },
@@ -8101,7 +8150,8 @@ fn lowerFnParamTy(dg: *DeclGen, cc: std.builtin.CallingConvention, ty: Type) !*c
                             }
                         }
                         if (classes[0] == .integer and classes[1] == .none) {
-                            return llvm_types_buffer[0];
+                            const abi_size = ty.abiSize(target);
+                            return dg.context.intType(@intCast(c_uint, abi_size * 8));
                         }
                         return dg.context.structType(&llvm_types_buffer, llvm_types_index, .False);
                     },
@@ -8251,3 +8301,15 @@ const AnnotatedDITypePtr = enum(usize) {
 };
 
 const lt_errors_fn_name = "__zig_lt_errors_len";
+
+/// Without this workaround, LLVM crashes with "unknown codeview register H1"
+/// TODO use llvm-reduce and file upstream LLVM bug for this.
+fn needDbgVarWorkaround(dg: *DeclGen, ty: Type) bool {
+    if (ty.tag() == .f16) {
+        const target = dg.module.getTarget();
+        if (target.os.tag == .windows and target.cpu.arch == .aarch64) {
+            return true;
+        }
+    }
+    return false;
+}

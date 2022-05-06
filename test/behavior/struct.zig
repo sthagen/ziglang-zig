@@ -421,21 +421,10 @@ test "packed struct 24bits" {
     if (builtin.cpu.arch == .arm) return error.SkipZigTest; // TODO
 
     comptime {
-        // TODO Remove if and leave only the else branch when it is also fixed in stage2
-        if (builtin.zig_backend == .stage2_llvm or builtin.zig_backend == .stage2_x86 or
-            builtin.zig_backend == .stage2_riscv64)
-        {
-            // Stage 2 still expects the wrong values
-            try expect(@sizeOf(Foo24Bits) == 4);
-            if (@sizeOf(usize) == 4) {
-                try expect(@sizeOf(Foo96Bits) == 12);
-            } else {
-                try expect(@sizeOf(Foo96Bits) == 16);
-            }
-        } else {
-            // Stage1 is now fixed and is expected to return right values
-            try expectEqual(@sizeOf(Foo24Bits), 3);
-            try expectEqual(@sizeOf(Foo96Bits), 12);
+        // stage1 gets the wrong answer for sizeof
+        if (builtin.zig_backend != .stage1) {
+            std.debug.assert(@sizeOf(Foo24Bits) == @sizeOf(u24));
+            std.debug.assert(@sizeOf(Foo96Bits) == @sizeOf(u96));
         }
     }
 
@@ -510,17 +499,18 @@ const Bitfields = packed struct {
     f7: u8,
 };
 
-test "native bit field understands endianness" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+test "packed struct fields are ordered from LSB to MSB" {
+    if (builtin.zig_backend == .stage1) {
+        // stage1 gets the wrong answer for a lot of targets
+        return error.SkipZigTest;
+    }
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
-    var all: u64 = if (native_endian != .Little)
-        0x1111222233445677
-    else
-        0x7765443322221111;
+    var all: u64 = 0x7765443322221111;
     var bytes: [8]u8 = undefined;
     @memcpy(&bytes, @ptrCast([*]u8, &all), 8);
     var bitfields = @ptrCast(*Bitfields, &bytes).*;
@@ -984,6 +974,8 @@ test "comptime struct field" {
         a: i32,
         comptime b: i32 = 1234,
     };
+
+    comptime std.debug.assert(@sizeOf(T) == 4);
 
     var foo: T = undefined;
     comptime try expect(foo.b == 1234);

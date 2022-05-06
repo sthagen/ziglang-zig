@@ -966,14 +966,16 @@ pub fn spillCompareFlagsIfOccupied(self: *Self) !void {
         const mcv = self.getResolvedInstValue(inst_to_save);
         assert(mcv.usesCompareFlags());
 
-        const new_mcv = try self.allocRegOrMem(inst_to_save, true);
+        const new_mcv = try self.allocRegOrMem(inst_to_save, !mcv.isRegister());
         try self.setRegOrMem(self.air.typeOfIndex(inst_to_save), new_mcv, mcv);
         log.debug("spilling {d} to mcv {any}", .{ inst_to_save, new_mcv });
-
         const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
         try branch.inst_table.put(self.gpa, inst_to_save, new_mcv);
 
         self.compare_flags_inst = null;
+        // TODO consolidate with register manager and spillInstruction
+        // this call should really belong in the register manager!
+        if (mcv.isRegister()) self.register_manager.freeReg(mcv.asRegister().?);
     }
 }
 
@@ -1085,31 +1087,8 @@ fn airTrunc(self: *Self, inst: Air.Inst.Index) !void {
     // when truncating a `u16` to `u5`, for example, those top 3 bits in the result
     // have to be removed. this only happens if the dst if not a power-of-two size.
     const dst_bit_size = dst_ty.bitSize(self.target.*);
-    const is_power_of_two = (dst_bit_size & (dst_bit_size - 1)) == 0;
-    if (!is_power_of_two or dst_bit_size < 8) {
-        const max_reg_bit_width = Register.rax.size();
-        const shift = @intCast(u6, max_reg_bit_width - dst_ty.bitSize(self.target.*));
-        const mask = (~@as(u64, 0)) >> shift;
-        try self.genBinMathOpMir(.@"and", Type.usize, .{ .register = reg }, .{ .immediate = mask });
-
-        if (src_ty.intInfo(self.target.*).signedness == .signed) {
-            _ = try self.addInst(.{
-                .tag = .sal,
-                .ops = (Mir.Ops{
-                    .reg1 = reg,
-                    .flags = 0b10,
-                }).encode(),
-                .data = .{ .imm = shift },
-            });
-            _ = try self.addInst(.{
-                .tag = .sar,
-                .ops = (Mir.Ops{
-                    .reg1 = reg,
-                    .flags = 0b10,
-                }).encode(),
-                .data = .{ .imm = shift },
-            });
-        }
+    if (!math.isPowerOfTwo(dst_bit_size) or dst_bit_size < 8) {
+        try self.truncateRegister(dst_ty, reg);
     }
 
     return self.finishAir(inst, .{ .register = reg }, .{ ty_op.operand, .none, .none });
@@ -1415,23 +1394,30 @@ fn airMulSat(self: *Self, inst: Air.Inst.Index) !void {
 fn airAddWithOverflow(self: *Self, inst: Air.Inst.Index) !void {
     const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
     const bin_op = self.air.extraData(Air.Bin, ty_pl.payload).data;
+    const result = if (self.liveness.isUnused(inst)) .dead else result: {
+        const ty = self.air.typeOf(bin_op.lhs);
 
-    if (self.liveness.isUnused(inst)) {
-        return self.finishAir(inst, .dead, .{ bin_op.lhs, bin_op.rhs, .none });
-    }
+        switch (ty.zigTypeTag()) {
+            .Vector => return self.fail("TODO implement add_with_overflow for Vector type", .{}),
+            .Int => {
+                const int_info = ty.intInfo(self.target.*);
 
-    const ty = self.air.typeOf(bin_op.lhs);
-    const signedness: std.builtin.Signedness = blk: {
-        if (ty.zigTypeTag() != .Int) {
-            return self.fail("TODO implement airAddWithOverflow for type {}", .{ty.fmtDebug()});
+                if (int_info.bits > 64) {
+                    return self.fail("TODO implement add_with_overflow for Ints larger than 64bits", .{});
+                }
+
+                try self.spillCompareFlagsIfOccupied();
+                self.compare_flags_inst = inst;
+
+                const partial = try self.genBinMathOp(inst, bin_op.lhs, bin_op.rhs);
+                const result: MCValue = switch (int_info.signedness) {
+                    .signed => .{ .register_overflow_signed = partial.register },
+                    .unsigned => .{ .register_overflow_unsigned = partial.register },
+                };
+                break :result result;
+            },
+            else => unreachable,
         }
-        break :blk ty.intInfo(self.target.*).signedness;
-    };
-
-    const partial = try self.genBinMathOp(inst, bin_op.lhs, bin_op.rhs);
-    const result: MCValue = switch (signedness) {
-        .signed => .{ .register_overflow_signed = partial.register },
-        .unsigned => .{ .register_overflow_unsigned = partial.register },
     };
 
     return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
@@ -1440,23 +1426,30 @@ fn airAddWithOverflow(self: *Self, inst: Air.Inst.Index) !void {
 fn airSubWithOverflow(self: *Self, inst: Air.Inst.Index) !void {
     const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
     const bin_op = self.air.extraData(Air.Bin, ty_pl.payload).data;
+    const result = if (self.liveness.isUnused(inst)) .dead else result: {
+        const ty = self.air.typeOf(bin_op.lhs);
 
-    if (self.liveness.isUnused(inst)) {
-        return self.finishAir(inst, .dead, .{ bin_op.lhs, bin_op.rhs, .none });
-    }
+        switch (ty.zigTypeTag()) {
+            .Vector => return self.fail("TODO implement sub_with_overflow for Vector type", .{}),
+            .Int => {
+                const int_info = ty.intInfo(self.target.*);
 
-    const ty = self.air.typeOf(bin_op.lhs);
-    const signedness: std.builtin.Signedness = blk: {
-        if (ty.zigTypeTag() != .Int) {
-            return self.fail("TODO implement airSubWithOverflow for type {}", .{ty.fmtDebug()});
+                if (int_info.bits > 64) {
+                    return self.fail("TODO implement sub_with_overflow for Ints larger than 64bits", .{});
+                }
+
+                try self.spillCompareFlagsIfOccupied();
+                self.compare_flags_inst = inst;
+
+                const partial = try self.genSubOp(inst, bin_op.lhs, bin_op.rhs);
+                const result: MCValue = switch (int_info.signedness) {
+                    .signed => .{ .register_overflow_signed = partial.register },
+                    .unsigned => .{ .register_overflow_unsigned = partial.register },
+                };
+                break :result result;
+            },
+            else => unreachable,
         }
-        break :blk ty.intInfo(self.target.*).signedness;
-    };
-
-    const partial = try self.genSubOp(inst, bin_op.lhs, bin_op.rhs);
-    const result: MCValue = switch (signedness) {
-        .signed => .{ .register_overflow_signed = partial.register },
-        .unsigned => .{ .register_overflow_unsigned = partial.register },
     };
 
     return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
@@ -1467,30 +1460,152 @@ fn airMulWithOverflow(self: *Self, inst: Air.Inst.Index) !void {
     const bin_op = self.air.extraData(Air.Bin, ty_pl.payload).data;
     const result = if (self.liveness.isUnused(inst)) .dead else result: {
         const ty = self.air.typeOf(bin_op.lhs);
-        const signedness: std.builtin.Signedness = blk: {
-            if (ty.zigTypeTag() != .Int) {
-                return self.fail("TODO implement airMulWithOverflow for type {}", .{ty.fmtDebug()});
-            }
-            break :blk ty.intInfo(self.target.*).signedness;
-        };
 
-        // Spill .rax and .rdx upfront to ensure we don't spill the operands too late.
-        try self.register_manager.getReg(.rax, inst);
-        try self.register_manager.getReg(.rdx, null);
-        self.register_manager.freezeRegs(&.{ .rax, .rdx });
-        defer self.register_manager.unfreezeRegs(&.{ .rax, .rdx });
+        switch (ty.zigTypeTag()) {
+            .Vector => return self.fail("TODO implement mul_with_overflow for Vector type", .{}),
+            .Int => {
+                const int_info = ty.intInfo(self.target.*);
 
-        const lhs = try self.resolveInst(bin_op.lhs);
-        const rhs = try self.resolveInst(bin_op.rhs);
+                if (int_info.bits > 64) {
+                    return self.fail("TODO implement mul_with_overflow for Ints larger than 64bits", .{});
+                }
 
-        try self.genIntMulDivOpMir(switch (signedness) {
-            .signed => .imul,
-            .unsigned => .mul,
-        }, ty, signedness, lhs, rhs);
+                if (math.isPowerOfTwo(int_info.bits)) {
+                    try self.spillCompareFlagsIfOccupied();
+                    self.compare_flags_inst = inst;
 
-        switch (signedness) {
-            .signed => break :result MCValue{ .register_overflow_signed = .rax },
-            .unsigned => break :result MCValue{ .register_overflow_unsigned = .rax },
+                    // Spill .rax and .rdx upfront to ensure we don't spill the operands too late.
+                    try self.register_manager.getReg(.rax, inst);
+                    try self.register_manager.getReg(.rdx, null);
+                    self.register_manager.freezeRegs(&.{ .rax, .rdx });
+                    defer self.register_manager.unfreezeRegs(&.{ .rax, .rdx });
+
+                    const lhs = try self.resolveInst(bin_op.lhs);
+                    const rhs = try self.resolveInst(bin_op.rhs);
+
+                    try self.genIntMulDivOpMir(switch (int_info.signedness) {
+                        .signed => .imul,
+                        .unsigned => .mul,
+                    }, ty, int_info.signedness, lhs, rhs);
+
+                    const result: MCValue = switch (int_info.signedness) {
+                        .signed => .{ .register_overflow_signed = .rax },
+                        .unsigned => .{ .register_overflow_unsigned = .rax },
+                    };
+                    break :result result;
+                }
+
+                try self.spillCompareFlagsIfOccupied();
+                self.compare_flags_inst = null;
+
+                const dst_reg: Register = dst_reg: {
+                    switch (int_info.signedness) {
+                        .signed => {
+                            const lhs = try self.resolveInst(bin_op.lhs);
+                            const rhs = try self.resolveInst(bin_op.rhs);
+
+                            rhs.freezeIfRegister(&self.register_manager);
+                            defer rhs.unfreezeIfRegister(&self.register_manager);
+
+                            const dst_reg: Register = blk: {
+                                if (lhs.isRegister()) break :blk lhs.register;
+                                break :blk try self.copyToTmpRegister(ty, lhs);
+                            };
+                            self.register_manager.freezeRegs(&.{dst_reg});
+
+                            const rhs_mcv = blk: {
+                                if (rhs.isRegister() or rhs.isMemory()) break :blk rhs;
+                                break :blk MCValue{ .register = try self.copyToTmpRegister(ty, rhs) };
+                            };
+                            rhs_mcv.freezeIfRegister(&self.register_manager);
+                            defer rhs_mcv.unfreezeIfRegister(&self.register_manager);
+
+                            try self.genIntMulComplexOpMir(Type.isize, .{ .register = dst_reg }, rhs_mcv);
+
+                            break :dst_reg dst_reg;
+                        },
+                        .unsigned => {
+                            // Spill .rax and .rdx upfront to ensure we don't spill the operands too late.
+                            try self.register_manager.getReg(.rax, null);
+                            try self.register_manager.getReg(.rdx, null);
+                            self.register_manager.freezeRegs(&.{ .rax, .rdx });
+                            defer self.register_manager.unfreezeRegs(&.{.rdx});
+
+                            const lhs = try self.resolveInst(bin_op.lhs);
+                            const rhs = try self.resolveInst(bin_op.rhs);
+
+                            try self.genIntMulDivOpMir(.mul, ty, .unsigned, lhs, rhs);
+
+                            break :dst_reg registerAlias(.rax, @intCast(u32, ty.abiSize(self.target.*)));
+                        },
+                    }
+                };
+                defer self.register_manager.unfreezeRegs(&.{dst_reg});
+
+                const tuple_ty = self.air.typeOfIndex(inst);
+                const tuple_size = @intCast(u32, tuple_ty.abiSize(self.target.*));
+                const tuple_align = tuple_ty.abiAlignment(self.target.*);
+                const overflow_bit_offset = @intCast(i32, tuple_ty.structFieldOffset(1, self.target.*));
+
+                const stack_offset = @intCast(i32, try self.allocMem(inst, tuple_size, tuple_align));
+                const extended_ty = switch (int_info.signedness) {
+                    .signed => Type.isize,
+                    .unsigned => ty,
+                };
+
+                const temp_regs = try self.register_manager.allocRegs(3, .{ null, null, null });
+                self.register_manager.freezeRegs(&temp_regs);
+                defer self.register_manager.unfreezeRegs(&temp_regs);
+
+                const overflow_reg = temp_regs[0];
+                const flags: u2 = switch (int_info.signedness) {
+                    .signed => 0b00,
+                    .unsigned => 0b10,
+                };
+                _ = try self.addInst(.{
+                    .tag = .cond_set_byte_overflow,
+                    .ops = (Mir.Ops{
+                        .reg1 = overflow_reg.to8(),
+                        .flags = flags,
+                    }).encode(),
+                    .data = undefined,
+                });
+
+                const scratch_reg = temp_regs[1];
+                try self.genSetReg(extended_ty, scratch_reg, .{ .register = dst_reg });
+                try self.truncateRegister(ty, scratch_reg);
+                try self.genBinMathOpMir(
+                    .cmp,
+                    extended_ty,
+                    .{ .register = dst_reg },
+                    .{ .register = scratch_reg },
+                );
+
+                const eq_reg = temp_regs[2];
+                _ = try self.addInst(.{
+                    .tag = .cond_set_byte_eq_ne,
+                    .ops = (Mir.Ops{
+                        .reg1 = eq_reg.to8(),
+                        .flags = 0b00,
+                    }).encode(),
+                    .data = undefined,
+                });
+
+                try self.genBinMathOpMir(
+                    .@"or",
+                    Type.u8,
+                    .{ .register = overflow_reg },
+                    .{ .register = eq_reg },
+                );
+
+                try self.genSetStack(ty, stack_offset, .{ .register = scratch_reg }, .{});
+                try self.genSetStack(Type.initTag(.u1), stack_offset - overflow_bit_offset, .{
+                    .register = overflow_reg.to8(),
+                }, .{});
+
+                break :result MCValue{ .stack_offset = stack_offset };
+            },
+            else => unreachable,
         }
     };
 
@@ -1634,7 +1749,7 @@ fn genInlineIntDivFloor(self: *Self, ty: Type, lhs: MCValue, rhs: MCValue) !MCVa
         }).encode(),
         .data = undefined,
     });
-    try self.genBinMathOpMir(.add, Type.isize, .{ .register = divisor.to64() }, .{ .register = .rax });
+    try self.genBinMathOpMir(.add, Type.isize, .{ .register = divisor }, .{ .register = .rax });
     return MCValue{ .register = divisor };
 }
 
@@ -2208,8 +2323,8 @@ fn genSliceElemPtr(self: *Self, lhs: Air.Inst.Ref, rhs: Air.Inst.Ref) !MCValue {
     }
     // TODO we could allocate register here, but need to expect addr register and potentially
     // offset register.
-    try self.genBinMathOpMir(.add, slice_ptr_field_type, .{ .register = addr_reg.to64() }, .{
-        .register = offset_reg.to64(),
+    try self.genBinMathOpMir(.add, slice_ptr_field_type, .{ .register = addr_reg }, .{
+        .register = offset_reg,
     });
     return MCValue{ .register = addr_reg.to64() };
 }
@@ -2301,7 +2416,7 @@ fn airArrayElemVal(self: *Self, inst: Air.Inst.Index) !void {
         // TODO we could allocate register here, but need to expect addr register and potentially
         // offset register.
         const dst_mcv = try self.allocRegOrMem(inst, false);
-        try self.genBinMathOpMir(.add, array_ty, .{ .register = addr_reg.to64() }, .{ .register = offset_reg.to64() });
+        try self.genBinMathOpMir(.add, Type.usize, .{ .register = addr_reg }, .{ .register = offset_reg });
         try self.load(dst_mcv, .{ .register = addr_reg.to64() }, array_ty);
         break :result dst_mcv;
     };
@@ -2679,7 +2794,6 @@ fn loadMemPtrIntoRegister(self: *Self, reg: Register, ptr_ty: Type, ptr: MCValue
 }
 
 fn store(self: *Self, ptr: MCValue, value: MCValue, ptr_ty: Type, value_ty: Type) InnerError!void {
-    _ = ptr_ty;
     const abi_size = value_ty.abiSize(self.target.*);
     switch (ptr) {
         .none => unreachable,
@@ -2882,6 +2996,24 @@ fn store(self: *Self, ptr: MCValue, value: MCValue, ptr_ty: Type, value_ty: Type
                             }).encode(),
                             .data = .{ .imm = 0 },
                         });
+                        _ = try self.addInst(.{
+                            .tag = .mov,
+                            .ops = (Mir.Ops{
+                                .reg1 = addr_reg.to64(),
+                                .reg2 = tmp_reg,
+                                .flags = 0b10,
+                            }).encode(),
+                            .data = .{ .imm = 0 },
+                        });
+                        return;
+                    }
+
+                    try self.genInlineMemcpy(.{ .register = addr_reg.to64() }, value, .{ .immediate = abi_size }, .{});
+                },
+                .stack_offset => {
+                    if (abi_size <= 8) {
+                        // TODO this should really be a recursive call
+                        const tmp_reg = try self.copyToTmpRegister(value_ty, value);
                         _ = try self.addInst(.{
                             .tag = .mov,
                             .ops = (Mir.Ops{
@@ -3164,8 +3296,8 @@ fn genBinMathOpMir(self: *Self, mir_tag: Mir.Inst.Tag, dst_ty: Type, dst_mcv: MC
                     _ = try self.addInst(.{
                         .tag = mir_tag,
                         .ops = (Mir.Ops{
-                            .reg1 = registerAlias(dst_reg, @divExact(src_reg.size(), 8)),
-                            .reg2 = src_reg,
+                            .reg1 = registerAlias(dst_reg, abi_size),
+                            .reg2 = registerAlias(src_reg, abi_size),
                         }).encode(),
                         .data = undefined,
                     });
@@ -4739,10 +4871,12 @@ fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
             if (output != .none) {
                 return self.fail("TODO implement codegen for non-expr asm", .{});
             }
+            const extra_bytes = std.mem.sliceAsBytes(self.air.extra[extra_i..]);
             const constraint = std.mem.sliceTo(std.mem.sliceAsBytes(self.air.extra[extra_i..]), 0);
+            const name = std.mem.sliceTo(extra_bytes[constraint.len + 1 ..], 0);
             // This equation accounts for the fact that even if we have exactly 4 bytes
             // for the string, we still use the next u32 for the null terminator.
-            extra_i += constraint.len / 4 + 1;
+            extra_i += (constraint.len + name.len + (2 + 3)) / 4;
 
             break constraint;
         } else null;
@@ -4750,10 +4884,10 @@ fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
         for (inputs) |input| {
             const input_bytes = std.mem.sliceAsBytes(self.air.extra[extra_i..]);
             const constraint = std.mem.sliceTo(input_bytes, 0);
-            const input_name = std.mem.sliceTo(input_bytes[constraint.len + 1 ..], 0);
+            const name = std.mem.sliceTo(input_bytes[constraint.len + 1 ..], 0);
             // This equation accounts for the fact that even if we have exactly 4 bytes
             // for the string, we still use the next u32 for the null terminator.
-            extra_i += (constraint.len + input_name.len + 1) / 4 + 1;
+            extra_i += (constraint.len + name.len + (2 + 3)) / 4;
 
             if (constraint.len < 3 or constraint[0] != '{' or constraint[constraint.len - 1] != '}') {
                 return self.fail("unrecognized asm input constraint: '{s}'", .{constraint});
@@ -5125,8 +5259,7 @@ fn genSetStack(self: *Self, ty: Type, stack_offset: i32, mcv: MCValue, opts: Inl
             }
 
             const base_reg = opts.dest_stack_base orelse .rbp;
-            const is_power_of_two = (abi_size % 2) == 0;
-            if (!is_power_of_two) {
+            if (!math.isPowerOfTwo(abi_size)) {
                 self.register_manager.freezeRegs(&.{reg});
                 defer self.register_manager.unfreezeRegs(&.{reg});
 
@@ -5135,31 +5268,31 @@ fn genSetStack(self: *Self, ty: Type, stack_offset: i32, mcv: MCValue, opts: Inl
                 var next_offset = stack_offset;
                 var remainder = abi_size;
                 while (remainder > 0) {
-                    const closest_power_of_two = @as(u6, 1) << @intCast(u3, math.log2(remainder));
+                    const nearest_power_of_two = @as(u6, 1) << math.log2_int(u3, @intCast(u3, remainder));
 
                     _ = try self.addInst(.{
                         .tag = .mov,
                         .ops = (Mir.Ops{
                             .reg1 = base_reg,
-                            .reg2 = registerAlias(tmp_reg, closest_power_of_two),
+                            .reg2 = registerAlias(tmp_reg, nearest_power_of_two),
                             .flags = 0b10,
                         }).encode(),
                         .data = .{ .imm = @bitCast(u32, -next_offset) },
                     });
 
-                    if (closest_power_of_two > 1) {
+                    if (nearest_power_of_two > 1) {
                         _ = try self.addInst(.{
                             .tag = .shr,
                             .ops = (Mir.Ops{
                                 .reg1 = tmp_reg,
                                 .flags = 0b10,
                             }).encode(),
-                            .data = .{ .imm = closest_power_of_two * 8 },
+                            .data = .{ .imm = nearest_power_of_two * 8 },
                         });
                     }
 
-                    remainder -= closest_power_of_two;
-                    next_offset -= closest_power_of_two;
+                    remainder -= nearest_power_of_two;
+                    next_offset -= nearest_power_of_two;
                 }
             } else {
                 _ = try self.addInst(.{
@@ -6514,5 +6647,43 @@ fn shiftRegister(self: *Self, reg: Register, shift: u8) !void {
             }).encode(),
             .data = .{ .imm = shift },
         });
+    }
+}
+
+/// Truncates the value in the register in place.
+/// Clobbers any remaining bits.
+fn truncateRegister(self: *Self, ty: Type, reg: Register) !void {
+    const int_info = ty.intInfo(self.target.*);
+    const max_reg_bit_width = Register.rax.size();
+    switch (int_info.signedness) {
+        .signed => {
+            const shift = @intCast(u6, max_reg_bit_width - int_info.bits);
+            _ = try self.addInst(.{
+                .tag = .sal,
+                .ops = (Mir.Ops{
+                    .reg1 = reg.to64(),
+                    .flags = 0b10,
+                }).encode(),
+                .data = .{ .imm = shift },
+            });
+            _ = try self.addInst(.{
+                .tag = .sar,
+                .ops = (Mir.Ops{
+                    .reg1 = reg.to64(),
+                    .flags = 0b10,
+                }).encode(),
+                .data = .{ .imm = shift },
+            });
+        },
+        .unsigned => {
+            const shift = @intCast(u6, max_reg_bit_width - int_info.bits);
+            const mask = (~@as(u64, 0)) >> shift;
+            if (int_info.bits <= 32) {
+                try self.genBinMathOpMir(.@"and", Type.usize, .{ .register = reg }, .{ .immediate = mask });
+            } else {
+                const tmp_reg = try self.copyToTmpRegister(Type.usize, .{ .immediate = mask });
+                try self.genBinMathOpMir(.@"and", Type.usize, .{ .register = reg }, .{ .register = tmp_reg });
+            }
+        },
     }
 }
