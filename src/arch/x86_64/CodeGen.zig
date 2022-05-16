@@ -348,18 +348,6 @@ pub fn generate(
         else => |e| return e,
     };
 
-    if (builtin.mode == .Debug and bin_file.options.module.?.comp.verbose_mir) {
-        const w = std.io.getStdErr().writer();
-        w.print("# Begin Function MIR: {s}:\n", .{fn_owner_decl.name}) catch {};
-        const PrintMir = @import("PrintMir.zig");
-        const print = PrintMir{
-            .mir = mir,
-            .bin_file = bin_file,
-        };
-        print.printMir(w, function.mir_to_air_map, air) catch {}; // we don't care if the debug printing fails
-        w.print("# End Function MIR: {s}\n\n", .{fn_owner_decl.name}) catch {};
-    }
-
     if (function.err_msg) |em| {
         return FnResult{ .fail = em };
     } else {
@@ -3767,8 +3755,10 @@ fn airArg(self: *Self, inst: Air.Inst.Index) !void {
 
 fn airBreakpoint(self: *Self) !void {
     _ = try self.addInst(.{
-        .tag = .brk,
-        .ops = undefined,
+        .tag = .interrupt,
+        .ops = (Mir.Ops{
+            .flags = 0b00,
+        }).encode(),
         .data = undefined,
     });
     return self.finishAirBookkeeping();
