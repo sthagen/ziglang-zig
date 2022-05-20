@@ -764,6 +764,7 @@ pub const InitOptions = struct {
     linker_z_noexecstack: bool = false,
     linker_z_now: bool = false,
     linker_z_relro: bool = false,
+    linker_z_nocopyreloc: bool = false,
     linker_tsaware: bool = false,
     linker_nxcompat: bool = false,
     linker_dynamicbase: bool = false,
@@ -1457,7 +1458,8 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
         errdefer if (module) |zm| zm.deinit();
 
         const error_return_tracing = !strip and switch (options.optimize_mode) {
-            .Debug, .ReleaseSafe => true,
+            .Debug, .ReleaseSafe => (!options.target.isWasm() or options.target.os.tag == .emscripten) and
+                !options.target.cpu.arch.isBpf(),
             .ReleaseFast, .ReleaseSmall => false,
         };
 
@@ -1596,6 +1598,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .z_notext = options.linker_z_notext,
             .z_defs = options.linker_z_defs,
             .z_origin = options.linker_z_origin,
+            .z_nocopyreloc = options.linker_z_nocopyreloc,
             .z_noexecstack = options.linker_z_noexecstack,
             .z_now = options.linker_z_now,
             .z_relro = options.linker_z_relro,
@@ -2254,7 +2257,7 @@ fn prepareWholeEmitSubPath(arena: Allocator, opt_emit: ?EmitLoc) error{OutOfMemo
 /// to remind the programmer to update multiple related pieces of code that
 /// are in different locations. Bump this number when adding or deleting
 /// anything from the link cache manifest.
-pub const link_hash_implementation_version = 2;
+pub const link_hash_implementation_version = 3;
 
 fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifest) !void {
     const gpa = comp.gpa;
@@ -2264,7 +2267,7 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
-    comptime assert(link_hash_implementation_version == 2);
+    comptime assert(link_hash_implementation_version == 3);
 
     if (comp.bin_file.options.module) |mod| {
         const main_zig_file = try mod.main_pkg.root_src_directory.join(arena, &[_][]const u8{
@@ -2332,6 +2335,7 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
     man.hash.add(comp.bin_file.options.z_notext);
     man.hash.add(comp.bin_file.options.z_defs);
     man.hash.add(comp.bin_file.options.z_origin);
+    man.hash.add(comp.bin_file.options.z_nocopyreloc);
     man.hash.add(comp.bin_file.options.z_noexecstack);
     man.hash.add(comp.bin_file.options.z_now);
     man.hash.add(comp.bin_file.options.z_relro);

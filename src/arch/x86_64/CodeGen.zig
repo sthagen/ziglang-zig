@@ -574,23 +574,33 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
 
         switch (air_tags[inst]) {
             // zig fmt: off
-            .add             => try self.airBinOp(inst),
-            .addwrap         => try self.airBinOp(inst),
-            .add_sat         => try self.airAddSat(inst),
-            .sub             => try self.airBinOp(inst),
-            .subwrap         => try self.airBinOp(inst),
-            .sub_sat         => try self.airSubSat(inst),
+            .add             => try self.airBinOp(inst, .add),
+            .addwrap         => try self.airBinOp(inst, .addwrap),
+            .sub             => try self.airBinOp(inst, .sub),
+            .subwrap         => try self.airBinOp(inst, .subwrap),
+            .bool_and        => try self.airBinOp(inst, .bool_and),
+            .bool_or         => try self.airBinOp(inst, .bool_or),
+            .bit_and         => try self.airBinOp(inst, .bit_and),
+            .bit_or          => try self.airBinOp(inst, .bit_or),
+            .xor             => try self.airBinOp(inst, .xor),
+
+            .ptr_add         => try self.airPtrArithmetic(inst, .ptr_add),
+            .ptr_sub         => try self.airPtrArithmetic(inst, .ptr_sub),
+
+            .shr, .shr_exact => try self.airShlShrBinOp(inst),
+            .shl, .shl_exact => try self.airShlShrBinOp(inst),
+
             .mul             => try self.airMulDivBinOp(inst),
             .mulwrap         => try self.airMulDivBinOp(inst),
-            .mul_sat         => try self.airMulSat(inst),
             .rem             => try self.airMulDivBinOp(inst),
             .mod             => try self.airMulDivBinOp(inst),
-            .shl, .shl_exact => try self.airShlShrBinOp(inst),
+
+            .add_sat         => try self.airAddSat(inst),
+            .sub_sat         => try self.airSubSat(inst),
+            .mul_sat         => try self.airMulSat(inst),
             .shl_sat         => try self.airShlSat(inst),
             .min             => try self.airMin(inst),
             .max             => try self.airMax(inst),
-            .ptr_add         => try self.airBinOp(inst),
-            .ptr_sub         => try self.airBinOp(inst),
             .slice           => try self.airSlice(inst),
 
             .sqrt,
@@ -625,13 +635,6 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
 
             .cmp_vector => try self.airCmpVector(inst),
             .cmp_lt_errors_len => try self.airCmpLtErrorsLen(inst),
-
-            .bool_and        => try self.airBinOp(inst),
-            .bool_or         => try self.airBinOp(inst),
-            .bit_and         => try self.airBinOp(inst),
-            .bit_or          => try self.airBinOp(inst),
-            .xor             => try self.airBinOp(inst),
-            .shr, .shr_exact => try self.airShlShrBinOp(inst),
 
             .alloc           => try self.airAlloc(inst),
             .ret_ptr         => try self.airRetPtr(inst),
@@ -749,6 +752,8 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .unwrap_errunion_err_ptr    => try self.airUnwrapErrErrPtr(inst),
             .unwrap_errunion_payload_ptr=> try self.airUnwrapErrPayloadPtr(inst),
             .errunion_payload_ptr_set   => try self.airErrUnionPayloadPtrSet(inst),
+            .err_return_trace           => try self.airErrReturnTrace(inst),
+            .set_err_return_trace       => try self.airSetErrReturnTrace(inst),
 
             .wrap_optional         => try self.airWrapOptional(inst),
             .wrap_errunion_payload => try self.airWrapErrUnionPayload(inst),
@@ -1229,21 +1234,26 @@ fn airSlice(self: *Self, inst: Air.Inst.Index) !void {
     return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
 }
 
-fn airBinOp(self: *Self, inst: Air.Inst.Index) !void {
+fn airBinOp(self: *Self, inst: Air.Inst.Index, tag: Air.Inst.Tag) !void {
     const bin_op = self.air.instructions.items(.data)[inst].bin_op;
 
     if (self.liveness.isUnused(inst)) {
         return self.finishAir(inst, .dead, .{ bin_op.lhs, bin_op.rhs, .none });
     }
 
-    const tag = self.air.instructions.items(.tag)[inst];
-    const lhs = try self.resolveInst(bin_op.lhs);
-    const rhs = try self.resolveInst(bin_op.rhs);
-    const lhs_ty = self.air.typeOf(bin_op.lhs);
-    const rhs_ty = self.air.typeOf(bin_op.rhs);
+    const result = try self.genBinOp(inst, tag, bin_op.lhs, bin_op.rhs);
+    return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
+}
 
-    const result = try self.genBinOp(tag, inst, lhs, rhs, lhs_ty, rhs_ty);
+fn airPtrArithmetic(self: *Self, inst: Air.Inst.Index, tag: Air.Inst.Tag) !void {
+    const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
+    const bin_op = self.air.extraData(Air.Bin, ty_pl.payload).data;
 
+    if (self.liveness.isUnused(inst)) {
+        return self.finishAir(inst, .dead, .{ bin_op.lhs, bin_op.rhs, .none });
+    }
+
+    const result = try self.genBinOp(inst, tag, bin_op.lhs, bin_op.rhs);
     return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
 }
 
@@ -1314,13 +1324,12 @@ fn airAddSubShlWithOverflow(self: *Self, inst: Air.Inst.Index) !void {
                     try self.spillRegisters(1, .{.rcx});
                 }
 
-                const lhs = try self.resolveInst(bin_op.lhs);
-                const rhs = try self.resolveInst(bin_op.rhs);
-
                 const partial: MCValue = switch (tag) {
-                    .add_with_overflow => try self.genBinOp(.add, null, lhs, rhs, ty, ty),
-                    .sub_with_overflow => try self.genBinOp(.sub, null, lhs, rhs, ty, ty),
+                    .add_with_overflow => try self.genBinOp(null, .add, bin_op.lhs, bin_op.rhs),
+                    .sub_with_overflow => try self.genBinOp(null, .sub, bin_op.lhs, bin_op.rhs),
                     .shl_with_overflow => blk: {
+                        const lhs = try self.resolveInst(bin_op.lhs);
+                        const rhs = try self.resolveInst(bin_op.rhs);
                         const shift_ty = self.air.typeOf(bin_op.rhs);
                         break :blk try self.genShiftBinOp(.shl, null, lhs, rhs, ty, shift_ty);
                     },
@@ -1853,6 +1862,20 @@ fn airErrUnionPayloadPtrSet(self: *Self, inst: Air.Inst.Index) !void {
     else
         return self.fail("TODO implement .errunion_payload_ptr_set for {}", .{self.target.cpu.arch});
     return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
+}
+
+fn airErrReturnTrace(self: *Self, inst: Air.Inst.Index) !void {
+    _ = inst;
+    const result: MCValue = if (self.liveness.isUnused(inst))
+        .dead
+    else
+        return self.fail("TODO implement airErrReturnTrace for {}", .{self.target.cpu.arch});
+    return self.finishAir(inst, result, .{ .none, .none, .none });
+}
+
+fn airSetErrReturnTrace(self: *Self, inst: Air.Inst.Index) !void {
+    _ = inst;
+    return self.fail("TODO implement airSetErrReturnTrace for {}", .{self.target.cpu.arch});
 }
 
 fn airWrapOptional(self: *Self, inst: Air.Inst.Index) !void {
@@ -3294,13 +3317,15 @@ fn genMulDivBinOp(
 /// Result is always a register.
 fn genBinOp(
     self: *Self,
-    tag: Air.Inst.Tag,
     maybe_inst: ?Air.Inst.Index,
-    lhs: MCValue,
-    rhs: MCValue,
-    lhs_ty: Type,
-    rhs_ty: Type,
+    tag: Air.Inst.Tag,
+    lhs_air: Air.Inst.Ref,
+    rhs_air: Air.Inst.Ref,
 ) !MCValue {
+    const lhs = try self.resolveInst(lhs_air);
+    const rhs = try self.resolveInst(rhs_air);
+    const lhs_ty = self.air.typeOf(lhs_air);
+    const rhs_ty = self.air.typeOf(rhs_air);
     if (lhs_ty.zigTypeTag() == .Vector or lhs_ty.zigTypeTag() == .Float) {
         return self.fail("TODO implement genBinOp for {}", .{lhs_ty.fmtDebug()});
     }
@@ -3336,11 +3361,10 @@ fn genBinOp(
     var flipped: bool = false;
     const dst_mcv: MCValue = blk: {
         if (maybe_inst) |inst| {
-            const bin_op = self.air.instructions.items(.data)[inst].bin_op;
-            if (self.reuseOperand(inst, bin_op.lhs, 0, lhs) and lhs.isRegister()) {
+            if (self.reuseOperand(inst, lhs_air, 0, lhs) and lhs.isRegister()) {
                 break :blk lhs;
             }
-            if (is_commutative and self.reuseOperand(inst, bin_op.rhs, 1, rhs) and rhs.isRegister()) {
+            if (is_commutative and self.reuseOperand(inst, rhs_air, 1, rhs) and rhs.isRegister()) {
                 flipped = true;
                 break :blk rhs;
             }

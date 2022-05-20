@@ -395,11 +395,11 @@ pub const Object = struct {
         return slice.ptr;
     }
 
-    fn genErrorNameTable(self: *Object, comp: *Compilation) !void {
+    fn genErrorNameTable(self: *Object) !void {
         // If self.error_name_table is null, there was no instruction that actually referenced the error table.
         const error_name_table_ptr_global = self.error_name_table orelse return;
 
-        const mod = comp.bin_file.options.module.?;
+        const mod = self.module;
         const target = mod.getTarget();
 
         const llvm_ptr_ty = self.context.intType(8).pointerType(0); // TODO: Address space
@@ -413,8 +413,8 @@ pub const Object = struct {
         const slice_alignment = slice_ty.abiAlignment(target);
 
         const error_name_list = mod.error_name_list.items;
-        const llvm_errors = try comp.gpa.alloc(*const llvm.Value, error_name_list.len);
-        defer comp.gpa.free(llvm_errors);
+        const llvm_errors = try mod.gpa.alloc(*const llvm.Value, error_name_list.len);
+        defer mod.gpa.free(llvm_errors);
 
         llvm_errors[0] = llvm_slice_ty.getUndef();
         for (llvm_errors[1..]) |*llvm_error, i| {
@@ -447,10 +447,10 @@ pub const Object = struct {
         error_name_table_ptr_global.setInitializer(error_name_table_ptr);
     }
 
-    fn genCmpLtErrorsLenFunction(object: *Object, comp: *Compilation) !void {
+    fn genCmpLtErrorsLenFunction(object: *Object) !void {
         // If there is no such function in the module, it means the source code does not need it.
         const llvm_fn = object.llvm_module.getNamedFunction(lt_errors_fn_name) orelse return;
-        const mod = comp.bin_file.options.module.?;
+        const mod = object.module;
         const errors_len = mod.global_error_set.count();
 
         // Delete previous implementation. We replace it with every flush() because the
@@ -476,10 +476,10 @@ pub const Object = struct {
         _ = builder.buildRet(is_lt);
     }
 
-    fn genModuleLevelAssembly(object: *Object, comp: *Compilation) !void {
-        const mod = comp.bin_file.options.module.?;
+    fn genModuleLevelAssembly(object: *Object) !void {
+        const mod = object.module;
         if (mod.global_assembly.count() == 0) return;
-        var buffer = std.ArrayList(u8).init(comp.gpa);
+        var buffer = std.ArrayList(u8).init(mod.gpa);
         defer buffer.deinit();
         var it = mod.global_assembly.iterator();
         while (it.next()) |kv| {
@@ -489,15 +489,53 @@ pub const Object = struct {
         object.llvm_module.setModuleInlineAsm2(buffer.items.ptr, buffer.items.len - 1);
     }
 
+    fn resolveExportExternCollisions(object: *Object) !void {
+        const mod = object.module;
+
+        const export_keys = mod.decl_exports.keys();
+        for (mod.decl_exports.values()) |export_list, i| {
+            const decl_index = export_keys[i];
+            const llvm_global = object.decl_map.get(decl_index) orelse continue;
+            for (export_list) |exp| {
+                // Detect if the LLVM global has already been created as an extern. In such
+                // case, we need to replace all uses of it with this exported global.
+                // TODO update std.builtin.ExportOptions to have the name be a
+                // null-terminated slice.
+                const exp_name_z = try mod.gpa.dupeZ(u8, exp.options.name);
+                defer mod.gpa.free(exp_name_z);
+
+                const other_global = object.getLlvmGlobal(exp_name_z.ptr) orelse continue;
+                if (other_global == llvm_global) continue;
+
+                // replaceAllUsesWith requires the type to be unchanged. So we bitcast
+                // the new global to the old type and use that as the thing to replace
+                // old uses.
+                const new_global_ptr = llvm_global.constBitCast(other_global.typeOf());
+                other_global.replaceAllUsesWith(new_global_ptr);
+                llvm_global.takeName(other_global);
+                other_global.deleteGlobal();
+                // Problem: now we need to replace in the decl_map that
+                // the extern decl index points to this new global. However we don't
+                // know the decl index.
+                // Even if we did, a future incremental update to the extern would then
+                // treat the LLVM global as an extern rather than an export, so it would
+                // need a way to check that.
+                // This is a TODO that needs to be solved when making
+                // the LLVM backend support incremental compilation.
+            }
+        }
+    }
+
     pub fn flushModule(self: *Object, comp: *Compilation, prog_node: *std.Progress.Node) !void {
         var sub_prog_node = prog_node.start("LLVM Emit Object", 0);
         sub_prog_node.activate();
         sub_prog_node.context.refresh();
         defer sub_prog_node.end();
 
-        try self.genErrorNameTable(comp);
-        try self.genCmpLtErrorsLenFunction(comp);
-        try self.genModuleLevelAssembly(comp);
+        try self.resolveExportExternCollisions();
+        try self.genErrorNameTable();
+        try self.genCmpLtErrorsLenFunction();
+        try self.genModuleLevelAssembly();
 
         if (self.di_builder) |dib| {
             // When lowering debug info for pointers, we emitted the element types as
@@ -636,10 +674,18 @@ pub const Object = struct {
         const ret_ptr = if (sret) llvm_func.getParam(0) else null;
         const gpa = dg.gpa;
 
+        const err_return_tracing = fn_info.return_type.isError() and
+            dg.module.comp.bin_file.options.error_return_tracing;
+
+        const err_ret_trace = if (err_return_tracing)
+            llvm_func.getParam(@boolToInt(ret_ptr != null))
+        else
+            null;
+
         var args = std.ArrayList(*const llvm.Value).init(gpa);
         defer args.deinit();
 
-        const param_offset: c_uint = @boolToInt(ret_ptr != null);
+        const param_offset = @as(c_uint, @boolToInt(ret_ptr != null)) + @boolToInt(err_return_tracing);
         for (fn_info.param_types) |param_ty| {
             if (!param_ty.hasRuntimeBitsIgnoreComptime()) continue;
 
@@ -711,6 +757,7 @@ pub const Object = struct {
             .base_line = dg.decl.src_line,
             .prev_dbg_line = 0,
             .prev_dbg_column = 0,
+            .err_ret_trace = err_ret_trace,
         };
         defer fg.deinit();
 
@@ -750,6 +797,14 @@ pub const Object = struct {
         };
         const decl_exports = module.decl_exports.get(decl_index) orelse &[0]*Module.Export{};
         try self.updateDeclExports(module, decl_index, decl_exports);
+    }
+
+    /// TODO replace this with a call to `Module::getNamedValue`. This will require adding
+    /// a new wrapper in zig_llvm.h/zig_llvm.cpp.
+    fn getLlvmGlobal(o: Object, name: [*:0]const u8) ?*const llvm.Value {
+        if (o.llvm_module.getNamedFunction(name)) |x| return x;
+        if (o.llvm_module.getNamedGlobal(name)) |x| return x;
+        return null;
     }
 
     pub fn updateDeclExports(
@@ -818,6 +873,7 @@ pub const Object = struct {
                     llvm_global.setThreadLocalMode(.GeneralDynamicTLSModel);
                 }
             }
+
             // If a Decl is exported more than one time (which is rare),
             // we add aliases for all but the first export.
             // TODO LLVM C API does not support deleting aliases. We need to
@@ -1755,6 +1811,17 @@ pub const Object = struct {
                     try param_di_types.append(try o.lowerDebugType(Type.void, .full));
                 }
 
+                if (fn_info.return_type.isError() and
+                    o.module.comp.bin_file.options.error_return_tracing)
+                {
+                    var ptr_ty_payload: Type.Payload.ElemType = .{
+                        .base = .{ .tag = .single_mut_pointer },
+                        .data = o.getStackTraceType(),
+                    };
+                    const ptr_ty = Type.initPayload(&ptr_ty_payload.base);
+                    try param_di_types.append(try o.lowerDebugType(ptr_ty, .full));
+                }
+
                 for (fn_info.param_types) |param_ty| {
                     if (!param_ty.hasRuntimeBitsIgnoreComptime()) continue;
 
@@ -1823,6 +1890,27 @@ pub const Object = struct {
             null, // vtable holder
             "", // unique id
         );
+    }
+
+    fn getStackTraceType(o: *Object) Type {
+        const mod = o.module;
+
+        const std_pkg = mod.main_pkg.table.get("std").?;
+        const std_file = (mod.importPkg(std_pkg) catch unreachable).file;
+
+        const builtin_str: []const u8 = "builtin";
+        const std_namespace = mod.declPtr(std_file.root_decl.unwrap().?).src_namespace;
+        const builtin_decl = std_namespace.decls
+            .getKeyAdapted(builtin_str, Module.DeclAdapter{ .mod = mod }).?;
+
+        const stack_trace_str: []const u8 = "StackTrace";
+        // buffer is only used for int_type, `builtin` is a struct.
+        const builtin_ty = mod.declPtr(builtin_decl).val.toType(undefined);
+        const builtin_namespace = builtin_ty.getNamespace().?;
+        const stack_trace_decl = builtin_namespace.decls
+            .getKeyAdapted(stack_trace_str, Module.DeclAdapter{ .mod = mod }).?;
+
+        return mod.declPtr(stack_trace_decl).val.toType(undefined);
     }
 };
 
@@ -1976,8 +2064,15 @@ pub const DeclGen = struct {
             llvm_fn.addSretAttr(0, raw_llvm_ret_ty);
         }
 
+        const err_return_tracing = fn_info.return_type.isError() and
+            dg.module.comp.bin_file.options.error_return_tracing;
+
+        if (err_return_tracing) {
+            dg.addArgAttr(llvm_fn, @boolToInt(sret), "nonnull");
+        }
+
         // Set parameter attributes.
-        var llvm_param_i: c_uint = @boolToInt(sret);
+        var llvm_param_i: c_uint = @as(c_uint, @boolToInt(sret)) + @boolToInt(err_return_tracing);
         for (fn_info.param_types) |param_ty| {
             if (!param_ty.hasRuntimeBitsIgnoreComptime()) continue;
 
@@ -2433,6 +2528,17 @@ pub const DeclGen = struct {
                 if (firstParamSRet(fn_info, target)) {
                     const llvm_sret_ty = try dg.llvmType(fn_info.return_type);
                     try llvm_params.append(llvm_sret_ty.pointerType(0));
+                }
+
+                if (fn_info.return_type.isError() and
+                    dg.module.comp.bin_file.options.error_return_tracing)
+                {
+                    var ptr_ty_payload: Type.Payload.ElemType = .{
+                        .base = .{ .tag = .single_mut_pointer },
+                        .data = dg.object.getStackTraceType(),
+                    };
+                    const ptr_ty = Type.initPayload(&ptr_ty_payload.base);
+                    try llvm_params.append(try lowerFnParamTy(dg, fn_info.cc, ptr_ty));
                 }
 
                 for (fn_info.param_types) |param_ty| {
@@ -3449,6 +3555,8 @@ pub const FuncGen = struct {
 
     llvm_func: *const llvm.Value,
 
+    err_ret_trace: ?*const llvm.Value = null,
+
     /// This data structure is used to implement breaking to blocks.
     blocks: std.AutoHashMapUnmanaged(Air.Inst.Index, struct {
         parent_bb: *const llvm.BasicBlock,
@@ -3678,6 +3786,8 @@ pub const FuncGen = struct {
                 .unwrap_errunion_err         => try self.airErrUnionErr(inst, false),
                 .unwrap_errunion_err_ptr     => try self.airErrUnionErr(inst, true),
                 .errunion_payload_ptr_set    => try self.airErrUnionPayloadPtrSet(inst),
+                .err_return_trace            => try self.airErrReturnTrace(inst),
+                .set_err_return_trace        => try self.airSetErrReturnTrace(inst),
 
                 .wrap_optional         => try self.airWrapOptional(inst),
                 .wrap_errunion_payload => try self.airWrapErrUnionPayload(inst),
@@ -3731,6 +3841,12 @@ pub const FuncGen = struct {
             try llvm_args.append(ret_ptr);
             break :blk ret_ptr;
         };
+
+        if (fn_info.return_type.isError() and
+            self.dg.module.comp.bin_file.options.error_return_tracing)
+        {
+            try llvm_args.append(self.err_ret_trace.?);
+        }
 
         for (args) |arg| {
             const param_ty = self.air.typeOf(arg);
@@ -5149,6 +5265,17 @@ pub const FuncGen = struct {
         return self.builder.buildInBoundsGEP(operand, &indices, indices.len, "");
     }
 
+    fn airErrReturnTrace(self: *FuncGen, _: Air.Inst.Index) !?*const llvm.Value {
+        return self.err_ret_trace.?;
+    }
+
+    fn airSetErrReturnTrace(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        const un_op = self.air.instructions.items(.data)[inst].un_op;
+        const operand = try self.resolveInst(un_op);
+        self.err_ret_trace = operand;
+        return null;
+    }
+
     fn airWrapOptional(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
         if (self.liveness.isUnused(inst)) return null;
 
@@ -5552,7 +5679,8 @@ pub const FuncGen = struct {
     fn airPtrAdd(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
         if (self.liveness.isUnused(inst)) return null;
 
-        const bin_op = self.air.instructions.items(.data)[inst].bin_op;
+        const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
+        const bin_op = self.air.extraData(Air.Bin, ty_pl.payload).data;
         const base_ptr = try self.resolveInst(bin_op.lhs);
         const offset = try self.resolveInst(bin_op.rhs);
         const ptr_ty = self.air.typeOf(bin_op.lhs);
@@ -5571,7 +5699,8 @@ pub const FuncGen = struct {
     fn airPtrSub(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
         if (self.liveness.isUnused(inst)) return null;
 
-        const bin_op = self.air.instructions.items(.data)[inst].bin_op;
+        const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
+        const bin_op = self.air.extraData(Air.Bin, ty_pl.payload).data;
         const base_ptr = try self.resolveInst(bin_op.lhs);
         const offset = try self.resolveInst(bin_op.rhs);
         const negative_offset = self.builder.buildNeg(offset, "");
@@ -5604,14 +5733,25 @@ pub const FuncGen = struct {
         const rhs = try self.resolveInst(extra.rhs);
 
         const lhs_ty = self.air.typeOf(extra.lhs);
+        const scalar_ty = lhs_ty.scalarType();
+        const dest_ty = self.air.typeOfIndex(inst);
 
-        const intrinsic_name = if (lhs_ty.isSignedInt()) signed_intrinsic else unsigned_intrinsic;
+        const intrinsic_name = if (scalar_ty.isSignedInt()) signed_intrinsic else unsigned_intrinsic;
 
         const llvm_lhs_ty = try self.dg.llvmType(lhs_ty);
+        const llvm_dest_ty = try self.dg.llvmType(dest_ty);
+
+        const tg = self.dg.module.getTarget();
 
         const llvm_fn = self.getIntrinsic(intrinsic_name, &.{llvm_lhs_ty});
         const result_struct = self.builder.buildCall(llvm_fn, &[_]*const llvm.Value{ lhs, rhs }, 2, .Fast, .Auto, "");
-        return result_struct;
+
+        const result = self.builder.buildExtractValue(result_struct, 0, "");
+        const overflow_bit = self.builder.buildExtractValue(result_struct, 1, "");
+
+        var ty_buf: Type.Payload.Pointer = undefined;
+        const partial = self.builder.buildInsertValue(llvm_dest_ty.getUndef(), result, llvmFieldIndex(dest_ty, 0, tg, &ty_buf).?, "");
+        return self.builder.buildInsertValue(partial, overflow_bit, llvmFieldIndex(dest_ty, 1, tg, &ty_buf).?, "");
     }
 
     fn buildElementwiseCall(
@@ -5898,26 +6038,30 @@ pub const FuncGen = struct {
 
         const lhs_ty = self.air.typeOf(extra.lhs);
         const rhs_ty = self.air.typeOf(extra.rhs);
+        const lhs_scalar_ty = lhs_ty.scalarType();
+        const rhs_scalar_ty = rhs_ty.scalarType();
+
         const dest_ty = self.air.typeOfIndex(inst);
         const llvm_dest_ty = try self.dg.llvmType(dest_ty);
 
         const tg = self.dg.module.getTarget();
 
-        const casted_rhs = if (rhs_ty.bitSize(tg) < lhs_ty.bitSize(tg))
+        const casted_rhs = if (rhs_scalar_ty.bitSize(tg) < lhs_scalar_ty.bitSize(tg))
             self.builder.buildZExt(rhs, try self.dg.llvmType(lhs_ty), "")
         else
             rhs;
 
         const result = self.builder.buildShl(lhs, casted_rhs, "");
-        const reconstructed = if (lhs_ty.isSignedInt())
+        const reconstructed = if (lhs_scalar_ty.isSignedInt())
             self.builder.buildAShr(result, casted_rhs, "")
         else
             self.builder.buildLShr(result, casted_rhs, "");
 
         const overflow_bit = self.builder.buildICmp(.NE, lhs, reconstructed, "");
 
-        const partial = self.builder.buildInsertValue(llvm_dest_ty.getUndef(), result, 0, "");
-        return self.builder.buildInsertValue(partial, overflow_bit, 1, "");
+        var ty_buf: Type.Payload.Pointer = undefined;
+        const partial = self.builder.buildInsertValue(llvm_dest_ty.getUndef(), result, llvmFieldIndex(dest_ty, 0, tg, &ty_buf).?, "");
+        return self.builder.buildInsertValue(partial, overflow_bit, llvmFieldIndex(dest_ty, 1, tg, &ty_buf).?, "");
     }
 
     fn airAnd(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
