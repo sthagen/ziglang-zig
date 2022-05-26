@@ -425,7 +425,6 @@ test "f64 at compile time is lossy" {
 }
 
 test {
-    if (builtin.zig_backend != .stage1 and builtin.os.tag == .macos) return error.SkipZigTest;
     comptime try expect(@as(f128, 1 << 113) == 10384593717069655257060992658440192);
 }
 
@@ -573,28 +572,6 @@ test "inlined loop has array literal with elided runtime scope on first iteratio
     }
 }
 
-test "call method on bound fn referring to var instance" {
-    if (builtin.zig_backend != .stage1) {
-        // Let's delay solving this one; I want to try to eliminate bound functions from
-        // the language.
-        return error.SkipZigTest; // TODO
-    }
-
-    try expect(bound_fn() == 1237);
-}
-
-const SimpleStruct = struct {
-    field: i32,
-
-    fn method(self: *const SimpleStruct) i32 {
-        return self.field + 3;
-    }
-};
-
-var simple_struct = SimpleStruct{ .field = 1234 };
-
-const bound_fn = simple_struct.method;
-
 test "ptr to local array argument at comptime" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
@@ -643,9 +620,18 @@ fn assertEqualPtrs(ptr1: *const u8, ptr2: *const u8) !void {
     try expect(ptr1 == ptr2);
 }
 
+// This one is still up for debate in the language specification.
+// Application code should not rely on this behavior until it is solidified.
+// Currently, stage1 has special case code to make this pass for string literals
+// but it does not work if the values are constructed with comptime code, or if
+// arrays of non-u8 elements are used instead.
+// The official language specification might not make this guarantee. However, if
+// it does make this guarantee, it will make it consistently for all types, not
+// only string literals. This is why stage2 currently has a string table for
+// string literals, to match stage1 and pass this test, however the end-game once
+// the lang spec issue is settled would be to use a global InternPool for comptime
+// memoized objects, making this behavior consistent across all types.
 test "string literal used as comptime slice is memoized" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
-
     const a = "link";
     const b = "link";
     comptime try expect(TypeWithCompTimeSlice(a).Node == TypeWithCompTimeSlice(b).Node);
@@ -660,8 +646,6 @@ pub fn TypeWithCompTimeSlice(comptime field_name: []const u8) type {
 }
 
 test "comptime function with mutable pointer is not memoized" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
-
     comptime {
         var x: i32 = 1;
         const ptr = &x;
@@ -676,8 +660,6 @@ fn increment(value: *i32) void {
 }
 
 test "const ptr to comptime mutable data is not memoized" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
-
     comptime {
         var foo = SingleFieldStruct{ .x = 1 };
         try expect(foo.read_x() == 1);
@@ -722,8 +704,6 @@ test "call method with comptime pass-by-non-copying-value self parameter" {
 }
 
 test "setting backward branch quota just before a generic fn call" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
-
     @setEvalBranchQuota(1001);
     loopNTimes(1001);
 }
