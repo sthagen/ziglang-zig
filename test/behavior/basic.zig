@@ -362,7 +362,6 @@ fn testMemcpyMemset() !void {
 }
 
 test "variable is allowed to be a pointer to an opaque type" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
 
@@ -611,7 +610,6 @@ test "self reference through fn ptr field" {
 }
 
 test "global variable initialized to global variable array element" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
 
     try expect(global_ptr == &gdt[0]);
@@ -677,7 +675,6 @@ test "explicit cast optional pointers" {
 }
 
 test "pointer comparison" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
 
@@ -932,4 +929,16 @@ test "try in labeled block doesn't cast to wrong type" {
         break :blk null;
     };
     _ = s;
+}
+
+test "comptime int in switch in catch is casted to correct inferred type" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+
+    var a: error{ A, B }!u64 = 0;
+    var b = a catch |err| switch (err) {
+        error.A => 0,
+        else => unreachable,
+    };
+    _ = b;
 }
