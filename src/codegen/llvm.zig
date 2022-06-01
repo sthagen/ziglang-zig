@@ -712,7 +712,7 @@ pub const Object = struct {
                 .byval => {
                     const param_ty = fn_info.param_types[it.zig_index - 1];
                     const param = llvm_func.getParam(llvm_arg_i);
-                    llvm_arg_i += 1;
+                    try args.ensureUnusedCapacity(1);
 
                     if (isByRef(param_ty)) {
                         const alignment = param_ty.abiAlignment(target);
@@ -721,23 +721,51 @@ pub const Object = struct {
                         arg_ptr.setAlignment(alignment);
                         const store_inst = builder.buildStore(param, arg_ptr);
                         store_inst.setAlignment(alignment);
-                        try args.append(arg_ptr);
+                        args.appendAssumeCapacity(arg_ptr);
                     } else {
-                        try args.append(param);
+                        args.appendAssumeCapacity(param);
+
+                        if (param_ty.isPtrAtRuntime()) {
+                            const ptr_info = param_ty.ptrInfo().data;
+                            if (math.cast(u5, it.zig_index - 1)) |i| {
+                                if (@truncate(u1, fn_info.noalias_bits >> i) != 0) {
+                                    dg.addArgAttr(llvm_func, llvm_arg_i, "noalias");
+                                }
+                            }
+                            if (!param_ty.isPtrLikeOptional() and !ptr_info.@"allowzero") {
+                                dg.addArgAttr(llvm_func, llvm_arg_i, "nonnull");
+                            }
+                            if (!ptr_info.mutable) {
+                                dg.addArgAttr(llvm_func, llvm_arg_i, "readonly");
+                            }
+                            if (ptr_info.@"align" != 0) {
+                                dg.addArgAttrInt(llvm_func, llvm_arg_i, "align", ptr_info.@"align");
+                            } else {
+                                dg.addArgAttrInt(llvm_func, llvm_arg_i, "align", ptr_info.pointee_type.abiAlignment(target));
+                            }
+                        }
                     }
+                    llvm_arg_i += 1;
                 },
                 .byref => {
                     const param_ty = fn_info.param_types[it.zig_index - 1];
                     const param = llvm_func.getParam(llvm_arg_i);
+
+                    dg.addArgAttr(llvm_func, llvm_arg_i, "nonnull");
+                    dg.addArgAttr(llvm_func, llvm_arg_i, "readonly");
+                    dg.addArgAttrInt(llvm_func, llvm_arg_i, "align", param_ty.abiAlignment(target));
+
                     llvm_arg_i += 1;
 
+                    try args.ensureUnusedCapacity(1);
+
                     if (isByRef(param_ty)) {
-                        try args.append(param);
+                        args.appendAssumeCapacity(param);
                     } else {
                         const alignment = param_ty.abiAlignment(target);
                         const load_inst = builder.buildLoad(param, "");
                         load_inst.setAlignment(alignment);
-                        try args.append(load_inst);
+                        args.appendAssumeCapacity(load_inst);
                     }
                 },
                 .abi_sized_int => {
@@ -759,13 +787,43 @@ pub const Object = struct {
                     const store_inst = builder.buildStore(param, casted_ptr);
                     store_inst.setAlignment(alignment);
 
+                    try args.ensureUnusedCapacity(1);
+
                     if (isByRef(param_ty)) {
-                        try args.append(arg_ptr);
+                        args.appendAssumeCapacity(arg_ptr);
                     } else {
                         const load_inst = builder.buildLoad(arg_ptr, "");
                         load_inst.setAlignment(alignment);
-                        try args.append(load_inst);
+                        args.appendAssumeCapacity(load_inst);
                     }
+                },
+                .slice => {
+                    const param_ty = fn_info.param_types[it.zig_index - 1];
+                    const ptr_info = param_ty.ptrInfo().data;
+
+                    if (math.cast(u5, it.zig_index - 1)) |i| {
+                        if (@truncate(u1, fn_info.noalias_bits >> i) != 0) {
+                            dg.addArgAttr(llvm_func, llvm_arg_i, "noalias");
+                        }
+                    }
+                    dg.addArgAttr(llvm_func, llvm_arg_i, "nonnull");
+                    if (!ptr_info.mutable) {
+                        dg.addArgAttr(llvm_func, llvm_arg_i, "readonly");
+                    }
+                    if (ptr_info.@"align" != 0) {
+                        dg.addArgAttrInt(llvm_func, llvm_arg_i, "align", ptr_info.@"align");
+                    } else {
+                        dg.addArgAttrInt(llvm_func, llvm_arg_i, "align", ptr_info.pointee_type.abiAlignment(target));
+                    }
+                    const ptr_param = llvm_func.getParam(llvm_arg_i);
+                    llvm_arg_i += 1;
+                    const len_param = llvm_func.getParam(llvm_arg_i);
+                    llvm_arg_i += 1;
+
+                    const slice_llvm_ty = try dg.lowerType(param_ty);
+                    const partial = builder.buildInsertValue(slice_llvm_ty.getUndef(), ptr_param, 0, "");
+                    const aggregate = builder.buildInsertValue(partial, len_param, 1, "");
+                    try args.append(aggregate);
                 },
                 .multiple_llvm_ints => {
                     const param_ty = fn_info.param_types[it.zig_index - 1];
@@ -2213,20 +2271,8 @@ pub const DeclGen = struct {
             dg.addArgAttr(llvm_fn, @boolToInt(sret), "nonnull");
         }
 
-        // Set parameter attributes.
-        // TODO: more attributes. see codegen.cpp `make_fn_llvm_value`.
         switch (fn_info.cc) {
             .Unspecified, .Inline => {
-                var llvm_param_i: c_uint = @as(c_uint, @boolToInt(sret)) + @boolToInt(err_return_tracing);
-                for (fn_info.param_types) |param_ty| {
-                    if (!param_ty.hasRuntimeBitsIgnoreComptime()) continue;
-
-                    if (isByRef(param_ty)) {
-                        dg.addArgAttr(llvm_fn, llvm_param_i, "nonnull");
-                        // TODO readonly, noalias, align
-                    }
-                    llvm_param_i += 1;
-                }
                 llvm_fn.setFunctionCallConv(.Fast);
             },
             .Naked => {
@@ -2256,19 +2302,21 @@ pub const DeclGen = struct {
     }
 
     fn addCommonFnAttributes(dg: *DeclGen, llvm_fn: *const llvm.Value) void {
-        if (!dg.module.comp.bin_file.options.red_zone) {
+        const comp = dg.module.comp;
+
+        if (!comp.bin_file.options.red_zone) {
             dg.addFnAttr(llvm_fn, "noredzone");
         }
-        if (dg.module.comp.bin_file.options.omit_frame_pointer) {
+        if (comp.bin_file.options.omit_frame_pointer) {
             dg.addFnAttrString(llvm_fn, "frame-pointer", "none");
         } else {
             dg.addFnAttrString(llvm_fn, "frame-pointer", "all");
         }
         dg.addFnAttr(llvm_fn, "nounwind");
-        if (dg.module.comp.unwind_tables) {
+        if (comp.unwind_tables) {
             dg.addFnAttr(llvm_fn, "uwtable");
         }
-        if (dg.module.comp.bin_file.options.skip_linker_dependencies) {
+        if (comp.bin_file.options.skip_linker_dependencies) {
             // The intent here is for compiler-rt and libc functions to not generate
             // infinite recursion. For example, if we are compiling the memcpy function,
             // and llvm detects that the body is equivalent to memcpy, it may replace the
@@ -2276,14 +2324,19 @@ pub const DeclGen = struct {
             // overflow instead of performing memcpy.
             dg.addFnAttr(llvm_fn, "nobuiltin");
         }
-        if (dg.module.comp.bin_file.options.optimize_mode == .ReleaseSmall) {
+        if (comp.bin_file.options.optimize_mode == .ReleaseSmall) {
             dg.addFnAttr(llvm_fn, "minsize");
             dg.addFnAttr(llvm_fn, "optsize");
         }
-        if (dg.module.comp.bin_file.options.tsan) {
+        if (comp.bin_file.options.tsan) {
             dg.addFnAttr(llvm_fn, "sanitize_thread");
         }
-        // TODO add target-cpu and target-features fn attributes
+        if (comp.getTarget().cpu.model.llvm_name) |s| {
+            llvm_fn.addFunctionAttr("target-cpu", s);
+        }
+        if (comp.bin_file.options.llvm_cpu_features) |s| {
+            llvm_fn.addFunctionAttr("target-features", s);
+        }
     }
 
     fn resolveGlobalDecl(dg: *DeclGen, decl_index: Module.Decl.Index) Error!*const llvm.Value {
@@ -2729,6 +2782,17 @@ pub const DeclGen = struct {
                 const param_ty = fn_info.param_types[it.zig_index - 1];
                 const abi_size = @intCast(c_uint, param_ty.abiSize(target));
                 try llvm_params.append(dg.context.intType(abi_size * 8));
+            },
+            .slice => {
+                const param_ty = fn_info.param_types[it.zig_index - 1];
+                var buf: Type.SlicePtrFieldTypeBuffer = undefined;
+                const ptr_ty = param_ty.slicePtrFieldType(&buf);
+                const ptr_llvm_ty = try dg.lowerType(ptr_ty);
+                const len_llvm_ty = try dg.lowerType(Type.usize);
+
+                try llvm_params.ensureUnusedCapacity(2);
+                llvm_params.appendAssumeCapacity(ptr_llvm_ty);
+                llvm_params.appendAssumeCapacity(len_llvm_ty);
             },
             .multiple_llvm_ints => {
                 const param_ty = fn_info.param_types[it.zig_index - 1];
@@ -3705,6 +3769,10 @@ pub const DeclGen = struct {
         return dg.addAttr(fn_val, param_index + 1, attr_name);
     }
 
+    fn addArgAttrInt(dg: DeclGen, fn_val: *const llvm.Value, param_index: u32, attr_name: []const u8, int: u64) void {
+        return dg.addAttrInt(fn_val, param_index + 1, attr_name, int);
+    }
+
     fn removeAttr(val: *const llvm.Value, index: llvm.AttributeIndex, name: []const u8) void {
         const kind_id = llvm.getEnumAttributeKindForName(name.ptr, name.len);
         assert(kind_id != 0);
@@ -3885,7 +3953,7 @@ pub const FuncGen = struct {
 
     fn genBody(self: *FuncGen, body: []const Air.Inst.Index) Error!void {
         const air_tags = self.air.instructions.items(.tag);
-        for (body) |inst| {
+        for (body) |inst, i| {
             const opt_value: ?*const llvm.Value = switch (air_tags[inst]) {
                 // zig fmt: off
                 .add       => try self.airAdd(inst),
@@ -3976,7 +4044,7 @@ pub const FuncGen = struct {
                 .fptrunc        => try self.airFptrunc(inst),
                 .fpext          => try self.airFpext(inst),
                 .ptrtoint       => try self.airPtrToInt(inst),
-                .load           => try self.airLoad(inst),
+                .load           => try self.airLoad(inst, body, i + 1),
                 .loop           => try self.airLoop(inst),
                 .not            => try self.airNot(inst),
                 .ret            => try self.airRet(inst),
@@ -4187,6 +4255,15 @@ pub const FuncGen = struct {
                     load_inst.setAlignment(alignment);
                     try llvm_args.append(load_inst);
                 }
+            },
+            .slice => {
+                const arg = args[it.zig_index - 1];
+                const llvm_arg = try self.resolveInst(arg);
+                const ptr = self.builder.buildExtractValue(llvm_arg, 0, "");
+                const len = self.builder.buildExtractValue(llvm_arg, 1, "");
+                try llvm_args.ensureUnusedCapacity(2);
+                llvm_args.appendAssumeCapacity(ptr);
+                llvm_args.appendAssumeCapacity(len);
             },
             .multiple_llvm_ints => {
                 const arg = args[it.zig_index - 1];
@@ -6982,11 +7059,33 @@ pub const FuncGen = struct {
         return null;
     }
 
-    fn airLoad(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+    fn airLoad(
+        self: *FuncGen,
+        inst: Air.Inst.Index,
+        body: []const Air.Inst.Index,
+        body_i: usize,
+    ) !?*const llvm.Value {
         const ty_op = self.air.instructions.items(.data)[inst].ty_op;
         const ptr_ty = self.air.typeOf(ty_op.operand);
-        if (!ptr_ty.isVolatilePtr() and self.liveness.isUnused(inst))
-            return null;
+        elide: {
+            const ptr_info = ptr_ty.ptrInfo().data;
+            if (ptr_info.@"volatile") break :elide;
+            if (self.liveness.isUnused(inst)) return null;
+            if (!isByRef(ptr_info.pointee_type)) break :elide;
+
+            // It would be valid to fall back to the code below here that simply calls
+            // load(). However, as an optimization, we want to avoid unnecessary copies
+            // of isByRef=true types. Here, we scan forward in the current block,
+            // looking to see if this load dies before any side effects occur.
+            // In such case, we can safely return the operand without making a copy.
+            for (body[body_i..]) |body_inst| {
+                switch (self.liveness.categorizeOperand(self.air, body_inst, inst)) {
+                    .none => continue,
+                    .write, .noret, .complex => break :elide,
+                    .tomb => return try self.resolveInst(ty_op.operand),
+                }
+            } else unreachable;
+        }
         const ptr = try self.resolveInst(ty_op.operand);
         return self.load(ptr, ptr_ty);
     }
@@ -8772,6 +8871,7 @@ const ParamTypeIterator = struct {
         byref,
         abi_sized_int,
         multiple_llvm_ints,
+        slice,
     };
 
     fn next(it: *ParamTypeIterator) ?Lowering {
@@ -8787,7 +8887,9 @@ const ParamTypeIterator = struct {
             .Unspecified, .Inline => {
                 it.zig_index += 1;
                 it.llvm_index += 1;
-                if (isByRef(ty)) {
+                if (ty.isSlice()) {
+                    return .slice;
+                } else if (isByRef(ty)) {
                     return .byref;
                 } else {
                     return .byval;

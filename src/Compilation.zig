@@ -756,6 +756,7 @@ pub const InitOptions = struct {
     linker_global_base: ?u64 = null,
     linker_export_symbol_names: []const []const u8 = &.{},
     each_lib_rpath: ?bool = null,
+    build_id: ?bool = null,
     disable_c_depfile: bool = false,
     linker_z_nodelete: bool = false,
     linker_z_notext: bool = false,
@@ -974,6 +975,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
         const unwind_tables = options.want_unwind_tables orelse
             (link_libunwind or target_util.needUnwindTables(options.target));
         const link_eh_frame_hdr = options.link_eh_frame_hdr or unwind_tables;
+        const build_id = options.build_id orelse false;
 
         // Make a decision on whether to use LLD or our own linker.
         const use_lld = options.use_lld orelse blk: {
@@ -1004,7 +1006,8 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                 options.output_mode == .Lib or
                 options.image_base_override != null or
                 options.linker_script != null or options.version_script != null or
-                options.emit_implib != null)
+                options.emit_implib != null or
+                build_id)
             {
                 break :blk true;
             }
@@ -1639,6 +1642,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .skip_linker_dependencies = options.skip_linker_dependencies,
             .parent_compilation_link_libc = options.parent_compilation_link_libc,
             .each_lib_rpath = options.each_lib_rpath orelse options.is_native_os,
+            .build_id = build_id,
             .cache_mode = cache_mode,
             .disable_lld_caching = options.disable_lld_caching or cache_mode == .whole,
             .subsystem = options.subsystem,
@@ -2339,6 +2343,7 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
     man.hash.addListOfBytes(comp.bin_file.options.lib_dirs);
     man.hash.addListOfBytes(comp.bin_file.options.rpath_list);
     man.hash.add(comp.bin_file.options.each_lib_rpath);
+    man.hash.add(comp.bin_file.options.build_id);
     man.hash.add(comp.bin_file.options.skip_linker_dependencies);
     man.hash.add(comp.bin_file.options.z_nodelete);
     man.hash.add(comp.bin_file.options.z_notext);

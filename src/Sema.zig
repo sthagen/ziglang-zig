@@ -2976,7 +2976,7 @@ fn zirResolveInferredAlloc(sema: *Sema, block: *Block, inst: Zir.Inst.Index) Com
 
                 // Even though we reuse the constant instruction, we still remove it from the
                 // block so that codegen does not see it.
-                block.instructions.shrinkRetainingCapacity(block.instructions.items.len - 3);
+                block.instructions.shrinkRetainingCapacity(search_index);
                 sema.air_values.items[value_index] = try Value.Tag.decl_ref.create(sema.arena, new_decl_index);
                 // if bitcast ty ref needs to be made const, make_ptr_const
                 // ZIR handles it later, so we can just use the ty ref here.
@@ -6565,12 +6565,10 @@ fn zirFunc(
         has_body,
         src_locs,
         null,
+        0,
     );
 }
 
-// TODO this function and its callsites along with funcCommon need to be reworked
-// to handle when callconv, align, linksection, addrspace depend on comptime values
-// (thus triggering error.GenericPoison)
 fn resolveGenericBody(
     sema: *Sema,
     block: *Block,
@@ -6696,6 +6694,7 @@ fn funcCommon(
     has_body: bool,
     src_locs: Zir.Inst.Func.SrcLocs,
     opt_lib_name: ?[]const u8,
+    noalias_bits: u32,
 ) CompileError!Air.Inst.Ref {
     const ret_ty_src: LazySrcLoc = .{ .node_offset_fn_type_ret_ty = src_node_offset };
 
@@ -6807,6 +6806,7 @@ fn funcCommon(
             .addrspace_is_generic = address_space == null,
             .is_var_args = var_args,
             .is_generic = is_generic,
+            .noalias_bits = noalias_bits,
         });
     };
 
@@ -9626,7 +9626,7 @@ fn zirArrayMul(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
     const lhs_src: LazySrcLoc = .{ .node_offset_bin_lhs = inst_data.src_node };
     const rhs_src: LazySrcLoc = .{ .node_offset_bin_rhs = inst_data.src_node };
 
-    // In `**` rhs has to be comptime-known, but lhs can be runtime-known
+    // In `**` rhs must be comptime-known, but lhs can be runtime-known
     const factor = try sema.resolveInt(block, rhs_src, extra.rhs, Type.usize);
 
     if (lhs_ty.isTuple()) {
@@ -11916,7 +11916,7 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
 
             try sema.queueFullTypeResolution(try error_field_ty.copy(sema.arena));
 
-            // If the error set is inferred it has to be resolved at this point
+            // If the error set is inferred it must be resolved at this point
             try sema.resolveInferredErrorSetTy(block, src, ty);
 
             // Build our list of Error values
@@ -13011,10 +13011,13 @@ fn analyzeRet(
     const backend_supports_error_return_tracing =
         sema.mod.comp.bin_file.options.use_llvm;
 
-    if ((sema.fn_ret_ty.zigTypeTag() == .ErrorSet or sema.typeOf(uncasted_operand).zigTypeTag() == .ErrorUnion) and
+    if (sema.fn_ret_ty.isError() and
         sema.mod.comp.bin_file.options.error_return_tracing and
         backend_supports_error_return_tracing)
-    {
+    ret_err: {
+        if (try sema.resolveMaybeUndefVal(block, src, operand)) |ret_val| {
+            if (ret_val.tag() != .@"error") break :ret_err;
+        }
         const return_err_fn = try sema.getBuiltin(block, src, "returnError");
         const unresolved_stack_trace_ty = try sema.getBuiltinType(block, src, "StackTrace");
         const stack_trace_ty = try sema.resolveTypeFields(block, src, unresolved_stack_trace_ty);
@@ -16967,6 +16970,12 @@ fn zirFuncFancy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
         break :blk ty;
     } else Type.void;
 
+    const noalias_bits: u32 = if (extra.data.bits.has_any_noalias) blk: {
+        const x = sema.code.extra[extra_index];
+        extra_index += 1;
+        break :blk x;
+    } else 0;
+
     var src_locs: Zir.Inst.Func.SrcLocs = undefined;
     const has_body = extra.data.body_len != 0;
     if (has_body) {
@@ -16993,6 +17002,7 @@ fn zirFuncFancy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
         has_body,
         src_locs,
         lib_name,
+        noalias_bits,
     );
 }
 
