@@ -1540,6 +1540,24 @@ fn resolveMaybeUndefVal(
     }
 }
 
+/// Value Tag `variable` results in `null`.
+/// Value Tag `undef` results in the Value.
+/// Value Tag `generic_poison` causes `error.GenericPoison` to be returned.
+/// Value Tag `decl_ref` and `decl_ref_mut` or any nested such value results in `null`.
+fn resolveMaybeUndefValIntable(
+    sema: *Sema,
+    block: *Block,
+    src: LazySrcLoc,
+    inst: Air.Inst.Ref,
+) CompileError!?Value {
+    const val = (try sema.resolveMaybeUndefValAllowVariables(block, src, inst)) orelse return null;
+    switch (val.tag()) {
+        .variable, .decl_ref, .decl_ref_mut => return null,
+        .generic_poison => return error.GenericPoison,
+        else => return val,
+    }
+}
+
 /// Returns all Value tags including `variable` and `undef`.
 fn resolveMaybeUndefValAllowVariables(
     sema: *Sema,
@@ -2711,17 +2729,72 @@ fn zirAllocComptime(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileErr
 
 fn zirMakePtrConst(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
     const inst_data = sema.code.instructions.items(.data)[inst].un_node;
-    const ptr = try sema.resolveInst(inst_data.operand);
-    const ptr_ty = sema.typeOf(ptr);
-    var ptr_info = ptr_ty.ptrInfo().data;
+    const src = inst_data.src();
+    const alloc = try sema.resolveInst(inst_data.operand);
+    const alloc_ty = sema.typeOf(alloc);
+
+    var ptr_info = alloc_ty.ptrInfo().data;
+    const elem_ty = ptr_info.pointee_type;
+
+    // Detect if all stores to an `.alloc` were comptime known.
+    ct: {
+        var search_index: usize = block.instructions.items.len;
+        const air_tags = sema.air_instructions.items(.tag);
+        const air_datas = sema.air_instructions.items(.data);
+
+        const store_inst = while (true) {
+            if (search_index == 0) break :ct;
+            search_index -= 1;
+
+            const candidate = block.instructions.items[search_index];
+            switch (air_tags[candidate]) {
+                .dbg_stmt => continue,
+                .store => break candidate,
+                else => break :ct,
+            }
+        } else unreachable; // TODO shouldn't need this
+
+        while (true) {
+            if (search_index == 0) break :ct;
+            search_index -= 1;
+
+            const candidate = block.instructions.items[search_index];
+            switch (air_tags[candidate]) {
+                .dbg_stmt => continue,
+                .alloc => {
+                    if (Air.indexToRef(candidate) != alloc) break :ct;
+                    break;
+                },
+                else => break :ct,
+            }
+        }
+
+        const store_op = air_datas[store_inst].bin_op;
+        const store_val = (try sema.resolveMaybeUndefVal(block, src, store_op.rhs)) orelse break :ct;
+        if (store_op.lhs != alloc) break :ct;
+
+        // Remove all the unnecessary runtime instructions.
+        block.instructions.shrinkRetainingCapacity(search_index);
+
+        var anon_decl = try block.startAnonDecl(src);
+        defer anon_decl.deinit();
+        return sema.analyzeDeclRef(try anon_decl.finish(
+            try elem_ty.copy(anon_decl.arena()),
+            try store_val.copy(anon_decl.arena()),
+            ptr_info.@"align",
+        ));
+    }
+
     ptr_info.mutable = false;
     const const_ptr_ty = try Type.ptr(sema.arena, sema.mod, ptr_info);
 
-    if (try sema.resolveMaybeUndefVal(block, inst_data.src(), ptr)) |val| {
+    // Detect if a comptime value simply needs to have its type changed.
+    if (try sema.resolveMaybeUndefVal(block, inst_data.src(), alloc)) |val| {
         return sema.addConstant(const_ptr_ty, val);
     }
-    try sema.requireRuntimeBlock(block, inst_data.src());
-    return block.addBitCast(const_ptr_ty, ptr);
+
+    try sema.requireRuntimeBlock(block, src);
+    return block.addBitCast(const_ptr_ty, alloc);
 }
 
 fn zirAllocInferredComptime(
@@ -3160,7 +3233,9 @@ fn validateUnionInit(
         return sema.failWithOwnedErrorMsg(block, msg);
     }
 
-    if (is_comptime or block.is_comptime) {
+    if ((is_comptime or block.is_comptime) and
+        (try sema.resolveDefinedValue(block, init_src, union_ptr)) != null)
+    {
         // In this case, comptime machinery already did everything. No work to do here.
         return;
     }
@@ -3206,7 +3281,18 @@ fn validateUnionInit(
         if (store_inst == field_ptr_air_inst) break;
         if (air_tags[store_inst] != .store) continue;
         const bin_op = air_datas[store_inst].bin_op;
-        if (bin_op.lhs != field_ptr_air_ref) continue;
+        var lhs = bin_op.lhs;
+        if (Air.refToIndex(lhs)) |lhs_index| {
+            if (air_tags[lhs_index] == .bitcast) {
+                lhs = air_datas[lhs_index].ty_op.operand;
+                block_index -= 1;
+            }
+        }
+        if (lhs != field_ptr_air_ref) continue;
+        while (block_index > 0) : (block_index -= 1) {
+            const block_inst = block.instructions.items[block_index - 1];
+            if (air_tags[block_inst] != .dbg_stmt) break;
+        }
         if (block_index > 0 and
             field_ptr_air_inst == block.instructions.items[block_index - 1])
         {
@@ -3285,7 +3371,9 @@ fn validateStructInit(
     const struct_ptr = try sema.resolveInst(struct_ptr_zir_ref);
     const struct_ty = sema.typeOf(struct_ptr).childType();
 
-    if (is_comptime or block.is_comptime) {
+    if ((is_comptime or block.is_comptime) and
+        (try sema.resolveDefinedValue(block, init_src, struct_ptr)) != null)
+    {
         // In this case the only thing we need to do is evaluate the implicit
         // store instructions for default field values, and report any missing fields.
         // Avoid the cost of the extra machinery for detecting a comptime struct init value.
@@ -3387,7 +3475,19 @@ fn validateStructInit(
                 }
                 if (air_tags[store_inst] != .store) continue;
                 const bin_op = air_datas[store_inst].bin_op;
-                if (bin_op.lhs != field_ptr_air_ref) continue;
+                var lhs = bin_op.lhs;
+                {
+                    const lhs_index = Air.refToIndex(lhs) orelse continue;
+                    if (air_tags[lhs_index] == .bitcast) {
+                        lhs = air_datas[lhs_index].ty_op.operand;
+                        block_index -= 1;
+                    }
+                }
+                if (lhs != field_ptr_air_ref) continue;
+                while (block_index > 0) : (block_index -= 1) {
+                    const block_inst = block.instructions.items[block_index - 1];
+                    if (air_tags[block_inst] != .dbg_stmt) break;
+                }
                 if (block_index > 0 and
                     field_ptr_air_inst == block.instructions.items[block_index - 1])
                 {
@@ -3489,7 +3589,9 @@ fn zirValidateArrayInit(
         });
     }
 
-    if (is_comptime or block.is_comptime) {
+    if ((is_comptime or block.is_comptime) and
+        (try sema.resolveDefinedValue(block, init_src, array_ptr)) != null)
+    {
         // In this case the comptime machinery will have evaluated the store instructions
         // at comptime so we have almost nothing to do here. However, in case of a
         // sentinel-terminated array, the sentinel will not have been populated by
@@ -3544,7 +3646,14 @@ fn zirValidateArrayInit(
         switch (air_tags[next_air_inst]) {
             .store => {
                 const bin_op = air_datas[next_air_inst].bin_op;
-                if (bin_op.lhs != elem_ptr_air_ref) {
+                var lhs = bin_op.lhs;
+                if (Air.refToIndex(lhs)) |lhs_index| {
+                    if (air_tags[lhs_index] == .bitcast) {
+                        lhs = air_datas[lhs_index].ty_op.operand;
+                        block_index -= 1;
+                    }
+                }
+                if (lhs != elem_ptr_air_ref) {
                     array_is_comptime = false;
                     continue;
                 }
@@ -9211,19 +9320,27 @@ fn zirBitwise(
         return sema.fail(block, src, "invalid operands to binary bitwise expression: '{s}' and '{s}'", .{ @tagName(lhs_ty.zigTypeTag()), @tagName(rhs_ty.zigTypeTag()) });
     }
 
-    if (try sema.resolveMaybeUndefVal(block, lhs_src, casted_lhs)) |lhs_val| {
-        if (try sema.resolveMaybeUndefVal(block, rhs_src, casted_rhs)) |rhs_val| {
-            const result_val = switch (air_tag) {
-                .bit_and => try lhs_val.bitwiseAnd(rhs_val, resolved_type, sema.arena, target),
-                .bit_or => try lhs_val.bitwiseOr(rhs_val, resolved_type, sema.arena, target),
-                .xor => try lhs_val.bitwiseXor(rhs_val, resolved_type, sema.arena, target),
-                else => unreachable,
-            };
-            return sema.addConstant(resolved_type, result_val);
+    const runtime_src = runtime: {
+        // TODO: ask the linker what kind of relocations are available, and
+        // in some cases emit a Value that means "this decl's address AND'd with this operand".
+        if (try sema.resolveMaybeUndefValIntable(block, lhs_src, casted_lhs)) |lhs_val| {
+            if (try sema.resolveMaybeUndefValIntable(block, rhs_src, casted_rhs)) |rhs_val| {
+                const result_val = switch (air_tag) {
+                    .bit_and => try lhs_val.bitwiseAnd(rhs_val, resolved_type, sema.arena, target),
+                    .bit_or => try lhs_val.bitwiseOr(rhs_val, resolved_type, sema.arena, target),
+                    .xor => try lhs_val.bitwiseXor(rhs_val, resolved_type, sema.arena, target),
+                    else => unreachable,
+                };
+                return sema.addConstant(resolved_type, result_val);
+            } else {
+                break :runtime rhs_src;
+            }
+        } else {
+            break :runtime lhs_src;
         }
-    }
+    };
 
-    try sema.requireRuntimeBlock(block, src);
+    try sema.requireRuntimeBlock(block, runtime_src);
     return block.addBinOp(air_tag, casted_lhs, casted_rhs);
 }
 
@@ -10072,8 +10189,8 @@ fn analyzeArithmetic(
 
     const mod = sema.mod;
     const target = mod.getTarget();
-    const maybe_lhs_val = try sema.resolveMaybeUndefVal(block, lhs_src, casted_lhs);
-    const maybe_rhs_val = try sema.resolveMaybeUndefVal(block, rhs_src, casted_rhs);
+    const maybe_lhs_val = try sema.resolveMaybeUndefValIntable(block, lhs_src, casted_lhs);
+    const maybe_rhs_val = try sema.resolveMaybeUndefValIntable(block, rhs_src, casted_rhs);
     const rs: struct { src: LazySrcLoc, air_tag: Air.Inst.Tag } = rs: {
         switch (zir_tag) {
             .add => {
@@ -10938,6 +11055,7 @@ fn analyzePtrArithmetic(
 
     const new_ptr_ty = t: {
         // Calculate the new pointer alignment.
+        // This code is duplicated in `elemPtrType`.
         if (ptr_info.@"align" == 0) {
             // ABI-aligned pointer. Any pointer arithmetic maintains the same ABI-alignedness.
             break :t ptr_ty;
@@ -18617,20 +18735,20 @@ fn elemPtr(
         .Pointer => {
             // In all below cases, we have to deref the ptr operand to get the actual indexable pointer.
             const indexable = try sema.analyzeLoad(block, indexable_ptr_src, indexable_ptr, indexable_ptr_src);
-            const result_ty = try indexable_ty.elemPtrType(sema.arena, sema.mod);
             switch (indexable_ty.ptrSize()) {
                 .Slice => return sema.elemPtrSlice(block, indexable_ptr_src, indexable, elem_index_src, elem_index),
                 .Many, .C => {
                     const maybe_ptr_val = try sema.resolveDefinedValue(block, indexable_ptr_src, indexable);
                     const maybe_index_val = try sema.resolveDefinedValue(block, elem_index_src, elem_index);
-
                     const runtime_src = rs: {
                         const ptr_val = maybe_ptr_val orelse break :rs indexable_ptr_src;
                         const index_val = maybe_index_val orelse break :rs elem_index_src;
                         const index = @intCast(usize, index_val.toUnsignedInt(target));
                         const elem_ptr = try ptr_val.elemPtr(indexable_ty, sema.arena, index, sema.mod);
+                        const result_ty = try sema.elemPtrType(indexable_ty, index);
                         return sema.addConstant(result_ty, elem_ptr);
                     };
+                    const result_ty = try sema.elemPtrType(indexable_ty, null);
 
                     try sema.requireRuntimeBlock(block, runtime_src);
                     return block.addPtrElemPtr(indexable, elem_index, result_ty);
@@ -18883,29 +19001,29 @@ fn elemPtrArray(
     const array_sent = array_ty.sentinel() != null;
     const array_len = array_ty.arrayLen();
     const array_len_s = array_len + @boolToInt(array_sent);
-    const elem_ptr_ty = try array_ptr_ty.elemPtrType(sema.arena, sema.mod);
 
     if (array_len_s == 0) {
         return sema.fail(block, elem_index_src, "indexing into empty array", .{});
     }
 
     const maybe_undef_array_ptr_val = try sema.resolveMaybeUndefVal(block, array_ptr_src, array_ptr);
-    // index must be defined since it can index out of bounds
-    const maybe_index_val = try sema.resolveDefinedValue(block, elem_index_src, elem_index);
-
-    if (maybe_index_val) |index_val| {
-        const index = @intCast(usize, index_val.toUnsignedInt(target));
+    // The index must not be undefined since it can be out of bounds.
+    const offset: ?usize = if (try sema.resolveDefinedValue(block, elem_index_src, elem_index)) |index_val| o: {
+        const index = try sema.usizeCast(block, elem_index_src, index_val.toUnsignedInt(target));
         if (index >= array_len_s) {
             const sentinel_label: []const u8 = if (array_sent) " +1 (sentinel)" else "";
             return sema.fail(block, elem_index_src, "index {d} outside array of length {d}{s}", .{ index, array_len, sentinel_label });
         }
-    }
+        break :o index;
+    } else null;
+
+    const elem_ptr_ty = try sema.elemPtrType(array_ptr_ty, offset);
+
     if (maybe_undef_array_ptr_val) |array_ptr_val| {
         if (array_ptr_val.isUndef()) {
             return sema.addConstUndef(elem_ptr_ty);
         }
-        if (maybe_index_val) |index_val| {
-            const index = @intCast(usize, index_val.toUnsignedInt(target));
+        if (offset) |index| {
             const elem_ptr = try array_ptr_val.elemPtr(array_ptr_ty, sema.arena, index, sema.mod);
             return sema.addConstant(elem_ptr_ty, elem_ptr);
         }
@@ -18932,14 +19050,14 @@ fn elemPtrArray(
 
     const runtime_src = if (maybe_undef_array_ptr_val != null) elem_index_src else array_ptr_src;
     try sema.requireRuntimeBlock(block, runtime_src);
-    if (block.wantSafety()) {
-        // Runtime check is only needed if unable to comptime check
-        if (maybe_index_val == null) {
-            const len_inst = try sema.addIntUnsigned(Type.usize, array_len);
-            const cmp_op: Air.Inst.Tag = if (array_sent) .cmp_lte else .cmp_lt;
-            try sema.panicIndexOutOfBounds(block, elem_index_src, elem_index, len_inst, cmp_op);
-        }
+
+    // Runtime check is only needed if unable to comptime check.
+    if (block.wantSafety() and offset == null) {
+        const len_inst = try sema.addIntUnsigned(Type.usize, array_len);
+        const cmp_op: Air.Inst.Tag = if (array_sent) .cmp_lte else .cmp_lt;
+        try sema.panicIndexOutOfBounds(block, elem_index_src, elem_index, len_inst, cmp_op);
     }
+
     return block.addPtrElemPtr(array_ptr, elem_index, elem_ptr_ty);
 }
 
@@ -19007,11 +19125,15 @@ fn elemPtrSlice(
     const target = sema.mod.getTarget();
     const slice_ty = sema.typeOf(slice);
     const slice_sent = slice_ty.sentinel() != null;
-    const elem_ptr_ty = try slice_ty.elemPtrType(sema.arena, sema.mod);
 
     const maybe_undef_slice_val = try sema.resolveMaybeUndefVal(block, slice_src, slice);
-    // index must be defined since it can index out of bounds
-    const maybe_index_val = try sema.resolveDefinedValue(block, elem_index_src, elem_index);
+    // The index must not be undefined since it can be out of bounds.
+    const offset: ?usize = if (try sema.resolveDefinedValue(block, elem_index_src, elem_index)) |index_val| o: {
+        const index = try sema.usizeCast(block, elem_index_src, index_val.toUnsignedInt(target));
+        break :o index;
+    } else null;
+
+    const elem_ptr_ty = try sema.elemPtrType(slice_ty, null);
 
     if (maybe_undef_slice_val) |slice_val| {
         if (slice_val.isUndef()) {
@@ -19022,8 +19144,7 @@ fn elemPtrSlice(
         if (slice_len_s == 0) {
             return sema.fail(block, elem_index_src, "indexing into empty slice", .{});
         }
-        if (maybe_index_val) |index_val| {
-            const index = @intCast(usize, index_val.toUnsignedInt(target));
+        if (offset) |index| {
             if (index >= slice_len_s) {
                 const sentinel_label: []const u8 = if (slice_sent) " +1 (sentinel)" else "";
                 return sema.fail(block, elem_index_src, "index {d} outside slice of length {d}{s}", .{ index, slice_len, sentinel_label });
@@ -25363,4 +25484,43 @@ fn compareVector(
         scalar.* = Value.makeBool(res_bool);
     }
     return Value.Tag.aggregate.create(sema.arena, result_data);
+}
+
+/// Returns the type of a pointer to an element.
+/// Asserts that the type is a pointer, and that the element type is indexable.
+/// For *[N]T, return *T
+/// For [*]T, returns *T
+/// For []T, returns *T
+/// Handles const-ness and address spaces in particular.
+/// This code is duplicated in `analyzePtrArithmetic`.
+fn elemPtrType(sema: *Sema, ptr_ty: Type, offset: ?usize) !Type {
+    const ptr_info = ptr_ty.ptrInfo().data;
+    const elem_ty = ptr_ty.elemType2();
+    const allow_zero = ptr_info.@"allowzero" and (offset orelse 0) == 0;
+    const alignment: u32 = a: {
+        // Calculate the new pointer alignment.
+        if (ptr_info.@"align" == 0) {
+            // ABI-aligned pointer. Any pointer arithmetic maintains the same ABI-alignedness.
+            break :a 0;
+        }
+        // If the addend is not a comptime-known value we can still count on
+        // it being a multiple of the type size.
+        const target = sema.mod.getTarget();
+        const elem_size = elem_ty.abiSize(target);
+        const addend = if (offset) |off| elem_size * off else elem_size;
+
+        // The resulting pointer is aligned to the lcd between the offset (an
+        // arbitrary number) and the alignment factor (always a power of two,
+        // non zero).
+        const new_align = @as(u32, 1) << @intCast(u5, @ctz(u64, addend | ptr_info.@"align"));
+        break :a new_align;
+    };
+    return try Type.ptr(sema.arena, sema.mod, .{
+        .pointee_type = elem_ty,
+        .mutable = ptr_info.mutable,
+        .@"addrspace" = ptr_info.@"addrspace",
+        .@"allowzero" = allow_zero,
+        .@"volatile" = ptr_info.@"volatile",
+        .@"align" = alignment,
+    });
 }
