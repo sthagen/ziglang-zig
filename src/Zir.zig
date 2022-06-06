@@ -1250,19 +1250,6 @@ pub const Inst = struct {
             };
         }
 
-        /// Returns whether the instruction is a "break". This differs from
-        /// isNoReturn because a "break" in a block statement is not a
-        /// "noreturn" for the outer scope, whereas the other "noreturn"
-        /// instructions are.
-        pub fn isBreak(tag: Tag) bool {
-            return switch (tag) {
-                .@"break",
-                .break_inline,
-                => true,
-                else => false,
-            };
-        }
-
         /// AstGen uses this to find out if `Ref.void_value` should be used in place
         /// of the result of a given instruction. This allows Sema to forego adding
         /// the instruction to the map after analysis.
@@ -1974,6 +1961,7 @@ pub const Inst = struct {
         i8_type,
         u16_type,
         i16_type,
+        u29_type,
         u32_type,
         i32_type,
         u64_type,
@@ -2084,6 +2072,10 @@ pub const Inst = struct {
             .i16_type = .{
                 .ty = Type.initTag(.type),
                 .val = Value.initTag(.i16_type),
+            },
+            .u29_type = .{
+                .ty = Type.initTag(.type),
+                .val = Value.initTag(.u29_type),
             },
             .u32_type = .{
                 .ty = Type.initTag(.type),
