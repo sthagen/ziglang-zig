@@ -214,6 +214,10 @@ pub const Object = struct {
     /// Note that the values are not added until flushModule, when all errors in
     /// the compilation are known.
     error_name_table: ?*const llvm.Value,
+    /// This map is usually very close to empty. It tracks only the cases when a
+    /// second extern Decl could not be emitted with the correct name due to a
+    /// name collision.
+    extern_collisions: std.AutoArrayHashMapUnmanaged(Module.Decl.Index, void),
 
     pub const TypeMap = std.HashMapUnmanaged(
         Type,
@@ -376,6 +380,7 @@ pub const Object = struct {
             .type_map_arena = std.heap.ArenaAllocator.init(gpa),
             .di_type_map = .{},
             .error_name_table = null,
+            .extern_collisions = .{},
         };
     }
 
@@ -392,6 +397,7 @@ pub const Object = struct {
         self.decl_map.deinit(gpa);
         self.type_map.deinit(gpa);
         self.type_map_arena.deinit();
+        self.extern_collisions.deinit(gpa);
         self.* = undefined;
     }
 
@@ -507,6 +513,22 @@ pub const Object = struct {
 
     fn resolveExportExternCollisions(object: *Object) !void {
         const mod = object.module;
+
+        // This map has externs with incorrect symbol names.
+        for (object.extern_collisions.keys()) |decl_index| {
+            const entry = object.decl_map.getEntry(decl_index) orelse continue;
+            const llvm_global = entry.value_ptr.*;
+            // Same logic as below but for externs instead of exports.
+            const decl = mod.declPtr(decl_index);
+            const other_global = object.getLlvmGlobal(decl.name) orelse continue;
+            if (other_global == llvm_global) continue;
+
+            const new_global_ptr = other_global.constBitCast(llvm_global.typeOf());
+            llvm_global.replaceAllUsesWith(new_global_ptr);
+            object.deleteLlvmGlobal(llvm_global);
+            entry.value_ptr.* = new_global_ptr;
+        }
+        object.extern_collisions.clearRetainingCapacity();
 
         const export_keys = mod.decl_exports.keys();
         for (mod.decl_exports.values()) |export_list, i| {
@@ -997,6 +1019,15 @@ pub const Object = struct {
         return null;
     }
 
+    /// TODO can this be done with simpler logic / different API binding?
+    fn deleteLlvmGlobal(o: Object, llvm_global: *const llvm.Value) void {
+        if (o.llvm_module.getNamedFunction(llvm_global.getValueName()) != null) {
+            llvm_global.deleteFunction();
+            return;
+        }
+        return llvm_global.deleteGlobal();
+    }
+
     pub fn updateDeclExports(
         self: *Object,
         module: *Module,
@@ -1009,6 +1040,12 @@ pub const Object = struct {
         const decl = module.declPtr(decl_index);
         if (decl.isExtern()) {
             llvm_global.setValueName(decl.name);
+            if (self.getLlvmGlobal(decl.name)) |other_global| {
+                if (other_global != llvm_global) {
+                    log.debug("updateDeclExports isExtern()=true setValueName({s}) conflict", .{decl.name});
+                    try self.extern_collisions.put(module.gpa, decl_index, {});
+                }
+            }
             llvm_global.setUnnamedAddr(.False);
             llvm_global.setLinkage(.External);
             if (self.di_map.get(decl)) |di_node| {
@@ -2143,11 +2180,8 @@ pub const DeclGen = struct {
         log.debug("gen: {s} type: {}, value: {}", .{
             decl.name, decl.ty.fmtDebug(), decl.val.fmtDebug(),
         });
-
-        if (decl.val.castTag(.function)) |func_payload| {
-            _ = func_payload;
-            @panic("TODO llvm backend genDecl function pointer");
-        } else if (decl.val.castTag(.extern_fn)) |extern_fn| {
+        assert(decl.val.tag() != .function);
+        if (decl.val.castTag(.extern_fn)) |extern_fn| {
             _ = try dg.resolveLlvmFunction(extern_fn.data.owner_decl);
         } else {
             const target = dg.module.getTarget();
@@ -2246,12 +2280,14 @@ pub const DeclGen = struct {
         if (!is_extern) {
             llvm_fn.setLinkage(.Internal);
             llvm_fn.setUnnamedAddr(.True);
-        } else if (dg.module.getTarget().isWasm()) {
-            dg.addFnAttrString(llvm_fn, "wasm-import-name", std.mem.sliceTo(decl.name, 0));
-            if (decl.getExternFn().?.lib_name) |lib_name| {
-                const module_name = std.mem.sliceTo(lib_name, 0);
-                if (!std.mem.eql(u8, module_name, "c")) {
-                    dg.addFnAttrString(llvm_fn, "wasm-import-module", module_name);
+        } else {
+            if (dg.module.getTarget().isWasm()) {
+                dg.addFnAttrString(llvm_fn, "wasm-import-name", std.mem.sliceTo(decl.name, 0));
+                if (decl.getExternFn().?.lib_name) |lib_name| {
+                    const module_name = std.mem.sliceTo(lib_name, 0);
+                    if (!std.mem.eql(u8, module_name, "c")) {
+                        dg.addFnAttrString(llvm_fn, "wasm-import-module", module_name);
+                    }
                 }
             }
         }
@@ -4040,6 +4076,8 @@ pub const FuncGen = struct {
                 .ret_addr       => try self.airRetAddr(inst),
                 .frame_addr     => try self.airFrameAddress(inst),
                 .cond_br        => try self.airCondBr(inst),
+                .@"try"         => try self.airTry(inst),
+                .try_ptr        => try self.airTryPtr(inst),
                 .intcast        => try self.airIntCast(inst),
                 .trunc          => try self.airTrunc(inst),
                 .fptrunc        => try self.airFptrunc(inst),
@@ -4729,6 +4767,75 @@ pub const FuncGen = struct {
 
         // No need to reset the insert cursor since this instruction is noreturn.
         return null;
+    }
+
+    fn airTry(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        const pl_op = self.air.instructions.items(.data)[inst].pl_op;
+        const err_union = try self.resolveInst(pl_op.operand);
+        const extra = self.air.extraData(Air.Try, pl_op.payload);
+        const body = self.air.extra[extra.end..][0..extra.data.body_len];
+        const err_union_ty = self.air.typeOf(pl_op.operand);
+        const result_ty = self.air.typeOfIndex(inst);
+        return lowerTry(self, err_union, body, err_union_ty, false, result_ty);
+    }
+
+    fn airTryPtr(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
+        const extra = self.air.extraData(Air.TryPtr, ty_pl.payload);
+        const err_union_ptr = try self.resolveInst(extra.data.ptr);
+        const body = self.air.extra[extra.end..][0..extra.data.body_len];
+        const err_union_ty = self.air.typeOf(extra.data.ptr).childType();
+        const result_ty = self.air.typeOfIndex(inst);
+        return lowerTry(self, err_union_ptr, body, err_union_ty, true, result_ty);
+    }
+
+    fn lowerTry(fg: *FuncGen, err_union: *const llvm.Value, body: []const Air.Inst.Index, err_union_ty: Type, operand_is_ptr: bool, result_ty: Type) !?*const llvm.Value {
+        if (err_union_ty.errorUnionSet().errorSetCardinality() == .zero) {
+            // If the error set has no fields, then the payload and the error
+            // union are the same value.
+            return err_union;
+        }
+
+        const payload_ty = err_union_ty.errorUnionPayload();
+        const payload_has_bits = payload_ty.hasRuntimeBitsIgnoreComptime();
+        const target = fg.dg.module.getTarget();
+        const is_err = err: {
+            const err_set_ty = try fg.dg.lowerType(Type.anyerror);
+            const zero = err_set_ty.constNull();
+            if (!payload_has_bits) {
+                const loaded = if (operand_is_ptr) fg.builder.buildLoad(err_union, "") else err_union;
+                break :err fg.builder.buildICmp(.NE, loaded, zero, "");
+            }
+            const err_field_index = errUnionErrorOffset(payload_ty, target);
+            if (operand_is_ptr or isByRef(err_union_ty)) {
+                const err_field_ptr = fg.builder.buildStructGEP(err_union, err_field_index, "");
+                const loaded = fg.builder.buildLoad(err_field_ptr, "");
+                break :err fg.builder.buildICmp(.NE, loaded, zero, "");
+            }
+            const loaded = fg.builder.buildExtractValue(err_union, err_field_index, "");
+            break :err fg.builder.buildICmp(.NE, loaded, zero, "");
+        };
+
+        const return_block = fg.context.appendBasicBlock(fg.llvm_func, "TryRet");
+        const continue_block = fg.context.appendBasicBlock(fg.llvm_func, "TryCont");
+        _ = fg.builder.buildCondBr(is_err, return_block, continue_block);
+
+        fg.builder.positionBuilderAtEnd(return_block);
+        try fg.genBody(body);
+
+        fg.builder.positionBuilderAtEnd(continue_block);
+        if (!payload_has_bits) {
+            if (!operand_is_ptr) return null;
+
+            // TODO once we update to LLVM 14 this bitcast won't be necessary.
+            const res_ptr_ty = try fg.dg.lowerType(result_ty);
+            return fg.builder.buildBitCast(err_union, res_ptr_ty, "");
+        }
+        const offset = errUnionPayloadOffset(payload_ty, target);
+        if (operand_is_ptr or isByRef(payload_ty)) {
+            return fg.builder.buildStructGEP(err_union, offset, "");
+        }
+        return fg.builder.buildExtractValue(err_union, offset, "");
     }
 
     fn airSwitchBr(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
@@ -5673,15 +5780,14 @@ pub const FuncGen = struct {
         const operand = try self.resolveInst(ty_op.operand);
         const operand_ty = self.air.typeOf(ty_op.operand);
         const error_union_ty = if (operand_is_ptr) operand_ty.childType() else operand_ty;
-        // If the error set has no fields, then the payload and the error
-        // union are the same value.
         if (error_union_ty.errorUnionSet().errorSetCardinality() == .zero) {
+            // If the error set has no fields, then the payload and the error
+            // union are the same value.
             return operand;
         }
         const result_ty = self.air.typeOfIndex(inst);
         const payload_ty = if (operand_is_ptr) result_ty.childType() else result_ty;
         const target = self.dg.module.getTarget();
-        const offset = errUnionPayloadOffset(payload_ty, target);
 
         if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
             if (!operand_is_ptr) return null;
@@ -5690,6 +5796,7 @@ pub const FuncGen = struct {
             const res_ptr_ty = try self.dg.lowerType(result_ty);
             return self.builder.buildBitCast(operand, res_ptr_ty, "");
         }
+        const offset = errUnionPayloadOffset(payload_ty, target);
         if (operand_is_ptr or isByRef(payload_ty)) {
             return self.builder.buildStructGEP(operand, offset, "");
         }
