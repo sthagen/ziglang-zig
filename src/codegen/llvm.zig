@@ -5012,7 +5012,7 @@ pub const FuncGen = struct {
         const compiler_rt_operand_abbrev = compilerRtFloatAbbrev(operand_bits);
 
         const compiler_rt_dest_abbrev = compilerRtIntAbbrev(rt_int_bits);
-        const sign_prefix = if (dest_scalar_ty.isSignedInt()) "" else "un";
+        const sign_prefix = if (dest_scalar_ty.isSignedInt()) "" else "uns";
 
         var fn_name_buf: [64]u8 = undefined;
         const fn_name = std.fmt.bufPrintZ(&fn_name_buf, "__fix{s}{s}f{s}i", .{
@@ -5435,10 +5435,6 @@ pub const FuncGen = struct {
         const inputs = @ptrCast([]const Air.Inst.Ref, self.air.extra[extra_i..][0..extra.data.inputs_len]);
         extra_i += inputs.len;
 
-        if (outputs.len > 1) {
-            return self.todo("implement llvm codegen for asm with more than 1 output", .{});
-        }
-
         var llvm_constraints: std.ArrayListUnmanaged(u8) = .{};
         defer llvm_constraints.deinit(self.gpa);
 
@@ -5446,7 +5442,10 @@ pub const FuncGen = struct {
         defer arena_allocator.deinit();
         const arena = arena_allocator.allocator();
 
-        const llvm_params_len = inputs.len;
+        const return_count: u8 = for (outputs) |output| {
+            if (output == .none) break 1;
+        } else 0;
+        const llvm_params_len = inputs.len + outputs.len - return_count;
         const llvm_param_types = try arena.alloc(*const llvm.Type, llvm_params_len);
         const llvm_param_values = try arena.alloc(*const llvm.Value, llvm_params_len);
         var llvm_param_i: usize = 0;
@@ -5456,9 +5455,6 @@ pub const FuncGen = struct {
         try name_map.ensureUnusedCapacity(arena, outputs.len + inputs.len);
 
         for (outputs) |output| {
-            if (output != .none) {
-                return self.todo("implement inline asm with non-returned output", .{});
-            }
             const extra_bytes = std.mem.sliceAsBytes(self.air.extra[extra_i..]);
             const constraint = std.mem.sliceTo(std.mem.sliceAsBytes(self.air.extra[extra_i..]), 0);
             const name = std.mem.sliceTo(extra_bytes[constraint.len + 1 ..], 0);
@@ -5471,6 +5467,15 @@ pub const FuncGen = struct {
                 llvm_constraints.appendAssumeCapacity(',');
             }
             llvm_constraints.appendAssumeCapacity('=');
+            if (output != .none) {
+                try llvm_constraints.ensureUnusedCapacity(self.gpa, llvm_constraints.capacity + 1);
+                llvm_constraints.appendAssumeCapacity('*');
+
+                const output_inst = try self.resolveInst(output);
+                llvm_param_values[llvm_param_i] = output_inst;
+                llvm_param_types[llvm_param_i] = output_inst.typeOf();
+                llvm_param_i += 1;
+            }
             llvm_constraints.appendSliceAssumeCapacity(constraint[1..]);
 
             name_map.putAssumeCapacityNoClobber(name, {});
@@ -8306,23 +8311,41 @@ pub const FuncGen = struct {
         field_index: u32,
     ) !?*const llvm.Value {
         if (self.liveness.isUnused(inst)) return null;
+
+        const target = self.dg.object.target;
         const struct_ty = struct_ptr_ty.childType();
         switch (struct_ty.zigTypeTag()) {
             .Struct => switch (struct_ty.containerLayout()) {
                 .Packed => {
-                    // From LLVM's perspective, a pointer to a packed struct and a pointer
-                    // to a field of a packed struct are the same. The difference is in the
-                    // Zig pointer type which provides information for how to mask and shift
-                    // out the relevant bits when accessing the pointee.
-                    // Here we perform a bitcast because we want to use the host_size
-                    // as the llvm pointer element type.
-                    const result_llvm_ty = try self.dg.lowerType(self.air.typeOfIndex(inst));
-                    // TODO this can be removed if we change host_size to be bits instead
-                    // of bytes.
-                    return self.builder.buildBitCast(struct_ptr, result_llvm_ty, "");
+                    const result_ty = self.air.typeOfIndex(inst);
+                    const result_ty_info = result_ty.ptrInfo().data;
+                    const result_llvm_ty = try self.dg.lowerType(result_ty);
+
+                    if (result_ty_info.host_size != 0) {
+                        // From LLVM's perspective, a pointer to a packed struct and a pointer
+                        // to a field of a packed struct are the same. The difference is in the
+                        // Zig pointer type which provides information for how to mask and shift
+                        // out the relevant bits when accessing the pointee.
+                        // Here we perform a bitcast because we want to use the host_size
+                        // as the llvm pointer element type.
+                        return self.builder.buildBitCast(struct_ptr, result_llvm_ty, "");
+                    }
+
+                    // We have a pointer to a packed struct field that happens to be byte-aligned.
+                    // Offset our operand pointer by the correct number of bytes.
+                    const byte_offset = struct_ty.packedStructFieldByteOffset(field_index, target);
+                    if (byte_offset == 0) {
+                        return self.builder.buildBitCast(struct_ptr, result_llvm_ty, "");
+                    }
+                    const llvm_bytes_ptr_ty = self.context.intType(8).pointerType(0);
+                    const ptr_as_bytes = self.builder.buildBitCast(struct_ptr, llvm_bytes_ptr_ty, "");
+                    const llvm_usize = try self.dg.lowerType(Type.usize);
+                    const llvm_index = llvm_usize.constInt(byte_offset, .False);
+                    const indices: [1]*const llvm.Value = .{llvm_index};
+                    const new_ptr = self.builder.buildInBoundsGEP(ptr_as_bytes, &indices, indices.len, "");
+                    return self.builder.buildBitCast(new_ptr, result_llvm_ty, "");
                 },
                 else => {
-                    const target = self.dg.module.getTarget();
                     var ty_buf: Type.Payload.Pointer = undefined;
                     if (llvmFieldIndex(struct_ty, field_index, target, &ty_buf)) |llvm_field_index| {
                         return self.builder.buildStructGEP(struct_ptr, llvm_field_index, "");
@@ -9284,7 +9307,7 @@ fn needDbgVarWorkaround(dg: *DeclGen, ty: Type) bool {
 }
 
 fn compilerRtIntBits(bits: u16) u16 {
-    inline for (.{ 8, 16, 32, 64, 128 }) |b| {
+    inline for (.{ 32, 64, 128 }) |b| {
         if (bits <= b) {
             return b;
         }
