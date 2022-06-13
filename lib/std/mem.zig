@@ -268,7 +268,7 @@ pub fn zeroes(comptime T: type) T {
         },
         .Struct => |struct_info| {
             if (@sizeOf(T) == 0) return T{};
-            if (comptime meta.containerLayout(T) == .Extern) {
+            if (struct_info.layout == .Extern) {
                 var item: T = undefined;
                 set(u8, asBytes(&item), 0);
                 return item;
@@ -2080,6 +2080,7 @@ fn testReadIntImpl() !void {
 }
 
 test "writeIntSlice" {
+    if (@import("builtin").zig_backend != .stage1) return error.SkipZigTest; // TODO
     try testWriteIntImpl();
     comptime try testWriteIntImpl();
 }
