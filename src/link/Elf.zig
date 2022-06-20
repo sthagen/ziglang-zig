@@ -1272,7 +1272,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation, prog_node: *std.Progress.Node) !v
     const stack_size = self.base.options.stack_size_override orelse 16777216;
     const allow_shlib_undefined = self.base.options.allow_shlib_undefined orelse !self.base.options.is_native_os;
     const compiler_rt_path: ?[]const u8 = blk: {
-        if (comp.compiler_rt_static_lib) |x| break :blk x.full_object_path;
+        if (comp.compiler_rt_lib) |x| break :blk x.full_object_path;
         if (comp.compiler_rt_obj) |x| break :blk x.full_object_path;
         break :blk null;
     };
@@ -1298,7 +1298,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation, prog_node: *std.Progress.Node) !v
         // We are about to obtain this lock, so here we give other processes a chance first.
         self.base.releaseLock();
 
-        comptime assert(Compilation.link_hash_implementation_version == 3);
+        comptime assert(Compilation.link_hash_implementation_version == 4);
 
         try man.addOptionalFile(self.base.options.linker_script);
         try man.addOptionalFile(self.base.options.version_script);

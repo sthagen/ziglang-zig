@@ -286,9 +286,9 @@ const default_dyld_path: [*:0]const u8 = "/usr/lib/dyld";
 const minimum_text_block_size = 64;
 pub const min_text_capacity = padToIdeal(minimum_text_block_size);
 
-/// Virtual memory offset corresponds to the size of __PAGEZERO segment and start of
-/// __TEXT segment.
-const pagezero_vmsize: u64 = 0x100000000;
+/// Default virtual memory offset corresponds to the size of __PAGEZERO segment and
+/// start of __TEXT segment.
+const default_pagezero_vmsize: u64 = 0x100000000;
 
 pub const Export = struct {
     sym_index: ?u32 = null,
@@ -436,7 +436,7 @@ pub fn flush(self: *MachO, comp: *Compilation, prog_node: *std.Progress.Node) !v
             return error.TODOImplementWritingStaticLibFiles;
         }
     }
-    try self.flushModule(comp, prog_node);
+    return self.flushModule(comp, prog_node);
 }
 
 pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.Node) !void {
@@ -444,8 +444,23 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
     defer tracy.end();
 
     const use_stage1 = build_options.is_stage1 and self.base.options.use_stage1;
-    if (!use_stage1 and self.base.options.output_mode == .Obj)
-        return self.flushObject(comp, prog_node);
+
+    if (build_options.have_llvm and !use_stage1) {
+        if (self.llvm_object) |llvm_object| {
+            try llvm_object.flushModule(comp, prog_node);
+
+            llvm_object.destroy(self.base.allocator);
+            self.llvm_object = null;
+
+            if (self.base.options.output_mode == .Lib and self.base.options.link_mode == .Static) {
+                return;
+            }
+        }
+    }
+
+    var sub_prog_node = prog_node.start("MachO Flush", 0);
+    sub_prog_node.activate();
+    defer sub_prog_node.end();
 
     var arena_allocator = std.heap.ArenaAllocator.init(self.base.allocator);
     defer arena_allocator.deinit();
@@ -453,12 +468,6 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
 
     const directory = self.base.options.emit.?.directory; // Just an alias to make it shorter to type.
     const full_out_path = try directory.join(arena, &[_][]const u8{self.base.options.emit.?.sub_path});
-
-    if (self.d_sym) |*d_sym| {
-        if (self.base.options.module) |module| {
-            try d_sym.dwarf.flushModule(&self.base, module);
-        }
-    }
 
     // If there is no Zig code to compile, then we should skip flushing the output file because it
     // will not be part of the linker line anyway.
@@ -482,8 +491,6 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
 
         const obj_basename = self.base.intermediary_basename orelse break :blk null;
 
-        try self.flushObject(comp, prog_node);
-
         if (fs.path.dirname(full_out_path)) |dirname| {
             break :blk try fs.path.join(arena, &.{ dirname, obj_basename });
         } else {
@@ -491,9 +498,11 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
         }
     } else null;
 
-    var sub_prog_node = prog_node.start("MachO Flush", 0);
-    sub_prog_node.activate();
-    defer sub_prog_node.end();
+    if (self.d_sym) |*d_sym| {
+        if (self.base.options.module) |module| {
+            try d_sym.dwarf.flushModule(&self.base, module);
+        }
+    }
 
     const is_lib = self.base.options.output_mode == .Lib;
     const is_dyn_lib = self.base.options.link_mode == .Dynamic and is_lib;
@@ -527,7 +536,7 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
         // We are about to obtain this lock, so here we give other processes a chance first.
         self.base.releaseLock();
 
-        comptime assert(Compilation.link_hash_implementation_version == 3);
+        comptime assert(Compilation.link_hash_implementation_version == 4);
 
         for (self.base.options.objects) |obj| {
             _ = try man.addFile(obj.path, null);
@@ -540,6 +549,7 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
         // We can skip hashing libc and libc++ components that we are in charge of building from Zig
         // installation sources because they are always a product of the compiler version + target information.
         man.hash.add(stack_size);
+        man.hash.addOptional(self.base.options.pagezero_size);
         man.hash.addListOfBytes(self.base.options.lib_dirs);
         man.hash.addListOfBytes(self.base.options.framework_dirs);
         man.hash.addListOfBytes(self.base.options.frameworks);
@@ -738,7 +748,7 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
                 try positionals.append(p);
             }
 
-            if (comp.compiler_rt_static_lib) |lib| {
+            if (comp.compiler_rt_lib) |lib| {
                 try positionals.append(lib.full_object_path);
             }
 
@@ -917,6 +927,11 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
                 for (rpath_table.keys()) |rpath| {
                     try argv.append("-rpath");
                     try argv.append(rpath);
+                }
+
+                if (self.base.options.pagezero_size) |pagezero_size| {
+                    try argv.append("-pagezero_size");
+                    try argv.append(try std.fmt.allocPrint(arena, "0x{x}", .{pagezero_size}));
                 }
 
                 try argv.appendSlice(positionals.items);
@@ -1117,17 +1132,6 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
     }
 
     self.cold_start = false;
-}
-
-pub fn flushObject(self: *MachO, comp: *Compilation, prog_node: *std.Progress.Node) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    if (build_options.have_llvm)
-        if (self.llvm_object) |llvm_object|
-            return llvm_object.flushModule(comp, prog_node);
-
-    return error.TODOImplementWritingObjFiles;
 }
 
 fn resolveSearchDir(
@@ -4367,14 +4371,21 @@ pub fn getDeclVAddr(self: *MachO, decl_index: Module.Decl.Index, reloc_info: Fil
 
 fn populateMissingMetadata(self: *MachO) !void {
     const cpu_arch = self.base.options.target.cpu.arch;
+    const pagezero_vmsize = self.base.options.pagezero_size orelse default_pagezero_vmsize;
+    const aligned_pagezero_vmsize = mem.alignBackwardGeneric(u64, pagezero_vmsize, self.page_size);
 
-    if (self.pagezero_segment_cmd_index == null) {
+    if (self.pagezero_segment_cmd_index == null) blk: {
+        if (aligned_pagezero_vmsize == 0) break :blk;
+        if (aligned_pagezero_vmsize != pagezero_vmsize) {
+            log.warn("requested __PAGEZERO size (0x{x}) is not page aligned", .{pagezero_vmsize});
+            log.warn("  rounding down to 0x{x}", .{aligned_pagezero_vmsize});
+        }
         self.pagezero_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
             .segment = .{
                 .inner = .{
                     .segname = makeStaticString("__PAGEZERO"),
-                    .vmsize = pagezero_vmsize,
+                    .vmsize = aligned_pagezero_vmsize,
                     .cmdsize = @sizeOf(macho.segment_command_64),
                 },
             },
@@ -4396,7 +4407,7 @@ fn populateMissingMetadata(self: *MachO) !void {
             .segment = .{
                 .inner = .{
                     .segname = makeStaticString("__TEXT"),
-                    .vmaddr = pagezero_vmsize,
+                    .vmaddr = aligned_pagezero_vmsize,
                     .vmsize = needed_size,
                     .filesize = needed_size,
                     .maxprot = macho.PROT.READ | macho.PROT.EXEC,
@@ -4883,7 +4894,10 @@ fn populateMissingMetadata(self: *MachO) !void {
 
 fn allocateTextSegment(self: *MachO) !void {
     const seg = &self.load_commands.items[self.text_segment_cmd_index.?].segment;
-    const base_vmaddr = self.load_commands.items[self.pagezero_segment_cmd_index.?].segment.inner.vmsize;
+    const base_vmaddr = if (self.pagezero_segment_cmd_index) |index|
+        self.load_commands.items[index].segment.inner.vmsize
+    else
+        0;
     seg.inner.fileoff = 0;
     seg.inner.vmaddr = base_vmaddr;
 
