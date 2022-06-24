@@ -215,8 +215,7 @@ fn buildOpcode(args: OpcodeBuildArguments) wasm.Opcode {
             16 => switch (args.valtype1.?) {
                 .i32 => if (args.signedness.? == .signed) return .i32_load16_s else return .i32_load16_u,
                 .i64 => if (args.signedness.? == .signed) return .i64_load16_s else return .i64_load16_u,
-                .f32 => return .f32_load,
-                .f64 => unreachable,
+                .f32, .f64 => unreachable,
             },
             32 => switch (args.valtype1.?) {
                 .i64 => if (args.signedness.? == .signed) return .i64_load32_s else return .i64_load32_u,
@@ -246,8 +245,7 @@ fn buildOpcode(args: OpcodeBuildArguments) wasm.Opcode {
                 16 => switch (args.valtype1.?) {
                     .i32 => return .i32_store16,
                     .i64 => return .i64_store16,
-                    .f32 => return .f32_store,
-                    .f64 => unreachable,
+                    .f32, .f64 => unreachable,
                 },
                 32 => switch (args.valtype1.?) {
                     .i64 => return .i64_store32,
@@ -419,22 +417,24 @@ fn buildOpcode(args: OpcodeBuildArguments) wasm.Opcode {
             .f64 => return .f64_neg,
         },
         .ceil => switch (args.valtype1.?) {
-            .i32, .i64 => unreachable,
+            .i64 => unreachable,
+            .i32 => return .f32_ceil, // when valtype is f16, we store it in i32.
             .f32 => return .f32_ceil,
             .f64 => return .f64_ceil,
         },
         .floor => switch (args.valtype1.?) {
-            .i32, .i64 => unreachable,
+            .i64 => unreachable,
+            .i32 => return .f32_floor, // when valtype is f16, we store it in i32.
             .f32 => return .f32_floor,
             .f64 => return .f64_floor,
         },
         .trunc => switch (args.valtype1.?) {
-            .i32 => switch (args.valtype2.?) {
+            .i32 => if (args.valtype2) |valty| switch (valty) {
                 .i32 => unreachable,
                 .i64 => unreachable,
                 .f32 => if (args.signedness.? == .signed) return .i32_trunc_f32_s else return .i32_trunc_f32_u,
                 .f64 => if (args.signedness.? == .signed) return .i32_trunc_f64_s else return .i32_trunc_f64_u,
-            },
+            } else return .f32_trunc, // when no valtype2, it's an f16 instead which is stored in an i32.
             .i64 => unreachable,
             .f32 => return .f32_trunc,
             .f64 => return .f64_trunc,
@@ -725,7 +725,8 @@ fn typeToValtype(ty: Type, target: std.Target) wasm.Valtype {
     return switch (ty.zigTypeTag()) {
         .Float => blk: {
             const bits = ty.floatBits(target);
-            if (bits == 16 or bits == 32) break :blk wasm.Valtype.f32;
+            if (bits == 16) return wasm.Valtype.i32; // stored/loaded as u16
+            if (bits == 32) break :blk wasm.Valtype.f32;
             if (bits == 64) break :blk wasm.Valtype.f64;
             if (bits == 128) break :blk wasm.Valtype.i64;
             return wasm.Valtype.i32; // represented as pointer to stack
@@ -789,55 +790,53 @@ fn allocLocal(self: *Self, ty: Type) InnerError!WValue {
 
 /// Generates a `wasm.Type` from a given function type.
 /// Memory is owned by the caller.
-fn genFunctype(gpa: Allocator, fn_info: Type.Payload.Function.Data, target: std.Target) !wasm.Type {
-    var params = std.ArrayList(wasm.Valtype).init(gpa);
-    defer params.deinit();
+fn genFunctype(gpa: Allocator, cc: std.builtin.CallingConvention, params: []const Type, return_type: Type, target: std.Target) !wasm.Type {
+    var temp_params = std.ArrayList(wasm.Valtype).init(gpa);
+    defer temp_params.deinit();
     var returns = std.ArrayList(wasm.Valtype).init(gpa);
     defer returns.deinit();
 
-    if (firstParamSRet(fn_info, target)) {
-        try params.append(.i32); // memory address is always a 32-bit handle
-    } else if (fn_info.return_type.hasRuntimeBitsIgnoreComptime()) {
-        if (fn_info.cc == .C) {
-            const res_classes = abi.classifyType(fn_info.return_type, target);
+    if (firstParamSRet(cc, return_type, target)) {
+        try temp_params.append(.i32); // memory address is always a 32-bit handle
+    } else if (return_type.hasRuntimeBitsIgnoreComptime()) {
+        if (cc == .C) {
+            const res_classes = abi.classifyType(return_type, target);
             assert(res_classes[0] == .direct and res_classes[1] == .none);
-            const scalar_type = abi.scalarType(fn_info.return_type, target);
+            const scalar_type = abi.scalarType(return_type, target);
             try returns.append(typeToValtype(scalar_type, target));
         } else {
-            try returns.append(typeToValtype(fn_info.return_type, target));
+            try returns.append(typeToValtype(return_type, target));
         }
-    } else if (fn_info.return_type.isError()) {
+    } else if (return_type.isError()) {
         try returns.append(.i32);
     }
 
     // param types
-    if (fn_info.param_types.len != 0) {
-        for (fn_info.param_types) |param_type| {
-            if (!param_type.hasRuntimeBitsIgnoreComptime()) continue;
+    for (params) |param_type| {
+        if (!param_type.hasRuntimeBitsIgnoreComptime()) continue;
 
-            switch (fn_info.cc) {
-                .C => {
-                    const param_classes = abi.classifyType(param_type, target);
-                    for (param_classes) |class| {
-                        if (class == .none) continue;
-                        if (class == .direct) {
-                            const scalar_type = abi.scalarType(param_type, target);
-                            try params.append(typeToValtype(scalar_type, target));
-                        } else {
-                            try params.append(typeToValtype(param_type, target));
-                        }
+        switch (cc) {
+            .C => {
+                const param_classes = abi.classifyType(param_type, target);
+                for (param_classes) |class| {
+                    if (class == .none) continue;
+                    if (class == .direct) {
+                        const scalar_type = abi.scalarType(param_type, target);
+                        try temp_params.append(typeToValtype(scalar_type, target));
+                    } else {
+                        try temp_params.append(typeToValtype(param_type, target));
                     }
-                },
-                else => if (isByRef(param_type, target))
-                    try params.append(.i32)
-                else
-                    try params.append(typeToValtype(param_type, target)),
-            }
+                }
+            },
+            else => if (isByRef(param_type, target))
+                try temp_params.append(.i32)
+            else
+                try temp_params.append(typeToValtype(param_type, target)),
         }
     }
 
     return wasm.Type{
-        .params = params.toOwnedSlice(),
+        .params = temp_params.toOwnedSlice(),
         .returns = returns.toOwnedSlice(),
     };
 }
@@ -878,7 +877,8 @@ pub fn generate(
 }
 
 fn genFunc(self: *Self) InnerError!void {
-    var func_type = try genFunctype(self.gpa, self.decl.ty.fnInfo(), self.target);
+    const fn_info = self.decl.ty.fnInfo();
+    var func_type = try genFunctype(self.gpa, fn_info.cc, fn_info.param_types, fn_info.return_type, self.target);
     defer func_type.deinit(self.gpa);
     self.decl.fn_link.wasm.type_index = try self.bin_file.putOrGetFuncType(func_type);
 
@@ -993,7 +993,8 @@ fn resolveCallingConventionValues(self: *Self, fn_ty: Type) InnerError!CallWValu
 
     // Check if we store the result as a pointer to the stack rather than
     // by value
-    if (firstParamSRet(fn_ty.fnInfo(), self.target)) {
+    const fn_info = fn_ty.fnInfo();
+    if (firstParamSRet(fn_info.cc, fn_info.return_type, self.target)) {
         // the sret arg will be passed as first argument, therefore we
         // set the `return_value` before allocating locals for regular args.
         result.return_value = .{ .local = self.local_index };
@@ -1027,11 +1028,11 @@ fn resolveCallingConventionValues(self: *Self, fn_ty: Type) InnerError!CallWValu
     return result;
 }
 
-fn firstParamSRet(fn_info: Type.Payload.Function.Data, target: std.Target) bool {
-    switch (fn_info.cc) {
-        .Unspecified, .Inline => return isByRef(fn_info.return_type, target),
+fn firstParamSRet(cc: std.builtin.CallingConvention, return_type: Type, target: std.Target) bool {
+    switch (cc) {
+        .Unspecified, .Inline => return isByRef(return_type, target),
         .C => {
-            const ty_classes = abi.classifyType(fn_info.return_type, target);
+            const ty_classes = abi.classifyType(return_type, target);
             if (ty_classes[0] == .indirect) return true;
             if (ty_classes[0] == .direct and ty_classes[1] == .direct) return true;
             return false;
@@ -1678,7 +1679,8 @@ fn airRetPtr(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
         return self.allocStack(Type.usize); // create pointer to void
     }
 
-    if (firstParamSRet(self.decl.ty.fnInfo(), self.target)) {
+    const fn_info = self.decl.ty.fnInfo();
+    if (firstParamSRet(fn_info.cc, fn_info.return_type, self.target)) {
         return self.return_value;
     }
 
@@ -1697,7 +1699,8 @@ fn airRetLoad(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
         }
     }
 
-    if (!firstParamSRet(self.decl.ty.fnInfo(), self.target)) {
+    const fn_info = self.decl.ty.fnInfo();
+    if (!firstParamSRet(fn_info.cc, fn_info.return_type, self.target)) {
         const result = try self.load(operand, ret_ty, 0);
         try self.emitWValue(result);
     }
@@ -1720,7 +1723,8 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallOptions.
         else => unreachable,
     };
     const ret_ty = fn_ty.fnReturnType();
-    const first_param_sret = firstParamSRet(fn_ty.fnInfo(), self.target);
+    const fn_info = fn_ty.fnInfo();
+    const first_param_sret = firstParamSRet(fn_info.cc, fn_info.return_type, self.target);
 
     const callee: ?*Decl = blk: {
         const func_val = self.air.value(pl_op.operand) orelse break :blk null;
@@ -1730,10 +1734,16 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallOptions.
             break :blk module.declPtr(func.data.owner_decl);
         } else if (func_val.castTag(.extern_fn)) |extern_fn| {
             const ext_decl = module.declPtr(extern_fn.data.owner_decl);
-            var func_type = try genFunctype(self.gpa, ext_decl.ty.fnInfo(), self.target);
+            const ext_info = ext_decl.ty.fnInfo();
+            var func_type = try genFunctype(self.gpa, ext_info.cc, ext_info.param_types, ext_info.return_type, self.target);
             defer func_type.deinit(self.gpa);
             ext_decl.fn_link.wasm.type_index = try self.bin_file.putOrGetFuncType(func_type);
-            try self.bin_file.addOrUpdateImport(ext_decl);
+            try self.bin_file.addOrUpdateImport(
+                mem.sliceTo(ext_decl.name, 0),
+                ext_decl.link.wasm.sym_index,
+                ext_decl.getExternFn().?.lib_name,
+                ext_decl.fn_link.wasm.type_index,
+            );
             break :blk ext_decl;
         } else if (func_val.castTag(.decl_ref)) |decl_ref| {
             break :blk module.declPtr(decl_ref.data);
@@ -1766,7 +1776,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallOptions.
         const operand = try self.resolveInst(pl_op.operand);
         try self.emitWValue(operand);
 
-        var fn_type = try genFunctype(self.gpa, fn_ty.fnInfo(), self.target);
+        var fn_type = try genFunctype(self.gpa, fn_info.cc, fn_info.param_types, fn_info.return_type, self.target);
         defer fn_type.deinit(self.gpa);
 
         const fn_type_index = try self.bin_file.putOrGetFuncType(fn_type);
@@ -2004,6 +2014,10 @@ fn binOp(self: *Self, lhs: WValue, rhs: WValue, ty: Type, op: Op) InnerError!WVa
         }
     }
 
+    if (ty.isAnyFloat() and ty.floatBits(self.target) == 16) {
+        return self.binOpFloat16(lhs, rhs, op);
+    }
+
     const opcode: wasm.Opcode = buildOpcode(.{
         .op = op,
         .valtype1 = typeToValtype(ty, self.target),
@@ -2018,6 +2032,20 @@ fn binOp(self: *Self, lhs: WValue, rhs: WValue, ty: Type, op: Op) InnerError!WVa
     const bin_local = try self.allocLocal(ty);
     try self.addLabel(.local_set, bin_local.local);
     return bin_local;
+}
+
+fn binOpFloat16(self: *Self, lhs: WValue, rhs: WValue, op: Op) InnerError!WValue {
+    const ext_lhs = try self.fpext(lhs, Type.f16, Type.f32);
+    const ext_rhs = try self.fpext(rhs, Type.f16, Type.f32);
+
+    const opcode: wasm.Opcode = buildOpcode(.{ .op = op, .valtype1 = .f32, .signedness = .unsigned });
+    try self.emitWValue(ext_lhs);
+    try self.emitWValue(ext_rhs);
+    try self.addTag(Mir.Inst.Tag.fromOpcode(opcode));
+
+    // re-use temporary local
+    try self.addLabel(.local_set, ext_lhs.local);
+    return self.fptrunc(ext_lhs, Type.f32, Type.f16);
 }
 
 fn binOpBigInt(self: *Self, lhs: WValue, rhs: WValue, ty: Type, op: Op) InnerError!WValue {
@@ -2301,8 +2329,9 @@ fn lowerConstant(self: *Self, val: Value, ty: Type) InnerError!WValue {
         },
         .Bool => return WValue{ .imm32 = @intCast(u32, val.toUnsignedInt(target)) },
         .Float => switch (ty.floatBits(self.target)) {
-            0...32 => return WValue{ .float32 = val.toFloat(f32) },
-            33...64 => return WValue{ .float64 = val.toFloat(f64) },
+            16 => return WValue{ .imm32 = @bitCast(u16, val.toFloat(f16)) },
+            32 => return WValue{ .float32 = val.toFloat(f32) },
+            64 => return WValue{ .float64 = val.toFloat(f64) },
             else => unreachable,
         },
         .Pointer => switch (val.tag()) {
@@ -2380,8 +2409,9 @@ fn emitUndefined(self: *Self, ty: Type) InnerError!WValue {
             else => unreachable,
         },
         .Float => switch (ty.floatBits(self.target)) {
-            0...32 => return WValue{ .float32 = @bitCast(f32, @as(u32, 0xaaaaaaaa)) },
-            33...64 => return WValue{ .float64 = @bitCast(f64, @as(u64, 0xaaaaaaaaaaaaaaaa)) },
+            16 => return WValue{ .imm32 = 0xaaaaaaaa },
+            32 => return WValue{ .float32 = @bitCast(f32, @as(u32, 0xaaaaaaaa)) },
+            64 => return WValue{ .float64 = @bitCast(f64, @as(u64, 0xaaaaaaaaaaaaaaaa)) },
             else => unreachable,
         },
         .Pointer => switch (self.arch()) {
@@ -2553,6 +2583,8 @@ fn cmp(self: *Self, lhs: WValue, rhs: WValue, ty: Type, op: std.math.CompareOper
         }
     } else if (isByRef(ty, self.target)) {
         return self.cmpBigInt(lhs, rhs, ty, op);
+    } else if (ty.isAnyFloat() and ty.floatBits(self.target) == 16) {
+        return self.cmpFloat16(lhs, rhs, op);
     }
 
     // ensure that when we compare pointers, we emit
@@ -2584,6 +2616,31 @@ fn cmp(self: *Self, lhs: WValue, rhs: WValue, ty: Type, op: std.math.CompareOper
     const cmp_tmp = try self.allocLocal(Type.initTag(.i32)); // bool is always i32
     try self.addLabel(.local_set, cmp_tmp.local);
     return cmp_tmp;
+}
+
+fn cmpFloat16(self: *Self, lhs: WValue, rhs: WValue, op: std.math.CompareOperator) InnerError!WValue {
+    const ext_lhs = try self.fpext(lhs, Type.f16, Type.f32);
+    const ext_rhs = try self.fpext(rhs, Type.f16, Type.f32);
+
+    const opcode: wasm.Opcode = buildOpcode(.{
+        .op = switch (op) {
+            .lt => .lt,
+            .lte => .le,
+            .eq => .eq,
+            .neq => .ne,
+            .gte => .ge,
+            .gt => .gt,
+        },
+        .valtype1 = .f32,
+        .signedness = .unsigned,
+    });
+    try self.emitWValue(ext_lhs);
+    try self.emitWValue(ext_rhs);
+    try self.addTag(Mir.Inst.Tag.fromOpcode(opcode));
+
+    const result = try self.allocLocal(Type.initTag(.i32)); // bool is always i32
+    try self.addLabel(.local_set, result.local);
+    return result;
 }
 
 fn airCmpVector(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
@@ -3925,19 +3982,44 @@ fn airFpext(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
 
     const ty_op = self.air.instructions.items(.data)[inst].ty_op;
     const dest_ty = self.air.typeOfIndex(inst);
-    const dest_bits = dest_ty.floatBits(self.target);
-    const src_bits = self.air.typeOf(ty_op.operand).floatBits(self.target);
     const operand = try self.resolveInst(ty_op.operand);
 
-    if (dest_bits == 64 and src_bits == 32) {
-        const result = try self.allocLocal(dest_ty);
+    return self.fpext(operand, self.air.typeOf(ty_op.operand), dest_ty);
+}
+
+fn fpext(self: *Self, operand: WValue, given: Type, wanted: Type) InnerError!WValue {
+    const given_bits = given.floatBits(self.target);
+    const wanted_bits = wanted.floatBits(self.target);
+
+    if (wanted_bits == 64 and given_bits == 32) {
+        const result = try self.allocLocal(wanted);
         try self.emitWValue(operand);
         try self.addTag(.f64_promote_f32);
         try self.addLabel(.local_set, result.local);
         return result;
+    } else if (given_bits == 16) {
+        // call __extendhfsf2(f16) f32
+        const f32_result = try self.callIntrinsic(
+            "__extendhfsf2",
+            &.{Type.f16},
+            Type.f32,
+            &.{operand},
+        );
+
+        if (wanted_bits == 32) {
+            return f32_result;
+        }
+        if (wanted_bits == 64) {
+            const result = try self.allocLocal(wanted);
+            try self.emitWValue(f32_result);
+            try self.addTag(.f64_promote_f32);
+            try self.addLabel(.local_set, result.local);
+            return result;
+        }
+        return self.fail("TODO: Implement 'fpext' for floats with bitsize: {d}", .{wanted_bits});
     } else {
         // TODO: Emit a call to compiler-rt to extend the float. e.g. __extendhfsf2
-        return self.fail("TODO: Implement 'fpext' for floats with bitsize: {d}", .{dest_bits});
+        return self.fail("TODO: Implement 'fpext' for floats with bitsize: {d}", .{wanted_bits});
     }
 }
 
@@ -3946,19 +4028,34 @@ fn airFptrunc(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
 
     const ty_op = self.air.instructions.items(.data)[inst].ty_op;
     const dest_ty = self.air.typeOfIndex(inst);
-    const dest_bits = dest_ty.floatBits(self.target);
-    const src_bits = self.air.typeOf(ty_op.operand).floatBits(self.target);
     const operand = try self.resolveInst(ty_op.operand);
+    return self.fptrunc(operand, self.air.typeOf(ty_op.operand), dest_ty);
+}
 
-    if (dest_bits == 32 and src_bits == 64) {
-        const result = try self.allocLocal(dest_ty);
+fn fptrunc(self: *Self, operand: WValue, given: Type, wanted: Type) InnerError!WValue {
+    const given_bits = given.floatBits(self.target);
+    const wanted_bits = wanted.floatBits(self.target);
+
+    if (wanted_bits == 32 and given_bits == 64) {
+        const result = try self.allocLocal(wanted);
         try self.emitWValue(operand);
         try self.addTag(.f32_demote_f64);
         try self.addLabel(.local_set, result.local);
         return result;
+    } else if (wanted_bits == 16) {
+        const op: WValue = if (given_bits == 64) blk: {
+            const tmp = try self.allocLocal(Type.f32);
+            try self.emitWValue(operand);
+            try self.addTag(.f32_demote_f64);
+            try self.addLabel(.local_set, tmp.local);
+            break :blk tmp;
+        } else operand;
+
+        // call __truncsfhf2(f32) f16
+        return self.callIntrinsic("__truncsfhf2", &.{Type.f32}, Type.f16, &.{op});
     } else {
         // TODO: Emit a call to compiler-rt to trunc the float. e.g. __truncdfhf2
-        return self.fail("TODO: Implement 'fptrunc' for floats with bitsize: {d}", .{dest_bits});
+        return self.fail("TODO: Implement 'fptrunc' for floats with bitsize: {d}", .{wanted_bits});
     }
 }
 
@@ -4400,13 +4497,23 @@ fn airMulAdd(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
         return self.fail("TODO: `@mulAdd` for vectors", .{});
     }
 
-    if (ty.floatBits(self.target) == 16) {
-        return self.fail("TODO: `@mulAdd` for f16", .{});
-    }
-
     const addend = try self.resolveInst(pl_op.operand);
     const lhs = try self.resolveInst(bin_op.lhs);
     const rhs = try self.resolveInst(bin_op.rhs);
+
+    if (ty.floatBits(self.target) == 16) {
+        const addend_ext = try self.fpext(addend, ty, Type.f32);
+        const lhs_ext = try self.fpext(lhs, ty, Type.f32);
+        const rhs_ext = try self.fpext(rhs, ty, Type.f32);
+        // call to compiler-rt `fn fmaf(f32, f32, f32) f32`
+        const result = try self.callIntrinsic(
+            "fmaf",
+            &.{ Type.f32, Type.f32, Type.f32 },
+            Type.f32,
+            &.{ rhs_ext, lhs_ext, addend_ext },
+        );
+        return try self.fptrunc(result, Type.f32, ty);
+    }
 
     const mul_result = try self.binOp(lhs, rhs, ty, .mul);
     return self.binOp(mul_result, addend, ty, .add);
@@ -4778,12 +4885,38 @@ fn airDivFloor(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
         try self.emitWValue(rem_result);
         try self.addTag(.select);
     } else {
-        const div_result = try self.binOp(lhs, rhs, ty, .div);
-        try self.emitWValue(div_result);
-        switch (ty.floatBits(self.target)) {
-            32 => try self.addTag(.f32_floor),
-            64 => try self.addTag(.f64_floor),
-            else => |bit_size| return self.fail("TODO: `@divFloor` for floats with bitsize: {d}", .{bit_size}),
+        const float_bits = ty.floatBits(self.target);
+        if (float_bits > 64) {
+            return self.fail("TODO: `@divFloor` for floats with bitsize: {d}", .{float_bits});
+        }
+        const is_f16 = float_bits == 16;
+
+        const lhs_operand = if (is_f16) blk: {
+            break :blk try self.fpext(lhs, Type.f16, Type.f32);
+        } else lhs;
+        const rhs_operand = if (is_f16) blk: {
+            break :blk try self.fpext(rhs, Type.f16, Type.f32);
+        } else rhs;
+
+        try self.emitWValue(lhs_operand);
+        try self.emitWValue(rhs_operand);
+
+        switch (float_bits) {
+            16, 32 => {
+                try self.addTag(.f32_div);
+                try self.addTag(.f32_floor);
+            },
+            64 => {
+                try self.addTag(.f64_div);
+                try self.addTag(.f64_floor);
+            },
+            else => unreachable,
+        }
+
+        if (is_f16) {
+            // we can re-use temporary local
+            try self.addLabel(.local_set, lhs_operand.local);
+            return self.fptrunc(lhs_operand, Type.f32, Type.f16);
         }
     }
 
@@ -4856,22 +4989,28 @@ fn airCeilFloorTrunc(self: *Self, inst: Air.Inst.Index, op: Op) InnerError!WValu
 
     const un_op = self.air.instructions.items(.data)[inst].un_op;
     const ty = self.air.typeOfIndex(inst);
+    const float_bits = ty.floatBits(self.target);
+    const is_f16 = float_bits == 16;
 
     if (ty.zigTypeTag() == .Vector) {
         return self.fail("TODO: Implement `@ceil` for vectors", .{});
     }
+    if (float_bits > 64) {
+        return self.fail("TODO: implement `@ceil`, `@trunc`, `@floor` for floats larger than 64bits", .{});
+    }
 
     const operand = try self.resolveInst(un_op);
-    try self.emitWValue(operand);
-    switch (ty.floatBits(self.target)) {
-        32, 64 => {
-            const opcode = buildOpcode(.{
-                .op = op,
-                .valtype1 = typeToValtype(ty, self.target),
-            });
-            try self.addTag(Mir.Inst.Tag.fromOpcode(opcode));
-        },
-        else => |bit_size| return self.fail("TODO: Implement `@ceil` for floats with bitsize {d}", .{bit_size}),
+    const op_to_lower = if (is_f16) blk: {
+        break :blk try self.fpext(operand, Type.f16, Type.f32);
+    } else operand;
+    try self.emitWValue(op_to_lower);
+    const opcode = buildOpcode(.{ .op = op, .valtype1 = typeToValtype(ty, self.target) });
+    try self.addTag(Mir.Inst.Tag.fromOpcode(opcode));
+
+    if (is_f16) {
+        // re-use temporary to save locals
+        try self.addLabel(.local_set, op_to_lower.local);
+        return self.fptrunc(op_to_lower, Type.f32, Type.f16);
     }
 
     const result = try self.allocLocal(ty);
@@ -5089,5 +5228,58 @@ fn airShlSat(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
             return self.wrapOperand(shift_result, ty);
         }
         return shift_result;
+    }
+}
+
+/// Calls a compiler-rt intrinsic by creating an undefined symbol,
+/// then lowering the arguments and calling the symbol as a function call.
+/// This function call assumes the C-ABI.
+fn callIntrinsic(
+    self: *Self,
+    name: []const u8,
+    param_types: []const Type,
+    return_type: Type,
+    args: []const WValue,
+) InnerError!WValue {
+    assert(param_types.len == args.len);
+    const symbol_index = self.bin_file.base.getGlobalSymbol(name) catch |err| {
+        return self.fail("Could not find or create global symbol '{s}'", .{@errorName(err)});
+    };
+
+    // Always pass over C-ABI
+    var func_type = try genFunctype(self.gpa, .C, param_types, return_type, self.target);
+    defer func_type.deinit(self.gpa);
+    const func_type_index = try self.bin_file.putOrGetFuncType(func_type);
+    try self.bin_file.addOrUpdateImport(name, symbol_index, null, func_type_index);
+
+    const want_sret_param = firstParamSRet(.C, return_type, self.target);
+    // if we want return as first param, we allocate a pointer to stack,
+    // and emit it as our first argument
+    const sret = if (want_sret_param) blk: {
+        const sret_local = try self.allocStack(return_type);
+        try self.lowerToStack(sret_local);
+        break :blk sret_local;
+    } else WValue{ .none = {} };
+
+    // Lower all arguments to the stack before we call our function
+    for (args) |arg, arg_i| {
+        assert(param_types[arg_i].hasRuntimeBitsIgnoreComptime());
+        try self.lowerArg(.C, param_types[arg_i], arg);
+    }
+
+    // Actually call our intrinsic
+    try self.addLabel(.call, symbol_index);
+
+    if (!return_type.hasRuntimeBitsIgnoreComptime()) {
+        return WValue.none;
+    } else if (return_type.isNoReturn()) {
+        try self.addTag(.@"unreachable");
+        return WValue.none;
+    } else if (want_sret_param) {
+        return sret;
+    } else {
+        const result_local = try self.allocLocal(return_type);
+        try self.addLabel(.local_set, result_local.local);
+        return result_local;
     }
 }
