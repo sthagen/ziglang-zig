@@ -21,6 +21,7 @@ const TypedValue = @import("TypedValue.zig");
 
 pub const SystemLib = struct {
     needed: bool = false,
+    weak: bool = false,
 };
 
 pub const CacheMode = enum { incremental, whole };
@@ -162,7 +163,7 @@ pub const Options = struct {
 
     objects: []Compilation.LinkObject,
     framework_dirs: []const []const u8,
-    frameworks: []const []const u8,
+    frameworks: std.StringArrayHashMapUnmanaged(SystemLib),
     system_libs: std.StringArrayHashMapUnmanaged(SystemLib),
     wasi_emulated_libs: []const wasi_libc.CRTFile,
     lib_dirs: []const []const u8,
@@ -198,6 +199,9 @@ pub const Options = struct {
 
     /// (Darwin) set enough space as if all paths were MATPATHLEN
     headerpad_max_install_names: bool = false,
+
+    /// (Darwin) remove dylibs that are unreachable by the entry point or exported symbols
+    dead_strip_dylibs: bool = false,
 
     pub fn effectiveOutputMode(options: Options) std.builtin.OutputMode {
         return if (options.use_lld) .Obj else options.output_mode;

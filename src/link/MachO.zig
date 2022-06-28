@@ -52,6 +52,11 @@ pub const SearchStrategy = enum {
     dylibs_first,
 };
 
+const SystemLib = struct {
+    needed: bool = false,
+    weak: bool = false,
+};
+
 base: File,
 
 /// If this is not null, an object file is created by LLVM and linked with LLD afterwards.
@@ -541,7 +546,7 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
         // We are about to obtain this lock, so here we give other processes a chance first.
         self.base.releaseLock();
 
-        comptime assert(Compilation.link_hash_implementation_version == 6);
+        comptime assert(Compilation.link_hash_implementation_version == 7);
 
         for (self.base.options.objects) |obj| {
             _ = try man.addFile(obj.path, null);
@@ -558,9 +563,10 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
         man.hash.addOptional(self.base.options.search_strategy);
         man.hash.addOptional(self.base.options.headerpad_size);
         man.hash.add(self.base.options.headerpad_max_install_names);
+        man.hash.add(self.base.options.dead_strip_dylibs);
         man.hash.addListOfBytes(self.base.options.lib_dirs);
         man.hash.addListOfBytes(self.base.options.framework_dirs);
-        man.hash.addListOfBytes(self.base.options.frameworks);
+        link.hashAddSystemLibs(&man.hash, self.base.options.frameworks);
         man.hash.addListOfBytes(self.base.options.rpath_list);
         if (is_dyn_lib) {
             man.hash.addOptionalBytes(self.base.options.install_name);
@@ -767,19 +773,23 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
             }
 
             // Shared and static libraries passed via `-l` flag.
-            var search_lib_names = std.ArrayList([]const u8).init(arena);
+            var candidate_libs = std.StringArrayHashMap(SystemLib).init(arena);
 
-            const system_libs = self.base.options.system_libs.keys();
-            for (system_libs) |link_lib| {
+            const system_lib_names = self.base.options.system_libs.keys();
+            for (system_lib_names) |system_lib_name| {
                 // By this time, we depend on these libs being dynamically linked libraries and not static libraries
                 // (the check for that needs to be earlier), but they could be full paths to .dylib files, in which
                 // case we want to avoid prepending "-l".
-                if (Compilation.classifyFileExt(link_lib) == .shared_library) {
-                    try positionals.append(link_lib);
+                if (Compilation.classifyFileExt(system_lib_name) == .shared_library) {
+                    try positionals.append(system_lib_name);
                     continue;
                 }
 
-                try search_lib_names.append(link_lib);
+                const system_lib_info = self.base.options.system_libs.get(system_lib_name).?;
+                try candidate_libs.put(system_lib_name, .{
+                    .needed = system_lib_info.needed,
+                    .weak = system_lib_info.weak,
+                });
             }
 
             var lib_dirs = std.ArrayList([]const u8).init(arena);
@@ -791,18 +801,18 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
                 }
             }
 
-            var libs = std.ArrayList([]const u8).init(arena);
+            var libs = std.StringArrayHashMap(SystemLib).init(arena);
 
             // Assume ld64 default -search_paths_first if no strategy specified.
             const search_strategy = self.base.options.search_strategy orelse .paths_first;
-            outer: for (search_lib_names.items) |lib_name| {
+            outer: for (candidate_libs.keys()) |lib_name| {
                 switch (search_strategy) {
                     .paths_first => {
                         // Look in each directory for a dylib (stub first), and then for archive
                         for (lib_dirs.items) |dir| {
                             for (&[_][]const u8{ ".tbd", ".dylib", ".a" }) |ext| {
                                 if (try resolveLib(arena, dir, lib_name, ext)) |full_path| {
-                                    try libs.append(full_path);
+                                    try libs.put(full_path, candidate_libs.get(lib_name).?);
                                     continue :outer;
                                 }
                             }
@@ -816,13 +826,13 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
                         for (lib_dirs.items) |dir| {
                             for (&[_][]const u8{ ".tbd", ".dylib" }) |ext| {
                                 if (try resolveLib(arena, dir, lib_name, ext)) |full_path| {
-                                    try libs.append(full_path);
+                                    try libs.put(full_path, candidate_libs.get(lib_name).?);
                                     continue :outer;
                                 }
                             }
                         } else for (lib_dirs.items) |dir| {
                             if (try resolveLib(arena, dir, lib_name, ".a")) |full_path| {
-                                try libs.append(full_path);
+                                try libs.put(full_path, candidate_libs.get(lib_name).?);
                             } else {
                                 log.warn("library not found for '-l{s}'", .{lib_name});
                                 lib_not_found = true;
@@ -846,7 +856,7 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
                 // re-exports every single symbol definition.
                 for (lib_dirs.items) |dir| {
                     if (try resolveLib(arena, dir, "System", ".tbd")) |full_path| {
-                        try libs.append(full_path);
+                        try libs.put(full_path, .{ .needed = false });
                         libsystem_available = true;
                         break :blk;
                     }
@@ -856,8 +866,8 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
                 for (lib_dirs.items) |dir| {
                     if (try resolveLib(arena, dir, "System", ".dylib")) |libsystem_path| {
                         if (try resolveLib(arena, dir, "c", ".dylib")) |libc_path| {
-                            try libs.append(libsystem_path);
-                            try libs.append(libc_path);
+                            try libs.put(libsystem_path, .{ .needed = false });
+                            try libs.put(libc_path, .{ .needed = false });
                             libsystem_available = true;
                             break :blk;
                         }
@@ -871,7 +881,7 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
                 const full_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{
                     "libc", "darwin", libsystem_name,
                 });
-                try libs.append(full_path);
+                try libs.put(full_path, .{ .needed = false });
             }
 
             // frameworks
@@ -884,16 +894,20 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
                 }
             }
 
-            outer: for (self.base.options.frameworks) |framework| {
+            outer: for (self.base.options.frameworks.keys()) |f_name| {
                 for (framework_dirs.items) |dir| {
                     for (&[_][]const u8{ ".tbd", ".dylib", "" }) |ext| {
-                        if (try resolveFramework(arena, dir, framework, ext)) |full_path| {
-                            try libs.append(full_path);
+                        if (try resolveFramework(arena, dir, f_name, ext)) |full_path| {
+                            const info = self.base.options.frameworks.get(f_name).?;
+                            try libs.put(full_path, .{
+                                .needed = info.needed,
+                                .weak = info.weak,
+                            });
                             continue :outer;
                         }
                     }
                 } else {
-                    log.warn("framework not found for '-framework {s}'", .{framework});
+                    log.warn("framework not found for '-framework {s}'", .{f_name});
                     framework_not_found = true;
                 }
             }
@@ -987,6 +1001,10 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
                     try argv.append("-headerpad_max_install_names");
                 }
 
+                if (self.base.options.dead_strip_dylibs) {
+                    try argv.append("-dead_strip_dylibs");
+                }
+
                 if (self.base.options.entry) |entry| {
                     try argv.append("-e");
                     try argv.append(entry);
@@ -1020,15 +1038,29 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
                 try argv.append("-lc");
 
                 for (self.base.options.system_libs.keys()) |l_name| {
-                    try argv.append(try std.fmt.allocPrint(arena, "-l{s}", .{l_name}));
+                    const info = self.base.options.system_libs.get(l_name).?;
+                    const arg = if (info.needed)
+                        try std.fmt.allocPrint(arena, "-needed-l{s}", .{l_name})
+                    else if (info.weak)
+                        try std.fmt.allocPrint(arena, "-weak-l{s}", .{l_name})
+                    else
+                        try std.fmt.allocPrint(arena, "-l{s}", .{l_name});
+                    try argv.append(arg);
                 }
 
                 for (self.base.options.lib_dirs) |lib_dir| {
                     try argv.append(try std.fmt.allocPrint(arena, "-L{s}", .{lib_dir}));
                 }
 
-                for (self.base.options.frameworks) |framework| {
-                    try argv.append(try std.fmt.allocPrint(arena, "-framework {s}", .{framework}));
+                for (self.base.options.frameworks.keys()) |framework| {
+                    const info = self.base.options.frameworks.get(framework).?;
+                    const arg = if (info.needed)
+                        try std.fmt.allocPrint(arena, "-needed_framework {s}", .{framework})
+                    else if (info.weak)
+                        try std.fmt.allocPrint(arena, "-weak_framework {s}", .{framework})
+                    else
+                        try std.fmt.allocPrint(arena, "-framework {s}", .{framework});
+                    try argv.append(arg);
                 }
 
                 for (self.base.options.framework_dirs) |framework_dir| {
@@ -1047,11 +1079,14 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
                 Compilation.dump_argv(argv.items);
             }
 
-            var dependent_libs = std.fifo.LinearFifo(Dylib.Id, .Dynamic).init(self.base.allocator);
+            var dependent_libs = std.fifo.LinearFifo(struct {
+                id: Dylib.Id,
+                parent: u16,
+            }, .Dynamic).init(self.base.allocator);
             defer dependent_libs.deinit();
             try self.parseInputFiles(positionals.items, self.base.options.sysroot, &dependent_libs);
             try self.parseAndForceLoadStaticArchives(must_link_archives.keys());
-            try self.parseLibs(libs.items, self.base.options.sysroot, &dependent_libs);
+            try self.parseLibs(libs.keys(), libs.values(), self.base.options.sysroot, &dependent_libs);
             try self.parseDependentLibs(self.base.options.sysroot, &dependent_libs);
         }
 
@@ -1373,12 +1408,18 @@ const ParseDylibError = error{
 
 const DylibCreateOpts = struct {
     syslibroot: ?[]const u8,
-    dependent_libs: *std.fifo.LinearFifo(Dylib.Id, .Dynamic),
     id: ?Dylib.Id = null,
-    is_dependent: bool = false,
+    dependent: bool = false,
+    needed: bool = false,
+    weak: bool = false,
 };
 
-pub fn parseDylib(self: *MachO, path: []const u8, opts: DylibCreateOpts) ParseDylibError!bool {
+pub fn parseDylib(
+    self: *MachO,
+    path: []const u8,
+    dependent_libs: anytype,
+    opts: DylibCreateOpts,
+) ParseDylibError!bool {
     const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => |e| return e,
@@ -1388,12 +1429,19 @@ pub fn parseDylib(self: *MachO, path: []const u8, opts: DylibCreateOpts) ParseDy
     const name = try self.base.allocator.dupe(u8, path);
     errdefer self.base.allocator.free(name);
 
+    const dylib_id = @intCast(u16, self.dylibs.items.len);
     var dylib = Dylib{
         .name = name,
         .file = file,
+        .weak = opts.weak,
     };
 
-    dylib.parse(self.base.allocator, self.base.options.target, opts.dependent_libs) catch |err| switch (err) {
+    dylib.parse(
+        self.base.allocator,
+        self.base.options.target,
+        dylib_id,
+        dependent_libs,
+    ) catch |err| switch (err) {
         error.EndOfStream, error.NotDylib => {
             try file.seekTo(0);
 
@@ -1403,7 +1451,13 @@ pub fn parseDylib(self: *MachO, path: []const u8, opts: DylibCreateOpts) ParseDy
             };
             defer lib_stub.deinit();
 
-            try dylib.parseFromStub(self.base.allocator, self.base.options.target, lib_stub, opts.dependent_libs);
+            try dylib.parseFromStub(
+                self.base.allocator,
+                self.base.options.target,
+                lib_stub,
+                dylib_id,
+                dependent_libs,
+            );
         },
         else => |e| return e,
     };
@@ -1421,11 +1475,15 @@ pub fn parseDylib(self: *MachO, path: []const u8, opts: DylibCreateOpts) ParseDy
         }
     }
 
-    const dylib_id = @intCast(u16, self.dylibs.items.len);
     try self.dylibs.append(self.base.allocator, dylib);
     try self.dylibs_map.putNoClobber(self.base.allocator, dylib.id.?.name, dylib_id);
 
-    if (!(opts.is_dependent or self.referenced_dylibs.contains(dylib_id))) {
+    const should_link_dylib_even_if_unreachable = blk: {
+        if (self.base.options.dead_strip_dylibs and !opts.needed) break :blk false;
+        break :blk !(opts.dependent or self.referenced_dylibs.contains(dylib_id));
+    };
+
+    if (should_link_dylib_even_if_unreachable) {
         try self.addLoadDylibLC(dylib_id);
         try self.referenced_dylibs.putNoClobber(self.base.allocator, dylib_id, {});
     }
@@ -1445,9 +1503,8 @@ fn parseInputFiles(self: *MachO, files: []const []const u8, syslibroot: ?[]const
 
         if (try self.parseObject(full_path)) continue;
         if (try self.parseArchive(full_path, false)) continue;
-        if (try self.parseDylib(full_path, .{
+        if (try self.parseDylib(full_path, dependent_libs, .{
             .syslibroot = syslibroot,
-            .dependent_libs = dependent_libs,
         })) continue;
 
         log.warn("unknown filetype for positional input file: '{s}'", .{file_name});
@@ -1469,12 +1526,20 @@ fn parseAndForceLoadStaticArchives(self: *MachO, files: []const []const u8) !voi
     }
 }
 
-fn parseLibs(self: *MachO, libs: []const []const u8, syslibroot: ?[]const u8, dependent_libs: anytype) !void {
-    for (libs) |lib| {
+fn parseLibs(
+    self: *MachO,
+    lib_names: []const []const u8,
+    lib_infos: []const SystemLib,
+    syslibroot: ?[]const u8,
+    dependent_libs: anytype,
+) !void {
+    for (lib_names) |lib, i| {
+        const lib_info = lib_infos[i];
         log.debug("parsing lib path '{s}'", .{lib});
-        if (try self.parseDylib(lib, .{
+        if (try self.parseDylib(lib, dependent_libs, .{
             .syslibroot = syslibroot,
-            .dependent_libs = dependent_libs,
+            .needed = lib_info.needed,
+            .weak = lib_info.weak,
         })) continue;
         if (try self.parseArchive(lib, false)) continue;
 
@@ -1492,20 +1557,21 @@ fn parseDependentLibs(self: *MachO, syslibroot: ?[]const u8, dependent_libs: any
     const arena = arena_alloc.allocator();
     defer arena_alloc.deinit();
 
-    while (dependent_libs.readItem()) |*id| {
-        defer id.deinit(self.base.allocator);
+    while (dependent_libs.readItem()) |*dep_id| {
+        defer dep_id.id.deinit(self.base.allocator);
 
-        if (self.dylibs_map.contains(id.name)) continue;
+        if (self.dylibs_map.contains(dep_id.id.name)) continue;
 
+        const weak = self.dylibs.items[dep_id.parent].weak;
         const has_ext = blk: {
-            const basename = fs.path.basename(id.name);
+            const basename = fs.path.basename(dep_id.id.name);
             break :blk mem.lastIndexOfScalar(u8, basename, '.') != null;
         };
-        const extension = if (has_ext) fs.path.extension(id.name) else "";
+        const extension = if (has_ext) fs.path.extension(dep_id.id.name) else "";
         const without_ext = if (has_ext) blk: {
-            const index = mem.lastIndexOfScalar(u8, id.name, '.') orelse unreachable;
-            break :blk id.name[0..index];
-        } else id.name;
+            const index = mem.lastIndexOfScalar(u8, dep_id.id.name, '.') orelse unreachable;
+            break :blk dep_id.id.name[0..index];
+        } else dep_id.id.name;
 
         for (&[_][]const u8{ extension, ".tbd" }) |ext| {
             const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ without_ext, ext });
@@ -1513,15 +1579,15 @@ fn parseDependentLibs(self: *MachO, syslibroot: ?[]const u8, dependent_libs: any
 
             log.debug("trying dependency at fully resolved path {s}", .{full_path});
 
-            const did_parse_successfully = try self.parseDylib(full_path, .{
-                .id = id.*,
+            const did_parse_successfully = try self.parseDylib(full_path, dependent_libs, .{
+                .id = dep_id.id,
                 .syslibroot = syslibroot,
-                .is_dependent = true,
-                .dependent_libs = dependent_libs,
+                .dependent = true,
+                .weak = weak,
             });
             if (did_parse_successfully) break;
         } else {
-            log.warn("unable to resolve dependency {s}", .{id.name});
+            log.warn("unable to resolve dependency {s}", .{dep_id.id.name});
         }
     }
 }
@@ -3051,6 +3117,10 @@ fn resolveSymbolsInDylibs(self: *MachO) !void {
             undef.n_type |= macho.N_EXT;
             undef.n_desc = @intCast(u16, ordinal + 1) * macho.N_SYMBOL_RESOLVER;
 
+            if (dylib.weak) {
+                undef.n_desc |= macho.N_WEAK_REF;
+            }
+
             if (self.unresolved.fetchSwapRemove(resolv.where_index)) |entry| outer_blk: {
                 switch (entry.value) {
                     .none => {},
@@ -3411,6 +3481,7 @@ fn addLoadDylibLC(self: *MachO, id: u16) !void {
     const dylib_id = dylib.id orelse unreachable;
     var dylib_cmd = try macho.createLoadDylibCommand(
         self.base.allocator,
+        if (dylib.weak) .LOAD_WEAK_DYLIB else .LOAD_DYLIB,
         dylib_id.name,
         dylib_id.timestamp,
         dylib_id.current_version,
@@ -4855,13 +4926,13 @@ fn populateMissingMetadata(self: *MachO) !void {
             std.builtin.Version{ .major = 1, .minor = 0, .patch = 0 };
         var dylib_cmd = try macho.createLoadDylibCommand(
             self.base.allocator,
+            .ID_DYLIB,
             install_name,
             2,
             current_version.major << 16 | current_version.minor << 8 | current_version.patch,
             compat_version.major << 16 | compat_version.minor << 8 | compat_version.patch,
         );
         errdefer dylib_cmd.deinit(self.base.allocator);
-        dylib_cmd.inner.cmd = .ID_DYLIB;
         try self.load_commands.append(self.base.allocator, .{ .dylib = dylib_cmd });
         self.load_commands_dirty = true;
     }
@@ -5739,11 +5810,16 @@ fn writeDyldInfoData(self: *MachO) !void {
                         },
                         .undef => {
                             const bind_sym = self.undefs.items[resolv.where_index];
+                            var flags: u4 = 0;
+                            if (bind_sym.weakRef()) {
+                                flags |= @truncate(u4, macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT);
+                            }
                             try bind_pointers.append(.{
                                 .offset = binding.offset + base_offset,
                                 .segment_id = match.seg,
-                                .dylib_ordinal = @divExact(@bitCast(i16, bind_sym.n_desc), macho.N_SYMBOL_RESOLVER),
+                                .dylib_ordinal = @divTrunc(@bitCast(i16, bind_sym.n_desc), macho.N_SYMBOL_RESOLVER),
                                 .name = self.getString(bind_sym.n_strx),
+                                .bind_flags = flags,
                             });
                         },
                     }
@@ -5761,11 +5837,16 @@ fn writeDyldInfoData(self: *MachO) !void {
                         },
                         .undef => {
                             const bind_sym = self.undefs.items[resolv.where_index];
+                            var flags: u4 = 0;
+                            if (bind_sym.weakRef()) {
+                                flags |= @truncate(u4, macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT);
+                            }
                             try lazy_bind_pointers.append(.{
                                 .offset = binding.offset + base_offset,
                                 .segment_id = match.seg,
-                                .dylib_ordinal = @divExact(@bitCast(i16, bind_sym.n_desc), macho.N_SYMBOL_RESOLVER),
+                                .dylib_ordinal = @divTrunc(@bitCast(i16, bind_sym.n_desc), macho.N_SYMBOL_RESOLVER),
                                 .name = self.getString(bind_sym.n_strx),
+                                .bind_flags = flags,
                             });
                         },
                     }
