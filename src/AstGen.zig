@@ -812,6 +812,7 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) InnerEr
 
         .deref => {
             const lhs = try expr(gz, scope, .none, node_datas[node].lhs);
+            _ = try gz.addUnTok(.validate_deref, lhs, main_tokens[node]);
             switch (rl) {
                 .ref => return lhs,
                 else => {
@@ -1476,7 +1477,7 @@ fn arrayInitExprRlPtr(
         return arrayInitExprRlPtrInner(gz, scope, node, base_ptr, elements);
     }
 
-    var as_scope = try gz.makeCoercionScope(scope, array_ty, result_ptr);
+    var as_scope = try gz.makeCoercionScope(scope, array_ty, result_ptr, node);
     defer as_scope.unstack();
 
     const result = try arrayInitExprRlPtrInner(&as_scope, scope, node, as_scope.rl_ptr, elements);
@@ -1697,7 +1698,7 @@ fn structInitExprRlPtr(
     const ty_inst = try typeExpr(gz, scope, struct_init.ast.type_expr);
     _ = try gz.addUnNode(.validate_struct_init_ty, ty_inst, node);
 
-    var as_scope = try gz.makeCoercionScope(scope, ty_inst, result_ptr);
+    var as_scope = try gz.makeCoercionScope(scope, ty_inst, result_ptr, node);
     defer as_scope.unstack();
 
     const result = try structInitExprRlPtrInner(&as_scope, scope, node, struct_init, as_scope.rl_ptr);
@@ -2500,6 +2501,7 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
             .memset,
             .validate_array_init_ty,
             .validate_struct_init_ty,
+            .validate_deref,
             => break :b true,
         }
     } else switch (maybe_unused_result) {
@@ -4464,6 +4466,7 @@ fn containerDecl(
                 var total_fields: usize = 0;
                 var decls: usize = 0;
                 var nonexhaustive_node: Ast.Node.Index = 0;
+                var nonfinal_nonexhaustive = false;
                 for (container_decl.ast.members) |member_node| {
                     const member = switch (node_tags[member_node]) {
                         .container_field_init => tree.containerFieldInit(member_node),
@@ -4515,6 +4518,8 @@ fn containerDecl(
                             return astgen.failNode(member.ast.value_expr, "'_' is used to mark an enum as non-exhaustive and cannot be assigned a value", .{});
                         }
                         continue;
+                    } else if (nonexhaustive_node != 0) {
+                        nonfinal_nonexhaustive = true;
                     }
                     total_fields += 1;
                     if (member.ast.value_expr != 0) {
@@ -4523,6 +4528,9 @@ fn containerDecl(
                         }
                         values += 1;
                     }
+                }
+                if (nonfinal_nonexhaustive) {
+                    return astgen.failNode(nonexhaustive_node, "'_' field of non-exhaustive enum must be last", .{});
                 }
                 break :blk .{
                     .total_fields = total_fields,
@@ -5146,16 +5154,14 @@ fn arrayAccess(
     const tree = astgen.tree;
     const node_datas = tree.nodes.items(.data);
     switch (rl) {
-        .ref => return gz.addBin(
-            .elem_ptr,
-            try expr(gz, scope, .ref, node_datas[node].lhs),
-            try expr(gz, scope, .{ .ty = .usize_type }, node_datas[node].rhs),
-        ),
-        else => return rvalue(gz, rl, try gz.addBin(
-            .elem_val,
-            try expr(gz, scope, .none, node_datas[node].lhs),
-            try expr(gz, scope, .{ .coerced_ty = .usize_type }, node_datas[node].rhs),
-        ), node),
+        .ref => return gz.addPlNode(.elem_ptr_node, node, Zir.Inst.Bin{
+            .lhs = try expr(gz, scope, .ref, node_datas[node].lhs),
+            .rhs = try expr(gz, scope, .{ .ty = .usize_type }, node_datas[node].rhs),
+        }),
+        else => return rvalue(gz, rl, try gz.addPlNode(.elem_val_node, node, Zir.Inst.Bin{
+            .lhs = try expr(gz, scope, .none, node_datas[node].lhs),
+            .rhs = try expr(gz, scope, .{ .ty = .usize_type }, node_datas[node].rhs),
+        }), node),
     }
 }
 
@@ -5677,7 +5683,7 @@ fn whileExpr(
         try then_scope.addDbgVar(.dbg_var_val, some, dbg_var_inst);
     }
     if (while_full.ast.cont_expr != 0) {
-        _ = try expr(&loop_scope, then_sub_scope, .{ .ty = .void_type }, while_full.ast.cont_expr);
+        _ = try unusedResultExpr(&loop_scope, then_sub_scope, while_full.ast.cont_expr);
     }
     try then_scope.addDbgBlockEnd();
     const repeat_tag: Zir.Inst.Tag = if (is_inline) .repeat_inline else .repeat;
@@ -5882,7 +5888,10 @@ fn forExpr(
         if (!mem.eql(u8, value_name, "_")) {
             const name_str_index = try astgen.identAsString(ident);
             const tag: Zir.Inst.Tag = if (is_ptr) .elem_ptr else .elem_val;
-            const payload_inst = try then_scope.addBin(tag, array_ptr, index);
+            const payload_inst = try then_scope.addPlNode(tag, for_full.ast.cond_expr, Zir.Inst.Bin{
+                .lhs = array_ptr,
+                .rhs = index,
+            });
             try astgen.detectLocalShadowing(&then_scope.base, name_str_index, ident, value_name);
             payload_val_scope = .{
                 .parent = &then_scope.base,
@@ -7040,7 +7049,7 @@ fn asRlPtr(
     operand_node: Ast.Node.Index,
     dest_type: Zir.Inst.Ref,
 ) InnerError!Zir.Inst.Ref {
-    var as_scope = try parent_gz.makeCoercionScope(scope, dest_type, result_ptr);
+    var as_scope = try parent_gz.makeCoercionScope(scope, dest_type, result_ptr, src_node);
     defer as_scope.unstack();
 
     const result = try reachableExpr(&as_scope, &as_scope.base, .{ .block_ptr = &as_scope }, operand_node, src_node);
@@ -9897,13 +9906,14 @@ const GenZir = struct {
         scope: *Scope,
         dest_type: Zir.Inst.Ref,
         result_ptr: Zir.Inst.Ref,
+        src_node: Ast.Node.Index,
     ) !GenZir {
         // Detect whether this expr() call goes into rvalue() to store the result into the
         // result location. If it does, elide the coerce_result_ptr instruction
         // as well as the store instruction, instead passing the result as an rvalue.
         var as_scope = parent_gz.makeSubBlock(scope);
         errdefer as_scope.unstack();
-        as_scope.rl_ptr = try as_scope.addBin(.coerce_result_ptr, dest_type, result_ptr);
+        as_scope.rl_ptr = try as_scope.addPlNode(.coerce_result_ptr, src_node, Zir.Inst.Bin{ .lhs = dest_type, .rhs = result_ptr });
 
         // `rl_ty_inst` needs to be set in case the stores to `rl_ptr` are eliminated.
         as_scope.rl_ty_inst = dest_type;

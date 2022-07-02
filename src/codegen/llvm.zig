@@ -768,7 +768,11 @@ pub const Object = struct {
                             if (ptr_info.@"align" != 0) {
                                 dg.addArgAttrInt(llvm_func, llvm_arg_i, "align", ptr_info.@"align");
                             } else {
-                                dg.addArgAttrInt(llvm_func, llvm_arg_i, "align", ptr_info.pointee_type.abiAlignment(target));
+                                const elem_align = @maximum(
+                                    ptr_info.pointee_type.abiAlignment(target),
+                                    1,
+                                );
+                                dg.addArgAttrInt(llvm_func, llvm_arg_i, "align", elem_align);
                             }
                         }
                     }
@@ -840,7 +844,8 @@ pub const Object = struct {
                     if (ptr_info.@"align" != 0) {
                         dg.addArgAttrInt(llvm_func, llvm_arg_i, "align", ptr_info.@"align");
                     } else {
-                        dg.addArgAttrInt(llvm_func, llvm_arg_i, "align", ptr_info.pointee_type.abiAlignment(target));
+                        const elem_align = @maximum(ptr_info.pointee_type.abiAlignment(target), 1);
+                        dg.addArgAttrInt(llvm_func, llvm_arg_i, "align", elem_align);
                     }
                     const ptr_param = llvm_func.getParam(llvm_arg_i);
                     llvm_arg_i += 1;
@@ -3401,6 +3406,13 @@ pub const DeclGen = struct {
                 const union_obj = tv.ty.cast(Type.Payload.Union).?.data;
                 const field_index = union_obj.tag_ty.enumTagFieldIndex(tag_and_val.tag, dg.module).?;
                 assert(union_obj.haveFieldTypes());
+
+                // Sometimes we must make an unnamed struct because LLVM does
+                // not support bitcasting our payload struct to the true union payload type.
+                // Instead we use an unnamed struct and every reference to the global
+                // must pointer cast to the expected type before accessing the union.
+                var need_unnamed: bool = layout.most_aligned_field != field_index;
+
                 const field_ty = union_obj.fields.values()[field_index].ty;
                 const payload = p: {
                     if (!field_ty.hasRuntimeBitsIgnoreComptime()) {
@@ -3408,6 +3420,7 @@ pub const DeclGen = struct {
                         break :p dg.context.intType(8).arrayType(padding_len).getUndef();
                     }
                     const field = try lowerValue(dg, .{ .ty = field_ty, .val = tag_and_val.val });
+                    need_unnamed = need_unnamed or dg.isUnnamedType(field_ty, field);
                     const field_size = field_ty.abiSize(target);
                     if (field_size == layout.payload_size) {
                         break :p field;
@@ -3418,12 +3431,6 @@ pub const DeclGen = struct {
                     };
                     break :p dg.context.constStruct(&fields, fields.len, .True);
                 };
-
-                // In this case we must make an unnamed struct because LLVM does
-                // not support bitcasting our payload struct to the true union payload type.
-                // Instead we use an unnamed struct and every reference to the global
-                // must pointer cast to the expected type before accessing the union.
-                const need_unnamed = layout.most_aligned_field != field_index;
 
                 if (layout.tag_size == 0) {
                     const fields: [1]*const llvm.Value = .{payload};
@@ -4022,6 +4029,7 @@ pub const FuncGen = struct {
                 .ceil         => try self.airUnaryOp(inst, .ceil),
                 .round        => try self.airUnaryOp(inst, .round),
                 .trunc_float  => try self.airUnaryOp(inst, .trunc),
+                .neg          => try self.airUnaryOp(inst, .neg),
 
                 .cmp_eq  => try self.airCmp(inst, .eq),
                 .cmp_gt  => try self.airCmp(inst, .gt),
@@ -6548,13 +6556,14 @@ pub const FuncGen = struct {
         fabs,
         floor,
         fma,
+        fmax,
+        fmin,
+        fmod,
         log,
         log10,
         log2,
-        fmax,
-        fmin,
         mul,
-        fmod,
+        neg,
         round,
         sin,
         sqrt,
@@ -6587,6 +6596,7 @@ pub const FuncGen = struct {
         var fn_name_buf: [64]u8 = undefined;
         const strat: FloatOpStrat = if (intrinsics_allowed) switch (op) {
             // Some operations are dedicated LLVM instructions, not available as intrinsics
+            .neg => return self.builder.buildFNeg(params[0], ""),
             .add => return self.builder.buildFAdd(params[0], params[1], ""),
             .sub => return self.builder.buildFSub(params[0], params[1], ""),
             .mul => return self.builder.buildFMul(params[0], params[1], ""),
@@ -6598,6 +6608,17 @@ pub const FuncGen = struct {
         } else b: {
             const float_bits = scalar_ty.floatBits(target);
             break :b switch (op) {
+                .neg => {
+                    // In this case we can generate a softfloat negation by XORing the
+                    // bits with a constant.
+                    const int_llvm_ty = self.dg.context.intType(float_bits);
+                    const one = int_llvm_ty.constInt(1, .False);
+                    const shift_amt = int_llvm_ty.constInt(float_bits - 1, .False);
+                    const sign_mask = one.constShl(shift_amt);
+                    const bitcasted_operand = self.builder.buildBitCast(params[0], int_llvm_ty, "");
+                    const result = self.builder.buildXor(bitcasted_operand, sign_mask, "");
+                    return self.builder.buildBitCast(result, llvm_ty, "");
+                },
                 .add, .sub, .div, .mul => FloatOpStrat{
                     .libc = std.fmt.bufPrintZ(&fn_name_buf, "__{s}{s}f3", .{
                         @tagName(op), compilerRtFloatAbbrev(float_bits),
@@ -7620,33 +7641,31 @@ pub const FuncGen = struct {
     fn airTagName(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
         if (self.liveness.isUnused(inst)) return null;
 
-        var arena_allocator = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena_allocator.deinit();
-        const arena = arena_allocator.allocator();
-
         const un_op = self.air.instructions.items(.data)[inst].un_op;
         const operand = try self.resolveInst(un_op);
         const enum_ty = self.air.typeOf(un_op);
 
-        const mod = self.dg.module;
-        const llvm_fn_name = try std.fmt.allocPrintZ(arena, "__zig_tag_name_{s}", .{
-            try mod.declPtr(enum_ty.getOwnerDecl()).getFullyQualifiedName(mod),
-        });
-
-        const llvm_fn = try self.getEnumTagNameFunction(enum_ty, llvm_fn_name);
+        const llvm_fn = try self.getEnumTagNameFunction(enum_ty);
         const params = [_]*const llvm.Value{operand};
         return self.builder.buildCall(llvm_fn, &params, params.len, .Fast, .Auto, "");
     }
 
-    fn getEnumTagNameFunction(
-        self: *FuncGen,
-        enum_ty: Type,
-        llvm_fn_name: [:0]const u8,
-    ) !*const llvm.Value {
+    fn getEnumTagNameFunction(self: *FuncGen, enum_ty: Type) !*const llvm.Value {
+        const enum_decl = enum_ty.getOwnerDecl();
+
         // TODO: detect when the type changes and re-emit this function.
-        if (self.dg.object.llvm_module.getNamedFunction(llvm_fn_name)) |llvm_fn| {
-            return llvm_fn;
-        }
+        const gop = try self.dg.object.decl_map.getOrPut(self.dg.gpa, enum_decl);
+        if (gop.found_existing) return gop.value_ptr.*;
+        errdefer assert(self.dg.object.decl_map.remove(enum_decl));
+
+        var arena_allocator = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena_allocator.deinit();
+        const arena = arena_allocator.allocator();
+
+        const mod = self.dg.module;
+        const llvm_fn_name = try std.fmt.allocPrintZ(arena, "__zig_tag_name_{s}", .{
+            try mod.declPtr(enum_decl).getFullyQualifiedName(mod),
+        });
 
         const slice_ty = Type.initTag(.const_slice_u8_sentinel_0);
         const llvm_ret_ty = try self.dg.lowerType(slice_ty);
@@ -7663,6 +7682,7 @@ pub const FuncGen = struct {
         fn_val.setLinkage(.Internal);
         fn_val.setFunctionCallConv(.Fast);
         self.dg.addCommonFnAttributes(fn_val);
+        gop.value_ptr.* = fn_val;
 
         const prev_block = self.builder.getInsertBlock();
         const prev_debug_location = self.builder.getCurrentDebugLocation2();

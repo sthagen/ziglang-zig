@@ -43,6 +43,7 @@ pub const auth = struct {
 pub const core = struct {
     pub const aes = @import("crypto/aes.zig");
     pub const Gimli = @import("crypto/gimli.zig").State;
+    pub const Xoodoo = @import("crypto/xoodoo.zig").State;
 
     /// Modes are generic compositions to construct encryption/decryption functions from block ciphers and permutations.
     ///
@@ -76,6 +77,7 @@ pub const hash = struct {
     pub const Sha1 = @import("crypto/sha1.zig").Sha1;
     pub const sha2 = @import("crypto/sha2.zig");
     pub const sha3 = @import("crypto/sha3.zig");
+    pub const composition = @import("crypto/hash_composition.zig");
 };
 
 /// Key derivation functions.
@@ -215,6 +217,7 @@ test {
     _ = hash.Sha1;
     _ = hash.sha2;
     _ = hash.sha3;
+    _ = hash.composition;
 
     _ = kdf.hkdf;
 
