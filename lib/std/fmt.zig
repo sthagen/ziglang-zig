@@ -32,9 +32,11 @@ pub const FormatOptions = struct {
 /// this format:
 /// `{[argument][specifier]:[fill][alignment][width].[precision]}`
 ///
-/// Each word between `[` and `]` is a parameter you have to replace with something:
+/// Above, each word including its surrounding [ and ] is a parameter which you have to replace with something:
 ///
-/// - *argument* is either the index or the name of the argument that should be inserted
+/// - *argument* is either the numeric index or the field name of the argument that should be inserted
+///   - when using a field name, you are required to enclose the field name (an identifier) in square
+///     brackets, e.g. {[score]...} as opposed to the numeric index form which can be written e.g. {2...}
 /// - *specifier* is a type-dependent formatting option that determines how a type should formatted (see below)
 /// - *fill* is a single character which is used to pad the formatted text
 /// - *alignment* is one of the three characters `<`, `^` or `>`. they define if the text is *left*, *center*, or *right* aligned
@@ -2284,10 +2286,6 @@ test "float.hexadecimal.precision" {
 }
 
 test "float.decimal" {
-    if (builtin.zig_backend == .stage1 and builtin.os.tag == .windows) {
-        // https://github.com/ziglang/zig/issues/12063
-        return error.SkipZigTest;
-    }
     try expectFmt("f64: 152314000000000000000000000000", "f64: {d}", .{@as(f64, 1.52314e+29)});
     try expectFmt("f32: 0", "f32: {d}", .{@as(f32, 0.0)});
     try expectFmt("f32: 0", "f32: {d:.0}", .{@as(f32, 0.0)});
@@ -2311,10 +2309,6 @@ test "float.decimal" {
 }
 
 test "float.libc.sanity" {
-    if (builtin.zig_backend == .stage1 and builtin.os.tag == .windows) {
-        // https://github.com/ziglang/zig/issues/12063
-        return error.SkipZigTest;
-    }
     try expectFmt("f64: 0.00001", "f64: {d:.5}", .{@as(f64, @bitCast(f32, @as(u32, 916964781)))});
     try expectFmt("f64: 0.00001", "f64: {d:.5}", .{@as(f64, @bitCast(f32, @as(u32, 925353389)))});
     try expectFmt("f64: 0.10000", "f64: {d:.5}", .{@as(f64, @bitCast(f32, @as(u32, 1036831278)))});
