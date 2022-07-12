@@ -123,6 +123,7 @@ pub const Options = struct {
     nxcompat: bool,
     dynamicbase: bool,
     linker_optimization: u8,
+    compress_debug_sections: CompressDebugSections,
     bind_global_refs_locally: bool,
     import_memory: bool,
     import_table: bool,
@@ -218,6 +219,8 @@ pub const Options = struct {
 };
 
 pub const HashStyle = enum { sysv, gnu, both };
+
+pub const CompressDebugSections = enum { none, zlib };
 
 pub const File = struct {
     tag: Tag,
@@ -348,7 +351,7 @@ pub const File = struct {
 
     pub fn makeWritable(base: *File) !void {
         switch (base.tag) {
-            .coff, .elf, .macho, .plan9 => {
+            .coff, .elf, .macho, .plan9, .wasm => {
                 if (base.file != null) return;
                 const emit = base.options.emit orelse return;
                 base.file = try emit.directory.handle.createFile(emit.sub_path, .{
@@ -357,7 +360,7 @@ pub const File = struct {
                     .mode = determineMode(base.options),
                 });
             },
-            .c, .wasm, .spirv, .nvptx => {},
+            .c, .spirv, .nvptx => {},
         }
     }
 
@@ -391,7 +394,7 @@ pub const File = struct {
                     base.file = null;
                 }
             },
-            .coff, .elf, .plan9 => if (base.file) |f| {
+            .coff, .elf, .plan9, .wasm => if (base.file) |f| {
                 if (base.intermediary_basename != null) {
                     // The file we have open is not the final file that we want to
                     // make executable, so we don't have to close it.
@@ -400,7 +403,7 @@ pub const File = struct {
                 f.close();
                 base.file = null;
             },
-            .c, .wasm, .spirv, .nvptx => {},
+            .c, .spirv, .nvptx => {},
         }
     }
 
