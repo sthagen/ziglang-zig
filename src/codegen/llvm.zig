@@ -2689,7 +2689,7 @@ pub const DeclGen = struct {
                         llvm_aligned_field_ty,
                         dg.context.intType(8).arrayType(padding_len),
                     };
-                    break :t dg.context.structType(&fields, fields.len, .True);
+                    break :t dg.context.structType(&fields, fields.len, .False);
                 };
 
                 if (layout.tag_size == 0) {
@@ -3002,7 +3002,7 @@ pub const DeclGen = struct {
                         return dg.context.constStruct(
                             llvm_elems.ptr,
                             @intCast(c_uint, llvm_elems.len),
-                            .True,
+                            .False,
                         );
                     } else {
                         const llvm_elem_ty = try dg.lowerType(elem_ty);
@@ -3039,7 +3039,7 @@ pub const DeclGen = struct {
                         return dg.context.constStruct(
                             llvm_elems.ptr,
                             @intCast(c_uint, llvm_elems.len),
-                            .True,
+                            .False,
                         );
                     } else {
                         const llvm_elem_ty = try dg.lowerType(elem_ty);
@@ -3056,7 +3056,7 @@ pub const DeclGen = struct {
                     const llvm_elems: [1]*const llvm.Value = .{sentinel};
                     const need_unnamed = dg.isUnnamedType(elem_ty, llvm_elems[0]);
                     if (need_unnamed) {
-                        return dg.context.constStruct(&llvm_elems, llvm_elems.len, .True);
+                        return dg.context.constStruct(&llvm_elems, llvm_elems.len, .False);
                     } else {
                         const llvm_elem_ty = try dg.lowerType(elem_ty);
                         return llvm_elem_ty.constArray(&llvm_elems, llvm_elems.len);
@@ -3343,7 +3343,7 @@ pub const DeclGen = struct {
                     const fields: [2]*const llvm.Value = .{
                         field, dg.context.intType(8).arrayType(padding_len).getUndef(),
                     };
-                    break :p dg.context.constStruct(&fields, fields.len, .True);
+                    break :p dg.context.constStruct(&fields, fields.len, .False);
                 };
 
                 if (layout.tag_size == 0) {
@@ -5244,7 +5244,7 @@ pub const FuncGen = struct {
         const operand_ty = self.air.typeOf(pl_op.operand);
         const name = self.air.nullTerminatedString(pl_op.payload);
 
-        if (needDbgVarWorkaround(self.dg, operand_ty)) {
+        if (needDbgVarWorkaround(self.dg)) {
             return null;
         }
 
@@ -5432,6 +5432,25 @@ pub const FuncGen = struct {
                 total_i += 1;
             }
         }
+
+        // For some targets, Clang unconditionally adds some clobbers to all inline assembly.
+        // While this is probably not strictly necessary, if we don't follow Clang's lead
+        // here then we may risk tripping LLVM bugs since anything not used by Clang tends
+        // to be buggy and regress often.
+        switch (target.cpu.arch) {
+            .x86_64, .i386 => {
+                if (total_i != 0) try llvm_constraints.append(self.gpa, ',');
+                try llvm_constraints.appendSlice(self.gpa, "~{dirflag},~{fpsr},~{flags}");
+                total_i += 3;
+            },
+            .mips, .mipsel, .mips64, .mips64el => {
+                if (total_i != 0) try llvm_constraints.append(self.gpa, ',');
+                try llvm_constraints.appendSlice(self.gpa, "~{$1}");
+                total_i += 1;
+            },
+            else => {},
+        }
+
         const asm_source = std.mem.sliceAsBytes(self.air.extra[extra_i..])[0..extra.data.source_len];
 
         // hackety hacks until stage2 has proper inline asm in the frontend.
@@ -6988,7 +7007,7 @@ pub const FuncGen = struct {
 
         const inst_ty = self.air.typeOfIndex(inst);
         if (self.dg.object.di_builder) |dib| {
-            if (needDbgVarWorkaround(self.dg, inst_ty)) {
+            if (needDbgVarWorkaround(self.dg)) {
                 return arg_val;
             }
 
@@ -9255,13 +9274,11 @@ const AnnotatedDITypePtr = enum(usize) {
 const lt_errors_fn_name = "__zig_lt_errors_len";
 
 /// Without this workaround, LLVM crashes with "unknown codeview register H1"
-/// TODO use llvm-reduce and file upstream LLVM bug for this.
-fn needDbgVarWorkaround(dg: *DeclGen, ty: Type) bool {
-    if (ty.tag() == .f16) {
-        const target = dg.module.getTarget();
-        if (target.os.tag == .windows and target.cpu.arch == .aarch64) {
-            return true;
-        }
+/// https://github.com/llvm/llvm-project/issues/56484
+fn needDbgVarWorkaround(dg: *DeclGen) bool {
+    const target = dg.module.getTarget();
+    if (target.os.tag == .windows and target.cpu.arch == .aarch64) {
+        return true;
     }
     return false;
 }
