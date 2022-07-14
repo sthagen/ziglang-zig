@@ -3966,6 +3966,7 @@ pub fn connect(sock: socket_t, sock_addr: *const sockaddr, len: socklen_t) Conne
             .FAULT => unreachable, // The socket structure address is outside the user's address space.
             .INTR => continue,
             .ISCONN => unreachable, // The socket is already connected.
+            .HOSTUNREACH => return error.NetworkUnreachable,
             .NETUNREACH => return error.NetworkUnreachable,
             .NOTSOCK => unreachable, // The file descriptor sockfd does not refer to a socket.
             .PROTOTYPE => unreachable, // The socket type does not support the requested communications protocol.
@@ -3995,6 +3996,7 @@ pub fn getsockoptError(sockfd: fd_t) ConnectError!void {
             .CONNREFUSED => return error.ConnectionRefused,
             .FAULT => unreachable, // The socket structure address is outside the user's address space.
             .ISCONN => unreachable, // The socket is already connected.
+            .HOSTUNREACH => return error.NetworkUnreachable,
             .NETUNREACH => return error.NetworkUnreachable,
             .NOTSOCK => unreachable, // The file descriptor sockfd does not refer to a socket.
             .PROTOTYPE => unreachable, // The socket type does not support the requested communications protocol.
@@ -6476,7 +6478,7 @@ pub fn dn_expand(
             p = msg.ptr + j;
         } else if (p[0] != 0) {
             if (dest != exp_dn.ptr) {
-                dest.* = '.';
+                dest[0] = '.';
                 dest += 1;
             }
             var j = p[0];
@@ -6486,12 +6488,12 @@ pub fn dn_expand(
             }
             while (j != 0) {
                 j -= 1;
-                dest.* = p[0];
+                dest[0] = p[0];
                 dest += 1;
                 p += 1;
             }
         } else {
-            dest.* = 0;
+            dest[0] = 0;
             if (len == std.math.maxInt(usize)) len = @ptrToInt(p) + 1 - @ptrToInt(comp_dn.ptr);
             return len;
         }
