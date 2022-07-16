@@ -363,6 +363,22 @@ pub const TmpDir = struct {
     }
 };
 
+pub const TmpIterableDir = struct {
+    iterable_dir: std.fs.IterableDir,
+    parent_dir: std.fs.Dir,
+    sub_path: [sub_path_len]u8,
+
+    const random_bytes_count = 12;
+    const sub_path_len = std.fs.base64_encoder.calcSize(random_bytes_count);
+
+    pub fn cleanup(self: *TmpIterableDir) void {
+        self.iterable_dir.close();
+        self.parent_dir.deleteTree(&self.sub_path) catch {};
+        self.parent_dir.close();
+        self.* = undefined;
+    }
+};
+
 fn getCwdOrWasiPreopen() std.fs.Dir {
     if (builtin.os.tag == .wasi and !builtin.link_libc) {
         var preopens = std.fs.wasi.PreopenList.init(allocator);
@@ -395,6 +411,28 @@ pub fn tmpDir(opts: std.fs.Dir.OpenDirOptions) TmpDir {
 
     return .{
         .dir = dir,
+        .parent_dir = parent_dir,
+        .sub_path = sub_path,
+    };
+}
+
+pub fn tmpIterableDir(opts: std.fs.Dir.OpenDirOptions) TmpIterableDir {
+    var random_bytes: [TmpIterableDir.random_bytes_count]u8 = undefined;
+    std.crypto.random.bytes(&random_bytes);
+    var sub_path: [TmpIterableDir.sub_path_len]u8 = undefined;
+    _ = std.fs.base64_encoder.encode(&sub_path, &random_bytes);
+
+    var cwd = getCwdOrWasiPreopen();
+    var cache_dir = cwd.makeOpenPath("zig-cache", .{}) catch
+        @panic("unable to make tmp dir for testing: unable to make and open zig-cache dir");
+    defer cache_dir.close();
+    var parent_dir = cache_dir.makeOpenPath("tmp", .{}) catch
+        @panic("unable to make tmp dir for testing: unable to make and open zig-cache/tmp dir");
+    var dir = parent_dir.makeOpenPathIterable(&sub_path, opts) catch
+        @panic("unable to make tmp dir for testing: unable to make and open the tmp dir");
+
+    return .{
+        .iterable_dir = dir,
         .parent_dir = parent_dir,
         .sub_path = sub_path,
     };
@@ -626,10 +664,6 @@ pub fn checkAllAllocationFailures(backing_allocator: std.mem.Allocator, comptime
     // the failing allocator in field @"0" before each @call)
     var args: ArgsTuple = undefined;
     inline for (@typeInfo(@TypeOf(extra_args)).Struct.fields) |field, i| {
-        const expected_type = fn_args_fields[i + 1].field_type;
-        if (expected_type != field.field_type) {
-            @compileError("Unexpected type for extra argument at index " ++ (comptime std.fmt.comptimePrint("{d}", .{i})) ++ ": expected " ++ @typeName(expected_type) ++ ", found " ++ @typeName(field.field_type));
-        }
         const arg_i_str = comptime str: {
             var str_buf: [100]u8 = undefined;
             const args_i = i + 1;
@@ -687,5 +721,21 @@ pub fn refAllDecls(comptime T: type) void {
     if (!builtin.is_test) return;
     inline for (comptime std.meta.declarations(T)) |decl| {
         if (decl.is_pub) _ = @field(T, decl.name);
+    }
+}
+
+/// Given a type, and Recursively reference all the declarations inside, so that the semantic analyzer sees them.
+/// For deep types, you may use `@setEvalBranchQuota`
+pub fn refAllDeclsRecursive(comptime T: type) void {
+    inline for (comptime std.meta.declarations(T)) |decl| {
+        if (decl.is_pub) {
+            if (@TypeOf(@field(T, decl.name)) == type) {
+                switch (@typeInfo(@field(T, decl.name))) {
+                    .Struct, .Enum, .Union, .Opaque => refAllDeclsRecursive(@field(T, decl.name)),
+                    else => {},
+                }
+            }
+            _ = @field(T, decl.name);
+        }
     }
 }

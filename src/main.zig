@@ -4212,13 +4212,13 @@ fn fmtPathDir(
     parent_dir: fs.Dir,
     parent_sub_path: []const u8,
 ) FmtError!void {
-    var dir = try parent_dir.openDir(parent_sub_path, .{ .iterate = true });
-    defer dir.close();
+    var iterable_dir = try parent_dir.openIterableDir(parent_sub_path, .{});
+    defer iterable_dir.close();
 
-    const stat = try dir.stat();
+    const stat = try iterable_dir.dir.stat();
     if (try fmt.seen.fetchPut(stat.inode, {})) |_| return;
 
-    var dir_it = dir.iterate();
+    var dir_it = iterable_dir.iterate();
     while (try dir_it.next()) |entry| {
         const is_dir = entry.kind == .Directory;
 
@@ -4229,9 +4229,9 @@ fn fmtPathDir(
             defer fmt.gpa.free(full_path);
 
             if (is_dir) {
-                try fmtPathDir(fmt, full_path, check_mode, dir, entry.name);
+                try fmtPathDir(fmt, full_path, check_mode, iterable_dir.dir, entry.name);
             } else {
-                fmtPathFile(fmt, full_path, check_mode, dir, entry.name) catch |err| {
+                fmtPathFile(fmt, full_path, check_mode, iterable_dir.dir, entry.name) catch |err| {
                     warn("unable to format '{s}': {s}", .{ full_path, @errorName(err) });
                     fmt.any_error = true;
                     return;
@@ -4387,7 +4387,7 @@ fn printErrsMsgToStdErr(
                     .msg = try std.fmt.allocPrint(arena, "invalid byte: '{'}'", .{
                         std.zig.fmtEscapes(tree.source[byte_offset..][0..1]),
                     }),
-                    .byte_offset = byte_offset,
+                    .span = .{ .start = byte_offset, .end = byte_offset + 1, .main = byte_offset },
                     .line = @intCast(u32, start_loc.line),
                     .column = @intCast(u32, start_loc.column) + bad_off,
                     .source_line = source_line,
@@ -4402,11 +4402,16 @@ fn printErrsMsgToStdErr(
             text_buf.items.len = 0;
             try tree.renderError(note, writer);
             const note_loc = tree.tokenLocation(0, note.token);
+            const byte_offset = @intCast(u32, note_loc.line_start);
             notes_buffer[notes_len] = .{
                 .src = .{
                     .src_path = path,
                     .msg = try arena.dupe(u8, text_buf.items),
-                    .byte_offset = @intCast(u32, note_loc.line_start),
+                    .span = .{
+                        .start = byte_offset,
+                        .end = byte_offset + @intCast(u32, tree.tokenSlice(note.token).len),
+                        .main = byte_offset,
+                    },
                     .line = @intCast(u32, note_loc.line),
                     .column = @intCast(u32, note_loc.column),
                     .source_line = tree.source[note_loc.line_start..note_loc.line_end],
@@ -4417,11 +4422,16 @@ fn printErrsMsgToStdErr(
         }
 
         const extra_offset = tree.errorOffset(parse_error);
+        const byte_offset = @intCast(u32, start_loc.line_start) + extra_offset;
         const message: Compilation.AllErrors.Message = .{
             .src = .{
                 .src_path = path,
                 .msg = text,
-                .byte_offset = @intCast(u32, start_loc.line_start) + extra_offset,
+                .span = .{
+                    .start = byte_offset,
+                    .end = byte_offset + @intCast(u32, tree.tokenSlice(lok_token).len),
+                    .main = byte_offset,
+                },
                 .line = @intCast(u32, start_loc.line),
                 .column = @intCast(u32, start_loc.column) + extra_offset,
                 .source_line = source_line,
