@@ -1499,7 +1499,7 @@ pub const Object = struct {
                     break :blk fwd_decl;
                 };
 
-                const non_null_ty = Type.bool;
+                const non_null_ty = Type.u8;
                 const payload_size = child_ty.abiSize(target);
                 const payload_align = child_ty.abiAlignment(target);
                 const non_null_size = non_null_ty.abiSize(target);
@@ -2530,16 +2530,16 @@ pub const DeclGen = struct {
                 var buf: Type.Payload.ElemType = undefined;
                 const child_ty = t.optionalChild(&buf);
                 if (!child_ty.hasRuntimeBitsIgnoreComptime()) {
-                    return dg.context.intType(1);
+                    return dg.context.intType(8);
                 }
                 const payload_llvm_ty = try dg.lowerType(child_ty);
                 if (t.optionalReprIsPayload()) {
                     return payload_llvm_ty;
                 }
 
-                comptime assert(optional_layout_version == 2);
+                comptime assert(optional_layout_version == 3);
                 var fields_buf: [3]*const llvm.Type = .{
-                    payload_llvm_ty, dg.context.intType(1), undefined,
+                    payload_llvm_ty, dg.context.intType(8), undefined,
                 };
                 const offset = child_ty.abiSize(target) + 1;
                 const abi_size = t.abiSize(target);
@@ -3134,12 +3134,13 @@ pub const DeclGen = struct {
                 else => unreachable,
             },
             .Optional => {
-                comptime assert(optional_layout_version == 2);
+                comptime assert(optional_layout_version == 3);
                 var buf: Type.Payload.ElemType = undefined;
                 const payload_ty = tv.ty.optionalChild(&buf);
-                const llvm_i1 = dg.context.intType(1);
+
+                const llvm_i8 = dg.context.intType(8);
                 const is_pl = !tv.val.isNull();
-                const non_null_bit = if (is_pl) llvm_i1.constAllOnes() else llvm_i1.constNull();
+                const non_null_bit = if (is_pl) llvm_i8.constInt(1, .False) else llvm_i8.constNull();
                 if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
                     return non_null_bit;
                 }
@@ -4041,10 +4042,10 @@ pub const FuncGen = struct {
                 .cmp_vector => try self.airCmpVector(inst),
                 .cmp_lt_errors_len => try self.airCmpLtErrorsLen(inst),
 
-                .is_non_null     => try self.airIsNonNull(inst, false, false, .NE),
-                .is_non_null_ptr => try self.airIsNonNull(inst, true , false, .NE),
-                .is_null         => try self.airIsNonNull(inst, false, true , .EQ),
-                .is_null_ptr     => try self.airIsNonNull(inst, true , true , .EQ),
+                .is_non_null     => try self.airIsNonNull(inst, false, .NE),
+                .is_non_null_ptr => try self.airIsNonNull(inst, true , .NE),
+                .is_null         => try self.airIsNonNull(inst, false, .EQ),
+                .is_null_ptr     => try self.airIsNonNull(inst, true , .EQ),
 
                 .is_non_err      => try self.airIsErr(inst, .EQ, false),
                 .is_non_err_ptr  => try self.airIsErr(inst, .EQ, true),
@@ -4538,7 +4539,7 @@ pub const FuncGen = struct {
                 }
                 // We need to emit instructions to check for equality/inequality
                 // of optionals that are not pointers.
-                const is_by_ref = isByRef(operand_ty);
+                const is_by_ref = isByRef(scalar_ty);
                 const lhs_non_null = self.optIsNonNull(lhs, is_by_ref);
                 const rhs_non_null = self.optIsNonNull(rhs, is_by_ref);
                 const llvm_i2 = self.context.intType(2);
@@ -4563,8 +4564,8 @@ pub const FuncGen = struct {
                 _ = self.builder.buildBr(end_block);
 
                 self.builder.positionBuilderAtEnd(both_pl_block);
-                const lhs_payload = self.optPayloadHandle(lhs, is_by_ref);
-                const rhs_payload = self.optPayloadHandle(rhs, is_by_ref);
+                const lhs_payload = self.optPayloadHandle(lhs, scalar_ty);
+                const rhs_payload = self.optPayloadHandle(rhs, scalar_ty);
                 const payload_cmp = try self.cmp(lhs_payload, rhs_payload, payload_ty, op);
                 _ = self.builder.buildBr(end_block);
                 const both_pl_block_end = self.builder.getInsertBlock();
@@ -4739,12 +4740,14 @@ pub const FuncGen = struct {
                 const err_set_ty = try fg.dg.lowerType(Type.anyerror);
                 const zero = err_set_ty.constNull();
                 if (!payload_has_bits) {
+                    // TODO add alignment to this load
                     const loaded = if (operand_is_ptr) fg.builder.buildLoad(err_union, "") else err_union;
                     break :err fg.builder.buildICmp(.NE, loaded, zero, "");
                 }
                 const err_field_index = errUnionErrorOffset(payload_ty, target);
                 if (operand_is_ptr or isByRef(err_union_ty)) {
                     const err_field_ptr = fg.builder.buildStructGEP(err_union, err_field_index, "");
+                    // TODO add alignment to this load
                     const loaded = fg.builder.buildLoad(err_field_ptr, "");
                     break :err fg.builder.buildICmp(.NE, loaded, zero, "");
                 }
@@ -4764,13 +4767,22 @@ pub const FuncGen = struct {
         if (!payload_has_bits) {
             if (!operand_is_ptr) return null;
 
-            // TODO once we update to LLVM 14 this bitcast won't be necessary.
+            // TODO once we update to an LLVM version with opaque pointers
+            // this bitcast won't be necessary.
             const res_ptr_ty = try fg.dg.lowerType(result_ty);
             return fg.builder.buildBitCast(err_union, res_ptr_ty, "");
         }
         const offset = errUnionPayloadOffset(payload_ty, target);
         if (operand_is_ptr or isByRef(payload_ty)) {
             return fg.builder.buildStructGEP(err_union, offset, "");
+        } else if (isByRef(err_union_ty)) {
+            const payload_ptr = fg.builder.buildStructGEP(err_union, offset, "");
+            if (isByRef(payload_ty)) {
+                return payload_ptr;
+            }
+            const load_inst = fg.builder.buildLoad(payload_ptr, "");
+            load_inst.setAlignment(payload_ty.abiAlignment(target));
+            return load_inst;
         }
         return fg.builder.buildExtractValue(err_union, offset, "");
     }
@@ -5633,7 +5645,6 @@ pub const FuncGen = struct {
         self: *FuncGen,
         inst: Air.Inst.Index,
         operand_is_ptr: bool,
-        invert: bool,
         pred: llvm.IntPredicate,
     ) !?*const llvm.Value {
         if (self.liveness.isUnused(inst)) return null;
@@ -5648,20 +5659,19 @@ pub const FuncGen = struct {
             return self.builder.buildICmp(pred, loaded, optional_llvm_ty.constNull(), "");
         }
 
+        comptime assert(optional_layout_version == 3);
+
         var buf: Type.Payload.ElemType = undefined;
         const payload_ty = optional_ty.optionalChild(&buf);
         if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
             const loaded = if (operand_is_ptr) self.builder.buildLoad(operand, "") else operand;
-            if (invert) {
-                return self.builder.buildNot(loaded, "");
-            } else {
-                return loaded;
-            }
+            const llvm_i8 = self.dg.context.intType(8);
+            return self.builder.buildICmp(pred, loaded, llvm_i8.constNull(), "");
         }
 
         const is_by_ref = operand_is_ptr or isByRef(optional_ty);
         const non_null_bit = self.optIsNonNull(operand, is_by_ref);
-        if (invert) {
+        if (pred == .EQ) {
             return self.builder.buildNot(non_null_bit, "");
         } else {
             return non_null_bit;
@@ -5731,24 +5741,21 @@ pub const FuncGen = struct {
             // The payload and the optional are the same value.
             return operand;
         }
-        const index_type = self.context.intType(32);
-        const indices: [2]*const llvm.Value = .{
-            index_type.constNull(), // dereference the pointer
-            index_type.constNull(), // first field is the payload
-        };
-        return self.builder.buildInBoundsGEP(operand, &indices, indices.len, "");
+        return self.builder.buildStructGEP(operand, 0, "");
     }
 
     fn airOptionalPayloadPtrSet(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        comptime assert(optional_layout_version == 3);
+
         const ty_op = self.air.instructions.items(.data)[inst].ty_op;
         const operand = try self.resolveInst(ty_op.operand);
         const optional_ty = self.air.typeOf(ty_op.operand).childType();
         const result_ty = self.air.getRefType(ty_op.ty);
         var buf: Type.Payload.ElemType = undefined;
         const payload_ty = optional_ty.optionalChild(&buf);
-        const non_null_bit = self.context.intType(1).constAllOnes();
+        const non_null_bit = self.context.intType(8).constInt(1, .False);
         if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
-            // We have a pointer to a i1. We need to set it to 1 and then return the same pointer.
+            // We have a pointer to a i8. We need to set it to 1 and then return the same pointer.
             _ = self.builder.buildStore(non_null_bit, operand);
 
             // TODO once we update to LLVM 14 this bitcast won't be necessary.
@@ -5760,24 +5767,17 @@ pub const FuncGen = struct {
             // Setting to non-null will be done when the payload is set.
             return operand;
         }
-        const index_type = self.context.intType(32);
-        {
-            // First set the non-null bit.
-            const indices: [2]*const llvm.Value = .{
-                index_type.constNull(), // dereference the pointer
-                index_type.constInt(1, .False), // second field is the non-null bit
-            };
-            const non_null_ptr = self.builder.buildInBoundsGEP(operand, &indices, indices.len, "");
-            _ = self.builder.buildStore(non_null_bit, non_null_ptr);
-        }
+
+        // First set the non-null bit.
+        const non_null_ptr = self.builder.buildStructGEP(operand, 1, "");
+        // TODO set alignment on this store
+        _ = self.builder.buildStore(non_null_bit, non_null_ptr);
+
         // Then return the payload pointer (only if it's used).
         if (self.liveness.isUnused(inst))
             return null;
-        const indices: [2]*const llvm.Value = .{
-            index_type.constNull(), // dereference the pointer
-            index_type.constNull(), // first field is the payload
-        };
-        return self.builder.buildInBoundsGEP(operand, &indices, indices.len, "");
+
+        return self.builder.buildStructGEP(operand, 0, "");
     }
 
     fn airOptionalPayload(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
@@ -5794,7 +5794,7 @@ pub const FuncGen = struct {
             return operand;
         }
 
-        return self.optPayloadHandle(operand, isByRef(payload_ty));
+        return self.optPayloadHandle(operand, optional_ty);
     }
 
     fn airErrUnionPayload(
@@ -5806,6 +5806,8 @@ pub const FuncGen = struct {
 
         const ty_op = self.air.instructions.items(.data)[inst].ty_op;
         const operand = try self.resolveInst(ty_op.operand);
+        const operand_ty = self.air.typeOf(ty_op.operand);
+        const err_union_ty = if (operand_is_ptr) operand_ty.childType() else operand_ty;
         const result_ty = self.air.typeOfIndex(inst);
         const payload_ty = if (operand_is_ptr) result_ty.childType() else result_ty;
         const target = self.dg.module.getTarget();
@@ -5820,6 +5822,14 @@ pub const FuncGen = struct {
         const offset = errUnionPayloadOffset(payload_ty, target);
         if (operand_is_ptr or isByRef(payload_ty)) {
             return self.builder.buildStructGEP(operand, offset, "");
+        } else if (isByRef(err_union_ty)) {
+            const payload_ptr = self.builder.buildStructGEP(operand, offset, "");
+            if (isByRef(payload_ty)) {
+                return payload_ptr;
+            }
+            const load_inst = self.builder.buildLoad(payload_ptr, "");
+            load_inst.setAlignment(payload_ty.abiAlignment(target));
+            return load_inst;
         }
         return self.builder.buildExtractValue(operand, offset, "");
     }
@@ -5873,16 +5883,11 @@ pub const FuncGen = struct {
             _ = self.builder.buildStore(non_error_val, operand);
             return operand;
         }
-        const index_type = self.context.intType(32);
         const target = self.dg.module.getTarget();
         {
             const error_offset = errUnionErrorOffset(payload_ty, target);
             // First set the non-error value.
-            const indices: [2]*const llvm.Value = .{
-                index_type.constNull(), // dereference the pointer
-                index_type.constInt(error_offset, .False),
-            };
-            const non_null_ptr = self.builder.buildInBoundsGEP(operand, &indices, indices.len, "");
+            const non_null_ptr = self.builder.buildStructGEP(operand, error_offset, "");
             const store_inst = self.builder.buildStore(non_error_val, non_null_ptr);
             store_inst.setAlignment(Type.anyerror.abiAlignment(target));
         }
@@ -5891,11 +5896,7 @@ pub const FuncGen = struct {
             return null;
 
         const payload_offset = errUnionPayloadOffset(payload_ty, target);
-        const indices: [2]*const llvm.Value = .{
-            index_type.constNull(), // dereference the pointer
-            index_type.constInt(payload_offset, .False),
-        };
-        return self.builder.buildInBoundsGEP(operand, &indices, indices.len, "");
+        return self.builder.buildStructGEP(operand, payload_offset, "");
     }
 
     fn airErrReturnTrace(self: *FuncGen, _: Air.Inst.Index) !?*const llvm.Value {
@@ -5914,8 +5915,8 @@ pub const FuncGen = struct {
 
         const ty_op = self.air.instructions.items(.data)[inst].ty_op;
         const payload_ty = self.air.typeOf(ty_op.operand);
-        const non_null_bit = self.context.intType(1).constAllOnes();
-        comptime assert(optional_layout_version == 2);
+        const non_null_bit = self.context.intType(8).constInt(1, .False);
+        comptime assert(optional_layout_version == 3);
         if (!payload_ty.hasRuntimeBitsIgnoreComptime()) return non_null_bit;
         const operand = try self.resolveInst(ty_op.operand);
         const optional_ty = self.air.typeOfIndex(inst);
@@ -6390,8 +6391,30 @@ pub const FuncGen = struct {
         const overflow_bit = self.builder.buildExtractValue(result_struct, 1, "");
 
         var ty_buf: Type.Payload.Pointer = undefined;
-        const partial = self.builder.buildInsertValue(llvm_dest_ty.getUndef(), result, llvmFieldIndex(dest_ty, 0, tg, &ty_buf).?, "");
-        return self.builder.buildInsertValue(partial, overflow_bit, llvmFieldIndex(dest_ty, 1, tg, &ty_buf).?, "");
+        const result_index = llvmFieldIndex(dest_ty, 0, tg, &ty_buf).?;
+        const overflow_index = llvmFieldIndex(dest_ty, 1, tg, &ty_buf).?;
+
+        if (isByRef(dest_ty)) {
+            const target = self.dg.module.getTarget();
+            const alloca_inst = self.buildAlloca(llvm_dest_ty);
+            const result_alignment = dest_ty.abiAlignment(target);
+            alloca_inst.setAlignment(result_alignment);
+            {
+                const field_ptr = self.builder.buildStructGEP(alloca_inst, result_index, "");
+                const store_inst = self.builder.buildStore(result, field_ptr);
+                store_inst.setAlignment(result_alignment);
+            }
+            {
+                const field_ptr = self.builder.buildStructGEP(alloca_inst, overflow_index, "");
+                const store_inst = self.builder.buildStore(overflow_bit, field_ptr);
+                store_inst.setAlignment(1);
+            }
+
+            return alloca_inst;
+        }
+
+        const partial = self.builder.buildInsertValue(llvm_dest_ty.getUndef(), result, result_index, "");
+        return self.builder.buildInsertValue(partial, overflow_bit, overflow_index, "");
     }
 
     fn buildElementwiseCall(
@@ -6720,8 +6743,30 @@ pub const FuncGen = struct {
         const overflow_bit = self.builder.buildICmp(.NE, lhs, reconstructed, "");
 
         var ty_buf: Type.Payload.Pointer = undefined;
-        const partial = self.builder.buildInsertValue(llvm_dest_ty.getUndef(), result, llvmFieldIndex(dest_ty, 0, tg, &ty_buf).?, "");
-        return self.builder.buildInsertValue(partial, overflow_bit, llvmFieldIndex(dest_ty, 1, tg, &ty_buf).?, "");
+        const result_index = llvmFieldIndex(dest_ty, 0, tg, &ty_buf).?;
+        const overflow_index = llvmFieldIndex(dest_ty, 1, tg, &ty_buf).?;
+
+        if (isByRef(dest_ty)) {
+            const target = self.dg.module.getTarget();
+            const alloca_inst = self.buildAlloca(llvm_dest_ty);
+            const result_alignment = dest_ty.abiAlignment(target);
+            alloca_inst.setAlignment(result_alignment);
+            {
+                const field_ptr = self.builder.buildStructGEP(alloca_inst, result_index, "");
+                const store_inst = self.builder.buildStore(result, field_ptr);
+                store_inst.setAlignment(result_alignment);
+            }
+            {
+                const field_ptr = self.builder.buildStructGEP(alloca_inst, overflow_index, "");
+                const store_inst = self.builder.buildStore(overflow_bit, field_ptr);
+                store_inst.setAlignment(1);
+            }
+
+            return alloca_inst;
+        }
+
+        const partial = self.builder.buildInsertValue(llvm_dest_ty.getUndef(), result, result_index, "");
+        return self.builder.buildInsertValue(partial, overflow_bit, overflow_index, "");
     }
 
     fn airAnd(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
@@ -7345,10 +7390,10 @@ pub const FuncGen = struct {
             return self.builder.buildSelect(success_bit, payload.typeOf().constNull(), payload, "");
         }
 
-        const optional_llvm_ty = try self.dg.lowerType(optional_ty);
+        comptime assert(optional_layout_version == 3);
+
         const non_null_bit = self.builder.buildNot(success_bit, "");
-        const partial = self.builder.buildInsertValue(optional_llvm_ty.getUndef(), payload, 0, "");
-        return self.builder.buildInsertValue(partial, non_null_bit, 1, "");
+        return buildOptional(self, optional_ty, payload, non_null_bit);
     }
 
     fn airAtomicRmw(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
@@ -7512,11 +7557,13 @@ pub const FuncGen = struct {
         const union_ptr = try self.resolveInst(bin_op.lhs);
         const new_tag = try self.resolveInst(bin_op.rhs);
         if (layout.payload_size == 0) {
+            // TODO alignment on this store
             _ = self.builder.buildStore(new_tag, union_ptr);
             return null;
         }
         const tag_index = @boolToInt(layout.tag_align < layout.payload_align);
         const tag_field_ptr = self.builder.buildStructGEP(union_ptr, tag_index, "");
+        // TODO alignment on this store
         _ = self.builder.buildStore(new_tag, tag_field_ptr);
         return null;
     }
@@ -8331,34 +8378,76 @@ pub const FuncGen = struct {
 
     /// Assumes the optional is not pointer-like and payload has bits.
     fn optIsNonNull(self: *FuncGen, opt_handle: *const llvm.Value, is_by_ref: bool) *const llvm.Value {
-        if (is_by_ref) {
-            const index_type = self.context.intType(32);
+        const field = b: {
+            if (is_by_ref) {
+                const field_ptr = self.builder.buildStructGEP(opt_handle, 1, "");
+                break :b self.builder.buildLoad(field_ptr, "");
+            }
+            break :b self.builder.buildExtractValue(opt_handle, 1, "");
+        };
+        comptime assert(optional_layout_version == 3);
 
-            const indices: [2]*const llvm.Value = .{
-                index_type.constNull(),
-                index_type.constInt(1, .False),
-            };
-
-            const field_ptr = self.builder.buildInBoundsGEP(opt_handle, &indices, indices.len, "");
-            return self.builder.buildLoad(field_ptr, "");
-        }
-
-        return self.builder.buildExtractValue(opt_handle, 1, "");
+        return self.builder.buildICmp(.NE, field, self.context.intType(8).constInt(0, .False), "");
     }
 
     /// Assumes the optional is not pointer-like and payload has bits.
-    fn optPayloadHandle(self: *FuncGen, opt_handle: *const llvm.Value, is_by_ref: bool) *const llvm.Value {
-        if (is_by_ref) {
+    fn optPayloadHandle(
+        fg: *FuncGen,
+        opt_handle: *const llvm.Value,
+        opt_ty: Type,
+    ) *const llvm.Value {
+        var buf: Type.Payload.ElemType = undefined;
+        const payload_ty = opt_ty.optionalChild(&buf);
+
+        if (isByRef(opt_ty)) {
             // We have a pointer and we need to return a pointer to the first field.
-            const index_type = self.context.intType(32);
-            const indices: [2]*const llvm.Value = .{
-                index_type.constNull(), // dereference the pointer
-                index_type.constNull(), // first field is the payload
-            };
-            return self.builder.buildInBoundsGEP(opt_handle, &indices, indices.len, "");
+            const payload_ptr = fg.builder.buildStructGEP(opt_handle, 0, "");
+
+            if (isByRef(payload_ty)) {
+                return payload_ptr;
+            }
+            const target = fg.dg.module.getTarget();
+            const payload_alignment = payload_ty.abiAlignment(target);
+            const load_inst = fg.builder.buildLoad(payload_ptr, "");
+            load_inst.setAlignment(payload_alignment);
+            return load_inst;
         }
 
-        return self.builder.buildExtractValue(opt_handle, 0, "");
+        assert(!isByRef(payload_ty));
+        return fg.builder.buildExtractValue(opt_handle, 0, "");
+    }
+
+    fn buildOptional(
+        self: *FuncGen,
+        optional_ty: Type,
+        payload: *const llvm.Value,
+        non_null_bit: *const llvm.Value,
+    ) !?*const llvm.Value {
+        const optional_llvm_ty = try self.dg.lowerType(optional_ty);
+        const non_null_field = self.builder.buildZExt(non_null_bit, self.dg.context.intType(8), "");
+
+        if (isByRef(optional_ty)) {
+            const target = self.dg.module.getTarget();
+            const alloca_inst = self.buildAlloca(optional_llvm_ty);
+            const payload_alignment = optional_ty.abiAlignment(target);
+            alloca_inst.setAlignment(payload_alignment);
+
+            {
+                const field_ptr = self.builder.buildStructGEP(alloca_inst, 0, "");
+                const store_inst = self.builder.buildStore(payload, field_ptr);
+                store_inst.setAlignment(payload_alignment);
+            }
+            {
+                const field_ptr = self.builder.buildStructGEP(alloca_inst, 1, "");
+                const store_inst = self.builder.buildStore(non_null_field, field_ptr);
+                store_inst.setAlignment(1);
+            }
+
+            return alloca_inst;
+        }
+
+        const partial = self.builder.buildInsertValue(optional_llvm_ty.getUndef(), payload, 0, "");
+        return self.builder.buildInsertValue(partial, non_null_field, 1, "");
     }
 
     fn fieldPtr(
@@ -9267,10 +9356,12 @@ fn ccAbiPromoteInt(
     return null;
 }
 
+/// This is the one source of truth for whether a type is passed around as an LLVM pointer,
+/// or as an LLVM value.
 fn isByRef(ty: Type) bool {
     // For tuples and structs, if there are more than this many non-void
     // fields, then we make it byref, otherwise byval.
-    const max_fields_byval = 2;
+    const max_fields_byval = 0;
 
     switch (ty.zigTypeTag()) {
         .Type,
@@ -9324,10 +9415,23 @@ fn isByRef(ty: Type) bool {
             return false;
         },
         .Union => return ty.hasRuntimeBits(),
-        .ErrorUnion => return isByRef(ty.errorUnionPayload()),
+        .ErrorUnion => {
+            const payload_ty = ty.errorUnionPayload();
+            if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
+                return false;
+            }
+            return true;
+        },
         .Optional => {
             var buf: Type.Payload.ElemType = undefined;
-            return isByRef(ty.optionalChild(&buf));
+            const payload_ty = ty.optionalChild(&buf);
+            if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
+                return false;
+            }
+            if (ty.optionalReprIsPayload()) {
+                return false;
+            }
+            return true;
         },
     }
 }
@@ -9369,7 +9473,10 @@ fn intrinsicsAllowed(scalar_ty: Type, target: std.Target) bool {
 /// We can do this because for all types, Zig ABI alignment >= LLVM ABI
 /// alignment.
 const struct_layout_version = 2;
-const optional_layout_version = 2;
+
+// TODO: Restore the non_null field to i1 once
+//       https://github.com/llvm/llvm-project/issues/56585/ is fixed
+const optional_layout_version = 3;
 
 /// We use the least significant bit of the pointer address to tell us
 /// whether the type is fully resolved. Types that are only fwd declared
