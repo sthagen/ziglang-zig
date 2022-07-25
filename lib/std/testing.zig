@@ -8,7 +8,11 @@ pub const FailingAllocator = @import("testing/failing_allocator.zig").FailingAll
 
 /// This should only be used in temporary test programs.
 pub const allocator = allocator_instance.allocator();
-pub var allocator_instance = std.heap.GeneralPurposeAllocator(.{}){};
+pub var allocator_instance = b: {
+    if (!builtin.is_test)
+        @compileError("Cannot use testing allocator outside of test block");
+    break :b std.heap.GeneralPurposeAllocator(.{}){};
+};
 
 pub const failing_allocator = failing_allocator_instance.allocator();
 pub var failing_allocator_instance = FailingAllocator.init(base_allocator_instance.allocator(), 0);
@@ -539,7 +543,10 @@ fn printIndicatorLine(source: []const u8, indicator_index: usize) void {
         while (i < indicator_index) : (i += 1)
             print(" ", .{});
     }
-    print("^\n", .{});
+    if (indicator_index >= source.len)
+        print("^ (end of string)\n", .{})
+    else
+        print("^ ('\\x{x:0>2}')\n", .{source[indicator_index]});
 }
 
 fn printWithVisibleNewlines(source: []const u8) void {

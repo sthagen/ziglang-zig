@@ -390,6 +390,7 @@ const Writer = struct {
             .switch_block => try self.writeSwitchBlock(stream, inst),
 
             .field_ptr,
+            .field_ptr_init,
             .field_val,
             .field_call_bind,
             => try self.writePlNodeField(stream, inst),
@@ -1983,6 +1984,7 @@ const Writer = struct {
             inferred_error_set,
             false,
             false,
+            false,
 
             .none,
             &.{},
@@ -2090,6 +2092,7 @@ const Writer = struct {
             extra.data.bits.is_inferred_error,
             extra.data.bits.is_var_args,
             extra.data.bits.is_extern,
+            extra.data.bits.is_noinline,
             align_ref,
             align_body,
             addrspace_ref,
@@ -2249,6 +2252,7 @@ const Writer = struct {
         inferred_error_set: bool,
         var_args: bool,
         is_extern: bool,
+        is_noinline: bool,
         align_ref: Zir.Inst.Ref,
         align_body: []const Zir.Inst.Index,
         addrspace_ref: Zir.Inst.Ref,
@@ -2272,6 +2276,7 @@ const Writer = struct {
         try self.writeFlag(stream, "vargs, ", var_args);
         try self.writeFlag(stream, "extern, ", is_extern);
         try self.writeFlag(stream, "inferror, ", inferred_error_set);
+        try self.writeFlag(stream, "noinline, ", is_noinline);
 
         if (noalias_bits != 0) {
             try stream.print("noalias=0b{b}, ", .{noalias_bits});

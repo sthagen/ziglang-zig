@@ -1274,6 +1274,7 @@ fn fnProtoExpr(
         .is_inferred_error = false,
         .is_test = false,
         .is_extern = false,
+        .is_noinline = false,
         .noalias_bits = noalias_bits,
     });
 
@@ -1589,13 +1590,12 @@ fn structInitExpr(
 
     switch (rl) {
         .discard => {
-            // TODO if a type expr is given the fields should be validated for that type
             if (struct_init.ast.type_expr != 0) {
                 const ty_inst = try typeExpr(gz, scope, struct_init.ast.type_expr);
                 _ = try gz.addUnNode(.validate_struct_init_ty, ty_inst, node);
-            }
-            for (struct_init.ast.fields) |field_init| {
-                _ = try expr(gz, scope, .discard, field_init);
+                _ = try structInitExprRlTy(gz, scope, node, struct_init, ty_inst, .struct_init);
+            } else {
+                _ = try structInitExprRlNone(gz, scope, node, struct_init, .none, .struct_init_anon);
             }
             return Zir.Inst.Ref.void_value;
         },
@@ -1729,7 +1729,7 @@ fn structInitExprRlPtrInner(
     for (struct_init.ast.fields) |field_init| {
         const name_token = tree.firstToken(field_init) - 2;
         const str_index = try astgen.identAsString(name_token);
-        const field_ptr = try gz.addPlNode(.field_ptr, field_init, Zir.Inst.Field{
+        const field_ptr = try gz.addPlNode(.field_ptr_init, field_init, Zir.Inst.Field{
             .lhs = result_ptr,
             .field_name_start = str_index,
         });
@@ -2287,6 +2287,7 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
             .elem_ptr_imm,
             .elem_val_node,
             .field_ptr,
+            .field_ptr_init,
             .field_val,
             .field_call_bind,
             .field_ptr_named,
@@ -3389,7 +3390,6 @@ fn fnDecl(
     };
     defer fn_gz.unstack();
 
-    // TODO: support noinline
     const is_pub = fn_proto.visib_token != null;
     const is_export = blk: {
         const maybe_export_token = fn_proto.extern_export_inline_token orelse break :blk false;
@@ -3402,6 +3402,10 @@ fn fnDecl(
     const has_inline_keyword = blk: {
         const maybe_inline_token = fn_proto.extern_export_inline_token orelse break :blk false;
         break :blk token_tags[maybe_inline_token] == .keyword_inline;
+    };
+    const is_noinline = blk: {
+        const maybe_noinline_token = fn_proto.extern_export_inline_token orelse break :blk false;
+        break :blk token_tags[maybe_noinline_token] == .keyword_noinline;
     };
 
     const doc_comment_index = try astgen.docCommentAsString(fn_proto.firstToken());
@@ -3610,6 +3614,7 @@ fn fnDecl(
             .is_inferred_error = false,
             .is_test = false,
             .is_extern = true,
+            .is_noinline = is_noinline,
             .noalias_bits = noalias_bits,
         });
     } else func: {
@@ -3658,6 +3663,7 @@ fn fnDecl(
             .is_inferred_error = is_inferred_error,
             .is_test = false,
             .is_extern = false,
+            .is_noinline = is_noinline,
             .noalias_bits = noalias_bits,
         });
     };
@@ -4093,6 +4099,7 @@ fn testDecl(
         .is_inferred_error = true,
         .is_test = true,
         .is_extern = false,
+        .is_noinline = false,
         .noalias_bits = 0,
     });
 
@@ -4212,6 +4219,12 @@ fn structDeclInner(
         const have_align = member.ast.align_expr != 0;
         const have_value = member.ast.value_expr != 0;
         const is_comptime = member.comptime_token != null;
+
+        if (is_comptime and layout == .Packed) {
+            return astgen.failTok(member.comptime_token.?, "packed struct fields cannot be marked comptime", .{});
+        } else if (is_comptime and layout == .Extern) {
+            return astgen.failTok(member.comptime_token.?, "extern struct fields cannot be marked comptime", .{});
+        }
 
         if (!is_comptime) {
             known_non_opv = known_non_opv or
@@ -6504,8 +6517,7 @@ fn ret(gz: *GenZir, scope: *Scope, node: Ast.Node.Index) InnerError!Zir.Inst.Ref
         },
         .always => {
             // Value is always an error. Emit both error defers and regular defers.
-            const result = if (rl == .ptr) try gz.addUnNode(.load, rl.ptr, node) else operand;
-            const err_code = try gz.addUnNode(.err_union_code, result, node);
+            const err_code = if (rl == .ptr) try gz.addUnNode(.load, rl.ptr, node) else operand;
             try genDefers(gz, defer_outer, scope, .{ .both = err_code });
             try gz.addRet(rl, operand, node);
             return Zir.Inst.Ref.unreachable_value;
@@ -10170,6 +10182,7 @@ const GenZir = struct {
         is_inferred_error: bool,
         is_test: bool,
         is_extern: bool,
+        is_noinline: bool,
     }) !Zir.Inst.Ref {
         assert(args.src_node != 0);
         const astgen = gz.astgen;
@@ -10211,10 +10224,9 @@ const GenZir = struct {
         }
         const body_len = astgen.countBodyLenAfterFixups(body);
 
-        if (args.cc_ref != .none or args.lib_name != 0 or
-            args.is_var_args or args.is_test or args.is_extern or
-            args.align_ref != .none or args.section_ref != .none or
-            args.addrspace_ref != .none or args.noalias_bits != 0)
+        if (args.cc_ref != .none or args.lib_name != 0 or args.is_var_args or args.is_test or
+            args.is_extern or args.align_ref != .none or args.section_ref != .none or
+            args.addrspace_ref != .none or args.noalias_bits != 0 or args.is_noinline)
         {
             var align_body: []Zir.Inst.Index = &.{};
             var addrspace_body: []Zir.Inst.Index = &.{};
@@ -10247,6 +10259,7 @@ const GenZir = struct {
                     .is_inferred_error = args.is_inferred_error,
                     .is_test = args.is_test,
                     .is_extern = args.is_extern,
+                    .is_noinline = args.is_noinline,
                     .has_lib_name = args.lib_name != 0,
                     .has_any_noalias = args.noalias_bits != 0,
 

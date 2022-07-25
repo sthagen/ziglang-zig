@@ -607,6 +607,7 @@ pub const IterableDir = struct {
                             .BADF => unreachable, // Dir is invalid or was opened without iteration ability
                             .FAULT => unreachable,
                             .NOTDIR => unreachable,
+                            .NOENT => return null, // The directory being iterated was deleted during iteration.
                             .INVAL => return error.Unexpected, // Linux may in some cases return EINVAL when reading /proc/$PID/net.
                             else => |err| return os.unexpectedErrno(err),
                         }
@@ -741,6 +742,7 @@ pub const IterableDir = struct {
                             .FAULT => unreachable,
                             .NOTDIR => unreachable,
                             .INVAL => unreachable,
+                            .NOENT => return null, // The directory being iterated was deleted during iteration.
                             .NOTCAPABLE => return error.AccessDenied,
                             else => |err| return os.unexpectedErrno(err),
                         }
@@ -889,8 +891,11 @@ pub const IterableDir = struct {
         }
 
         pub fn deinit(self: *Walker) void {
-            for (self.stack.items) |*item| {
-                item.iter.dir.close();
+            // Close any remaining directories except the initial one (which is always at index 0)
+            if (self.stack.items.len > 1) {
+                for (self.stack.items[1..]) |*item| {
+                    item.iter.dir.close();
+                }
             }
             self.stack.deinit();
             self.name_buffer.deinit();

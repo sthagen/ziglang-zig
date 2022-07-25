@@ -1622,6 +1622,30 @@ fn genInst(self: *Self, inst: Air.Inst.Index) !WValue {
         .err_return_trace,
         .set_err_return_trace,
         => |tag| return self.fail("TODO: Implement wasm inst: {s}", .{@tagName(tag)}),
+
+        .add_optimized,
+        .addwrap_optimized,
+        .sub_optimized,
+        .subwrap_optimized,
+        .mul_optimized,
+        .mulwrap_optimized,
+        .div_float_optimized,
+        .div_trunc_optimized,
+        .div_floor_optimized,
+        .div_exact_optimized,
+        .rem_optimized,
+        .mod_optimized,
+        .neg_optimized,
+        .cmp_lt_optimized,
+        .cmp_lte_optimized,
+        .cmp_eq_optimized,
+        .cmp_gte_optimized,
+        .cmp_gt_optimized,
+        .cmp_neq_optimized,
+        .cmp_vector_optimized,
+        .reduce_optimized,
+        .float_to_int_optimized,
+        => return self.fail("TODO implement optimized float mode", .{}),
     };
 }
 
@@ -1650,7 +1674,7 @@ fn airRet(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
                 try self.emitWValue(operand);
                 const opcode = buildOpcode(.{
                     .op = .load,
-                    .width = @intCast(u8, scalar_type.abiSize(self.target)),
+                    .width = @intCast(u8, scalar_type.abiSize(self.target) * 8),
                     .signedness = if (scalar_type.isSignedInt()) .signed else .unsigned,
                     .valtype1 = typeToValtype(scalar_type, self.target),
                 });

@@ -410,6 +410,8 @@ pub const Inst = struct {
         /// to the named field. The field name is stored in string_bytes. Used by a.b syntax.
         /// Uses `pl_node` field. The AST node is the a.b syntax. Payload is Field.
         field_ptr,
+        /// Same as `field_ptr` but used for struct init.
+        field_ptr_init,
         /// Given a struct or object that contains virtual fields, returns the named field.
         /// The field name is stored in string_bytes. Used by a.b syntax.
         /// This instruction also accepts a pointer.
@@ -1070,6 +1072,7 @@ pub const Inst = struct {
                 .@"export",
                 .export_value,
                 .field_ptr,
+                .field_ptr_init,
                 .field_val,
                 .field_call_bind,
                 .field_ptr_named,
@@ -1370,6 +1373,7 @@ pub const Inst = struct {
                 .elem_ptr_imm,
                 .elem_val_node,
                 .field_ptr,
+                .field_ptr_init,
                 .field_val,
                 .field_call_bind,
                 .field_ptr_named,
@@ -1629,6 +1633,7 @@ pub const Inst = struct {
                 .@"export" = .pl_node,
                 .export_value = .pl_node,
                 .field_ptr = .pl_node,
+                .field_ptr_init = .pl_node,
                 .field_val = .pl_node,
                 .field_ptr_named = .pl_node,
                 .field_val_named = .pl_node,
@@ -2731,6 +2736,7 @@ pub const Inst = struct {
             is_inferred_error: bool,
             is_test: bool,
             is_extern: bool,
+            is_noinline: bool,
             has_align_ref: bool,
             has_align_body: bool,
             has_addrspace_ref: bool,
@@ -2743,7 +2749,7 @@ pub const Inst = struct {
             has_ret_ty_body: bool,
             has_lib_name: bool,
             has_any_noalias: bool,
-            _: u16 = undefined,
+            _: u15 = undefined,
         };
     };
 
