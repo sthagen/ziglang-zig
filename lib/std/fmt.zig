@@ -60,8 +60,10 @@ pub const FormatOptions = struct {
 /// - `o`: output integer value in octal notation
 /// - `c`: output integer as an ASCII character. Integer type must have 8 bits at max.
 /// - `u`: output integer as an UTF-8 sequence. Integer type must have 21 bits at max.
+/// - `?`: output optional value as either the unwrapped value, or `null`; may be followed by a format specifier for the underlying value.
+/// - `!`: output error union value as either the unwrapped value, or the formatted error value; may be followed by a format specifier for the underlying value.
 /// - `*`: output the address of the value instead of the value itself.
-/// - `any`: output a value of any type using its default format
+/// - `any`: output a value of any type using its default format.
 ///
 /// If a formatted user type contains a function of the type
 /// ```
@@ -81,7 +83,7 @@ pub fn format(
     const ArgsType = @TypeOf(args);
     const args_type_info = @typeInfo(ArgsType);
     if (args_type_info != .Struct) {
-        @compileError("Expected tuple or struct argument, found " ++ @typeName(ArgsType));
+        @compileError("expected tuple or struct argument, found " ++ @typeName(ArgsType));
     }
 
     const fields_info = args_type_info.Struct.fields;
@@ -125,7 +127,7 @@ pub fn format(
         if (i >= fmt.len) break;
 
         if (fmt[i] == '}') {
-            @compileError("Missing opening {");
+            @compileError("missing opening {");
         }
 
         // Get past the {
@@ -138,7 +140,7 @@ pub fn format(
         const fmt_end = i;
 
         if (i >= fmt.len) {
-            @compileError("Missing closing }");
+            @compileError("missing closing }");
         }
 
         // Get past the }
@@ -150,7 +152,7 @@ pub fn format(
             .none => null,
             .number => |pos| pos,
             .named => |arg_name| meta.fieldIndex(ArgsType, arg_name) orelse
-                @compileError("No argument with name '" ++ arg_name ++ "'"),
+                @compileError("no argument with name '" ++ arg_name ++ "'"),
         };
 
         const width = switch (placeholder.width) {
@@ -158,8 +160,8 @@ pub fn format(
             .number => |v| v,
             .named => |arg_name| blk: {
                 const arg_i = comptime meta.fieldIndex(ArgsType, arg_name) orelse
-                    @compileError("No argument with name '" ++ arg_name ++ "'");
-                _ = comptime arg_state.nextArg(arg_i) orelse @compileError("Too few arguments");
+                    @compileError("no argument with name '" ++ arg_name ++ "'");
+                _ = comptime arg_state.nextArg(arg_i) orelse @compileError("too few arguments");
                 break :blk @field(args, arg_name);
             },
         };
@@ -169,14 +171,14 @@ pub fn format(
             .number => |v| v,
             .named => |arg_name| blk: {
                 const arg_i = comptime meta.fieldIndex(ArgsType, arg_name) orelse
-                    @compileError("No argument with name '" ++ arg_name ++ "'");
-                _ = comptime arg_state.nextArg(arg_i) orelse @compileError("Too few arguments");
+                    @compileError("no argument with name '" ++ arg_name ++ "'");
+                _ = comptime arg_state.nextArg(arg_i) orelse @compileError("too few arguments");
                 break :blk @field(args, arg_name);
             },
         };
 
         const arg_to_print = comptime arg_state.nextArg(arg_pos) orelse
-            @compileError("Too few arguments");
+            @compileError("too few arguments");
 
         try formatType(
             @field(args, fields_info[arg_to_print].name),
@@ -196,7 +198,7 @@ pub fn format(
         const missing_count = arg_state.args_len - @popCount(ArgSetType, arg_state.used_args);
         switch (missing_count) {
             0 => unreachable,
-            1 => @compileError("Unused argument in '" ++ fmt ++ "'"),
+            1 => @compileError("unused argument in '" ++ fmt ++ "'"),
             else => @compileError((comptime comptimePrint("{d}", .{missing_count})) ++ " unused arguments in '" ++ fmt ++ "'"),
         }
     }
@@ -215,7 +217,7 @@ fn parsePlaceholder(comptime str: anytype) Placeholder {
     // Skip the colon, if present
     if (comptime parser.char()) |ch| {
         if (ch != ':') {
-            @compileError("Expected : or }, found '" ++ [1]u8{ch} ++ "'");
+            @compileError("expected : or }, found '" ++ [1]u8{ch} ++ "'");
         }
     }
 
@@ -250,7 +252,7 @@ fn parsePlaceholder(comptime str: anytype) Placeholder {
     // Skip the dot, if present
     if (comptime parser.char()) |ch| {
         if (ch != '.') {
-            @compileError("Expected . or }, found '" ++ [1]u8{ch} ++ "'");
+            @compileError("expected . or }, found '" ++ [1]u8{ch} ++ "'");
         }
     }
 
@@ -259,7 +261,7 @@ fn parsePlaceholder(comptime str: anytype) Placeholder {
         @compileError(@errorName(err));
 
     if (comptime parser.char()) |ch| {
-        @compileError("Extraneous trailing character '" ++ [1]u8{ch} ++ "'");
+        @compileError("extraneous trailing character '" ++ [1]u8{ch} ++ "'");
     }
 
     return Placeholder{
@@ -421,7 +423,7 @@ pub fn formatAddress(value: anytype, options: FormatOptions, writer: anytype) @T
         else => {},
     }
 
-    @compileError("Cannot format non-pointer type " ++ @typeName(T) ++ " with * specifier");
+    @compileError("cannot format non-pointer type " ++ @typeName(T) ++ " with * specifier");
 }
 
 // This ANY const is a workaround for: https://github.com/ziglang/zig/issues/7948
@@ -438,10 +440,22 @@ fn defaultSpec(comptime T: type) [:0]const u8 {
             .Many, .C => return "*",
             .Slice => return ANY,
         },
-        .Optional => |info| return defaultSpec(info.child),
+        .Optional => |info| return "?" ++ defaultSpec(info.child),
+        .ErrorUnion => |info| return "!" ++ defaultSpec(info.payload),
         else => {},
     }
     return "";
+}
+
+fn stripOptionalOrErrorUnionSpec(comptime fmt: []const u8) []const u8 {
+    return if (std.mem.eql(u8, fmt[1..], ANY))
+        ANY
+    else
+        fmt[1..];
+}
+
+fn invalidFmtErr(comptime fmt: []const u8, value: anytype) void {
+    @compileError("invalid format string '" ++ fmt ++ "' for type '" ++ @typeName(@TypeOf(value)) ++ "'");
 }
 
 pub fn formatType(
@@ -451,12 +465,18 @@ pub fn formatType(
     writer: anytype,
     max_depth: usize,
 ) @TypeOf(writer).Error!void {
-    const actual_fmt = comptime if (std.mem.eql(u8, fmt, ANY)) defaultSpec(@TypeOf(value)) else fmt;
+    const T = @TypeOf(value);
+    const actual_fmt = comptime if (std.mem.eql(u8, fmt, ANY))
+        defaultSpec(@TypeOf(value))
+    else if (fmt.len != 0 and (fmt[0] == '?' or fmt[0] == '!')) switch (@typeInfo(T)) {
+        .Optional, .ErrorUnion => fmt,
+        else => stripOptionalOrErrorUnionSpec(fmt),
+    } else fmt;
+
     if (comptime std.mem.eql(u8, actual_fmt, "*")) {
         return formatAddress(value, options, writer);
     }
 
-    const T = @TypeOf(value);
     if (comptime std.meta.trait.hasFn("format")(T)) {
         return try value.format(actual_fmt, options, writer);
     }
@@ -466,32 +486,42 @@ pub fn formatType(
             return formatValue(value, actual_fmt, options, writer);
         },
         .Void => {
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
             return formatBuf("void", options, writer);
         },
         .Bool => {
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
             return formatBuf(if (value) "true" else "false", options, writer);
         },
         .Optional => {
+            if (actual_fmt.len == 0 or actual_fmt[0] != '?')
+                @compileError("cannot format optional without a specifier (i.e. {?} or {any})");
+            const remaining_fmt = comptime stripOptionalOrErrorUnionSpec(actual_fmt);
             if (value) |payload| {
-                return formatType(payload, actual_fmt, options, writer, max_depth);
+                return formatType(payload, remaining_fmt, options, writer, max_depth);
             } else {
                 return formatBuf("null", options, writer);
             }
         },
         .ErrorUnion => {
+            if (actual_fmt.len == 0 or actual_fmt[0] != '!')
+                @compileError("cannot format error union without a specifier (i.e. {!} or {any})");
+            const remaining_fmt = comptime stripOptionalOrErrorUnionSpec(actual_fmt);
             if (value) |payload| {
-                return formatType(payload, actual_fmt, options, writer, max_depth);
+                return formatType(payload, remaining_fmt, options, writer, max_depth);
             } else |err| {
-                return formatType(err, actual_fmt, options, writer, max_depth);
+                return formatType(err, "", options, writer, max_depth);
             }
         },
         .ErrorSet => {
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
             try writer.writeAll("error.");
             return writer.writeAll(@errorName(value));
         },
         .Enum => |enumInfo| {
             try writer.writeAll(@typeName(T));
             if (enumInfo.is_exhaustive) {
+                if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
                 try writer.writeAll(".");
                 try writer.writeAll(@tagName(value));
                 return;
@@ -512,6 +542,7 @@ pub fn formatType(
             try writer.writeAll(")");
         },
         .Union => |info| {
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
             try writer.writeAll(@typeName(T));
             if (max_depth == 0) {
                 return writer.writeAll("{ ... }");
@@ -531,6 +562,7 @@ pub fn formatType(
             }
         },
         .Struct => |info| {
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
             if (info.is_tuple) {
                 // Skip the type and field names when formatting tuples.
                 if (max_depth == 0) {
@@ -586,7 +618,7 @@ pub fn formatType(
                         }
                         return;
                     }
-                    @compileError("Unknown format string: '" ++ actual_fmt ++ "' for type '" ++ @typeName(T) ++ "'");
+                    invalidFmtErr(fmt, value);
                 },
                 .Enum, .Union, .Struct => {
                     return formatType(value.*, actual_fmt, options, writer, max_depth);
@@ -608,7 +640,7 @@ pub fn formatType(
                         else => {},
                     }
                 }
-                @compileError("Unknown format string: '" ++ actual_fmt ++ "' for type '" ++ @typeName(T) ++ "'");
+                invalidFmtErr(fmt, value);
             },
             .Slice => {
                 if (actual_fmt.len == 0)
@@ -671,15 +703,23 @@ pub fn formatType(
             try writer.writeAll(" }");
         },
         .Fn => {
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
             return format(writer, "{s}@{x}", .{ @typeName(T), @ptrToInt(value) });
         },
-        .Type => return formatBuf(@typeName(value), options, writer),
+        .Type => {
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
+            return formatBuf(@typeName(value), options, writer);
+        },
         .EnumLiteral => {
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
             const buffer = [_]u8{'.'} ++ @tagName(value);
             return formatBuf(buffer, options, writer);
         },
-        .Null => return formatBuf("null", options, writer),
-        else => @compileError("Unable to format type '" ++ @typeName(T) ++ "'"),
+        .Null => {
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
+            return formatBuf("null", options, writer);
+        },
+        else => @compileError("unable to format type '" ++ @typeName(T) ++ "'"),
     }
 }
 
@@ -725,13 +765,13 @@ pub fn formatIntValue(
         if (@typeInfo(@TypeOf(int_value)).Int.bits <= 8) {
             return formatAsciiChar(@as(u8, int_value), options, writer);
         } else {
-            @compileError("Cannot print integer that is larger than 8 bits as an ASCII character");
+            @compileError("cannot print integer that is larger than 8 bits as an ASCII character");
         }
     } else if (comptime std.mem.eql(u8, fmt, "u")) {
         if (@typeInfo(@TypeOf(int_value)).Int.bits <= 21) {
             return formatUnicodeCodepoint(@as(u21, int_value), options, writer);
         } else {
-            @compileError("Cannot print integer that is larger than 21 bits as an UTF-8 sequence");
+            @compileError("cannot print integer that is larger than 21 bits as an UTF-8 sequence");
         }
     } else if (comptime std.mem.eql(u8, fmt, "b")) {
         radix = 2;
@@ -746,7 +786,7 @@ pub fn formatIntValue(
         radix = 8;
         case = .lower;
     } else {
-        @compileError("Unsupported format string '" ++ fmt ++ "' for type '" ++ @typeName(@TypeOf(value)) ++ "'");
+        invalidFmtErr(fmt, value);
     }
 
     return formatInt(int_value, radix, case, options, writer);
@@ -775,7 +815,7 @@ fn formatFloatValue(
             error.NoSpaceLeft => unreachable,
         };
     } else {
-        @compileError("Unsupported format string '" ++ fmt ++ "' for type '" ++ @typeName(@TypeOf(value)) ++ "'");
+        invalidFmtErr(fmt, value);
     }
 
     return formatBuf(buf_stream.getWritten(), options, writer);
@@ -937,7 +977,7 @@ pub fn fmtIntSizeBin(value: u64) std.fmt.Formatter(formatSizeBin) {
 
 fn checkTextFmt(comptime fmt: []const u8) void {
     if (fmt.len != 1)
-        @compileError("Unsupported format string '" ++ fmt ++ "' when formatting text");
+        @compileError("unsupported format string '" ++ fmt ++ "' when formatting text");
     switch (fmt[0]) {
         'x' => @compileError("specifier 'x' has been deprecated, wrap your argument in std.fmt.fmtSliceHexLower instead"),
         'X' => @compileError("specifier 'X' has been deprecated, wrap your argument in std.fmt.fmtSliceHexUpper instead"),
@@ -1977,11 +2017,17 @@ test "escaped braces" {
 test "optional" {
     {
         const value: ?i32 = 1234;
-        try expectFmt("optional: 1234\n", "optional: {}\n", .{value});
+        try expectFmt("optional: 1234\n", "optional: {?}\n", .{value});
+        try expectFmt("optional: 1234\n", "optional: {?d}\n", .{value});
+        try expectFmt("optional: 4d2\n", "optional: {?x}\n", .{value});
+    }
+    {
+        const value: ?[]const u8 = "string";
+        try expectFmt("optional: string\n", "optional: {?s}\n", .{value});
     }
     {
         const value: ?i32 = null;
-        try expectFmt("optional: null\n", "optional: {}\n", .{value});
+        try expectFmt("optional: null\n", "optional: {?}\n", .{value});
     }
     {
         const value = @intToPtr(?*i32, 0xf000d000);
@@ -1992,11 +2038,17 @@ test "optional" {
 test "error" {
     {
         const value: anyerror!i32 = 1234;
-        try expectFmt("error union: 1234\n", "error union: {}\n", .{value});
+        try expectFmt("error union: 1234\n", "error union: {!}\n", .{value});
+        try expectFmt("error union: 1234\n", "error union: {!d}\n", .{value});
+        try expectFmt("error union: 4d2\n", "error union: {!x}\n", .{value});
+    }
+    {
+        const value: anyerror![]const u8 = "string";
+        try expectFmt("error union: string\n", "error union: {!s}\n", .{value});
     }
     {
         const value: anyerror!i32 = error.InvalidChar;
-        try expectFmt("error union: error.InvalidChar\n", "error union: {}\n", .{value});
+        try expectFmt("error union: error.InvalidChar\n", "error union: {!}\n", .{value});
     }
 }
 
@@ -2187,6 +2239,10 @@ test "struct" {
 }
 
 test "enum" {
+    if (builtin.zig_backend == .stage1) {
+        // stage1 starts the typename with 'std' which might also be desireable for stage2
+        return error.SkipZigTest;
+    }
     const Enum = enum {
         One,
         Two,
@@ -2194,8 +2250,8 @@ test "enum" {
     const value = Enum.Two;
     try expectFmt("enum: Enum.Two\n", "enum: {}\n", .{value});
     try expectFmt("enum: Enum.Two\n", "enum: {}\n", .{&value});
-    try expectFmt("enum: Enum.One\n", "enum: {x}\n", .{Enum.One});
-    try expectFmt("enum: Enum.Two\n", "enum: {X}\n", .{Enum.Two});
+    try expectFmt("enum: Enum.One\n", "enum: {}\n", .{Enum.One});
+    try expectFmt("enum: Enum.Two\n", "enum: {}\n", .{Enum.Two});
 
     // test very large enum to verify ct branch quota is large enough
     try expectFmt("enum: os.windows.win32error.Win32Error.INVALID_FUNCTION\n", "enum: {}\n", .{std.os.windows.Win32Error.INVALID_FUNCTION});
@@ -2355,7 +2411,7 @@ test "custom" {
             } else if (comptime std.mem.eql(u8, fmt, "d")) {
                 return std.fmt.format(writer, "{d:.3}x{d:.3}", .{ self.x, self.y });
             } else {
-                @compileError("Unknown format character: '" ++ fmt ++ "'");
+                @compileError("unknown format character: '" ++ fmt ++ "'");
             }
         }
     };
@@ -2563,7 +2619,7 @@ test "formatType max_depth" {
             if (fmt.len == 0) {
                 return std.fmt.format(writer, "({d:.3},{d:.3})", .{ self.x, self.y });
             } else {
-                @compileError("Unknown format string: '" ++ fmt ++ "'");
+                @compileError("unknown format string: '" ++ fmt ++ "'");
             }
         }
     };
@@ -2653,7 +2709,7 @@ test "vector" {
 }
 
 test "enum-literal" {
-    try expectFmt(".hello_world", "{s}", .{.hello_world});
+    try expectFmt(".hello_world", "{}", .{.hello_world});
 }
 
 test "padding" {

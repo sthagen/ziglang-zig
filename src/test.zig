@@ -20,7 +20,7 @@ const enable_wasmtime: bool = build_options.enable_wasmtime;
 const enable_darling: bool = build_options.enable_darling;
 const enable_rosetta: bool = build_options.enable_rosetta;
 const glibc_runtimes_dir: ?[]const u8 = build_options.glibc_runtimes_dir;
-const skip_stage1 = build_options.skip_stage1;
+const skip_stage1 = builtin.zig_backend != .stage1 or build_options.skip_stage1;
 
 const hr = "=" ** 80;
 
@@ -233,11 +233,11 @@ const TestManifest = struct {
     fn ConfigValueIterator(comptime T: type) type {
         return struct {
             inner: std.mem.SplitIterator(u8),
-            parse_fn: ParseFn(T),
 
             fn next(self: *@This()) !?T {
                 const next_raw = self.inner.next() orelse return null;
-                return try self.parse_fn(next_raw);
+                const parseFn = getDefaultParser(T);
+                return try parseFn(next_raw);
             }
         };
     }
@@ -313,25 +313,15 @@ const TestManifest = struct {
         return manifest;
     }
 
-    fn getConfigForKeyCustomParser(
-        self: TestManifest,
-        key: []const u8,
-        comptime T: type,
-        parse_fn: ParseFn(T),
-    ) ConfigValueIterator(T) {
-        const bytes = self.config_map.get(key) orelse TestManifestConfigDefaults.get(self.@"type", key);
-        return ConfigValueIterator(T){
-            .inner = std.mem.split(u8, bytes, ","),
-            .parse_fn = parse_fn,
-        };
-    }
-
     fn getConfigForKey(
         self: TestManifest,
         key: []const u8,
         comptime T: type,
     ) ConfigValueIterator(T) {
-        return self.getConfigForKeyCustomParser(key, T, getDefaultParser(T));
+        const bytes = self.config_map.get(key) orelse TestManifestConfigDefaults.get(self.@"type", key);
+        return ConfigValueIterator(T){
+            .inner = std.mem.split(u8, bytes, ","),
+        };
     }
 
     fn getConfigForKeyAlloc(
@@ -377,6 +367,15 @@ const TestManifest = struct {
     }
 
     fn getDefaultParser(comptime T: type) ParseFn(T) {
+        if (T == CrossTarget) return struct {
+            fn parse(str: []const u8) anyerror!T {
+                var opts = CrossTarget.ParseOptions{
+                    .arch_os_abi = str,
+                };
+                return try CrossTarget.parse(opts);
+            }
+        }.parse;
+
         switch (@typeInfo(T)) {
             .Int => return struct {
                 fn parse(str: []const u8) anyerror!T {
@@ -397,14 +396,7 @@ const TestManifest = struct {
                     };
                 }
             }.parse,
-            .Struct => if (comptime std.mem.eql(u8, @typeName(T), "CrossTarget")) return struct {
-                fn parse(str: []const u8) anyerror!T {
-                    var opts = CrossTarget.ParseOptions{
-                        .arch_os_abi = str,
-                    };
-                    return try CrossTarget.parse(opts);
-                }
-            }.parse else @compileError("no default parser for " ++ @typeName(T)),
+            .Struct => @compileError("no default parser for " ++ @typeName(T)),
             else => @compileError("no default parser for " ++ @typeName(T)),
         }
     }
@@ -884,8 +876,6 @@ pub const TestContext = struct {
         src: [:0]const u8,
         expected_errors: []const []const u8,
     ) void {
-        if (skip_stage1) return;
-
         const case = ctx.addObj(name, .{});
         case.backend = .stage1;
         case.addError(src, expected_errors);
@@ -897,8 +887,6 @@ pub const TestContext = struct {
         src: [:0]const u8,
         expected_errors: []const []const u8,
     ) void {
-        if (skip_stage1) return;
-
         const case = ctx.addTest(name, .{});
         case.backend = .stage1;
         case.addError(src, expected_errors);
@@ -910,8 +898,6 @@ pub const TestContext = struct {
         src: [:0]const u8,
         expected_errors: []const []const u8,
     ) void {
-        if (skip_stage1) return;
-
         const case = ctx.addExe(name, .{});
         case.backend = .stage1;
         case.addError(src, expected_errors);
@@ -1143,8 +1129,6 @@ pub const TestContext = struct {
 
                     // Cross-product to get all possible test combinations
                     for (backends) |backend| {
-                        if (backend == .stage1 and skip_stage1) continue;
-
                         for (targets) |target| {
                             const name = try std.fmt.allocPrint(ctx.arena, "{s} ({s}, {s})", .{
                                 name_prefix,
@@ -1274,6 +1258,9 @@ pub const TestContext = struct {
 
                 // Skip tests that require LLVM backend when it is not available
                 if (!build_options.have_llvm and case.backend == .llvm)
+                    continue;
+
+                if (skip_stage1 and case.backend == .stage1)
                     continue;
 
                 if (build_options.test_filter) |test_filter| {
@@ -1595,7 +1582,7 @@ pub const TestContext = struct {
         });
         defer comp.destroy();
 
-        for (case.updates.items) |update, update_index| {
+        update: for (case.updates.items) |update, update_index| {
             var update_node = root_node.start(update.name, 3);
             update_node.activate();
             defer update_node.end();
@@ -1607,6 +1594,7 @@ pub const TestContext = struct {
 
             var module_node = update_node.start("parse/analysis/codegen", 0);
             module_node.activate();
+            module_node.context.refresh();
             try comp.makeBinFileWritable();
             try comp.update();
             module_node.end();
@@ -1803,7 +1791,7 @@ pub const TestContext = struct {
                 .Execution => |expected_stdout| {
                     if (!std.process.can_spawn) {
                         print("Unable to spawn child processes on {s}, skipping test.\n", .{@tagName(builtin.os.tag)});
-                        return; // Pass test.
+                        continue :update; // Pass test.
                     }
 
                     update_node.setEstimatedTotalItems(4);
@@ -1829,7 +1817,7 @@ pub const TestContext = struct {
                         if (case.object_format != null and case.object_format.? == .c) {
                             if (host.getExternalExecutor(target_info, .{ .link_libc = true }) != .native) {
                                 // We wouldn't be able to run the compiled C code.
-                                return; // Pass test.
+                                continue :update; // Pass test.
                             }
                             try argv.appendSlice(&[_][]const u8{
                                 std.testing.zig_exe_path,
@@ -1845,18 +1833,18 @@ pub const TestContext = struct {
                             });
                         } else switch (host.getExternalExecutor(target_info, .{ .link_libc = case.link_libc })) {
                             .native => try argv.append(exe_path),
-                            .bad_dl, .bad_os_or_cpu => return, // Pass test.
+                            .bad_dl, .bad_os_or_cpu => continue :update, // Pass test.
 
                             .rosetta => if (enable_rosetta) {
                                 try argv.append(exe_path);
                             } else {
-                                return; // Rosetta not available, pass test.
+                                continue :update; // Rosetta not available, pass test.
                             },
 
                             .qemu => |qemu_bin_name| if (enable_qemu) {
                                 const need_cross_glibc = target.isGnuLibC() and case.link_libc;
-                                const glibc_dir_arg = if (need_cross_glibc)
-                                    glibc_runtimes_dir orelse return // glibc dir not available; pass test
+                                const glibc_dir_arg: ?[]const u8 = if (need_cross_glibc)
+                                    glibc_runtimes_dir orelse continue :update // glibc dir not available; pass test
                                 else
                                     null;
                                 try argv.append(qemu_bin_name);
@@ -1872,14 +1860,14 @@ pub const TestContext = struct {
                                 }
                                 try argv.append(exe_path);
                             } else {
-                                return; // QEMU not available; pass test.
+                                continue :update; // QEMU not available; pass test.
                             },
 
                             .wine => |wine_bin_name| if (enable_wine) {
                                 try argv.append(wine_bin_name);
                                 try argv.append(exe_path);
                             } else {
-                                return; // Wine not available; pass test.
+                                continue :update; // Wine not available; pass test.
                             },
 
                             .wasmtime => |wasmtime_bin_name| if (enable_wasmtime) {
@@ -1887,7 +1875,7 @@ pub const TestContext = struct {
                                 try argv.append("--dir=.");
                                 try argv.append(exe_path);
                             } else {
-                                return; // wasmtime not available; pass test.
+                                continue :update; // wasmtime not available; pass test.
                             },
 
                             .darling => |darling_bin_name| if (enable_darling) {
@@ -1897,7 +1885,7 @@ pub const TestContext = struct {
                                 try argv.append("shell");
                                 try argv.append(exe_path);
                             } else {
-                                return; // Darling not available; pass test.
+                                continue :update; // Darling not available; pass test.
                             },
                         }
 

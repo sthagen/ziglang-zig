@@ -1950,7 +1950,10 @@ fn transDeclRefExpr(
     const value_decl = expr.getDecl();
     const name = try c.str(@ptrCast(*const clang.NamedDecl, value_decl).getName_bytes_begin());
     const mangled_name = scope.getAlias(name);
-    var ref_expr = try Tag.identifier.create(c.arena, mangled_name);
+    var ref_expr = if (cIsFunctionDeclRef(@ptrCast(*const clang.Expr, expr)))
+        try Tag.fn_identifier.create(c.arena, mangled_name)
+    else
+        try Tag.identifier.create(c.arena, mangled_name);
 
     if (@ptrCast(*const clang.Decl, value_decl).getKind() == .Var) {
         const var_decl = @ptrCast(*const clang.VarDecl, value_decl);
@@ -1999,7 +2002,11 @@ fn transImplicitCastExpr(
         },
         .PointerToBoolean => {
             // @ptrToInt(val) != 0
-            const ptr_to_int = try Tag.ptr_to_int.create(c.arena, try transExpr(c, scope, sub_expr, .used));
+            var ptr_node = try transExpr(c, scope, sub_expr, .used);
+            if (ptr_node.tag() == .fn_identifier) {
+                ptr_node = try Tag.address_of.create(c.arena, ptr_node);
+            }
+            const ptr_to_int = try Tag.ptr_to_int.create(c.arena, ptr_node);
 
             const ne = try Tag.not_equal.create(c.arena, .{ .lhs = ptr_to_int, .rhs = Tag.zero_literal.init() });
             return maybeSuppressResult(c, scope, result_used, ne);
@@ -2042,7 +2049,7 @@ fn isBuiltinDefined(name: []const u8) bool {
 
 fn transBuiltinFnExpr(c: *Context, scope: *Scope, expr: *const clang.Expr, used: ResultUsed) TransError!Node {
     const node = try transExpr(c, scope, expr, used);
-    if (node.castTag(.identifier)) |ident| {
+    if (node.castTag(.fn_identifier)) |ident| {
         const name = ident.data;
         if (!isBuiltinDefined(name)) return fail(c, error.UnsupportedTranslation, expr.getBeginLoc(), "TODO implement function '{s}' in std.zig.c_builtins", .{name});
     }
@@ -2447,7 +2454,10 @@ fn transCCast(
     }
     if (cIsInteger(dst_type) and qualTypeIsPtr(src_type)) {
         // @intCast(dest_type, @ptrToInt(val))
-        const ptr_to_int = try Tag.ptr_to_int.create(c.arena, expr);
+        const ptr_to_int = if (expr.tag() == .fn_identifier)
+            try Tag.ptr_to_int.create(c.arena, try Tag.address_of.create(c.arena, expr))
+        else
+            try Tag.ptr_to_int.create(c.arena, expr);
         return Tag.int_cast.create(c.arena, .{ .lhs = dst_node, .rhs = ptr_to_int });
     }
     if (cIsInteger(src_type) and qualTypeIsPtr(dst_type)) {
@@ -2765,7 +2775,7 @@ fn transInitListExpr(
             qual_type,
         ));
     } else {
-        const type_name = c.str(qual_type.getTypeClassName());
+        const type_name = try c.str(qual_type.getTypeClassName());
         return fail(c, error.UnsupportedType, source_loc, "unsupported initlist type: '{s}'", .{type_name});
     }
 }
@@ -3269,7 +3279,7 @@ fn transConstantExpr(c: *Context, scope: *Scope, expr: *const clang.Expr, used: 
             return maybeSuppressResult(c, scope, used, as_node);
         },
         else => |kind| {
-            return fail(c, error.UnsupportedTranslation, expr.getBeginLoc(), "unsupported constant expression kind '{s}'", .{kind});
+            return fail(c, error.UnsupportedTranslation, expr.getBeginLoc(), "unsupported constant expression kind '{}'", .{kind});
         },
     }
 }
@@ -4812,11 +4822,11 @@ fn transType(c: *Context, scope: *Scope, ty: *const clang.Type, source_loc: clan
             });
         },
         .BitInt, .ExtVector => {
-            const type_name = c.str(ty.getTypeClassName());
+            const type_name = try c.str(ty.getTypeClassName());
             return fail(c, error.UnsupportedType, source_loc, "TODO implement translation of type: '{s}'", .{type_name});
         },
         else => {
-            const type_name = c.str(ty.getTypeClassName());
+            const type_name = try c.str(ty.getTypeClassName());
             return fail(c, error.UnsupportedType, source_loc, "unsupported type: '{s}'", .{type_name});
         },
     }
@@ -5052,8 +5062,8 @@ fn finishTransFnProto(
 }
 
 fn warn(c: *Context, scope: *Scope, loc: clang.SourceLocation, comptime format: []const u8, args: anytype) !void {
-    const args_prefix = .{c.locStr(loc)};
-    const value = try std.fmt.allocPrint(c.arena, "// {s}: warning: " ++ format, args_prefix ++ args);
+    const str = try c.locStr(loc);
+    const value = try std.fmt.allocPrint(c.arena, "// {s}: warning: " ++ format, .{str} ++ args);
     try scope.appendNode(try Tag.warning.create(c.arena, value));
 }
 
@@ -5073,7 +5083,8 @@ pub fn failDecl(c: *Context, loc: clang.SourceLocation, name: []const u8, compti
     // pub const name = @compileError(msg);
     const fail_msg = try std.fmt.allocPrint(c.arena, format, args);
     try addTopLevelDecl(c, name, try Tag.fail_decl.create(c.arena, .{ .actual = name, .mangled = fail_msg }));
-    const location_comment = try std.fmt.allocPrint(c.arena, "// {s}", .{c.locStr(loc)});
+    const str = try c.locStr(loc);
+    const location_comment = try std.fmt.allocPrint(c.arena, "// {s}", .{str});
     try c.global_scope.nodes.append(try Tag.warning.create(c.arena, location_comment));
 }
 
