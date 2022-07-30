@@ -751,6 +751,7 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) InnerEr
         },
 
         .unreachable_literal => {
+            try emitDbgNode(gz, node);
             _ = try gz.addAsIndex(.{
                 .tag = .@"unreachable",
                 .data = .{ .@"unreachable" = .{
@@ -1348,7 +1349,10 @@ fn arrayInitExpr(
             }
         }
         const array_type_inst = try typeExpr(gz, scope, array_init.ast.type_expr);
-        _ = try gz.addUnNode(.validate_array_init_ty, array_type_inst, array_init.ast.type_expr);
+        _ = try gz.addPlNode(.validate_array_init_ty, node, Zir.Inst.ArrayInit{
+            .ty = array_type_inst,
+            .init_count = @intCast(u32, array_init.ast.elements.len),
+        });
         break :inst .{
             .array = array_type_inst,
             .elem = .none,
@@ -1939,6 +1943,9 @@ fn continueExpr(parent_gz: *GenZir, parent_scope: *Scope, node: Ast.Node.Index) 
                     .break_inline
                 else
                     .@"break";
+                if (break_tag == .break_inline) {
+                    _ = try parent_gz.addNode(.check_comptime_control_flow, node);
+                }
                 _ = try parent_gz.addBreak(break_tag, continue_block, .void_value);
                 return Zir.Inst.Ref.unreachable_value;
             },
@@ -2472,6 +2479,7 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) Inner
             .repeat_inline,
             .panic,
             .panic_comptime,
+            .check_comptime_control_flow,
             => {
                 noreturn_src_node = statement;
                 break :b true;
@@ -7443,7 +7451,6 @@ fn builtinCall(
         .bool_to_int           => return simpleUnOp(gz, scope, rl, node, bool_rl,                             params[0], .bool_to_int),
         .embed_file            => return simpleUnOp(gz, scope, rl, node, .{ .ty = .const_slice_u8_type },     params[0], .embed_file),
         .error_name            => return simpleUnOp(gz, scope, rl, node, .{ .ty = .anyerror_type },           params[0], .error_name),
-        .panic                 => return simpleUnOp(gz, scope, rl, node, .{ .ty = .const_slice_u8_type },     params[0], if (gz.force_comptime) .panic_comptime else .panic),
         .set_cold              => return simpleUnOp(gz, scope, rl, node, bool_rl,                             params[0], .set_cold),
         .set_runtime_safety    => return simpleUnOp(gz, scope, rl, node, bool_rl,                             params[0], .set_runtime_safety),
         .sqrt                  => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .sqrt),
@@ -7476,6 +7483,10 @@ fn builtinCall(
         .truncate     => return typeCast(gz, scope, rl, node, params[0], params[1], .truncate),
         // zig fmt: on
 
+        .panic => {
+            try emitDbgNode(gz, node);
+            return simpleUnOp(gz, scope, rl, node, .{ .ty = .const_slice_u8_type }, params[0], if (gz.force_comptime) .panic_comptime else .panic);
+        },
         .error_to_int => {
             const operand = try expr(gz, scope, .none, params[0]);
             const result = try gz.addExtendedPayload(.error_to_int, Zir.Inst.UnNode{
@@ -10278,11 +10289,11 @@ const GenZir = struct {
             try astgen.extra.ensureUnusedCapacity(
                 gpa,
                 @typeInfo(Zir.Inst.FuncFancy).Struct.fields.len +
-                    fancyFnExprExtraLen(align_body, args.align_ref) +
-                    fancyFnExprExtraLen(addrspace_body, args.addrspace_ref) +
-                    fancyFnExprExtraLen(section_body, args.section_ref) +
-                    fancyFnExprExtraLen(cc_body, args.cc_ref) +
-                    fancyFnExprExtraLen(ret_body, ret_ref) +
+                    fancyFnExprExtraLen(astgen, align_body, args.align_ref) +
+                    fancyFnExprExtraLen(astgen, addrspace_body, args.addrspace_ref) +
+                    fancyFnExprExtraLen(astgen, section_body, args.section_ref) +
+                    fancyFnExprExtraLen(astgen, cc_body, args.cc_ref) +
+                    fancyFnExprExtraLen(astgen, ret_body, ret_ref) +
                     body_len + src_locs.len +
                     @boolToInt(args.lib_name != 0) +
                     @boolToInt(args.noalias_bits != 0),
@@ -10318,36 +10329,36 @@ const GenZir = struct {
 
             const zir_datas = astgen.instructions.items(.data);
             if (align_body.len != 0) {
-                astgen.extra.appendAssumeCapacity(@intCast(u32, align_body.len));
-                astgen.extra.appendSliceAssumeCapacity(align_body);
+                astgen.extra.appendAssumeCapacity(countBodyLenAfterFixups(astgen, align_body));
+                astgen.appendBodyWithFixups(align_body);
                 zir_datas[align_body[align_body.len - 1]].@"break".block_inst = new_index;
             } else if (args.align_ref != .none) {
                 astgen.extra.appendAssumeCapacity(@enumToInt(args.align_ref));
             }
             if (addrspace_body.len != 0) {
-                astgen.extra.appendAssumeCapacity(@intCast(u32, addrspace_body.len));
-                astgen.extra.appendSliceAssumeCapacity(addrspace_body);
+                astgen.extra.appendAssumeCapacity(countBodyLenAfterFixups(astgen, addrspace_body));
+                astgen.appendBodyWithFixups(addrspace_body);
                 zir_datas[addrspace_body[addrspace_body.len - 1]].@"break".block_inst = new_index;
             } else if (args.addrspace_ref != .none) {
                 astgen.extra.appendAssumeCapacity(@enumToInt(args.addrspace_ref));
             }
             if (section_body.len != 0) {
-                astgen.extra.appendAssumeCapacity(@intCast(u32, section_body.len));
-                astgen.extra.appendSliceAssumeCapacity(section_body);
+                astgen.extra.appendAssumeCapacity(countBodyLenAfterFixups(astgen, section_body));
+                astgen.appendBodyWithFixups(section_body);
                 zir_datas[section_body[section_body.len - 1]].@"break".block_inst = new_index;
             } else if (args.section_ref != .none) {
                 astgen.extra.appendAssumeCapacity(@enumToInt(args.section_ref));
             }
             if (cc_body.len != 0) {
-                astgen.extra.appendAssumeCapacity(@intCast(u32, cc_body.len));
-                astgen.extra.appendSliceAssumeCapacity(cc_body);
+                astgen.extra.appendAssumeCapacity(countBodyLenAfterFixups(astgen, cc_body));
+                astgen.appendBodyWithFixups(cc_body);
                 zir_datas[cc_body[cc_body.len - 1]].@"break".block_inst = new_index;
             } else if (args.cc_ref != .none) {
                 astgen.extra.appendAssumeCapacity(@enumToInt(args.cc_ref));
             }
             if (ret_body.len != 0) {
-                astgen.extra.appendAssumeCapacity(@intCast(u32, ret_body.len));
-                astgen.extra.appendSliceAssumeCapacity(ret_body);
+                astgen.extra.appendAssumeCapacity(countBodyLenAfterFixups(astgen, ret_body));
+                astgen.appendBodyWithFixups(ret_body);
                 zir_datas[ret_body[ret_body.len - 1]].@"break".block_inst = new_index;
             } else if (ret_ref != .none) {
                 astgen.extra.appendAssumeCapacity(@enumToInt(ret_ref));
@@ -10385,11 +10396,12 @@ const GenZir = struct {
             try astgen.extra.ensureUnusedCapacity(
                 gpa,
                 @typeInfo(Zir.Inst.Func).Struct.fields.len + 1 +
-                    @maximum(ret_body.len, @boolToInt(ret_ref != .none)) +
+                    fancyFnExprExtraLen(astgen, ret_body, ret_ref) +
                     body_len + src_locs.len,
             );
+
             const ret_body_len = if (ret_body.len != 0)
-                @intCast(u32, ret_body.len)
+                countBodyLenAfterFixups(astgen, ret_body)
             else
                 @boolToInt(ret_ref != .none);
 
@@ -10400,7 +10412,7 @@ const GenZir = struct {
             });
             const zir_datas = astgen.instructions.items(.data);
             if (ret_body.len != 0) {
-                astgen.extra.appendSliceAssumeCapacity(ret_body);
+                astgen.appendBodyWithFixups(ret_body);
                 zir_datas[ret_body[ret_body.len - 1]].@"break".block_inst = new_index;
             } else if (ret_ref != .none) {
                 astgen.extra.appendAssumeCapacity(@enumToInt(ret_ref));
@@ -10431,10 +10443,10 @@ const GenZir = struct {
         }
     }
 
-    fn fancyFnExprExtraLen(body: []Zir.Inst.Index, ref: Zir.Inst.Ref) usize {
+    fn fancyFnExprExtraLen(astgen: *AstGen, body: []Zir.Inst.Index, ref: Zir.Inst.Ref) u32 {
         // In the case of non-empty body, there is one for the body length,
         // and then one for each instruction.
-        return body.len + @boolToInt(ref != .none);
+        return countBodyLenAfterFixups(astgen, body) + @boolToInt(ref != .none);
     }
 
     fn addVar(gz: *GenZir, args: struct {
