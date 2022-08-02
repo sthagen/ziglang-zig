@@ -580,6 +580,7 @@ const DocData = struct {
         enumLiteral: []const u8, // direct value
         alignOf: usize, // index in `exprs`
         typeOf: usize, // index in `exprs`
+        typeInfo: usize, // index in `exprs`
         typeOf_peer: []usize,
         errorUnion: usize, // index in `exprs`
         as: As,
@@ -1398,7 +1399,6 @@ fn walkInstruction(
             const extra = file.zir.extraData(Zir.Inst.PtrType, ptr.payload_index);
             var extra_index = extra.end;
 
-            const type_slot_index = self.types.items.len;
             const elem_type_ref = try self.walkRef(
                 file,
                 parent_scope,
@@ -1445,6 +1445,7 @@ fn walkInstruction(
                 host_size = ref_result.expr;
             }
 
+            const type_slot_index = self.types.items.len;
             try self.types.append(self.arena, .{
                 .Pointer = .{
                     .size = ptr.size,
@@ -1788,7 +1789,7 @@ fn walkInstruction(
 
             return DocData.WalkResult{
                 .typeRef = operand.typeRef,
-                .expr = .{ .typeOf = operand_index },
+                .expr = .{ .typeInfo = operand_index },
             };
         },
         .as_node => {
@@ -2993,7 +2994,7 @@ fn tryResolveRefPath(
                     "TODO: handle `{s}`in tryResolveRefPath\nInfo: {}",
                     .{ @tagName(resolved_parent), resolved_parent },
                 );
-                path[i + 1] = (try self.cteTodo("match failure")).expr;
+                path[i + 1] = (try self.cteTodo("<match failure>")).expr;
                 continue :outer;
             },
             .comptimeExpr, .call, .typeOf => {
