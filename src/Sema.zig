@@ -816,7 +816,6 @@ fn analyzeBodyInner(
             .embed_file                   => try sema.zirEmbedFile(block, inst),
             .error_name                   => try sema.zirErrorName(block, inst),
             .tag_name                     => try sema.zirTagName(block, inst),
-            .reify                        => try sema.zirReify(block, inst),
             .type_name                    => try sema.zirTypeName(block, inst),
             .frame_type                   => try sema.zirFrameType(block, inst),
             .frame_size                   => try sema.zirFrameSize(block, inst),
@@ -951,6 +950,7 @@ fn analyzeBodyInner(
                     .select                => try sema.zirSelect(            block, extended),
                     .error_to_int          => try sema.zirErrorToInt(        block, extended),
                     .int_to_error          => try sema.zirIntToError(        block, extended),
+                    .reify                 => try sema.zirReify(             block, extended, inst),
                     // zig fmt: on
                     .fence => {
                         try sema.zirFence(block, extended);
@@ -1818,10 +1818,10 @@ fn failWithInvalidComptimeFieldStore(sema: *Sema, block: *Block, init_src: LazyS
 
         const tree = try sema.getAstTree(block);
         const decl = sema.mod.declPtr(decl_index);
-        const field_src = enumFieldSrcLoc(decl, tree.*, container_ty.getNodeOffset(), field_index);
+        const field_src = enumFieldSrcLoc(decl, tree.*, 0, field_index);
         const default_value_src: LazySrcLoc = .{ .node_offset_field_default = field_src.node_offset.x };
 
-        try sema.errNote(block, default_value_src, msg, "default value set here", .{});
+        try sema.mod.errNoteNonLazy(default_value_src.toSrcLoc(decl), msg, "default value set here", .{});
         break :msg msg;
     };
     return sema.failWithOwnedErrorMsg(msg);
@@ -1866,7 +1866,7 @@ fn addFieldErrNote(
     const decl_index = container_ty.getOwnerDecl();
     const decl = mod.declPtr(decl_index);
     const tree = try sema.getAstTree(block);
-    const field_src = enumFieldSrcLoc(decl, tree.*, container_ty.getNodeOffset(), field_index);
+    const field_src = enumFieldSrcLoc(decl, tree.*, 0, field_index);
     try mod.errNoteNonLazy(field_src.toSrcLoc(decl), parent, format, args);
 }
 
@@ -2262,7 +2262,7 @@ fn zirStructDecl(
     const struct_obj = try new_decl_arena_allocator.create(Module.Struct);
     const struct_ty = try Type.Tag.@"struct".create(new_decl_arena_allocator, struct_obj);
     const struct_val = try Value.Tag.ty.create(new_decl_arena_allocator, struct_ty);
-    const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, .{
+    const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, src, .{
         .ty = Type.type,
         .val = struct_val,
     }, small.name_strategy, "struct", inst);
@@ -2272,7 +2272,6 @@ fn zirStructDecl(
     struct_obj.* = .{
         .owner_decl = new_decl_index,
         .fields = .{},
-        .node_offset = src.node_offset.x,
         .zir_index = inst,
         .layout = small.layout,
         .status = .none,
@@ -2294,6 +2293,7 @@ fn zirStructDecl(
 fn createAnonymousDeclTypeNamed(
     sema: *Sema,
     block: *Block,
+    src: LazySrcLoc,
     typed_value: TypedValue,
     name_strategy: Zir.Inst.NameStrategy,
     anon_prefix: []const u8,
@@ -2303,7 +2303,8 @@ fn createAnonymousDeclTypeNamed(
     const namespace = block.namespace;
     const src_scope = block.wip_capture_scope;
     const src_decl = mod.declPtr(block.src_decl);
-    const new_decl_index = try mod.allocateNewDecl(namespace, src_decl.src_node, src_scope);
+    const src_node = src_decl.relativeToNodeIndex(src.node_offset.x);
+    const new_decl_index = try mod.allocateNewDecl(namespace, src_node, src_scope);
     errdefer mod.destroyDecl(new_decl_index);
 
     switch (name_strategy) {
@@ -2378,7 +2379,7 @@ fn createAnonymousDeclTypeNamed(
                 },
                 else => {},
             };
-            return sema.createAnonymousDeclTypeNamed(block, typed_value, .anon, anon_prefix, null);
+            return sema.createAnonymousDeclTypeNamed(block, src, typed_value, .anon, anon_prefix, null);
         },
     }
 }
@@ -2442,7 +2443,7 @@ fn zirEnumDecl(
     };
     const enum_ty = Type.initPayload(&enum_ty_payload.base);
     const enum_val = try Value.Tag.ty.create(new_decl_arena_allocator, enum_ty);
-    const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, .{
+    const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, src, .{
         .ty = Type.type,
         .val = enum_val,
     }, small.name_strategy, "enum", inst);
@@ -2456,7 +2457,6 @@ fn zirEnumDecl(
         .tag_ty_inferred = true,
         .fields = .{},
         .values = .{},
-        .node_offset = src.node_offset.x,
         .namespace = .{
             .parent = block.namespace,
             .ty = enum_ty,
@@ -2684,7 +2684,7 @@ fn zirUnionDecl(
     const union_ty = Type.initPayload(&union_payload.base);
     const union_val = try Value.Tag.ty.create(new_decl_arena_allocator, union_ty);
     const mod = sema.mod;
-    const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, .{
+    const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, src, .{
         .ty = Type.type,
         .val = union_val,
     }, small.name_strategy, "union", inst);
@@ -2695,7 +2695,6 @@ fn zirUnionDecl(
         .owner_decl = new_decl_index,
         .tag_ty = Type.initTag(.@"null"),
         .fields = .{},
-        .node_offset = src.node_offset.x,
         .zir_index = inst,
         .layout = small.layout,
         .status = .none,
@@ -2753,7 +2752,7 @@ fn zirOpaqueDecl(
     };
     const opaque_ty = Type.initPayload(&opaque_ty_payload.base);
     const opaque_val = try Value.Tag.ty.create(new_decl_arena_allocator, opaque_ty);
-    const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, .{
+    const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, src, .{
         .ty = Type.type,
         .val = opaque_val,
     }, small.name_strategy, "opaque", inst);
@@ -2763,7 +2762,6 @@ fn zirOpaqueDecl(
 
     opaque_obj.* = .{
         .owner_decl = new_decl_index,
-        .node_offset = src.node_offset.x,
         .namespace = .{
             .parent = block.namespace,
             .ty = opaque_ty,
@@ -2802,7 +2800,7 @@ fn zirErrorSetDecl(
     const error_set_ty = try Type.Tag.error_set.create(new_decl_arena_allocator, error_set);
     const error_set_val = try Value.Tag.ty.create(new_decl_arena_allocator, error_set_ty);
     const mod = sema.mod;
-    const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, .{
+    const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, src, .{
         .ty = Type.type,
         .val = error_set_val,
     }, name_strategy, "error", inst);
@@ -2827,7 +2825,6 @@ fn zirErrorSetDecl(
 
     error_set.* = .{
         .owner_decl = new_decl_index,
-        .node_offset = inst_data.src_node,
         .names = names,
     };
     try new_decl.finalizeNewArena(&new_decl_arena);
@@ -14492,6 +14489,20 @@ fn zirBoolBr(
     const rhs_result = try sema.resolveBody(rhs_block, body, inst);
     _ = try rhs_block.addBr(block_inst, rhs_result);
 
+    return finishCondBr(sema, parent_block, &child_block, &then_block, &else_block, lhs, block_inst);
+}
+
+fn finishCondBr(
+    sema: *Sema,
+    parent_block: *Block,
+    child_block: *Block,
+    then_block: *Block,
+    else_block: *Block,
+    cond: Air.Inst.Ref,
+    block_inst: Air.Inst.Index,
+) !Air.Inst.Ref {
+    const gpa = sema.gpa;
+
     try sema.air_extra.ensureUnusedCapacity(gpa, @typeInfo(Air.CondBr).Struct.fields.len +
         then_block.instructions.items.len + else_block.instructions.items.len +
         @typeInfo(Air.Block).Struct.fields.len + child_block.instructions.items.len + 1);
@@ -14504,7 +14515,7 @@ fn zirBoolBr(
     sema.air_extra.appendSliceAssumeCapacity(else_block.instructions.items);
 
     _ = try child_block.addInst(.{ .tag = .cond_br, .data = .{ .pl_op = .{
-        .operand = lhs,
+        .operand = cond,
         .payload = cond_br_payload,
     } } });
 
@@ -14874,8 +14885,81 @@ fn zirRetLoad(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Zir
         const operand = try sema.analyzeLoad(block, src, ret_ptr, src);
         return sema.analyzeRet(block, operand, src);
     }
+
+    if (sema.wantErrorReturnTracing()) {
+        const is_non_err = try sema.analyzePtrIsNonErr(block, src, ret_ptr);
+        return retWithErrTracing(sema, block, src, is_non_err, .ret_load, ret_ptr);
+    }
+
     _ = try block.addUnOp(.ret_load, ret_ptr);
     return always_noreturn;
+}
+
+fn retWithErrTracing(
+    sema: *Sema,
+    block: *Block,
+    src: LazySrcLoc,
+    is_non_err: Air.Inst.Ref,
+    ret_tag: Air.Inst.Tag,
+    operand: Air.Inst.Ref,
+) CompileError!Zir.Inst.Index {
+    const need_check = switch (is_non_err) {
+        .bool_true => {
+            _ = try block.addUnOp(ret_tag, operand);
+            return always_noreturn;
+        },
+        .bool_false => false,
+        else => true,
+    };
+    const gpa = sema.gpa;
+    const unresolved_stack_trace_ty = try sema.getBuiltinType(block, src, "StackTrace");
+    const stack_trace_ty = try sema.resolveTypeFields(block, src, unresolved_stack_trace_ty);
+    const ptr_stack_trace_ty = try Type.Tag.single_mut_pointer.create(sema.arena, stack_trace_ty);
+    const err_return_trace = try block.addTy(.err_return_trace, ptr_stack_trace_ty);
+    const return_err_fn = try sema.getBuiltin(block, src, "returnError");
+    const args: [1]Air.Inst.Ref = .{err_return_trace};
+
+    if (!need_check) {
+        _ = try sema.analyzeCall(block, return_err_fn, src, src, .never_inline, false, &args, null);
+        _ = try block.addUnOp(ret_tag, operand);
+        return always_noreturn;
+    }
+
+    var then_block = block.makeSubBlock();
+    defer then_block.instructions.deinit(gpa);
+    _ = try then_block.addUnOp(ret_tag, operand);
+
+    var else_block = block.makeSubBlock();
+    defer else_block.instructions.deinit(gpa);
+    _ = try sema.analyzeCall(&else_block, return_err_fn, src, src, .never_inline, false, &args, null);
+    _ = try else_block.addUnOp(ret_tag, operand);
+
+    try sema.air_extra.ensureUnusedCapacity(gpa, @typeInfo(Air.CondBr).Struct.fields.len +
+        then_block.instructions.items.len + else_block.instructions.items.len +
+        @typeInfo(Air.Block).Struct.fields.len + 1);
+
+    const cond_br_payload = sema.addExtraAssumeCapacity(Air.CondBr{
+        .then_body_len = @intCast(u32, then_block.instructions.items.len),
+        .else_body_len = @intCast(u32, else_block.instructions.items.len),
+    });
+    sema.air_extra.appendSliceAssumeCapacity(then_block.instructions.items);
+    sema.air_extra.appendSliceAssumeCapacity(else_block.instructions.items);
+
+    _ = try block.addInst(.{ .tag = .cond_br, .data = .{ .pl_op = .{
+        .operand = is_non_err,
+        .payload = cond_br_payload,
+    } } });
+
+    return always_noreturn;
+}
+
+fn wantErrorReturnTracing(sema: *Sema) bool {
+    // TODO implement this feature in all the backends and then delete this check.
+    const backend_supports_error_return_tracing = sema.mod.comp.bin_file.options.use_llvm;
+
+    return sema.fn_ret_ty.isError() and
+        sema.mod.comp.bin_file.options.error_return_tracing and
+        backend_supports_error_return_tracing;
 }
 
 fn addToInferredErrorSet(sema: *Sema, uncasted_operand: Air.Inst.Ref) !void {
@@ -14923,27 +15007,15 @@ fn analyzeRet(
         return always_noreturn;
     }
 
-    // TODO implement this feature in all the backends and then delete this check.
-    const backend_supports_error_return_tracing =
-        sema.mod.comp.bin_file.options.use_llvm;
+    try sema.resolveTypeLayout(block, src, sema.fn_ret_ty);
 
-    if (sema.fn_ret_ty.isError() and
-        sema.mod.comp.bin_file.options.error_return_tracing and
-        backend_supports_error_return_tracing)
-    ret_err: {
-        if (try sema.resolveMaybeUndefVal(block, src, operand)) |ret_val| {
-            if (ret_val.tag() != .@"error") break :ret_err;
-        }
-        const return_err_fn = try sema.getBuiltin(block, src, "returnError");
-        const unresolved_stack_trace_ty = try sema.getBuiltinType(block, src, "StackTrace");
-        const stack_trace_ty = try sema.resolveTypeFields(block, src, unresolved_stack_trace_ty);
-        const ptr_stack_trace_ty = try Type.Tag.optional_single_mut_pointer.create(sema.arena, stack_trace_ty);
-        const err_return_trace = try block.addTy(.err_return_trace, ptr_stack_trace_ty);
-        const args: [1]Air.Inst.Ref = .{err_return_trace};
-        _ = try sema.analyzeCall(block, return_err_fn, src, src, .never_inline, false, &args, null);
+    if (sema.wantErrorReturnTracing()) {
+        // Avoid adding a frame to the error return trace in case the value is comptime-known
+        // to be not an error.
+        const is_non_err = try sema.analyzeIsNonErr(block, src, operand);
+        return retWithErrTracing(sema, block, src, is_non_err, .ret, operand);
     }
 
-    try sema.resolveTypeLayout(block, src, sema.fn_ret_ty);
     _ = try block.addUnOp(.ret, operand);
     return always_noreturn;
 }
@@ -16023,13 +16095,14 @@ fn zirTagName(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air
     return block.addUnOp(.tag_name, casted_operand);
 }
 
-fn zirReify(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
+fn zirReify(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstData, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
     const mod = sema.mod;
-    const inst_data = sema.code.instructions.items(.data)[inst].un_node;
-    const src = inst_data.src();
+    const name_strategy = @intToEnum(Zir.Inst.NameStrategy, extended.small);
+    const extra = sema.code.extraData(Zir.Inst.UnNode, extended.operand).data;
+    const src = LazySrcLoc.nodeOffset(extra.node);
     const type_info_ty = try sema.resolveBuiltinTypeFields(block, src, "Type");
-    const uncasted_operand = try sema.resolveInst(inst_data.operand);
-    const operand_src: LazySrcLoc = .{ .node_offset_builtin_call_arg0 = inst_data.src_node };
+    const uncasted_operand = try sema.resolveInst(extra.operand);
+    const operand_src: LazySrcLoc = .{ .node_offset_builtin_call_arg0 = extra.node };
     const type_info = try sema.coerce(block, type_info_ty, uncasted_operand, operand_src);
     const val = try sema.resolveConstValue(block, operand_src, type_info, "operand to @Type must be comptime known");
     const union_val = val.cast(Value.Payload.Union).?.data;
@@ -16289,7 +16362,7 @@ fn zirReify(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.I
             return if (is_tuple_val.toBool())
                 try sema.reifyTuple(block, src, fields_val)
             else
-                try sema.reifyStruct(block, inst, src, layout_val, fields_val);
+                try sema.reifyStruct(block, inst, src, layout_val, fields_val, name_strategy);
         },
         .Enum => {
             const struct_val = union_val.val.castTag(.aggregate).?.data;
@@ -16335,10 +16408,10 @@ fn zirReify(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.I
             };
             const enum_ty = Type.initPayload(&enum_ty_payload.base);
             const enum_val = try Value.Tag.ty.create(new_decl_arena_allocator, enum_ty);
-            const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, .{
+            const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, src, .{
                 .ty = Type.type,
                 .val = enum_val,
-            }, .anon, "enum", null);
+            }, name_strategy, "enum", inst);
             const new_decl = mod.declPtr(new_decl_index);
             new_decl.owns_tv = true;
             errdefer mod.abortAnonDecl(new_decl_index);
@@ -16349,7 +16422,6 @@ fn zirReify(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.I
                 .tag_ty_inferred = false,
                 .fields = .{},
                 .values = .{},
-                .node_offset = src.node_offset.x,
                 .namespace = .{
                     .parent = block.namespace,
                     .ty = enum_ty,
@@ -16432,17 +16504,16 @@ fn zirReify(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.I
             };
             const opaque_ty = Type.initPayload(&opaque_ty_payload.base);
             const opaque_val = try Value.Tag.ty.create(new_decl_arena_allocator, opaque_ty);
-            const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, .{
+            const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, src, .{
                 .ty = Type.type,
                 .val = opaque_val,
-            }, .anon, "opaque", null);
+            }, name_strategy, "opaque", inst);
             const new_decl = mod.declPtr(new_decl_index);
             new_decl.owns_tv = true;
             errdefer mod.abortAnonDecl(new_decl_index);
 
             opaque_obj.* = .{
                 .owner_decl = new_decl_index,
-                .node_offset = src.node_offset.x,
                 .namespace = .{
                     .parent = block.namespace,
                     .ty = opaque_ty,
@@ -16491,10 +16562,10 @@ fn zirReify(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.I
             };
             const union_ty = Type.initPayload(&union_payload.base);
             const new_union_val = try Value.Tag.ty.create(new_decl_arena_allocator, union_ty);
-            const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, .{
+            const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, src, .{
                 .ty = Type.type,
                 .val = new_union_val,
-            }, .anon, "union", null);
+            }, name_strategy, "union", inst);
             const new_decl = mod.declPtr(new_decl_index);
             new_decl.owns_tv = true;
             errdefer mod.abortAnonDecl(new_decl_index);
@@ -16502,7 +16573,6 @@ fn zirReify(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.I
                 .owner_decl = new_decl_index,
                 .tag_ty = Type.initTag(.@"null"),
                 .fields = .{},
-                .node_offset = src.node_offset.x,
                 .zir_index = inst,
                 .layout = layout,
                 .status = .have_field_types,
@@ -16787,6 +16857,7 @@ fn reifyStruct(
     src: LazySrcLoc,
     layout_val: Value,
     fields_val: Value,
+    name_strategy: Zir.Inst.NameStrategy,
 ) CompileError!Air.Inst.Ref {
     var new_decl_arena = std.heap.ArenaAllocator.init(sema.gpa);
     errdefer new_decl_arena.deinit();
@@ -16796,17 +16867,16 @@ fn reifyStruct(
     const struct_ty = try Type.Tag.@"struct".create(new_decl_arena_allocator, struct_obj);
     const new_struct_val = try Value.Tag.ty.create(new_decl_arena_allocator, struct_ty);
     const mod = sema.mod;
-    const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, .{
+    const new_decl_index = try sema.createAnonymousDeclTypeNamed(block, src, .{
         .ty = Type.type,
         .val = new_struct_val,
-    }, .anon, "struct", null);
+    }, name_strategy, "struct", inst);
     const new_decl = mod.declPtr(new_decl_index);
     new_decl.owns_tv = true;
     errdefer mod.abortAnonDecl(new_decl_index);
     struct_obj.* = .{
         .owner_decl = new_decl_index,
         .fields = .{},
-        .node_offset = src.node_offset.x,
         .zir_index = inst,
         .layout = layout_val.toEnum(std.builtin.Type.ContainerLayout),
         .status = .have_field_types,
@@ -25423,6 +25493,27 @@ fn analyzeIsNull(
     return block.addUnOp(air_tag, operand);
 }
 
+fn analyzePtrIsNonErrComptimeOnly(
+    sema: *Sema,
+    block: *Block,
+    src: LazySrcLoc,
+    operand: Air.Inst.Ref,
+) CompileError!Air.Inst.Ref {
+    const ptr_ty = sema.typeOf(operand);
+    assert(ptr_ty.zigTypeTag() == .Pointer);
+    const child_ty = ptr_ty.childType();
+
+    const child_tag = child_ty.zigTypeTag();
+    if (child_tag != .ErrorSet and child_tag != .ErrorUnion) return Air.Inst.Ref.bool_true;
+    if (child_tag == .ErrorSet) return Air.Inst.Ref.bool_false;
+    assert(child_tag == .ErrorUnion);
+
+    _ = block;
+    _ = src;
+
+    return Air.Inst.Ref.none;
+}
+
 fn analyzeIsNonErrComptimeOnly(
     sema: *Sema,
     block: *Block,
@@ -25436,10 +25527,16 @@ fn analyzeIsNonErrComptimeOnly(
     assert(ot == .ErrorUnion);
 
     if (Air.refToIndex(operand)) |operand_inst| {
-        const air_tags = sema.air_instructions.items(.tag);
-        if (air_tags[operand_inst] == .wrap_errunion_payload) {
-            return Air.Inst.Ref.bool_true;
+        switch (sema.air_instructions.items(.tag)[operand_inst]) {
+            .wrap_errunion_payload => return Air.Inst.Ref.bool_true,
+            .wrap_errunion_err => return Air.Inst.Ref.bool_false,
+            else => {},
         }
+    } else if (operand == .undef) {
+        return sema.addConstUndef(Type.bool);
+    } else {
+        // None of the ref tags can be errors.
+        return Air.Inst.Ref.bool_true;
     }
 
     const maybe_operand_val = try sema.resolveMaybeUndefVal(block, src, operand);
@@ -25510,6 +25607,21 @@ fn analyzeIsNonErr(
     if (result == .none) {
         try sema.requireRuntimeBlock(block, src, null);
         return block.addUnOp(.is_non_err, operand);
+    } else {
+        return result;
+    }
+}
+
+fn analyzePtrIsNonErr(
+    sema: *Sema,
+    block: *Block,
+    src: LazySrcLoc,
+    operand: Air.Inst.Ref,
+) CompileError!Air.Inst.Ref {
+    const result = try sema.analyzePtrIsNonErrComptimeOnly(block, src, operand);
+    if (result == .none) {
+        try sema.requireRuntimeBlock(block, src, null);
+        return block.addUnOp(.is_non_err_ptr, operand);
     } else {
         return result;
     }
@@ -27239,7 +27351,7 @@ fn semaStructFields(mod: *Module, struct_obj: *Module.Struct) CompileError!void 
     const small = @bitCast(Zir.Inst.StructDecl.Small, extended.small);
     var extra_index: usize = extended.operand;
 
-    const src = LazySrcLoc.nodeOffset(struct_obj.node_offset);
+    const src = LazySrcLoc.nodeOffset(0);
     extra_index += @boolToInt(small.has_src_node);
 
     const fields_len = if (small.has_fields_len) blk: {
@@ -27358,12 +27470,12 @@ fn semaStructFields(mod: *Module, struct_obj: *Module.Struct) CompileError!void 
             if (gop.found_existing) {
                 const msg = msg: {
                     const tree = try sema.getAstTree(&block_scope);
-                    const field_src = enumFieldSrcLoc(decl, tree.*, struct_obj.node_offset, field_i);
+                    const field_src = enumFieldSrcLoc(decl, tree.*, 0, field_i);
                     const msg = try sema.errMsg(&block_scope, field_src, "duplicate struct field: '{s}'", .{field_name});
                     errdefer msg.destroy(gpa);
 
                     const prev_field_index = struct_obj.fields.getIndex(field_name).?;
-                    const prev_field_src = enumFieldSrcLoc(decl, tree.*, struct_obj.node_offset, prev_field_index);
+                    const prev_field_src = enumFieldSrcLoc(decl, tree.*, 0, prev_field_index);
                     try sema.mod.errNoteNonLazy(prev_field_src.toSrcLoc(decl), msg, "other field here", .{});
                     try sema.errNote(&block_scope, src, msg, "struct declared here", .{});
                     break :msg msg;
@@ -27420,7 +27532,7 @@ fn semaStructFields(mod: *Module, struct_obj: *Module.Struct) CompileError!void 
         if (field_ty.zigTypeTag() == .Opaque) {
             const msg = msg: {
                 const tree = try sema.getAstTree(&block_scope);
-                const field_src = enumFieldSrcLoc(decl, tree.*, struct_obj.node_offset, i);
+                const field_src = enumFieldSrcLoc(decl, tree.*, 0, i);
                 const msg = try sema.errMsg(&block_scope, field_src, "opaque types have unknown size and therefore cannot be directly embedded in structs", .{});
                 errdefer msg.destroy(sema.gpa);
 
@@ -27432,7 +27544,7 @@ fn semaStructFields(mod: *Module, struct_obj: *Module.Struct) CompileError!void 
         if (struct_obj.layout == .Extern and !sema.validateExternType(field.ty, .other)) {
             const msg = msg: {
                 const tree = try sema.getAstTree(&block_scope);
-                const fields_src = enumFieldSrcLoc(decl, tree.*, struct_obj.node_offset, i);
+                const fields_src = enumFieldSrcLoc(decl, tree.*, 0, i);
                 const msg = try sema.errMsg(&block_scope, fields_src, "extern structs cannot contain fields of type '{}'", .{field.ty.fmt(sema.mod)});
                 errdefer msg.destroy(sema.gpa);
 
@@ -27445,7 +27557,7 @@ fn semaStructFields(mod: *Module, struct_obj: *Module.Struct) CompileError!void 
         } else if (struct_obj.layout == .Packed and !(validatePackedType(field.ty))) {
             const msg = msg: {
                 const tree = try sema.getAstTree(&block_scope);
-                const fields_src = enumFieldSrcLoc(decl, tree.*, struct_obj.node_offset, i);
+                const fields_src = enumFieldSrcLoc(decl, tree.*, 0, i);
                 const msg = try sema.errMsg(&block_scope, fields_src, "packed structs cannot contain fields of type '{}'", .{field.ty.fmt(sema.mod)});
                 errdefer msg.destroy(sema.gpa);
 
@@ -27502,7 +27614,7 @@ fn semaUnionFields(mod: *Module, union_obj: *Module.Union) CompileError!void {
     const small = @bitCast(Zir.Inst.UnionDecl.Small, extended.small);
     var extra_index: usize = extended.operand;
 
-    const src = LazySrcLoc.nodeOffset(union_obj.node_offset);
+    const src = LazySrcLoc.nodeOffset(0);
     extra_index += @boolToInt(small.has_src_node);
 
     const tag_type_ref: Zir.Inst.Ref = if (small.has_tag_type) blk: {
@@ -27726,12 +27838,12 @@ fn semaUnionFields(mod: *Module, union_obj: *Module.Union) CompileError!void {
         if (gop.found_existing) {
             const msg = msg: {
                 const tree = try sema.getAstTree(&block_scope);
-                const field_src = enumFieldSrcLoc(decl, tree.*, union_obj.node_offset, field_i);
+                const field_src = enumFieldSrcLoc(decl, tree.*, 0, field_i);
                 const msg = try sema.errMsg(&block_scope, field_src, "duplicate union field: '{s}'", .{field_name});
                 errdefer msg.destroy(gpa);
 
                 const prev_field_index = union_obj.fields.getIndex(field_name).?;
-                const prev_field_src = enumFieldSrcLoc(decl, tree.*, union_obj.node_offset, prev_field_index);
+                const prev_field_src = enumFieldSrcLoc(decl, tree.*, 0, prev_field_index);
                 try sema.mod.errNoteNonLazy(prev_field_src.toSrcLoc(decl), msg, "other field here", .{});
                 try sema.errNote(&block_scope, src, msg, "union declared here", .{});
                 break :msg msg;
@@ -27744,7 +27856,7 @@ fn semaUnionFields(mod: *Module, union_obj: *Module.Union) CompileError!void {
             if (!enum_has_field) {
                 const msg = msg: {
                     const tree = try sema.getAstTree(&block_scope);
-                    const field_src = enumFieldSrcLoc(decl, tree.*, union_obj.node_offset, field_i);
+                    const field_src = enumFieldSrcLoc(decl, tree.*, 0, field_i);
                     const msg = try sema.errMsg(&block_scope, field_src, "no field named '{s}' in enum '{}'", .{ field_name, union_obj.tag_ty.fmt(sema.mod) });
                     errdefer msg.destroy(sema.gpa);
                     try sema.addDeclaredHereNote(msg, union_obj.tag_ty);
@@ -27757,7 +27869,7 @@ fn semaUnionFields(mod: *Module, union_obj: *Module.Union) CompileError!void {
         if (field_ty.zigTypeTag() == .Opaque) {
             const msg = msg: {
                 const tree = try sema.getAstTree(&block_scope);
-                const field_src = enumFieldSrcLoc(decl, tree.*, union_obj.node_offset, field_i);
+                const field_src = enumFieldSrcLoc(decl, tree.*, 0, field_i);
                 const msg = try sema.errMsg(&block_scope, field_src, "opaque types have unknown size and therefore cannot be directly embedded in unions", .{});
                 errdefer msg.destroy(sema.gpa);
 
@@ -27769,7 +27881,7 @@ fn semaUnionFields(mod: *Module, union_obj: *Module.Union) CompileError!void {
         if (union_obj.layout == .Extern and !sema.validateExternType(field_ty, .union_field)) {
             const msg = msg: {
                 const tree = try sema.getAstTree(&block_scope);
-                const field_src = enumFieldSrcLoc(decl, tree.*, union_obj.node_offset, field_i);
+                const field_src = enumFieldSrcLoc(decl, tree.*, 0, field_i);
                 const msg = try sema.errMsg(&block_scope, field_src, "extern unions cannot contain fields of type '{}'", .{field_ty.fmt(sema.mod)});
                 errdefer msg.destroy(sema.gpa);
 
@@ -27782,7 +27894,7 @@ fn semaUnionFields(mod: *Module, union_obj: *Module.Union) CompileError!void {
         } else if (union_obj.layout == .Packed and !(validatePackedType(field_ty))) {
             const msg = msg: {
                 const tree = try sema.getAstTree(&block_scope);
-                const fields_src = enumFieldSrcLoc(decl, tree.*, union_obj.node_offset, field_i);
+                const fields_src = enumFieldSrcLoc(decl, tree.*, 0, field_i);
                 const msg = try sema.errMsg(&block_scope, fields_src, "packed unions cannot contain fields of type '{}'", .{field_ty.fmt(sema.mod)});
                 errdefer msg.destroy(sema.gpa);
 
@@ -27874,7 +27986,6 @@ fn generateUnionTagTypeNumbered(
         .tag_ty = int_ty,
         .fields = .{},
         .values = .{},
-        .node_offset = 0,
     };
     // Here we pre-allocate the maps using the decl arena.
     try enum_obj.fields.ensureTotalCapacity(new_decl_arena_allocator, fields_len);
@@ -27932,7 +28043,6 @@ fn generateUnionTagTypeSimple(sema: *Sema, block: *Block, fields_len: usize, may
     enum_obj.* = .{
         .owner_decl = new_decl_index,
         .fields = .{},
-        .node_offset = 0,
     };
     // Here we pre-allocate the maps using the decl arena.
     try enum_obj.fields.ensureTotalCapacity(new_decl_arena_allocator, fields_len);
@@ -28243,7 +28353,7 @@ fn enumFieldSrcLoc(
         => tree.containerDeclArg(enum_node),
 
         // Container was constructed with `@Type`.
-        else => return LazySrcLoc.nodeOffset(node_offset),
+        else => return LazySrcLoc.nodeOffset(0),
     };
     var it_index: usize = 0;
     for (container_decl.ast.members) |member_node| {
