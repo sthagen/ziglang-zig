@@ -490,14 +490,6 @@ pub const Inst = struct {
         /// Merge two error sets into one, `E1 || E2`.
         /// Uses the `pl_node` field with payload `Bin`.
         merge_error_sets,
-        /// Given a reference to a function and a parameter index, returns the
-        /// type of the parameter. The only usage of this instruction is for the
-        /// result location of parameters of function calls. In the case of a function's
-        /// parameter type being `anytype`, it is the type coercion's job to detect this
-        /// scenario and skip the coercion, so that semantic analysis of this instruction
-        /// is not in a position where it must create an invalid type.
-        /// Uses the `param_type` union field.
-        param_type,
         /// Turns an R-Value into a const L-Value. In other words, it takes a value,
         /// stores it in a memory location, and returns a const pointer to it. If the value
         /// is `comptime`, the memory location is global static constant data. Otherwise,
@@ -1095,7 +1087,6 @@ pub const Inst = struct {
                 .mul,
                 .mulwrap,
                 .mul_sat,
-                .param_type,
                 .ref,
                 .shl,
                 .shl_sat,
@@ -1397,7 +1388,6 @@ pub const Inst = struct {
                 .mul,
                 .mulwrap,
                 .mul_sat,
-                .param_type,
                 .ref,
                 .shl,
                 .shl_sat,
@@ -1569,7 +1559,6 @@ pub const Inst = struct {
                 .mulwrap = .pl_node,
                 .mul_sat = .pl_node,
 
-                .param_type = .param_type,
                 .param = .pl_tok,
                 .param_comptime = .pl_tok,
                 .param_anytype = .str_tok,
@@ -2540,10 +2529,6 @@ pub const Inst = struct {
             /// Points to a `Block`.
             payload_index: u32,
         },
-        param_type: struct {
-            callee: Ref,
-            param_index: u32,
-        },
         @"unreachable": struct {
             /// Offset from Decl AST node index.
             /// `Tag` determines which kind of AST node this points to.
@@ -2614,7 +2599,6 @@ pub const Inst = struct {
             ptr_type,
             int_type,
             bool_br,
-            param_type,
             @"unreachable",
             @"break",
             switch_capture,
@@ -2794,7 +2778,9 @@ pub const Inst = struct {
     };
 
     /// Stored inside extra, with trailing arguments according to `args_len`.
-    /// Each argument is a `Ref`.
+    /// Implicit 0. arg_0_start: u32, // always same as `args_len`
+    /// 1. arg_end: u32, // for each `args_len`
+    /// arg_N_start is the same as arg_N-1_end
     pub const Call = struct {
         // Note: Flags *must* come first so that unusedResultExpr
         // can find it when it goes to modify them.
@@ -3099,13 +3085,16 @@ pub const Inst = struct {
     /// 0. src_node: i32, // if has_src_node
     /// 1. fields_len: u32, // if has_fields_len
     /// 2. decls_len: u32, // if has_decls_len
-    /// 3. decl_bits: u32 // for every 8 decls
+    /// 3. backing_int_body_len: u32, // if has_backing_int
+    /// 4. backing_int_ref: Ref, // if has_backing_int and backing_int_body_len is 0
+    /// 5. backing_int_body_inst: Inst, // if has_backing_int and backing_int_body_len is > 0
+    /// 6. decl_bits: u32 // for every 8 decls
     ///    - sets of 4 bits:
     ///      0b000X: whether corresponding decl is pub
     ///      0b00X0: whether corresponding decl is exported
     ///      0b0X00: whether corresponding decl has an align expression
     ///      0bX000: whether corresponding decl has a linksection or an address space expression
-    /// 4. decl: { // for every decls_len
+    /// 7. decl: { // for every decls_len
     ///        src_hash: [4]u32, // hash of source bytes
     ///        line: u32, // line number of decl, relative to parent
     ///        name: u32, // null terminated string index
@@ -3123,13 +3112,13 @@ pub const Inst = struct {
     ///            address_space: Ref,
     ///        }
     ///    }
-    /// 5. flags: u32 // for every 8 fields
+    /// 8. flags: u32 // for every 8 fields
     ///    - sets of 4 bits:
     ///      0b000X: whether corresponding field has an align expression
     ///      0b00X0: whether corresponding field has a default expression
     ///      0b0X00: whether corresponding field is comptime
     ///      0bX000: whether corresponding field has a type expression
-    /// 6. fields: { // for every fields_len
+    /// 9. fields: { // for every fields_len
     ///        field_name: u32,
     ///        doc_comment: u32, // 0 if no doc comment
     ///        field_type: Ref, // if corresponding bit is not set. none means anytype.
@@ -3137,7 +3126,7 @@ pub const Inst = struct {
     ///        align_body_len: u32, // if corresponding bit is set
     ///        init_body_len: u32, // if corresponding bit is set
     ///    }
-    /// 7. bodies: { // for every fields_len
+    /// 10. bodies: { // for every fields_len
     ///        field_type_body_inst: Inst, // for each field_type_body_len
     ///        align_body_inst: Inst, // for each align_body_len
     ///        init_body_inst: Inst, // for each init_body_len
@@ -3147,11 +3136,12 @@ pub const Inst = struct {
             has_src_node: bool,
             has_fields_len: bool,
             has_decls_len: bool,
+            has_backing_int: bool,
             known_non_opv: bool,
             known_comptime_only: bool,
             name_strategy: NameStrategy,
             layout: std.builtin.Type.ContainerLayout,
-            _: u7 = undefined,
+            _: u6 = undefined,
         };
     };
 

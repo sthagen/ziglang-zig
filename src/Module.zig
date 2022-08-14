@@ -84,7 +84,6 @@ string_literal_bytes: std.ArrayListUnmanaged(u8) = .{},
 /// The set of all the generic function instantiations. This is used so that when a generic
 /// function is called twice with the same comptime parameter arguments, both calls dispatch
 /// to the same function.
-/// TODO: remove functions from this set when they are destroyed.
 monomorphed_funcs: MonomorphedFuncsSet = .{},
 /// The set of all comptime function calls that have been cached so that future calls
 /// with the same parameters will get the same return value.
@@ -92,7 +91,6 @@ memoized_calls: MemoizedCallSet = .{},
 /// Contains the values from `@setAlignStack`. A sparse table is used here
 /// instead of a field of `Fn` because usage of `@setAlignStack` is rare, while
 /// functions are many.
-/// TODO: remove functions from this set when they are destroyed.
 align_stack_fns: std.AutoHashMapUnmanaged(*const Fn, SetAlignStack) = .{},
 
 /// We optimize memory usage for a compilation with no compile errors by storing the
@@ -560,6 +558,8 @@ pub const Decl = struct {
             gpa.destroy(extern_fn);
         }
         if (decl.getFunction()) |func| {
+            _ = mod.align_stack_fns.remove(func);
+            _ = mod.monomorphed_funcs.remove(func);
             func.deinit(gpa);
             gpa.destroy(func);
         }
@@ -895,6 +895,11 @@ pub const Struct = struct {
     zir_index: Zir.Inst.Index,
 
     layout: std.builtin.Type.ContainerLayout,
+    /// If the layout is not packed, this is the noreturn type.
+    /// If the layout is packed, this is the backing integer type of the packed struct.
+    /// Whether zig chooses this type or the user specifies it, it is stored here.
+    /// This will be set to the noreturn type until status is `have_layout`.
+    backing_int_ty: Type = Type.initTag(.noreturn),
     status: enum {
         none,
         field_types_wip,
@@ -1025,7 +1030,7 @@ pub const Struct = struct {
 
     pub fn packedFieldBitOffset(s: Struct, target: Target, index: usize) u16 {
         assert(s.layout == .Packed);
-        assert(s.haveFieldTypes());
+        assert(s.haveLayout());
         var bit_sum: u64 = 0;
         for (s.fields.values()) |field, i| {
             if (i == index) {
@@ -1033,19 +1038,7 @@ pub const Struct = struct {
             }
             bit_sum += field.ty.bitSize(target);
         }
-        return @intCast(u16, bit_sum);
-    }
-
-    pub fn packedIntegerBits(s: Struct, target: Target) u16 {
-        return s.packedFieldBitOffset(target, s.fields.count());
-    }
-
-    pub fn packedIntegerType(s: Struct, target: Target, buf: *Type.Payload.Bits) Type {
-        buf.* = .{
-            .base = .{ .tag = .int_unsigned },
-            .data = s.packedIntegerBits(target),
-        };
-        return Type.initPayload(&buf.base);
+        unreachable; // index out of bounds
     }
 };
 
@@ -4101,6 +4094,12 @@ pub fn ensureDeclAnalyzed(mod: *Module, decl_index: Decl.Index) SemaError!void {
             // The exports this Decl performs will be re-discovered, so we remove them here
             // prior to re-analysis.
             mod.deleteDeclExports(decl_index);
+
+            // Similarly, `@setAlignStack` invocations will be re-discovered.
+            if (decl.getFunction()) |func| {
+                _ = mod.align_stack_fns.remove(func);
+            }
+
             // Dependencies will be re-discovered, so we remove them here prior to re-analysis.
             for (decl.dependencies.keys()) |dep_index| {
                 const dep = mod.declPtr(dep_index);
