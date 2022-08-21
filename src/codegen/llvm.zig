@@ -273,7 +273,7 @@ pub const Object = struct {
         var di_compile_unit: ?*llvm.DICompileUnit = null;
 
         if (!options.strip) {
-            switch (options.object_format) {
+            switch (options.target.ofmt) {
                 .coff => llvm_module.addModuleCodeViewFlag(),
                 else => llvm_module.addModuleDebugInfoFlag(),
             }
@@ -711,9 +711,14 @@ pub const Object = struct {
             DeclGen.removeFnAttr(llvm_func, "noinline");
         }
 
-        // TODO: port these over from stage1
-        // addLLVMFnAttr(llvm_fn, "sspstrong");
-        // addLLVMFnAttrStr(llvm_fn, "stack-protector-buffer-size", "4");
+        // TODO: disable this if safety is off for the function scope
+        const ssp_buf_size = module.comp.bin_file.options.stack_protector;
+        if (ssp_buf_size != 0) {
+            var buf: [12]u8 = undefined;
+            const arg = std.fmt.bufPrintZ(&buf, "{d}", .{ssp_buf_size}) catch unreachable;
+            dg.addFnAttr(llvm_func, "sspstrong");
+            dg.addFnAttrString(llvm_func, "stack-protector-buffer-size", arg);
+        }
 
         // TODO: disable this if safety is off for the function scope
         if (module.comp.bin_file.options.stack_check) {
@@ -1098,6 +1103,7 @@ pub const Object = struct {
             }
             llvm_global.setUnnamedAddr(.False);
             llvm_global.setLinkage(.External);
+            if (module.wantDllExports()) llvm_global.setDLLStorageClass(.Default);
             if (self.di_map.get(decl)) |di_node| {
                 if (try decl.isFunction()) {
                     const di_func = @ptrCast(*llvm.DISubprogram, di_node);
@@ -1123,6 +1129,7 @@ pub const Object = struct {
             const exp_name = exports[0].options.name;
             llvm_global.setValueName2(exp_name.ptr, exp_name.len);
             llvm_global.setUnnamedAddr(.False);
+            if (module.wantDllExports()) llvm_global.setDLLStorageClass(.DLLExport);
             if (self.di_map.get(decl)) |di_node| {
                 if (try decl.isFunction()) {
                     const di_func = @ptrCast(*llvm.DISubprogram, di_node);
@@ -1182,6 +1189,7 @@ pub const Object = struct {
             defer module.gpa.free(fqn);
             llvm_global.setValueName2(fqn.ptr, fqn.len);
             llvm_global.setLinkage(.Internal);
+            if (module.wantDllExports()) llvm_global.setDLLStorageClass(.Default);
             llvm_global.setUnnamedAddr(.True);
             if (decl.val.castTag(.variable)) |variable| {
                 const single_threaded = module.comp.bin_file.options.single_threaded;
@@ -1841,6 +1849,7 @@ pub const Object = struct {
                 }
 
                 const fields = ty.structFields();
+                const layout = ty.containerLayout();
 
                 var di_fields: std.ArrayListUnmanaged(*llvm.DIType) = .{};
                 defer di_fields.deinit(gpa);
@@ -1854,7 +1863,7 @@ pub const Object = struct {
                     if (field.is_comptime or !field.ty.hasRuntimeBitsIgnoreComptime()) continue;
 
                     const field_size = field.ty.abiSize(target);
-                    const field_align = field.normalAlignment(target);
+                    const field_align = field.alignment(target, layout);
                     const field_offset = std.mem.alignForwardGeneric(u64, offset, field_align);
                     offset = field_offset + field_size;
 
@@ -2757,7 +2766,7 @@ pub const DeclGen = struct {
                 for (struct_obj.fields.values()) |field| {
                     if (field.is_comptime or !field.ty.hasRuntimeBitsIgnoreComptime()) continue;
 
-                    const field_align = field.normalAlignment(target);
+                    const field_align = field.alignment(target, struct_obj.layout);
                     const field_ty_align = field.ty.abiAlignment(target);
                     any_underaligned_fields = any_underaligned_fields or
                         field_align < field_ty_align;
@@ -3433,7 +3442,7 @@ pub const DeclGen = struct {
                 for (struct_obj.fields.values()) |field, i| {
                     if (field.is_comptime or !field.ty.hasRuntimeBitsIgnoreComptime()) continue;
 
-                    const field_align = field.normalAlignment(target);
+                    const field_align = field.alignment(target, struct_obj.layout);
                     big_align = @maximum(big_align, field_align);
                     const prev_offset = offset;
                     offset = std.mem.alignForwardGeneric(u64, offset, field_align);
@@ -4247,6 +4256,7 @@ pub const FuncGen = struct {
                 .prefetch       => try self.airPrefetch(inst),
 
                 .is_named_enum_value => try self.airIsNamedEnumValue(inst),
+                .error_set_has_value => try self.airErrorSetHasValue(inst),
 
                 .reduce           => try self.airReduce(inst, false),
                 .reduce_optimized => try self.airReduce(inst, true),
@@ -7983,6 +7993,53 @@ pub const FuncGen = struct {
         }
     }
 
+    fn airErrorSetHasValue(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
+        if (self.liveness.isUnused(inst)) return null;
+
+        const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+        const operand = try self.resolveInst(ty_op.operand);
+        const error_set_ty = self.air.getRefType(ty_op.ty);
+
+        const names = error_set_ty.errorSetNames();
+        const valid_block = self.dg.context.appendBasicBlock(self.llvm_func, "Valid");
+        const invalid_block = self.dg.context.appendBasicBlock(self.llvm_func, "Invalid");
+        const end_block = self.context.appendBasicBlock(self.llvm_func, "End");
+        const switch_instr = self.builder.buildSwitch(operand, invalid_block, @intCast(c_uint, names.len));
+
+        for (names) |name| {
+            const err_int = self.dg.module.global_error_set.get(name).?;
+            const this_tag_int_value = int: {
+                var tag_val_payload: Value.Payload.U64 = .{
+                    .base = .{ .tag = .int_u64 },
+                    .data = err_int,
+                };
+                break :int try self.dg.lowerValue(.{
+                    .ty = Type.err_int,
+                    .val = Value.initPayload(&tag_val_payload.base),
+                });
+            };
+            switch_instr.addCase(this_tag_int_value, valid_block);
+        }
+        self.builder.positionBuilderAtEnd(valid_block);
+        _ = self.builder.buildBr(end_block);
+
+        self.builder.positionBuilderAtEnd(invalid_block);
+        _ = self.builder.buildBr(end_block);
+
+        self.builder.positionBuilderAtEnd(end_block);
+
+        const llvm_type = self.dg.context.intType(1);
+        const incoming_values: [2]*const llvm.Value = .{
+            llvm_type.constInt(1, .False), llvm_type.constInt(0, .False),
+        };
+        const incoming_blocks: [2]*const llvm.BasicBlock = .{
+            valid_block, invalid_block,
+        };
+        const phi_node = self.builder.buildPhi(llvm_type, "");
+        phi_node.addIncoming(&incoming_values, &incoming_blocks, 2);
+        return phi_node;
+    }
+
     fn airIsNamedEnumValue(self: *FuncGen, inst: Air.Inst.Index) !?*const llvm.Value {
         if (self.liveness.isUnused(inst)) return null;
 
@@ -9328,13 +9385,14 @@ fn llvmFieldIndex(
         }
         return null;
     }
-    assert(ty.containerLayout() != .Packed);
+    const layout = ty.containerLayout();
+    assert(layout != .Packed);
 
     var llvm_field_index: c_uint = 0;
     for (ty.structFields().values()) |field, i| {
         if (field.is_comptime or !field.ty.hasRuntimeBitsIgnoreComptime()) continue;
 
-        const field_align = field.normalAlignment(target);
+        const field_align = field.alignment(target, layout);
         big_align = @maximum(big_align, field_align);
         const prev_offset = offset;
         offset = std.mem.alignForwardGeneric(u64, offset, field_align);
