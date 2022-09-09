@@ -1349,6 +1349,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation, prog_node: *std.Progress.Node) !v
         man.hash.addOptionalBytes(self.base.options.soname);
         man.hash.addOptional(self.base.options.version);
         link.hashAddSystemLibs(&man.hash, self.base.options.system_libs);
+        man.hash.addListOfBytes(self.base.options.force_undefined_symbols.keys());
         man.hash.add(allow_shlib_undefined);
         man.hash.add(self.base.options.bind_global_refs_locally);
         man.hash.add(self.base.options.compress_debug_sections);
@@ -1448,6 +1449,11 @@ fn linkWithLLD(self: *Elf, comp: *Compilation, prog_node: *std.Progress.Node) !v
             try argv.append(entry);
         }
 
+        for (self.base.options.force_undefined_symbols.keys()) |symbol| {
+            try argv.append("-u");
+            try argv.append(symbol);
+        }
+
         switch (self.base.options.hash_style) {
             .gnu => try argv.append("--hash-style=gnu"),
             .sysv => try argv.append("--hash-style=sysv"),
@@ -1474,6 +1480,18 @@ fn linkWithLLD(self: *Elf, comp: *Compilation, prog_node: *std.Progress.Node) !v
 
         if (gc_sections) {
             try argv.append("--gc-sections");
+        }
+
+        if (self.base.options.print_gc_sections) {
+            try argv.append("--print-gc-sections");
+        }
+
+        if (self.base.options.print_icf_sections) {
+            try argv.append("--print-icf-sections");
+        }
+
+        if (self.base.options.print_map) {
+            try argv.append("--print-map");
         }
 
         if (self.base.options.eh_frame_hdr) {

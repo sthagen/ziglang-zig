@@ -166,6 +166,9 @@ pub const Options = struct {
     version_script: ?[]const u8,
     soname: ?[]const u8,
     llvm_cpu_features: ?[*:0]const u8,
+    print_gc_sections: bool,
+    print_icf_sections: bool,
+    print_map: bool,
 
     objects: []Compilation.LinkObject,
     framework_dirs: []const []const u8,
@@ -174,6 +177,12 @@ pub const Options = struct {
     wasi_emulated_libs: []const wasi_libc.CRTFile,
     lib_dirs: []const []const u8,
     rpath_list: []const []const u8,
+
+    /// List of symbols forced as undefined in the symbol table
+    /// thus forcing their resolution by the linker.
+    /// Corresponds to `-u <symbol>` for ELF and `/include:<symbol>` for COFF/PE.
+    /// TODO add handling for MachO.
+    force_undefined_symbols: std.StringArrayHashMapUnmanaged(void),
 
     version: ?std.builtin.Version,
     compatibility_version: ?std.builtin.Version,
@@ -239,8 +248,8 @@ pub const File = struct {
 
     pub const LinkBlock = union {
         elf: Elf.TextBlock,
-        coff: Coff.TextBlock,
-        macho: MachO.TextBlock,
+        coff: Coff.Atom,
+        macho: MachO.Atom,
         plan9: Plan9.DeclBlock,
         c: void,
         wasm: Wasm.DeclBlock,
@@ -261,7 +270,7 @@ pub const File = struct {
 
     pub const Export = union {
         elf: Elf.Export,
-        coff: void,
+        coff: Coff.Export,
         macho: MachO.Export,
         plan9: Plan9.Export,
         c: void,
@@ -420,7 +429,7 @@ pub const File = struct {
         NoSpaceLeft,
         Unseekable,
         PermissionDenied,
-        FileBusy,
+        SwapFile,
         SystemResources,
         OperationAborted,
         BrokenPipe,
@@ -467,7 +476,7 @@ pub const File = struct {
         log.debug("getGlobalSymbol '{s}'", .{name});
         switch (base.tag) {
             // zig fmt: off
-            .coff  => unreachable,
+            .coff  => return @fieldParentPtr(Coff, "base", base).getGlobalSymbol(name),
             .elf   => unreachable,
             .macho => return @fieldParentPtr(MachO, "base", base).getGlobalSymbol(name),
             .plan9 => unreachable,
@@ -925,9 +934,10 @@ pub const File = struct {
             std.debug.print("\n", .{});
         }
 
-        const llvm = @import("codegen/llvm/bindings.zig");
-        const os_type = @import("target.zig").osToLLVM(base.options.target.os.tag);
-        const bad = llvm.WriteArchive(full_out_path_z, object_files.items.ptr, object_files.items.len, os_type);
+        const llvm_bindings = @import("codegen/llvm/bindings.zig");
+        const llvm = @import("codegen/llvm.zig");
+        const os_tag = llvm.targetOs(base.options.target.os.tag);
+        const bad = llvm_bindings.WriteArchive(full_out_path_z, object_files.items.ptr, object_files.items.len, os_tag);
         if (bad) return error.UnableToWriteArchive;
 
         if (!base.options.disable_lld_caching) {

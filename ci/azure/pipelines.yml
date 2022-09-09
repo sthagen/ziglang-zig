@@ -10,24 +10,13 @@ jobs:
   - script: ci/azure/macos_script
     name: main
     displayName: 'Build and test'
-- job: BuildMacOS_arm64
-  pool:
-    vmImage: 'macOS-11'
-  timeoutInMinutes: 180
-  steps:
-  - task: DownloadSecureFile@1
-    inputs:
-      secureFile: s3cfg
-  - script: ci/azure/macos_arm64_script
-    name: main
-    displayName: 'Build'
 - job: BuildWindows
   timeoutInMinutes: 360
   pool:
     vmImage: 'windows-2019'
   variables:
     TARGET: 'x86_64-windows-gnu'
-    ZIG_LLVM_CLANG_LLD_NAME: 'zig+llvm+lld+clang-${{ variables.TARGET }}-0.10.0-dev.3653+7152a58c1'
+    ZIG_LLVM_CLANG_LLD_NAME: 'zig+llvm+lld+clang-${{ variables.TARGET }}-0.10.0-dev.3733+a9af47272'
     ZIG_LLVM_CLANG_LLD_URL: 'https://ziglang.org/deps/${{ variables.ZIG_LLVM_CLANG_LLD_NAME }}.zip'
   steps:
   - pwsh: |
@@ -72,6 +61,7 @@ jobs:
 
   - pwsh: |
       Set-Variable -Name ZIGINSTALLDIR -Value "$(Get-Location)\stage3-release"
+      Set-Variable -Name ZIGPREFIXPATH -Value "$(Get-Location)\$(ZIG_LLVM_CLANG_LLD_NAME)"
 
       function CheckLastExitCode {
         if (!$?) {
@@ -83,8 +73,7 @@ jobs:
       & "$ZIGINSTALLDIR\bin\zig.exe" build test docs `
         --search-prefix "$ZIGPREFIXPATH" `
         -Dstatic-llvm `
-        -Dskip-non-native `
-        -Dskip-stage2-tests
+        -Dskip-non-native
       CheckLastExitCode
     name: test
     displayName: 'Test'
@@ -155,7 +144,6 @@ jobs:
 - job: OnMasterSuccess
   dependsOn:
   - BuildMacOS
-  - BuildMacOS_arm64
   - BuildWindows
   condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
   strategy:

@@ -108,6 +108,14 @@ const test_targets = blk: {
             },
             .backend = .stage2_x86_64,
         },
+        .{
+            .target = .{
+                .cpu_arch = .x86_64,
+                .os_tag = .windows,
+                .abi = .gnu,
+            },
+            .backend = .stage2_x86_64,
+        },
 
         .{
             .target = .{
@@ -632,8 +640,9 @@ pub fn addPkgTests(
 
         if (test_target.backend) |backend| switch (backend) {
             .stage1 => if (skip_stage1) continue,
+            .stage2_llvm => {},
             else => if (skip_stage2) continue,
-        } else if (skip_stage2) continue;
+        };
 
         const want_this_mode = for (modes) |m| {
             if (m == test_target.mode) break true;
@@ -692,6 +701,8 @@ pub fn addPkgTests(
             else => {
                 these_tests.use_stage1 = false;
                 these_tests.use_llvm = false;
+                // TODO: force self-hosted linkers to avoid LLD creeping in until the auto-select mechanism deems them worthy
+                these_tests.use_lld = false;
             },
         };
 

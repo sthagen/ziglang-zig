@@ -26,7 +26,7 @@ const trace = @import("../tracy.zig").trace;
 const Air = @import("../Air.zig");
 const Allocator = mem.Allocator;
 const Archive = @import("MachO/Archive.zig");
-const Atom = @import("MachO/Atom.zig");
+pub const Atom = @import("MachO/Atom.zig");
 const Cache = @import("../Cache.zig");
 const CodeSignature = @import("MachO/CodeSignature.zig");
 const Compilation = @import("../Compilation.zig");
@@ -44,7 +44,6 @@ const Type = @import("../type.zig").Type;
 const TypedValue = @import("../TypedValue.zig");
 const Value = @import("../value.zig").Value;
 
-pub const TextBlock = Atom;
 pub const DebugSymbols = @import("MachO/DebugSymbols.zig");
 
 pub const base_tag: File.Tag = File.Tag.macho;
@@ -794,11 +793,13 @@ fn linkOneShot(self: *MachO, comp: *Compilation, prog_node: *std.Progress.Node) 
         }
     } else {
         const sub_path = self.base.options.emit.?.sub_path;
-        self.base.file = try directory.handle.createFile(sub_path, .{
-            .truncate = true,
-            .read = true,
-            .mode = link.determineMode(self.base.options),
-        });
+        if (self.base.file == null) {
+            self.base.file = try directory.handle.createFile(sub_path, .{
+                .truncate = true,
+                .read = true,
+                .mode = link.determineMode(self.base.options),
+            });
+        }
         // Index 0 is always a null symbol.
         try self.locals.append(gpa, .{
             .n_strx = 0,
@@ -1156,6 +1157,29 @@ fn linkOneShot(self: *MachO, comp: *Compilation, prog_node: *std.Progress.Node) 
         var ncmds: u32 = 0;
 
         try self.writeLinkeditSegmentData(&ncmds, lc_writer);
+
+        // If the last section of __DATA segment is zerofill section, we need to ensure
+        // that the free space between the end of the last non-zerofill section of __DATA
+        // segment and the beginning of __LINKEDIT segment is zerofilled as the loader will
+        // copy-paste this space into memory for quicker zerofill operation.
+        if (self.data_segment_cmd_index) |data_seg_id| blk: {
+            var physical_zerofill_start: u64 = 0;
+            const section_indexes = self.getSectionIndexes(data_seg_id);
+            for (self.sections.items(.header)[section_indexes.start..section_indexes.end]) |header| {
+                if (header.isZerofill() and header.size > 0) break;
+                physical_zerofill_start = header.offset + header.size;
+            } else break :blk;
+            const linkedit = self.segments.items[self.linkedit_segment_cmd_index.?];
+            const physical_zerofill_size = math.cast(usize, linkedit.fileoff - physical_zerofill_start) orelse
+                return error.Overflow;
+            if (physical_zerofill_size > 0) {
+                var padding = try self.base.allocator.alloc(u8, physical_zerofill_size);
+                defer self.base.allocator.free(padding);
+                mem.set(u8, padding, 0);
+                try self.base.file.?.pwriteAll(padding, physical_zerofill_start);
+            }
+        }
+
         try writeDylinkerLC(&ncmds, lc_writer);
         try self.writeMainLC(&ncmds, lc_writer);
         try self.writeDylibIdLC(&ncmds, lc_writer);
@@ -1436,7 +1460,6 @@ fn parseArchive(self: *MachO, path: []const u8, force_load: bool) !bool {
 
     if (force_load) {
         defer archive.deinit(gpa);
-        defer file.close();
         // Get all offsets from the ToC
         var offsets = std.AutoArrayHashMap(u32, void).init(gpa);
         defer offsets.deinit();
@@ -3085,15 +3108,6 @@ pub fn deinit(self: *MachO) void {
     }
 
     self.atom_by_index_table.deinit(gpa);
-}
-
-pub fn closeFiles(self: MachO) void {
-    for (self.archives.items) |archive| {
-        archive.file.close();
-    }
-    if (self.d_sym) |ds| {
-        ds.file.close();
-    }
 }
 
 fn freeAtom(self: *MachO, atom: *Atom, sect_id: u8, owns_atom: bool) void {
@@ -5699,8 +5713,10 @@ fn writeHeader(self: *MachO, ncmds: u32, sizeofcmds: u32) !void {
         else => unreachable,
     }
 
-    if (self.getSectionByName("__DATA", "__thread_vars")) |_| {
-        header.flags |= macho.MH_HAS_TLV_DESCRIPTORS;
+    if (self.getSectionByName("__DATA", "__thread_vars")) |sect_id| {
+        if (self.sections.items(.header)[sect_id].size > 0) {
+            header.flags |= macho.MH_HAS_TLV_DESCRIPTORS;
+        }
     }
 
     header.ncmds = ncmds;
@@ -5861,8 +5877,9 @@ pub fn generateSymbolStabs(
         },
         else => |e| return e,
     };
-    const tu_name = try compile_unit.die.getAttrString(&debug_info, dwarf.AT.name);
-    const tu_comp_dir = try compile_unit.die.getAttrString(&debug_info, dwarf.AT.comp_dir);
+
+    const tu_name = try compile_unit.die.getAttrString(&debug_info, dwarf.AT.name, debug_info.debug_str, compile_unit.*);
+    const tu_comp_dir = try compile_unit.die.getAttrString(&debug_info, dwarf.AT.comp_dir, debug_info.debug_str, compile_unit.*);
 
     // Open scope
     try locals.ensureUnusedCapacity(3);

@@ -18,7 +18,6 @@ const Dwarf = @import("../Dwarf.zig");
 const MachO = @import("../MachO.zig");
 const Module = @import("../../Module.zig");
 const StringTable = @import("../strtab.zig").StringTable;
-const TextBlock = MachO.TextBlock;
 const Type = @import("../../type.zig").Type;
 
 base: *MachO,
@@ -307,6 +306,7 @@ pub fn flushModule(self: *DebugSymbols, allocator: Allocator, options: link.Opti
 }
 
 pub fn deinit(self: *DebugSymbols, allocator: Allocator) void {
+    self.file.close();
     self.segments.deinit(allocator);
     self.sections.deinit(allocator);
     self.dwarf.deinit();

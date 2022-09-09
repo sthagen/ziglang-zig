@@ -878,6 +878,9 @@ pub const InitOptions = struct {
     linker_shared_memory: bool = false,
     linker_global_base: ?u64 = null,
     linker_export_symbol_names: []const []const u8 = &.{},
+    linker_print_gc_sections: bool = false,
+    linker_print_icf_sections: bool = false,
+    linker_print_map: bool = false,
     each_lib_rpath: ?bool = null,
     build_id: ?bool = null,
     disable_c_depfile: bool = false,
@@ -1127,7 +1130,6 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                 link_eh_frame_hdr or
                 options.link_emit_relocs or
                 options.output_mode == .Lib or
-                options.image_base_override != null or
                 options.linker_script != null or options.version_script != null or
                 options.emit_implib != null or
                 build_id)
@@ -1164,9 +1166,6 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                 // See https://github.com/ziglang/zig/issues/8680
                 break :blk false;
             } else if (options.c_source_files.len == 0) {
-                break :blk false;
-            } else if (options.target.os.tag == .windows and link_libcpp) {
-                // https://github.com/ziglang/zig/issues/8531
                 break :blk false;
             } else if (options.target.cpu.arch.isRISCV()) {
                 // Clang and LLVM currently don't support RISC-V target-abi for LTO.
@@ -1731,6 +1730,9 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .shared_memory = options.linker_shared_memory,
             .global_base = options.linker_global_base,
             .export_symbol_names = options.linker_export_symbol_names,
+            .print_gc_sections = options.linker_print_gc_sections,
+            .print_icf_sections = options.linker_print_icf_sections,
+            .print_map = options.linker_print_map,
             .z_nodelete = options.linker_z_nodelete,
             .z_notext = options.linker_z_notext,
             .z_defs = options.linker_z_defs,
@@ -1793,6 +1795,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .headerpad_size = options.headerpad_size,
             .headerpad_max_install_names = options.headerpad_max_install_names,
             .dead_strip_dylibs = options.dead_strip_dylibs,
+            .force_undefined_symbols = .{},
         });
         errdefer bin_file.destroy();
         comp.* = .{
@@ -1943,6 +1946,10 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             for (mingw.always_link_libs) |name| {
                 try comp.bin_file.options.system_libs.put(comp.gpa, name, .{});
             }
+
+            // LLD might drop some symbols as unused during LTO and GCing, therefore,
+            // we force mark them for resolution here.
+            try comp.bin_file.options.force_undefined_symbols.put(comp.gpa, "_tls_index", {});
         }
         // Generate Windows import libs.
         if (target.os.tag == .windows) {
@@ -2514,6 +2521,7 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
     man.hash.addOptionalBytes(comp.bin_file.options.soname);
     man.hash.addOptional(comp.bin_file.options.version);
     link.hashAddSystemLibs(&man.hash, comp.bin_file.options.system_libs);
+    man.hash.addListOfBytes(comp.bin_file.options.force_undefined_symbols.keys());
     man.hash.addOptional(comp.bin_file.options.allow_shlib_undefined);
     man.hash.add(comp.bin_file.options.bind_global_refs_locally);
     man.hash.add(comp.bin_file.options.tsan);
@@ -3753,22 +3761,67 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: *std.P
         };
         const o_basename = try std.fmt.allocPrint(arena, "{s}{s}", .{ o_basename_noext, out_ext });
 
+        try argv.appendSlice(&[_][]const u8{
+            self_exe_path,
+            "clang",
+            c_object.src.src_path,
+        });
+
+        const ext = classifyFileExt(c_object.src.src_path);
+
+        // When all these flags are true, it means that the entire purpose of
+        // this compilation is to perform a single zig cc operation. This means
+        // that we could "tail call" clang by doing an execve, and any use of
+        // the caching system would actually be problematic since the user is
+        // presumably doing their own caching by using dep file flags.
+        if (std.process.can_execv and direct_o and
+            comp.disable_c_depfile and comp.clang_passthrough_mode)
+        {
+            try comp.addCCArgs(arena, &argv, ext, null);
+            try argv.appendSlice(c_object.src.extra_flags);
+
+            const out_obj_path = if (comp.bin_file.options.emit) |emit|
+                try emit.directory.join(arena, &.{emit.sub_path})
+            else
+                "/dev/null";
+
+            try argv.ensureUnusedCapacity(5);
+            switch (comp.clang_preprocessor_mode) {
+                .no => argv.appendSliceAssumeCapacity(&[_][]const u8{ "-c", "-o", out_obj_path }),
+                .yes => argv.appendSliceAssumeCapacity(&[_][]const u8{ "-E", "-o", out_obj_path }),
+                .stdout => argv.appendAssumeCapacity("-E"),
+            }
+
+            if (comp.emit_asm != null) {
+                argv.appendAssumeCapacity("-S");
+            } else if (comp.emit_llvm_ir != null) {
+                argv.appendSliceAssumeCapacity(&[_][]const u8{ "-emit-llvm", "-S" });
+            } else if (comp.emit_llvm_bc != null) {
+                argv.appendAssumeCapacity("-emit-llvm");
+            }
+
+            if (comp.verbose_cc) {
+                dump_argv(argv.items);
+            }
+
+            const err = std.process.execv(arena, argv.items);
+            fatal("unable to execv clang: {s}", .{@errorName(err)});
+        }
+
         // We can't know the digest until we do the C compiler invocation,
         // so we need a temporary filename.
         const out_obj_path = try comp.tmpFilePath(arena, o_basename);
         var zig_cache_tmp_dir = try comp.local_cache_directory.handle.makeOpenPath("tmp", .{});
         defer zig_cache_tmp_dir.close();
 
-        try argv.appendSlice(&[_][]const u8{ self_exe_path, "clang" });
-
-        const ext = classifyFileExt(c_object.src.src_path);
         const out_dep_path: ?[]const u8 = if (comp.disable_c_depfile or !ext.clangSupportsDepFile())
             null
         else
             try std.fmt.allocPrint(arena, "{s}.d", .{out_obj_path});
         try comp.addCCArgs(arena, &argv, ext, out_dep_path);
+        try argv.appendSlice(c_object.src.extra_flags);
 
-        try argv.ensureUnusedCapacity(6 + c_object.src.extra_flags.len);
+        try argv.ensureUnusedCapacity(5);
         switch (comp.clang_preprocessor_mode) {
             .no => argv.appendSliceAssumeCapacity(&[_][]const u8{ "-c", "-o", out_obj_path }),
             .yes => argv.appendSliceAssumeCapacity(&[_][]const u8{ "-E", "-o", out_obj_path }),
@@ -3783,8 +3836,6 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: *std.P
                 argv.appendAssumeCapacity("-emit-llvm");
             }
         }
-        argv.appendAssumeCapacity(c_object.src.src_path);
-        argv.appendSliceAssumeCapacity(c_object.src.extra_flags);
 
         if (comp.verbose_cc) {
             dump_argv(argv.items);
@@ -4085,10 +4136,10 @@ pub fn addCCArgs(
             }
 
             if (!comp.bin_file.options.strip) {
-                try argv.append("-g");
                 switch (target.ofmt) {
                     .coff => try argv.append("-gcodeview"),
-                    else => {},
+                    .elf, .macho => try argv.append("-gdwarf-4"),
+                    else => try argv.append("-g"),
                 }
             }
 
@@ -4721,6 +4772,24 @@ pub fn dump_argv(argv: []const []const u8) void {
     std.debug.print("{s}\n", .{argv[argv.len - 1]});
 }
 
+pub fn getZigBackend(comp: Compilation) std.builtin.CompilerBackend {
+    const use_stage1 = build_options.have_stage1 and comp.bin_file.options.use_stage1;
+    if (use_stage1) return .stage1;
+    if (build_options.have_llvm and comp.bin_file.options.use_llvm) return .stage2_llvm;
+    const target = comp.bin_file.options.target;
+    if (target.ofmt == .c) return .stage2_c;
+    return switch (target.cpu.arch) {
+        .wasm32, .wasm64 => std.builtin.CompilerBackend.stage2_wasm,
+        .arm, .armeb, .thumb, .thumbeb => .stage2_arm,
+        .x86_64 => .stage2_x86_64,
+        .i386 => .stage2_x86,
+        .aarch64, .aarch64_be, .aarch64_32 => .stage2_aarch64,
+        .riscv64 => .stage2_riscv64,
+        .sparc64 => .stage2_sparc64,
+        else => .other,
+    };
+}
+
 pub fn generateBuiltinZigSource(comp: *Compilation, allocator: Allocator) Allocator.Error![:0]u8 {
     const tracy_trace = trace(@src());
     defer tracy_trace.end();
@@ -4730,23 +4799,7 @@ pub fn generateBuiltinZigSource(comp: *Compilation, allocator: Allocator) Alloca
 
     const target = comp.getTarget();
     const generic_arch_name = target.cpu.arch.genericName();
-    const use_stage1 = build_options.have_stage1 and comp.bin_file.options.use_stage1;
-
-    const zig_backend: std.builtin.CompilerBackend = blk: {
-        if (use_stage1) break :blk .stage1;
-        if (build_options.have_llvm and comp.bin_file.options.use_llvm) break :blk .stage2_llvm;
-        if (target.ofmt == .c) break :blk .stage2_c;
-        break :blk switch (target.cpu.arch) {
-            .wasm32, .wasm64 => std.builtin.CompilerBackend.stage2_wasm,
-            .arm, .armeb, .thumb, .thumbeb => .stage2_arm,
-            .x86_64 => .stage2_x86_64,
-            .i386 => .stage2_x86,
-            .aarch64, .aarch64_be, .aarch64_32 => .stage2_aarch64,
-            .riscv64 => .stage2_riscv64,
-            .sparc64 => .stage2_sparc64,
-            else => .other,
-        };
-    };
+    const zig_backend = comp.getZigBackend();
 
     @setEvalBranchQuota(4000);
     try buffer.writer().print(

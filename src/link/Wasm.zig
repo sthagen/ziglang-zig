@@ -67,6 +67,18 @@ code_section_index: ?u32 = null,
 debug_info_index: ?u32 = null,
 /// The index of the segment representing the custom '.debug_line' section.
 debug_line_index: ?u32 = null,
+/// The index of the segment representing the custom '.debug_loc' section.
+debug_loc_index: ?u32 = null,
+/// The index of the segment representing the custom '.debug_ranges' section.
+debug_ranges_index: ?u32 = null,
+/// The index of the segment representing the custom '.debug_pubnames' section.
+debug_pubnames_index: ?u32 = null,
+/// The index of the segment representing the custom '.debug_pubtypes' section.
+debug_pubtypes_index: ?u32 = null,
+/// The index of the segment representing the custom '.debug_pubtypes' section.
+debug_str_index: ?u32 = null,
+/// The index of the segment representing the custom '.debug_pubtypes' section.
+debug_abbrev_index: ?u32 = null,
 /// The count of imported functions. This number will be appended
 /// to the function indexes as their index starts at the lowest non-extern function.
 imported_functions_count: u32 = 0,
@@ -83,23 +95,14 @@ imports: std.AutoHashMapUnmanaged(SymbolLoc, types.Import) = .{},
 segments: std.ArrayListUnmanaged(Segment) = .{},
 /// Maps a data segment key (such as .rodata) to the index into `segments`.
 data_segments: std.StringArrayHashMapUnmanaged(u32) = .{},
-/// A list of `types.Segment` which provide meta data
-/// about a data symbol such as its name
-segment_info: std.ArrayListUnmanaged(types.Segment) = .{},
+/// A table of `types.Segment` which provide meta data
+/// about a data symbol such as its name where the key is
+/// the segment index, which can be found from `data_segments`
+segment_info: std.AutoArrayHashMapUnmanaged(u32, types.Segment) = .{},
 /// Deduplicated string table for strings used by symbols, imports and exports.
 string_table: StringTable = .{},
 /// Debug information for wasm
 dwarf: ?Dwarf = null,
-
-// *debug information* //
-/// Contains all bytes for the '.debug_info' section
-debug_info: std.ArrayListUnmanaged(u8) = .{},
-/// Contains all bytes for the '.debug_line' section
-debug_line: std.ArrayListUnmanaged(u8) = .{},
-/// Contains all bytes for the '.debug_abbrev' section
-debug_abbrev: std.ArrayListUnmanaged(u8) = .{},
-/// Contains all bytes for the '.debug_ranges' section
-debug_aranges: std.ArrayListUnmanaged(u8) = .{},
 
 // Output sections
 /// Output type section
@@ -156,6 +159,19 @@ export_names: std.AutoHashMapUnmanaged(SymbolLoc, u32) = .{},
 /// The actual table is populated during `flush`.
 error_table_symbol: ?u32 = null,
 
+// Debug section atoms. These are only set when the current compilation
+// unit contains Zig code. The lifetime of these atoms are extended
+// until the end of the compiler's lifetime. Meaning they're not freed
+// during `flush()` in incremental-mode.
+debug_info_atom: ?*Atom = null,
+debug_line_atom: ?*Atom = null,
+debug_loc_atom: ?*Atom = null,
+debug_ranges_atom: ?*Atom = null,
+debug_abbrev_atom: ?*Atom = null,
+debug_str_atom: ?*Atom = null,
+debug_pubnames_atom: ?*Atom = null,
+debug_pubtypes_atom: ?*Atom = null,
+
 pub const Segment = struct {
     alignment: u32,
     size: u32,
@@ -208,6 +224,18 @@ pub const SymbolLoc = struct {
             return object.string_table.get(object.symtable[self.index].name);
         }
         return wasm_bin.string_table.get(wasm_bin.symbols.items[self.index].name);
+    }
+
+    /// From a given symbol location, returns the final location.
+    /// e.g. when a symbol was resolved and replaced by the symbol
+    /// in a different file, this will return said location.
+    /// If the symbol wasn't replaced by another, this will return
+    /// the given location itself.
+    pub fn finalLoc(self: SymbolLoc, wasm_bin: *const Wasm) SymbolLoc {
+        if (wasm_bin.discarded.get(self)) |new_loc| {
+            return new_loc.finalLoc(wasm_bin);
+        }
+        return self;
     }
 };
 
@@ -335,6 +363,7 @@ pub fn openPath(allocator: Allocator, sub_path: []const u8, options: link.Option
         };
     }
 
+    try wasm_bin.initDebugSections();
     return wasm_bin;
 }
 
@@ -363,6 +392,24 @@ pub fn createEmpty(gpa: Allocator, options: link.Options) !*Wasm {
     return self;
 }
 
+/// Initializes symbols and atoms for the debug sections
+/// Initialization is only done when compiling Zig code.
+/// When Zig is invoked as a linker instead, the atoms
+/// and symbols come from the object files instead.
+pub fn initDebugSections(self: *Wasm) !void {
+    if (self.dwarf == null) return; // not compiling Zig code, so no need to pre-initialize debug sections
+    assert(self.debug_info_index == null);
+    // this will create an Atom and set the index for us.
+    self.debug_info_atom = try self.createDebugSectionForIndex(&self.debug_info_index, ".debug_info");
+    self.debug_line_atom = try self.createDebugSectionForIndex(&self.debug_line_index, ".debug_line");
+    self.debug_loc_atom = try self.createDebugSectionForIndex(&self.debug_loc_index, ".debug_loc");
+    self.debug_abbrev_atom = try self.createDebugSectionForIndex(&self.debug_abbrev_index, ".debug_abbrev");
+    self.debug_ranges_atom = try self.createDebugSectionForIndex(&self.debug_ranges_index, ".debug_ranges");
+    self.debug_str_atom = try self.createDebugSectionForIndex(&self.debug_str_index, ".debug_str");
+    self.debug_pubnames_atom = try self.createDebugSectionForIndex(&self.debug_pubnames_index, ".debug_pubnames");
+    self.debug_pubtypes_atom = try self.createDebugSectionForIndex(&self.debug_pubtypes_index, ".debug_pubtypes");
+}
+
 fn parseInputFiles(self: *Wasm, files: []const []const u8) !void {
     for (files) |path| {
         if (try self.parseObjectFile(path)) continue;
@@ -378,7 +425,7 @@ fn parseObjectFile(self: *Wasm, path: []const u8) !bool {
     const file = try fs.cwd().openFile(path, .{});
     errdefer file.close();
 
-    var object = Object.create(self.base.allocator, file, path) catch |err| switch (err) {
+    var object = Object.create(self.base.allocator, file, path, null) catch |err| switch (err) {
         error.InvalidMagicByte, error.NotObjectFile => return false,
         else => |e| return e,
     };
@@ -595,8 +642,8 @@ fn resolveSymbolsInArchives(self: *Wasm) !void {
             // Parse object and and resolve symbols again before we check remaining
             // undefined symbols.
             const object_file_index = @intCast(u16, self.objects.items.len);
-            const object = try self.objects.addOne(self.base.allocator);
-            object.* = try archive.parseObject(self.base.allocator, offset.items[0]);
+            var object = try archive.parseObject(self.base.allocator, offset.items[0]);
+            try self.objects.append(self.base.allocator, object);
             try self.resolveSymbolsInObject(object_file_index);
 
             // continue loop for any remaining undefined symbols that still exist
@@ -604,6 +651,24 @@ fn resolveSymbolsInArchives(self: *Wasm) !void {
             continue :undef_loop;
         }
         index += 1;
+    }
+}
+
+fn checkUndefinedSymbols(self: *const Wasm) !void {
+    var found_undefined_symbols = false;
+    for (self.undefs.values()) |undef| {
+        const symbol = undef.getSymbol(self);
+        if (symbol.tag == .data) {
+            found_undefined_symbols = true;
+            const file_name = if (undef.file) |file_index| name: {
+                break :name self.objects.items[file_index].name;
+            } else self.name;
+            log.err("could not resolve undefined symbol '{s}'", .{undef.getName(self)});
+            log.err("  defined in '{s}'", .{file_name});
+        }
+    }
+    if (found_undefined_symbols) {
+        return error.UndefinedSymbol;
     }
 }
 
@@ -626,16 +691,14 @@ pub fn deinit(self: *Wasm) void {
     for (self.func_types.items) |*func_type| {
         func_type.deinit(gpa);
     }
-    for (self.segment_info.items) |segment_info| {
+    for (self.segment_info.values()) |segment_info| {
         gpa.free(segment_info.name);
     }
     for (self.objects.items) |*object| {
-        object.file.?.close();
         object.deinit(gpa);
     }
 
     for (self.archives.items) |*archive| {
-        archive.file.close();
         archive.deinit(gpa);
     }
 
@@ -674,11 +737,6 @@ pub fn deinit(self: *Wasm) void {
     if (self.dwarf) |*dwarf| {
         dwarf.deinit();
     }
-
-    self.debug_info.deinit(gpa);
-    self.debug_line.deinit(gpa);
-    self.debug_abbrev.deinit(gpa);
-    self.debug_aranges.deinit(gpa);
 }
 
 pub fn allocateDeclIndexes(self: *Wasm, decl_index: Module.Decl.Index) !void {
@@ -783,14 +841,16 @@ pub fn updateDecl(self: *Wasm, mod: *Module, decl_index: Module.Decl.Index) !voi
 
     decl.link.wasm.clear();
 
-    if (decl.isExtern()) {
-        return;
-    }
-
     if (decl.val.castTag(.function)) |_| {
         return;
     } else if (decl.val.castTag(.extern_fn)) |_| {
         return;
+    }
+
+    if (decl.isExtern()) {
+        const variable = decl.getVariable().?;
+        const name = mem.sliceTo(decl.name, 0);
+        return self.addOrUpdateImport(name, decl.link.wasm.sym_index, variable.lib_name, null);
     }
     const val = if (decl.val.castTag(.variable)) |payload| payload.data.init else decl.val;
 
@@ -834,19 +894,18 @@ pub fn updateDeclLineNumber(self: *Wasm, mod: *Module, decl: *const Module.Decl)
 }
 
 fn finishUpdateDecl(self: *Wasm, decl: *Module.Decl, code: []const u8) !void {
-    if (code.len == 0) return;
     const mod = self.base.options.module.?;
     const atom: *Atom = &decl.link.wasm;
-    atom.size = @intCast(u32, code.len);
-    atom.alignment = decl.ty.abiAlignment(self.base.options.target);
     const symbol = &self.symbols.items[atom.sym_index];
-
     const full_name = try decl.getFullyQualifiedName(mod);
     defer self.base.allocator.free(full_name);
     symbol.name = try self.string_table.put(self.base.allocator, full_name);
     try atom.code.appendSlice(self.base.allocator, code);
-
     try self.resolved_symbols.put(self.base.allocator, atom.symbolLoc(), {});
+
+    if (code.len == 0) return;
+    atom.size = @intCast(u32, code.len);
+    atom.alignment = decl.ty.abiAlignment(self.base.options.target);
 }
 
 /// From a given symbol location, returns its `wasm.GlobalType`.
@@ -860,7 +919,8 @@ fn getGlobalType(self: *const Wasm, loc: SymbolLoc) wasm.GlobalType {
         if (is_undefined) {
             return obj.findImport(.global, symbol.index).kind.global;
         }
-        return obj.globals[symbol.index].global_type;
+        const import_global_count = obj.importedCountByKind(.global);
+        return obj.globals[symbol.index - import_global_count].global_type;
     }
     if (is_undefined) {
         return self.imports.get(loc).?.kind.global;
@@ -880,7 +940,9 @@ fn getFunctionSignature(self: *const Wasm, loc: SymbolLoc) wasm.Type {
             const ty_index = obj.findImport(.function, symbol.index).kind.function;
             return obj.func_types[ty_index];
         }
-        return obj.func_types[obj.functions[symbol.index].type_index];
+        const import_function_count = obj.importedCountByKind(.function);
+        const type_index = obj.functions[symbol.index - import_function_count].type_index;
+        return obj.func_types[type_index];
     }
     if (is_undefined) {
         const ty_index = self.imports.get(loc).?.kind.function;
@@ -1232,7 +1294,10 @@ pub fn addOrUpdateImport(
                 .kind = .{ .function = ty_index },
             };
         }
-    } else @panic("TODO: Implement undefined symbols for non-function declarations");
+    } else {
+        symbol.tag = .data;
+        return; // non-functions will not be imported from the runtime, but only resolved during link-time
+    }
 }
 
 /// Kind represents the type of an Atom, which is only
@@ -1312,16 +1377,7 @@ fn parseAtom(self: *Wasm, atom: *Atom, kind: Kind) !void {
                 const index = gop.value_ptr.*;
                 self.segments.items[index].size += atom.size;
 
-                // segment indexes can be off by 1 due to also containing a segment
-                // for the code section, so we must check if the existing segment
-                // is larger than that of the code section, and substract the index by 1 in such case.
-                var info_add = if (self.code_section_index) |idx| blk: {
-                    if (idx < index) break :blk @as(u32, 1);
-                    break :blk 0;
-                } else @as(u32, 0);
-                if (self.debug_info_index != null) info_add += 1;
-                if (self.debug_line_index != null) info_add += 1;
-                symbol.index = index - info_add;
+                symbol.index = @intCast(u32, self.segment_info.getIndex(index).?);
                 // segment info already exists, so free its memory
                 self.base.allocator.free(segment_name);
                 break :result index;
@@ -1334,8 +1390,8 @@ fn parseAtom(self: *Wasm, atom: *Atom, kind: Kind) !void {
                 });
                 gop.value_ptr.* = index;
 
-                const info_index = @intCast(u32, self.segment_info.items.len);
-                try self.segment_info.append(self.base.allocator, segment_info);
+                const info_index = @intCast(u32, self.segment_info.count());
+                try self.segment_info.put(self.base.allocator, index, segment_info);
                 symbol.index = info_index;
                 break :result index;
             }
@@ -1345,18 +1401,54 @@ fn parseAtom(self: *Wasm, atom: *Atom, kind: Kind) !void {
     const segment: *Segment = &self.segments.items[final_index];
     segment.alignment = std.math.max(segment.alignment, atom.alignment);
 
-    if (self.atoms.getPtr(final_index)) |last| {
+    try self.appendAtomAtIndex(final_index, atom);
+}
+
+/// From a given index, append the given `Atom` at the back of the linked list.
+/// Simply inserts it into the map of atoms when it doesn't exist yet.
+pub fn appendAtomAtIndex(self: *Wasm, index: u32, atom: *Atom) !void {
+    if (self.atoms.getPtr(index)) |last| {
         last.*.next = atom;
         atom.prev = last.*;
         last.* = atom;
     } else {
-        try self.atoms.putNoClobber(self.base.allocator, final_index, atom);
+        try self.atoms.putNoClobber(self.base.allocator, index, atom);
     }
+}
+
+/// Allocates debug atoms into their respective debug sections
+/// to merge them with maybe-existing debug atoms from object files.
+fn allocateDebugAtoms(self: *Wasm) !void {
+    if (self.dwarf == null) return;
+
+    const allocAtom = struct {
+        fn f(bin: *Wasm, maybe_index: *?u32, atom: *Atom) !void {
+            const index = maybe_index.* orelse idx: {
+                const index = @intCast(u32, bin.segments.items.len);
+                try bin.appendDummySegment();
+                maybe_index.* = index;
+                break :idx index;
+            };
+            atom.size = @intCast(u32, atom.code.items.len);
+            bin.symbols.items[atom.sym_index].index = index;
+            try bin.appendAtomAtIndex(index, atom);
+        }
+    }.f;
+
+    try allocAtom(self, &self.debug_info_index, self.debug_info_atom.?);
+    try allocAtom(self, &self.debug_line_index, self.debug_line_atom.?);
+    try allocAtom(self, &self.debug_loc_index, self.debug_loc_atom.?);
+    try allocAtom(self, &self.debug_str_index, self.debug_str_atom.?);
+    try allocAtom(self, &self.debug_ranges_index, self.debug_ranges_atom.?);
+    try allocAtom(self, &self.debug_abbrev_index, self.debug_abbrev_atom.?);
+    try allocAtom(self, &self.debug_pubnames_index, self.debug_pubnames_atom.?);
+    try allocAtom(self, &self.debug_pubtypes_index, self.debug_pubtypes_atom.?);
 }
 
 fn allocateAtoms(self: *Wasm) !void {
     // first sort the data segments
     try sortDataSegments(self);
+    try allocateDebugAtoms(self);
 
     var it = self.atoms.iterator();
     while (it.next()) |entry| {
@@ -1374,7 +1466,7 @@ fn allocateAtoms(self: *Wasm) !void {
                 atom.size,
             });
             offset += atom.size;
-            self.symbol_atom.putAssumeCapacity(atom.symbolLoc(), atom); // Update atom pointers
+            try self.symbol_atom.put(self.base.allocator, atom.symbolLoc(), atom); // Update atom pointers
             atom = atom.next orelse break;
         }
         segment.size = std.mem.alignForwardGeneric(u32, offset, segment.alignment);
@@ -1435,7 +1527,7 @@ fn setupImports(self: *Wasm) !void {
         if (std.mem.eql(u8, symbol_loc.getName(self), "__indirect_function_table")) {
             continue;
         }
-        if (symbol.tag == .data or !symbol.requiresImport()) {
+        if (!symbol.requiresImport()) {
             continue;
         }
 
@@ -1728,7 +1820,7 @@ fn setupMemory(self: *Wasm) !void {
 /// From a given object's index and the index of the segment, returns the corresponding
 /// index of the segment within the final data section. When the segment does not yet
 /// exist, a new one will be initialized and appended. The new index will be returned in that case.
-pub fn getMatchingSegment(self: *Wasm, object_index: u16, relocatable_index: u32) !u32 {
+pub fn getMatchingSegment(self: *Wasm, object_index: u16, relocatable_index: u32) !?u32 {
     const object: Object = self.objects.items[object_index];
     const relocatable_data = object.relocatable_data[relocatable_index];
     const index = @intCast(u32, self.segments.items.len);
@@ -1740,25 +1832,81 @@ pub fn getMatchingSegment(self: *Wasm, object_index: u16, relocatable_index: u32
             const result = try self.data_segments.getOrPut(self.base.allocator, segment_info.outputName(merge_segment));
             if (!result.found_existing) {
                 result.value_ptr.* = index;
-                try self.segments.append(self.base.allocator, .{
-                    .alignment = 1,
-                    .size = 0,
-                    .offset = 0,
-                });
+                try self.appendDummySegment();
                 return index;
             } else return result.value_ptr.*;
         },
         .code => return self.code_section_index orelse blk: {
             self.code_section_index = index;
-            try self.segments.append(self.base.allocator, .{
-                .alignment = 1,
-                .size = 0,
-                .offset = 0,
-            });
+            try self.appendDummySegment();
             break :blk index;
         },
-        .custom => return error.@"TODO: Custom section relocations for wasm",
+        .debug => {
+            const debug_name = object.getDebugName(relocatable_data);
+            if (mem.eql(u8, debug_name, ".debug_info")) {
+                return self.debug_info_index orelse blk: {
+                    self.debug_info_index = index;
+                    try self.appendDummySegment();
+                    break :blk index;
+                };
+            } else if (mem.eql(u8, debug_name, ".debug_line")) {
+                return self.debug_line_index orelse blk: {
+                    self.debug_line_index = index;
+                    try self.appendDummySegment();
+                    break :blk index;
+                };
+            } else if (mem.eql(u8, debug_name, ".debug_loc")) {
+                return self.debug_loc_index orelse blk: {
+                    self.debug_loc_index = index;
+                    try self.appendDummySegment();
+                    break :blk index;
+                };
+            } else if (mem.eql(u8, debug_name, ".debug_ranges")) {
+                return self.debug_line_index orelse blk: {
+                    self.debug_ranges_index = index;
+                    try self.appendDummySegment();
+                    break :blk index;
+                };
+            } else if (mem.eql(u8, debug_name, ".debug_pubnames")) {
+                return self.debug_pubnames_index orelse blk: {
+                    self.debug_pubnames_index = index;
+                    try self.appendDummySegment();
+                    break :blk index;
+                };
+            } else if (mem.eql(u8, debug_name, ".debug_pubtypes")) {
+                return self.debug_pubtypes_index orelse blk: {
+                    self.debug_pubtypes_index = index;
+                    try self.appendDummySegment();
+                    break :blk index;
+                };
+            } else if (mem.eql(u8, debug_name, ".debug_abbrev")) {
+                return self.debug_abbrev_index orelse blk: {
+                    self.debug_abbrev_index = index;
+                    try self.appendDummySegment();
+                    break :blk index;
+                };
+            } else if (mem.eql(u8, debug_name, ".debug_str")) {
+                return self.debug_str_index orelse blk: {
+                    self.debug_str_index = index;
+                    try self.appendDummySegment();
+                    break :blk index;
+                };
+            } else {
+                log.warn("found unknown debug section '{s}'", .{debug_name});
+                log.warn("  debug section will be skipped", .{});
+                return null;
+            }
+        },
     }
+}
+
+/// Appends a new segment with default field values
+fn appendDummySegment(self: *Wasm) !void {
+    try self.segments.append(self.base.allocator, .{
+        .alignment = 1,
+        .size = 0,
+        .offset = 0,
+    });
 }
 
 /// Returns the symbol index of the error name table.
@@ -1878,50 +2026,52 @@ fn populateErrorNameTable(self: *Wasm) !void {
     try self.parseAtom(names_atom, .{ .data = .read_only });
 }
 
-pub fn getDebugInfoIndex(self: *Wasm) !u32 {
-    assert(self.dwarf != null);
-    return self.debug_info_index orelse {
-        self.debug_info_index = @intCast(u32, self.segments.items.len);
-        const segment = try self.segments.addOne(self.base.allocator);
-        segment.* = .{
-            .size = 0,
-            .offset = 0,
-            // debug sections always have alignment '1'
-            .alignment = 1,
-        };
-        return self.debug_info_index.?;
-    };
-}
+/// From a given index variable, creates a new debug section.
+/// This initializes the index, appends a new segment,
+/// and finally, creates a managed `Atom`.
+pub fn createDebugSectionForIndex(self: *Wasm, index: *?u32, name: []const u8) !*Atom {
+    const new_index = @intCast(u32, self.segments.items.len);
+    index.* = new_index;
+    try self.appendDummySegment();
+    // _ = index;
 
-pub fn getDebugLineIndex(self: *Wasm) !u32 {
-    assert(self.dwarf != null);
-    return self.debug_line_index orelse {
-        self.debug_line_index = @intCast(u32, self.segments.items.len);
-        const segment = try self.segments.addOne(self.base.allocator);
-        segment.* = .{
-            .size = 0,
-            .offset = 0,
-            .alignment = 1,
-        };
-        return self.debug_line_index.?;
+    const sym_index = self.symbols_free_list.popOrNull() orelse idx: {
+        const tmp_index = @intCast(u32, self.symbols.items.len);
+        _ = try self.symbols.addOne(self.base.allocator);
+        break :idx tmp_index;
     };
+    self.symbols.items[sym_index] = .{
+        .tag = .section,
+        .name = try self.string_table.put(self.base.allocator, name),
+        .index = 0,
+        .flags = @enumToInt(Symbol.Flag.WASM_SYM_BINDING_LOCAL),
+    };
+
+    const atom = try self.base.allocator.create(Atom);
+    atom.* = Atom.empty;
+    atom.alignment = 1; // debug sections are always 1-byte-aligned
+    atom.sym_index = sym_index;
+    try self.managed_atoms.append(self.base.allocator, atom);
+    try self.symbol_atom.put(self.base.allocator, atom.symbolLoc(), atom);
+    return atom;
 }
 
 fn resetState(self: *Wasm) void {
-    for (self.segment_info.items) |*segment_info| {
+    for (self.segment_info.values()) |segment_info| {
         self.base.allocator.free(segment_info.name);
     }
-    const mod = self.base.options.module.?;
-    var decl_it = self.decls.keyIterator();
-    while (decl_it.next()) |decl_index_ptr| {
-        const decl = mod.declPtr(decl_index_ptr.*);
-        const atom = &decl.link.wasm;
-        atom.next = null;
-        atom.prev = null;
+    if (self.base.options.module) |mod| {
+        var decl_it = self.decls.keyIterator();
+        while (decl_it.next()) |decl_index_ptr| {
+            const decl = mod.declPtr(decl_index_ptr.*);
+            const atom = &decl.link.wasm;
+            atom.next = null;
+            atom.prev = null;
 
-        for (atom.locals.items) |*local_atom| {
-            local_atom.next = null;
-            local_atom.prev = null;
+            for (atom.locals.items) |*local_atom| {
+                local_atom.next = null;
+                local_atom.prev = null;
+            }
         }
     }
     self.functions.clearRetainingCapacity();
@@ -1934,6 +2084,12 @@ fn resetState(self: *Wasm) void {
     self.code_section_index = null;
     self.debug_info_index = null;
     self.debug_line_index = null;
+    self.debug_loc_index = null;
+    self.debug_str_index = null;
+    self.debug_ranges_index = null;
+    self.debug_abbrev_index = null;
+    self.debug_pubnames_index = null;
+    self.debug_pubtypes_index = null;
 }
 
 pub fn flush(self: *Wasm, comp: *Compilation, prog_node: *std.Progress.Node) !void {
@@ -2004,35 +2160,41 @@ pub fn flushModule(self: *Wasm, comp: *Compilation, prog_node: *std.Progress.Nod
     }
 
     try self.resolveSymbolsInArchives();
+    try self.checkUndefinedSymbols();
 
     // When we finish/error we reset the state of the linker
     // So we can rebuild the binary file on each incremental update
     defer self.resetState();
     try self.setupStart();
     try self.setupImports();
-    const mod = self.base.options.module.?;
-    var decl_it = self.decls.keyIterator();
-    while (decl_it.next()) |decl_index_ptr| {
-        const decl = mod.declPtr(decl_index_ptr.*);
-        if (decl.isExtern()) continue;
-        const atom = &decl.*.link.wasm;
-        if (decl.ty.zigTypeTag() == .Fn) {
-            try self.parseAtom(atom, .{ .function = decl.fn_link.wasm });
-        } else if (decl.getVariable()) |variable| {
-            if (!variable.is_mutable) {
-                try self.parseAtom(atom, .{ .data = .read_only });
-            } else if (variable.init.isUndefDeep()) {
-                try self.parseAtom(atom, .{ .data = .uninitialized });
+    if (self.base.options.module) |mod| {
+        var decl_it = self.decls.keyIterator();
+        while (decl_it.next()) |decl_index_ptr| {
+            const decl = mod.declPtr(decl_index_ptr.*);
+            if (decl.isExtern()) continue;
+            const atom = &decl.*.link.wasm;
+            if (decl.ty.zigTypeTag() == .Fn) {
+                try self.parseAtom(atom, .{ .function = decl.fn_link.wasm });
+            } else if (decl.getVariable()) |variable| {
+                if (!variable.is_mutable) {
+                    try self.parseAtom(atom, .{ .data = .read_only });
+                } else if (variable.init.isUndefDeep()) {
+                    try self.parseAtom(atom, .{ .data = .uninitialized });
+                } else {
+                    try self.parseAtom(atom, .{ .data = .initialized });
+                }
             } else {
-                try self.parseAtom(atom, .{ .data = .initialized });
+                try self.parseAtom(atom, .{ .data = .read_only });
             }
-        } else {
-            try self.parseAtom(atom, .{ .data = .read_only });
+
+            // also parse atoms for a decl's locals
+            for (atom.locals.items) |*local_atom| {
+                try self.parseAtom(local_atom, .{ .data = .read_only });
+            }
         }
 
-        // also parse atoms for a decl's locals
-        for (atom.locals.items) |*local_atom| {
-            try self.parseAtom(local_atom, .{ .data = .read_only });
+        if (self.dwarf) |*dwarf| {
+            try dwarf.flushModule(&self.base, self.base.options.module.?);
         }
     }
 
@@ -2040,9 +2202,6 @@ pub fn flushModule(self: *Wasm, comp: *Compilation, prog_node: *std.Progress.Nod
         try object.parseIntoAtoms(self.base.allocator, @intCast(u16, object_index), self);
     }
 
-    if (self.dwarf) |*dwarf| {
-        try dwarf.flushModule(&self.base, self.base.options.module.?);
-    }
     try self.allocateAtoms();
     try self.setupMemory();
     self.mapFunctionTable();
@@ -2398,19 +2557,44 @@ pub fn flushModule(self: *Wasm, comp: *Compilation, prog_node: *std.Progress.Nod
         }
     } else if (!self.base.options.strip) {
         if (self.dwarf) |*dwarf| {
-            if (self.debug_info_index != null) {
-                try dwarf.writeDbgAbbrev(&self.base);
-                // for debug info and ranges, the address is always 0,
-                // as locations are always offsets relative to 'code' section.
-                try dwarf.writeDbgInfoHeader(&self.base, mod, 0, code_section_size);
-                try dwarf.writeDbgAranges(&self.base, 0, code_section_size);
-                try dwarf.writeDbgLineHeader(&self.base, mod);
+            const mod = self.base.options.module.?;
+            try dwarf.writeDbgAbbrev(&self.base);
+            // for debug info and ranges, the address is always 0,
+            // as locations are always offsets relative to 'code' section.
+            try dwarf.writeDbgInfoHeader(&self.base, mod, 0, code_section_size);
+            try dwarf.writeDbgAranges(&self.base, 0, code_section_size);
+            try dwarf.writeDbgLineHeader(&self.base, mod);
+        }
 
-                try emitDebugSection(file, self.debug_info.items, ".debug_info");
-                try emitDebugSection(file, self.debug_aranges.items, ".debug_ranges");
-                try emitDebugSection(file, self.debug_abbrev.items, ".debug_abbrev");
-                try emitDebugSection(file, self.debug_line.items, ".debug_line");
-                try emitDebugSection(file, dwarf.strtab.items, ".debug_str");
+        var debug_bytes = std.ArrayList(u8).init(self.base.allocator);
+        defer debug_bytes.deinit();
+
+        const DebugSection = struct {
+            name: []const u8,
+            index: ?u32,
+        };
+
+        const debug_sections: []const DebugSection = &.{
+            .{ .name = ".debug_info", .index = self.debug_info_index },
+            .{ .name = ".debug_pubtypes", .index = self.debug_pubtypes_index },
+            .{ .name = ".debug_abbrev", .index = self.debug_abbrev_index },
+            .{ .name = ".debug_line", .index = self.debug_line_index },
+            .{ .name = ".debug_str", .index = self.debug_str_index },
+            .{ .name = ".debug_pubnames", .index = self.debug_pubnames_index },
+            .{ .name = ".debug_loc", .index = self.debug_loc_index },
+            .{ .name = ".debug_ranges", .index = self.debug_ranges_index },
+        };
+
+        for (debug_sections) |item| {
+            if (item.index) |index| {
+                var atom = self.atoms.get(index).?.getFirst();
+                while (true) {
+                    atom.resolveRelocs(self);
+                    try debug_bytes.appendSlice(atom.code.items);
+                    atom = atom.next orelse break;
+                }
+                try emitDebugSection(file, debug_bytes.items, item.name);
+                debug_bytes.clearRetainingCapacity();
             }
         }
         try self.emitNameSection(file, arena);
@@ -2418,6 +2602,7 @@ pub fn flushModule(self: *Wasm, comp: *Compilation, prog_node: *std.Progress.Nod
 }
 
 fn emitDebugSection(file: fs.File, data: []const u8, name: []const u8) !void {
+    if (data.len == 0) return;
     const header_offset = try reserveCustomSectionHeader(file);
     const writer = file.writer();
     try leb.writeULEB128(writer, @intCast(u32, name.len));
@@ -2833,24 +3018,19 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation, prog_node: *std.Progress.Node) !
             try argv.append(entry);
         }
 
-        if (self.base.options.output_mode == .Exe) {
-            // Increase the default stack size to a more reasonable value of 1MB instead of
-            // the default of 1 Wasm page being 64KB, unless overridden by the user.
-            try argv.append("-z");
-            const stack_size = self.base.options.stack_size_override orelse 1048576;
-            const arg = try std.fmt.allocPrint(arena, "stack-size={d}", .{stack_size});
-            try argv.append(arg);
+        // Increase the default stack size to a more reasonable value of 1MB instead of
+        // the default of 1 Wasm page being 64KB, unless overridden by the user.
+        try argv.append("-z");
+        const stack_size = self.base.options.stack_size_override orelse wasm.page_size * 16;
+        const arg = try std.fmt.allocPrint(arena, "stack-size={d}", .{stack_size});
+        try argv.append(arg);
 
+        if (self.base.options.output_mode == .Exe) {
             if (self.base.options.wasi_exec_model == .reactor) {
                 // Reactor execution model does not have _start so lld doesn't look for it.
                 try argv.append("--no-entry");
             }
-        } else {
-            if (self.base.options.stack_size_override) |stack_size| {
-                try argv.append("-z");
-                const arg = try std.fmt.allocPrint(arena, "stack-size={d}", .{stack_size});
-                try argv.append(arg);
-            }
+        } else if (self.base.options.entry == null) {
             try argv.append("--no-entry"); // So lld doesn't look for _start.
         }
         try argv.appendSlice(&[_][]const u8{
@@ -3036,14 +3216,26 @@ fn writeVecSectionHeader(file: fs.File, offset: u64, section: wasm.Section, size
     buf[0] = @enumToInt(section);
     leb.writeUnsignedFixed(5, buf[1..6], size);
     leb.writeUnsignedFixed(5, buf[6..], items);
-    try file.pwriteAll(&buf, offset);
+
+    if (builtin.target.os.tag == .windows) {
+        // https://github.com/ziglang/zig/issues/12783
+        const curr_pos = try file.getPos();
+        try file.pwriteAll(&buf, offset);
+        try file.seekTo(curr_pos);
+    } else try file.pwriteAll(&buf, offset);
 }
 
 fn writeCustomSectionHeader(file: fs.File, offset: u64, size: u32) !void {
     var buf: [1 + 5]u8 = undefined;
     buf[0] = 0; // 0 = 'custom' section
     leb.writeUnsignedFixed(5, buf[1..6], size);
-    try file.pwriteAll(&buf, offset);
+
+    if (builtin.target.os.tag == .windows) {
+        // https://github.com/ziglang/zig/issues/12783
+        const curr_pos = try file.getPos();
+        try file.pwriteAll(&buf, offset);
+        try file.seekTo(curr_pos);
+    } else try file.pwriteAll(&buf, offset);
 }
 
 fn emitLinkSection(self: *Wasm, file: fs.File, arena: Allocator, symbol_table: *std.AutoArrayHashMap(SymbolLoc, u32)) !void {
@@ -3128,16 +3320,16 @@ fn emitSegmentInfo(self: *Wasm, file: fs.File, arena: Allocator) !void {
     var payload = std.ArrayList(u8).init(arena);
     const writer = payload.writer();
     try leb.writeULEB128(file.writer(), @enumToInt(types.SubsectionType.WASM_SEGMENT_INFO));
-    try leb.writeULEB128(writer, @intCast(u32, self.segment_info.items.len));
-    for (self.segment_info.items) |segment_info| {
+    try leb.writeULEB128(writer, @intCast(u32, self.segment_info.count()));
+    for (self.segment_info.values()) |segment_info| {
         log.debug("Emit segment: {s} align({d}) flags({b})", .{
             segment_info.name,
-            @ctz(u32, segment_info.alignment),
+            @ctz(segment_info.alignment),
             segment_info.flags,
         });
         try leb.writeULEB128(writer, @intCast(u32, segment_info.name.len));
         try writer.writeAll(segment_info.name);
-        try leb.writeULEB128(writer, @ctz(u32, segment_info.alignment));
+        try leb.writeULEB128(writer, @ctz(segment_info.alignment));
         try leb.writeULEB128(writer, segment_info.flags);
     }
 
