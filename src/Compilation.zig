@@ -154,6 +154,12 @@ owned_link_dir: ?std.fs.Dir,
 /// Don't use this for anything other than stage1 compatibility.
 color: Color = .auto,
 
+/// How many lines of reference trace should be included per compile error.
+/// Null means only show snippet on first error.
+reference_trace: ?u32 = null,
+
+libcxx_abi_version: libcxx.AbiVersion = libcxx.AbiVersion.default,
+
 /// This mutex guards all `Compilation` mutable state.
 mutex: std.Thread.Mutex = .{},
 
@@ -346,6 +352,7 @@ pub const AllErrors = struct {
             /// Does not include the trailing newline.
             source_line: ?[]const u8,
             notes: []Message = &.{},
+            reference_trace: []Message = &.{},
 
             /// Splits the error message up into lines to properly indent them
             /// to allow for long, good-looking error messages.
@@ -444,6 +451,34 @@ pub const AllErrors = struct {
                     }
                     for (src.notes) |note| {
                         try note.renderToWriter(ttyconf, stderr, "note", .Cyan, indent);
+                    }
+                    if (src.reference_trace.len != 0) {
+                        ttyconf.setColor(stderr, .Reset);
+                        ttyconf.setColor(stderr, .Dim);
+                        try stderr.print("referenced by:\n", .{});
+                        for (src.reference_trace) |reference| {
+                            switch (reference) {
+                                .src => |ref_src| try stderr.print("    {s}: {s}:{d}:{d}\n", .{
+                                    ref_src.msg,
+                                    ref_src.src_path,
+                                    ref_src.line + 1,
+                                    ref_src.column + 1,
+                                }),
+                                .plain => |plain| if (plain.count != 0) {
+                                    try stderr.print(
+                                        "    {d} reference(s) hidden; use '-freference-trace={d}' to see all references\n",
+                                        .{ plain.count, plain.count + src.reference_trace.len - 1 },
+                                    );
+                                } else {
+                                    try stderr.print(
+                                        "    remaining reference traces hidden; use '-freference-trace' to see all reference traces\n",
+                                        .{},
+                                    );
+                                },
+                            }
+                        }
+                        try stderr.writeByte('\n');
+                        ttyconf.setColor(stderr, .Reset);
                     }
                 },
                 .plain => |plain| {
@@ -570,6 +605,32 @@ pub const AllErrors = struct {
             });
             return;
         }
+
+        const reference_trace = try allocator.alloc(Message, module_err_msg.reference_trace.len);
+        for (reference_trace) |*reference, i| {
+            const module_reference = module_err_msg.reference_trace[i];
+            if (module_reference.hidden != 0) {
+                reference.* = .{ .plain = .{ .msg = undefined, .count = module_reference.hidden } };
+                break;
+            } else if (module_reference.decl == null) {
+                reference.* = .{ .plain = .{ .msg = undefined, .count = 0 } };
+                break;
+            }
+            const source = try module_reference.src_loc.file_scope.getSource(module.gpa);
+            const span = try module_reference.src_loc.span(module.gpa);
+            const loc = std.zig.findLineColumn(source.bytes, span.main);
+            const file_path = try module_reference.src_loc.file_scope.fullPath(allocator);
+            reference.* = .{
+                .src = .{
+                    .src_path = file_path,
+                    .msg = try allocator.dupe(u8, std.mem.sliceTo(module_reference.decl.?, 0)),
+                    .span = span,
+                    .line = @intCast(u32, loc.line),
+                    .column = @intCast(u32, loc.column),
+                    .source_line = null,
+                },
+            };
+        }
         const file_path = try module_err_msg.src_loc.file_scope.fullPath(allocator);
         try errors.append(.{
             .src = .{
@@ -579,6 +640,7 @@ pub const AllErrors = struct {
                 .line = @intCast(u32, err_loc.line),
                 .column = @intCast(u32, err_loc.column),
                 .notes = notes_buf[0..note_i],
+                .reference_trace = reference_trace,
                 .source_line = try allocator.dupe(u8, err_loc.source_line),
             },
         });
@@ -608,7 +670,7 @@ pub const AllErrors = struct {
                 }
                 const token_starts = file.tree.tokens.items(.start);
                 const start = token_starts[item.data.token] + item.data.byte_offset;
-                const end = start + @intCast(u32, file.tree.tokenSlice(item.data.token).len);
+                const end = start + @intCast(u32, file.tree.tokenSlice(item.data.token).len) - item.data.byte_offset;
                 break :blk Module.SrcLoc.Span{ .start = start, .end = end, .main = start };
             };
             const err_loc = std.zig.findLineColumn(file.source, err_span.main);
@@ -627,7 +689,7 @@ pub const AllErrors = struct {
                         }
                         const token_starts = file.tree.tokens.items(.start);
                         const start = token_starts[note_item.data.token] + note_item.data.byte_offset;
-                        const end = start + @intCast(u32, file.tree.tokenSlice(note_item.data.token).len);
+                        const end = start + @intCast(u32, file.tree.tokenSlice(note_item.data.token).len) - item.data.byte_offset;
                         break :blk Module.SrcLoc.Span{ .start = start, .end = end, .main = start };
                     };
                     const loc = std.zig.findLineColumn(file.source, span.main);
@@ -927,6 +989,7 @@ pub const InitOptions = struct {
     clang_preprocessor_mode: ClangPreprocessorMode = .no,
     /// This is for stage1 and should be deleted upon completion of self-hosting.
     color: Color = .auto,
+    reference_trace: ?u32 = null,
     test_filter: ?[]const u8 = null,
     test_name_prefix: ?[]const u8 = null,
     subsystem: ?std.Target.SubSystem = null,
@@ -950,6 +1013,7 @@ pub const InitOptions = struct {
     headerpad_max_install_names: bool = false,
     /// (Darwin) remove dylibs that are unreachable by the entry point or exported symbols
     dead_strip_dylibs: bool = false,
+    libcxx_abi_version: libcxx.AbiVersion = libcxx.AbiVersion.default,
 };
 
 fn addPackageTableToCacheHash(
@@ -1238,7 +1302,6 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             options.target,
             options.is_native_abi,
             link_libc,
-            options.system_lib_names.len != 0 or options.frameworks.count() != 0,
             options.libc_installation,
             options.native_darwin_sdk != null,
         );
@@ -1836,6 +1899,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .disable_c_depfile = options.disable_c_depfile,
             .owned_link_dir = owned_link_dir,
             .color = options.color,
+            .reference_trace = options.reference_trace,
             .time_report = options.time_report,
             .stack_report = options.stack_report,
             .unwind_tables = unwind_tables,
@@ -1844,6 +1908,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .test_evented_io = options.test_evented_io,
             .debug_compiler_runtime_libs = options.debug_compiler_runtime_libs,
             .debug_compile_errors = options.debug_compile_errors,
+            .libcxx_abi_version = options.libcxx_abi_version,
         };
         break :comp comp;
     };
@@ -4027,6 +4092,13 @@ pub fn addCCArgs(
         if (comp.bin_file.options.single_threaded) {
             try argv.append("-D_LIBCPP_HAS_NO_THREADS");
         }
+
+        try argv.append(try std.fmt.allocPrint(arena, "-D_LIBCPP_ABI_VERSION={d}", .{
+            @enumToInt(comp.libcxx_abi_version),
+        }));
+        try argv.append(try std.fmt.allocPrint(arena, "-D_LIBCPP_ABI_NAMESPACE=__{d}", .{
+            @enumToInt(comp.libcxx_abi_version),
+        }));
     }
 
     if (comp.bin_file.options.link_libunwind) {
@@ -4522,7 +4594,6 @@ fn detectLibCIncludeDirs(
     target: Target,
     is_native_abi: bool,
     link_libc: bool,
-    link_system_libs: bool,
     libc_installation: ?*const LibCInstallation,
     has_macos_sdk: bool,
 ) !LibCDirs {
@@ -4539,7 +4610,7 @@ fn detectLibCIncludeDirs(
 
     // If linking system libraries and targeting the native abi, default to
     // using the system libc installation.
-    if (link_system_libs and is_native_abi and !target.isMinGW()) {
+    if (is_native_abi and !target.isMinGW()) {
         if (target.isDarwin()) {
             return if (has_macos_sdk)
                 // For Darwin/macOS, we are all set with getDarwinSDK found earlier.
@@ -4551,74 +4622,29 @@ fn detectLibCIncludeDirs(
                 getZigShippedLibCIncludeDirsDarwin(arena, zig_lib_dir, target);
         }
         const libc = try arena.create(LibCInstallation);
-        libc.* = try LibCInstallation.findNative(.{ .allocator = arena, .verbose = true });
+        libc.* = LibCInstallation.findNative(.{ .allocator = arena }) catch |err| switch (err) {
+            error.CCompilerExitCode,
+            error.CCompilerCrashed,
+            error.CCompilerCannotFindHeaders,
+            error.UnableToSpawnCCompiler,
+            => |e| {
+                // We tried to integrate with the native system C compiler,
+                // however, it is not installed. So we must rely on our bundled
+                // libc files.
+                if (target_util.canBuildLibC(target)) {
+                    return detectLibCFromBuilding(arena, zig_lib_dir, target, has_macos_sdk);
+                }
+                return e;
+            },
+            else => |e| return e,
+        };
         return detectLibCFromLibCInstallation(arena, target, libc);
     }
 
     // If not linking system libraries, build and provide our own libc by
     // default if possible.
     if (target_util.canBuildLibC(target)) {
-        switch (target.os.tag) {
-            .macos => return if (has_macos_sdk)
-                // For Darwin/macOS, we are all set with getDarwinSDK found earlier.
-                LibCDirs{
-                    .libc_include_dir_list = &[0][]u8{},
-                    .libc_installation = null,
-                }
-            else
-                getZigShippedLibCIncludeDirsDarwin(arena, zig_lib_dir, target),
-            else => {
-                const generic_name = target_util.libCGenericName(target);
-                // Some architectures are handled by the same set of headers.
-                const arch_name = if (target.abi.isMusl())
-                    musl.archName(target.cpu.arch)
-                else if (target.cpu.arch.isThumb())
-                    // ARM headers are valid for Thumb too.
-                    switch (target.cpu.arch) {
-                        .thumb => "arm",
-                        .thumbeb => "armeb",
-                        else => unreachable,
-                    }
-                else
-                    @tagName(target.cpu.arch);
-                const os_name = @tagName(target.os.tag);
-                // Musl's headers are ABI-agnostic and so they all have the "musl" ABI name.
-                const abi_name = if (target.abi.isMusl()) "musl" else @tagName(target.abi);
-                const s = std.fs.path.sep_str;
-                const arch_include_dir = try std.fmt.allocPrint(
-                    arena,
-                    "{s}" ++ s ++ "libc" ++ s ++ "include" ++ s ++ "{s}-{s}-{s}",
-                    .{ zig_lib_dir, arch_name, os_name, abi_name },
-                );
-                const generic_include_dir = try std.fmt.allocPrint(
-                    arena,
-                    "{s}" ++ s ++ "libc" ++ s ++ "include" ++ s ++ "generic-{s}",
-                    .{ zig_lib_dir, generic_name },
-                );
-                const generic_arch_name = target_util.osArchName(target);
-                const arch_os_include_dir = try std.fmt.allocPrint(
-                    arena,
-                    "{s}" ++ s ++ "libc" ++ s ++ "include" ++ s ++ "{s}-{s}-any",
-                    .{ zig_lib_dir, generic_arch_name, os_name },
-                );
-                const generic_os_include_dir = try std.fmt.allocPrint(
-                    arena,
-                    "{s}" ++ s ++ "libc" ++ s ++ "include" ++ s ++ "any-{s}-any",
-                    .{ zig_lib_dir, os_name },
-                );
-
-                const list = try arena.alloc([]const u8, 4);
-                list[0] = arch_include_dir;
-                list[1] = generic_include_dir;
-                list[2] = arch_os_include_dir;
-                list[3] = generic_os_include_dir;
-
-                return LibCDirs{
-                    .libc_include_dir_list = list,
-                    .libc_installation = null,
-                };
-            },
-        }
+        return detectLibCFromBuilding(arena, zig_lib_dir, target, has_macos_sdk);
     }
 
     // If zig can't build the libc for the target and we are targeting the
@@ -4675,6 +4701,75 @@ fn detectLibCFromLibCInstallation(arena: Allocator, target: Target, lci: *const 
         .libc_include_dir_list = list.items,
         .libc_installation = lci,
     };
+}
+
+fn detectLibCFromBuilding(
+    arena: Allocator,
+    zig_lib_dir: []const u8,
+    target: std.Target,
+    has_macos_sdk: bool,
+) !LibCDirs {
+    switch (target.os.tag) {
+        .macos => return if (has_macos_sdk)
+            // For Darwin/macOS, we are all set with getDarwinSDK found earlier.
+            LibCDirs{
+                .libc_include_dir_list = &[0][]u8{},
+                .libc_installation = null,
+            }
+        else
+            getZigShippedLibCIncludeDirsDarwin(arena, zig_lib_dir, target),
+        else => {
+            const generic_name = target_util.libCGenericName(target);
+            // Some architectures are handled by the same set of headers.
+            const arch_name = if (target.abi.isMusl())
+                musl.archName(target.cpu.arch)
+            else if (target.cpu.arch.isThumb())
+                // ARM headers are valid for Thumb too.
+                switch (target.cpu.arch) {
+                    .thumb => "arm",
+                    .thumbeb => "armeb",
+                    else => unreachable,
+                }
+            else
+                @tagName(target.cpu.arch);
+            const os_name = @tagName(target.os.tag);
+            // Musl's headers are ABI-agnostic and so they all have the "musl" ABI name.
+            const abi_name = if (target.abi.isMusl()) "musl" else @tagName(target.abi);
+            const s = std.fs.path.sep_str;
+            const arch_include_dir = try std.fmt.allocPrint(
+                arena,
+                "{s}" ++ s ++ "libc" ++ s ++ "include" ++ s ++ "{s}-{s}-{s}",
+                .{ zig_lib_dir, arch_name, os_name, abi_name },
+            );
+            const generic_include_dir = try std.fmt.allocPrint(
+                arena,
+                "{s}" ++ s ++ "libc" ++ s ++ "include" ++ s ++ "generic-{s}",
+                .{ zig_lib_dir, generic_name },
+            );
+            const generic_arch_name = target_util.osArchName(target);
+            const arch_os_include_dir = try std.fmt.allocPrint(
+                arena,
+                "{s}" ++ s ++ "libc" ++ s ++ "include" ++ s ++ "{s}-{s}-any",
+                .{ zig_lib_dir, generic_arch_name, os_name },
+            );
+            const generic_os_include_dir = try std.fmt.allocPrint(
+                arena,
+                "{s}" ++ s ++ "libc" ++ s ++ "include" ++ s ++ "any-{s}-any",
+                .{ zig_lib_dir, os_name },
+            );
+
+            const list = try arena.alloc([]const u8, 4);
+            list[0] = arch_include_dir;
+            list[1] = generic_include_dir;
+            list[2] = arch_os_include_dir;
+            list[3] = generic_os_include_dir;
+
+            return LibCDirs{
+                .libc_include_dir_list = list,
+                .libc_installation = null,
+            };
+        },
+    }
 }
 
 pub fn get_libc_crt_file(comp: *Compilation, arena: Allocator, basename: []const u8) ![]const u8 {

@@ -2042,6 +2042,9 @@ pub const Type = extern union {
                 try writer.writeAll("fn(");
                 for (fn_info.param_types) |param_ty, i| {
                     if (i != 0) try writer.writeAll(", ");
+                    if (fn_info.paramIsComptime(i)) {
+                        try writer.writeAll("comptime ");
+                    }
                     if (std.math.cast(u5, i)) |index| if (@truncate(u1, fn_info.noalias_bits >> index) != 0) {
                         try writer.writeAll("noalias ");
                     };
@@ -2712,8 +2715,12 @@ pub const Type = extern union {
     }
 
     /// Returns 0 if the pointer is naturally aligned and the element type is 0-bit.
-    pub fn ptrAlignment(self: Type, target: Target) u32 {
-        switch (self.tag()) {
+    pub fn ptrAlignment(ty: Type, target: Target) u32 {
+        return ptrAlignmentAdvanced(ty, target, null) catch unreachable;
+    }
+
+    pub fn ptrAlignmentAdvanced(ty: Type, target: Target, sema_kit: ?Module.WipAnalysis) !u32 {
+        switch (ty.tag()) {
             .single_const_pointer,
             .single_mut_pointer,
             .many_const_pointer,
@@ -2725,8 +2732,12 @@ pub const Type = extern union {
             .optional_single_const_pointer,
             .optional_single_mut_pointer,
             => {
-                const child_type = self.cast(Payload.ElemType).?.data;
-                return child_type.abiAlignment(target);
+                const child_type = ty.cast(Payload.ElemType).?.data;
+                if (sema_kit) |sk| {
+                    const res = try child_type.abiAlignmentAdvanced(target, .{ .sema_kit = sk });
+                    return res.scalar;
+                }
+                return (child_type.abiAlignmentAdvanced(target, .eager) catch unreachable).scalar;
             },
 
             .manyptr_u8,
@@ -2737,14 +2748,17 @@ pub const Type = extern union {
             => return 1,
 
             .pointer => {
-                const ptr_info = self.castTag(.pointer).?.data;
+                const ptr_info = ty.castTag(.pointer).?.data;
                 if (ptr_info.@"align" != 0) {
                     return ptr_info.@"align";
+                } else if (sema_kit) |sk| {
+                    const res = try ptr_info.pointee_type.abiAlignmentAdvanced(target, .{ .sema_kit = sk });
+                    return res.scalar;
                 } else {
-                    return ptr_info.pointee_type.abiAlignment(target);
+                    return (ptr_info.pointee_type.abiAlignmentAdvanced(target, .eager) catch unreachable).scalar;
                 }
             },
-            .optional => return self.castTag(.optional).?.data.ptrAlignment(target),
+            .optional => return ty.castTag(.optional).?.data.ptrAlignmentAdvanced(target, sema_kit),
 
             else => unreachable,
         }
@@ -6266,6 +6280,11 @@ pub const Type = extern union {
                 mutable: bool = true, // TODO rename this to const, not mutable
                 @"volatile": bool = false,
                 size: std.builtin.Type.Pointer.Size = .One,
+
+                pub fn alignment(data: Data, target: Target) u32 {
+                    if (data.@"align" != 0) return data.@"align";
+                    return abiAlignment(data.pointee_type, target);
+                }
             };
         };
 
@@ -6682,6 +6701,7 @@ pub const CType = enum {
             .nvcl,
             .amdhsa,
             .ps4,
+            .ps5,
             .elfiamcu,
             .mesa3d,
             .contiki,
@@ -6691,6 +6711,8 @@ pub const CType = enum {
             .opencl,
             .glsl450,
             .vulkan,
+            .driverkit,
+            .shadermodel,
             => @panic("TODO specify the C integer and float type sizes for this OS"),
         }
     }

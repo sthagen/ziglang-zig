@@ -137,7 +137,7 @@ pub fn genHtml(
     );
 
     const source = try src.getSource(allocator);
-    try tokenizeAndPrintRaw(allocator, out, source.bytes);
+    try tokenizeAndPrintRaw(out, source.bytes);
     try out.writeAll(
         \\</body>
         \\</html>
@@ -150,13 +150,9 @@ const end_line = "</span>\n";
 var line_counter: usize = 1;
 
 pub fn tokenizeAndPrintRaw(
-    allocator: Allocator,
     out: anytype,
-    raw_src: [:0]const u8,
+    src: [:0]const u8,
 ) !void {
-    const src = try allocator.dupeZ(u8, raw_src);
-    defer allocator.free(src);
-
     line_counter = 1;
 
     try out.print("<pre><code>" ++ start_line, .{line_counter});
@@ -320,9 +316,7 @@ pub fn tokenizeAndPrintRaw(
                 }
             },
 
-            .integer_literal,
-            .float_literal,
-            => {
+            .number_literal => {
                 try out.writeAll("<span class=\"tok-number\">");
                 try writeEscaped(out, src[token.loc.start..token.loc.end]);
                 try out.writeAll("</span>");
@@ -424,10 +418,11 @@ fn writeEscaped(out: anytype, input: []const u8) !void {
 }
 
 const builtin_types = [_][]const u8{
-    "f16",         "f32",      "f64",       "f128",     "c_longdouble", "c_short",
-    "c_ushort",    "c_int",    "c_uint",    "c_long",   "c_ulong",      "c_longlong",
-    "c_ulonglong", "c_char",   "anyopaque", "void",     "bool",         "isize",
-    "usize",       "noreturn", "type",      "anyerror", "comptime_int", "comptime_float",
+    "f16",          "f32",     "f64",        "f80",          "f128",
+    "c_longdouble", "c_short", "c_ushort",   "c_int",        "c_uint",
+    "c_long",       "c_ulong", "c_longlong", "c_ulonglong",  "c_char",
+    "anyopaque",    "void",    "bool",       "isize",        "usize",
+    "noreturn",     "type",    "anyerror",   "comptime_int", "comptime_float",
 };
 
 fn isType(name: []const u8) bool {

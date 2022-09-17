@@ -287,7 +287,7 @@ pub const Inst = struct {
         /// Uses the `break` union field.
         break_inline,
         /// Checks that comptime control flow does not happen inside a runtime block.
-        /// Uses the `node` union field.
+        /// Uses the `un_node` union field.
         check_comptime_control_flow,
         /// Function call.
         /// Uses the `pl_node` union field with payload `Call`.
@@ -995,6 +995,13 @@ pub const Inst = struct {
         /// closure_capture instruction ref.
         closure_get,
 
+        /// A defer statement.
+        /// Uses the `defer` union field.
+        @"defer",
+        /// An errdefer statement with a code.
+        /// Uses the `err_defer_code` union field.
+        defer_err_code,
+
         /// The ZIR instruction tag is one of the `Extended` ones.
         /// Uses the `extended` union field.
         extended,
@@ -1244,6 +1251,8 @@ pub const Inst = struct {
                 .try_ptr,
                 //.try_inline,
                 //.try_ptr_inline,
+                .@"defer",
+                .defer_err_code,
                 => false,
 
                 .@"break",
@@ -1311,6 +1320,8 @@ pub const Inst = struct {
                 .memcpy,
                 .memset,
                 .check_comptime_control_flow,
+                .@"defer",
+                .defer_err_code,
                 => true,
 
                 .param,
@@ -1589,7 +1600,7 @@ pub const Inst = struct {
                 .bool_br_or = .bool_br,
                 .@"break" = .@"break",
                 .break_inline = .@"break",
-                .check_comptime_control_flow = .node,
+                .check_comptime_control_flow = .un_node,
                 .call = .pl_node,
                 .cmp_lt = .pl_node,
                 .cmp_lte = .pl_node,
@@ -1818,6 +1829,9 @@ pub const Inst = struct {
 
                 .closure_capture = .un_tok,
                 .closure_get = .inst_node,
+
+                .@"defer" = .@"defer",
+                .defer_err_code = .defer_err_code,
 
                 .extended = .extended,
             });
@@ -2575,12 +2589,20 @@ pub const Inst = struct {
                 return zir.nullTerminatedString(self.str);
             }
         },
+        @"defer": struct {
+            index: u32,
+            len: u32,
+        },
+        defer_err_code: struct {
+            err_code: Ref,
+            payload_index: u32,
+        },
 
         // Make sure we don't accidentally add a field to make this union
         // bigger than expected. Note that in Debug builds, Zig is allowed
         // to insert a secret field for safety checks.
         comptime {
-            if (builtin.mode != .Debug) {
+            if (builtin.mode != .Debug and builtin.mode != .ReleaseSafe) {
                 assert(@sizeOf(Data) == 8);
             }
         }
@@ -2611,6 +2633,8 @@ pub const Inst = struct {
             dbg_stmt,
             inst_node,
             str_op,
+            @"defer",
+            defer_err_code,
         };
     };
 
@@ -3549,6 +3573,12 @@ pub const Inst = struct {
         node: i32,
         line: u32,
         column: u32,
+    };
+
+    pub const DeferErrCode = struct {
+        remapped_err_code: Index,
+        index: u32,
+        len: u32,
     };
 };
 
