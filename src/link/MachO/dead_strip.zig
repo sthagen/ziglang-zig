@@ -179,7 +179,9 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), macho_file: *Mac
         loop = false;
 
         for (macho_file.objects.items) |object| {
-            for (object.in_symtab) |_, source_index| {
+            const in_symtab = object.in_symtab orelse continue;
+
+            for (in_symtab) |_, source_index| {
                 const atom = object.getAtomForSymbol(@intCast(u32, source_index)) orelse continue;
                 if (alive.contains(atom)) continue;
 
@@ -231,7 +233,7 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), macho_file: *Mac
         if (sym.n_desc != MachO.N_DESC_GCED) continue;
 
         // TODO tombstone
-        const atom = entry.getAtom(macho_file);
+        const atom = entry.getAtom(macho_file).?;
         const match = sym.n_sect - 1;
         removeAtomFromSection(atom, match, macho_file);
         _ = try gc_sections.put(match, {});
@@ -243,7 +245,7 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), macho_file: *Mac
         if (sym.n_desc != MachO.N_DESC_GCED) continue;
 
         // TODO tombstone
-        const atom = entry.getAtom(macho_file);
+        const atom = entry.getAtom(macho_file).?;
         const match = sym.n_sect - 1;
         removeAtomFromSection(atom, match, macho_file);
         _ = try gc_sections.put(match, {});
@@ -255,7 +257,7 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), macho_file: *Mac
         if (sym.n_desc != MachO.N_DESC_GCED) continue;
 
         // TODO tombstone
-        const atom = entry.getAtom(macho_file);
+        const atom = entry.getAtom(macho_file).?;
         const match = sym.n_sect - 1;
         removeAtomFromSection(atom, match, macho_file);
         _ = try gc_sections.put(match, {});
