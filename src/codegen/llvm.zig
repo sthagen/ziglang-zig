@@ -780,7 +780,7 @@ pub const Object = struct {
             null;
 
         const emit_asm_path = try locPath(arena, comp.emit_asm, cache_dir);
-        const emit_llvm_ir_path = try locPath(arena, comp.emit_llvm_ir, cache_dir);
+        var emit_llvm_ir_path = try locPath(arena, comp.emit_llvm_ir, cache_dir);
         const emit_llvm_bc_path = try locPath(arena, comp.emit_llvm_bc, cache_dir);
 
         const emit_asm_msg = emit_asm_path orelse "(none)";
@@ -791,7 +791,34 @@ pub const Object = struct {
             emit_asm_msg, emit_bin_msg, emit_llvm_ir_msg, emit_llvm_bc_msg,
         });
 
+        // Unfortunately, LLVM shits the bed when we ask for both binary and assembly.
+        // So we call the entire pipeline multiple times if this is requested.
         var error_message: [*:0]const u8 = undefined;
+        if (emit_asm_path != null and emit_bin_path != null) {
+            if (self.target_machine.emitToFile(
+                self.llvm_module,
+                &error_message,
+                comp.bin_file.options.optimize_mode == .Debug,
+                comp.bin_file.options.optimize_mode == .ReleaseSmall,
+                comp.time_report,
+                comp.bin_file.options.tsan,
+                comp.bin_file.options.lto,
+                null,
+                emit_bin_path,
+                emit_llvm_ir_path,
+                null,
+            )) {
+                defer llvm.disposeMessage(error_message);
+
+                log.err("LLVM failed to emit bin={s} ir={s}: {s}", .{
+                    emit_bin_msg, emit_llvm_ir_msg, error_message,
+                });
+                return error.FailedToEmit;
+            }
+            emit_bin_path = null;
+            emit_llvm_ir_path = null;
+        }
+
         if (self.target_machine.emitToFile(
             self.llvm_module,
             &error_message,
@@ -2711,7 +2738,7 @@ pub const DeclGen = struct {
                 return dg.context.intType(bit_count);
             },
             .Float => switch (t.floatBits(target)) {
-                16 => return dg.context.halfType(),
+                16 => return if (backendSupportsF16(target)) dg.context.halfType() else dg.context.intType(16),
                 32 => return dg.context.floatType(),
                 64 => return dg.context.doubleType(),
                 80 => return if (backendSupportsF80(target)) dg.context.x86FP80Type() else dg.context.intType(80),
@@ -3226,7 +3253,15 @@ pub const DeclGen = struct {
             .Float => {
                 const llvm_ty = try dg.lowerType(tv.ty);
                 switch (tv.ty.floatBits(target)) {
-                    16, 32, 64 => return llvm_ty.constReal(tv.val.toFloat(f64)),
+                    16 => if (intrinsicsAllowed(tv.ty, target)) {
+                        return llvm_ty.constReal(tv.val.toFloat(f16));
+                    } else {
+                        const repr = @bitCast(u16, tv.val.toFloat(f16));
+                        const llvm_i16 = dg.context.intType(16);
+                        const int = llvm_i16.constInt(repr, .False);
+                        return int.constBitCast(llvm_ty);
+                    },
+                    32, 64 => return llvm_ty.constReal(tv.val.toFloat(f64)),
                     80 => {
                         const float = tv.val.toFloat(f80);
                         const repr = std.math.break_f80(float);
@@ -3938,6 +3973,15 @@ pub const DeclGen = struct {
                         const parent_llvm_ty = try dg.lowerType(parent_ty);
                         break :blk parent_llvm_ty.constInBoundsGEP(parent_llvm_ptr, &indices, indices.len);
                     },
+                    .Pointer => {
+                        assert(parent_ty.isSlice());
+                        const indices: [2]*llvm.Value = .{
+                            llvm_u32.constInt(0, .False),
+                            llvm_u32.constInt(field_index, .False),
+                        };
+                        const parent_llvm_ty = try dg.lowerType(parent_ty);
+                        break :blk parent_llvm_ty.constInBoundsGEP(parent_llvm_ptr, &indices, indices.len);
+                    },
                     else => unreachable,
                 }
             },
@@ -4311,13 +4355,17 @@ pub const FuncGen = struct {
         const gop = try self.func_inst_table.getOrPut(self.dg.gpa, inst);
         if (gop.found_existing) return gop.value_ptr.*;
 
-        const val = self.air.value(inst).?;
-        const ty = self.air.typeOf(inst);
-        const llvm_val = try self.dg.lowerValue(.{ .ty = ty, .val = val });
-        if (!isByRef(ty)) {
-            gop.value_ptr.* = llvm_val;
-            return llvm_val;
-        }
+        const llvm_val = try self.resolveValue(.{
+            .ty = self.air.typeOf(inst),
+            .val = self.air.value(inst).?,
+        });
+        gop.value_ptr.* = llvm_val;
+        return llvm_val;
+    }
+
+    fn resolveValue(self: *FuncGen, tv: TypedValue) !*llvm.Value {
+        const llvm_val = try self.dg.lowerValue(tv);
+        if (!isByRef(tv.ty)) return llvm_val;
 
         // We have an LLVM value but we need to create a global constant and
         // set the value as its initializer, and then return a pointer to the global.
@@ -4327,15 +4375,13 @@ pub const FuncGen = struct {
         global.setLinkage(.Private);
         global.setGlobalConstant(.True);
         global.setUnnamedAddr(.True);
-        global.setAlignment(ty.abiAlignment(target));
+        global.setAlignment(tv.ty.abiAlignment(target));
         // Because of LLVM limitations for lowering certain types such as unions,
         // the type of global constants might not match the type it is supposed to
         // be, and so we must bitcast the pointer at the usage sites.
-        const wanted_llvm_ty = try self.dg.lowerType(ty);
+        const wanted_llvm_ty = try self.dg.lowerType(tv.ty);
         const wanted_llvm_ptr_ty = wanted_llvm_ty.pointerType(0);
-        const casted_ptr = global.constBitCast(wanted_llvm_ptr_ty);
-        gop.value_ptr.* = casted_ptr;
-        return casted_ptr;
+        return global.constBitCast(wanted_llvm_ptr_ty);
     }
 
     fn genBody(self: *FuncGen, body: []const Air.Inst.Index) Error!void {
@@ -7575,11 +7621,25 @@ pub const FuncGen = struct {
         const target = self.dg.module.getTarget();
         const dest_bits = dest_ty.floatBits(target);
         const src_bits = operand_ty.floatBits(target);
-        if (!backendSupportsF80(target) and (src_bits == 80 or dest_bits == 80)) {
-            return softF80TruncOrExt(self, operand, src_bits, dest_bits);
+
+        if (intrinsicsAllowed(dest_ty, target) and intrinsicsAllowed(operand_ty, target)) {
+            const dest_llvm_ty = try self.dg.lowerType(dest_ty);
+            return self.builder.buildFPTrunc(operand, dest_llvm_ty, "");
+        } else {
+            const operand_llvm_ty = try self.dg.lowerType(operand_ty);
+            const dest_llvm_ty = try self.dg.lowerType(dest_ty);
+
+            var fn_name_buf: [64]u8 = undefined;
+            const fn_name = std.fmt.bufPrintZ(&fn_name_buf, "__trunc{s}f{s}f2", .{
+                compilerRtFloatAbbrev(src_bits), compilerRtFloatAbbrev(dest_bits),
+            }) catch unreachable;
+
+            const params = [1]*llvm.Value{operand};
+            const param_types = [1]*llvm.Type{operand_llvm_ty};
+            const llvm_fn = self.getLibcFunction(fn_name, &param_types, dest_llvm_ty);
+
+            return self.builder.buildCall(llvm_fn.globalGetValueType(), llvm_fn, &params, params.len, .C, .Auto, "");
         }
-        const dest_llvm_ty = try self.dg.lowerType(dest_ty);
-        return self.builder.buildFPTrunc(operand, dest_llvm_ty, "");
     }
 
     fn airFpext(self: *FuncGen, inst: Air.Inst.Index) !?*llvm.Value {
@@ -7593,11 +7653,25 @@ pub const FuncGen = struct {
         const target = self.dg.module.getTarget();
         const dest_bits = dest_ty.floatBits(target);
         const src_bits = operand_ty.floatBits(target);
-        if (!backendSupportsF80(target) and (src_bits == 80 or dest_bits == 80)) {
-            return softF80TruncOrExt(self, operand, src_bits, dest_bits);
+
+        if (intrinsicsAllowed(dest_ty, target) and intrinsicsAllowed(operand_ty, target)) {
+            const dest_llvm_ty = try self.dg.lowerType(dest_ty);
+            return self.builder.buildFPExt(operand, dest_llvm_ty, "");
+        } else {
+            const operand_llvm_ty = try self.dg.lowerType(operand_ty);
+            const dest_llvm_ty = try self.dg.lowerType(dest_ty);
+
+            var fn_name_buf: [64]u8 = undefined;
+            const fn_name = std.fmt.bufPrintZ(&fn_name_buf, "__extend{s}f{s}f2", .{
+                compilerRtFloatAbbrev(src_bits), compilerRtFloatAbbrev(dest_bits),
+            }) catch unreachable;
+
+            const params = [1]*llvm.Value{operand};
+            const param_types = [1]*llvm.Type{operand_llvm_ty};
+            const llvm_fn = self.getLibcFunction(fn_name, &param_types, dest_llvm_ty);
+
+            return self.builder.buildCall(llvm_fn.globalGetValueType(), llvm_fn, &params, params.len, .C, .Auto, "");
         }
-        const dest_llvm_ty = try self.dg.lowerType(self.air.typeOfIndex(inst));
-        return self.builder.buildFPExt(operand, dest_llvm_ty, "");
     }
 
     fn airPtrToInt(self: *FuncGen, inst: Air.Inst.Index) !?*llvm.Value {
@@ -8681,12 +8755,78 @@ pub const FuncGen = struct {
         return self.builder.buildShuffleVector(a, b, llvm_mask_value, "");
     }
 
+    /// Reduce a vector by repeatedly applying `llvm_fn` to produce an accumulated result.
+    ///
+    /// Equivalent to:
+    ///   reduce: {
+    ///     var i: usize = 0;
+    ///     var accum: T = init;
+    ///     while (i < vec.len) : (i += 1) {
+    ///       accum = llvm_fn(accum, vec[i]);
+    ///     }
+    ///     break :reduce accum;
+    ///   }
+    ///
+    fn buildReducedCall(
+        self: *FuncGen,
+        llvm_fn: *llvm.Value,
+        operand_vector: *llvm.Value,
+        vector_len: usize,
+        accum_init: *llvm.Value,
+    ) !*llvm.Value {
+        const llvm_usize_ty = try self.dg.lowerType(Type.usize);
+        const llvm_vector_len = llvm_usize_ty.constInt(vector_len, .False);
+        const llvm_result_ty = accum_init.typeOf();
+
+        // Allocate and initialize our mutable variables
+        const i_ptr = self.buildAlloca(llvm_usize_ty);
+        _ = self.builder.buildStore(llvm_usize_ty.constInt(0, .False), i_ptr);
+        const accum_ptr = self.buildAlloca(llvm_result_ty);
+        _ = self.builder.buildStore(accum_init, accum_ptr);
+
+        // Setup the loop
+        const loop = self.context.appendBasicBlock(self.llvm_func, "ReduceLoop");
+        const loop_exit = self.context.appendBasicBlock(self.llvm_func, "AfterReduce");
+        _ = self.builder.buildBr(loop);
+        {
+            self.builder.positionBuilderAtEnd(loop);
+
+            // while (i < vec.len)
+            const i = self.builder.buildLoad(llvm_usize_ty, i_ptr, "");
+            const cond = self.builder.buildICmp(.ULT, i, llvm_vector_len, "");
+            const loop_then = self.context.appendBasicBlock(self.llvm_func, "ReduceLoopThen");
+
+            _ = self.builder.buildCondBr(cond, loop_then, loop_exit);
+
+            {
+                self.builder.positionBuilderAtEnd(loop_then);
+
+                // accum = f(accum, vec[i]);
+                const accum = self.builder.buildLoad(llvm_result_ty, accum_ptr, "");
+                const element = self.builder.buildExtractElement(operand_vector, i, "");
+                const params = [2]*llvm.Value{ accum, element };
+                const new_accum = self.builder.buildCall(llvm_fn.globalGetValueType(), llvm_fn, &params, params.len, .C, .Auto, "");
+                _ = self.builder.buildStore(new_accum, accum_ptr);
+
+                // i += 1
+                const new_i = self.builder.buildAdd(i, llvm_usize_ty.constInt(1, .False), "");
+                _ = self.builder.buildStore(new_i, i_ptr);
+                _ = self.builder.buildBr(loop);
+            }
+        }
+
+        self.builder.positionBuilderAtEnd(loop_exit);
+        return self.builder.buildLoad(llvm_result_ty, accum_ptr, "");
+    }
+
     fn airReduce(self: *FuncGen, inst: Air.Inst.Index, want_fast_math: bool) !?*llvm.Value {
         if (self.liveness.isUnused(inst)) return null;
         self.builder.setFastMath(want_fast_math);
+        const target = self.dg.module.getTarget();
 
         const reduce = self.air.instructions.items(.data)[inst].reduce;
-        const operand = try self.resolveInst(reduce.operand);
+        var operand = try self.resolveInst(reduce.operand);
+        const operand_ty = self.air.typeOf(reduce.operand);
         const scalar_ty = self.air.typeOfIndex(inst);
 
         // TODO handle the fast math setting
@@ -8697,17 +8837,21 @@ pub const FuncGen = struct {
             .Xor => return self.builder.buildXorReduce(operand),
             .Min => switch (scalar_ty.zigTypeTag()) {
                 .Int => return self.builder.buildIntMinReduce(operand, scalar_ty.isSignedInt()),
-                .Float => return self.builder.buildFPMinReduce(operand),
+                .Float => if (intrinsicsAllowed(scalar_ty, target)) {
+                    return self.builder.buildFPMinReduce(operand);
+                },
                 else => unreachable,
             },
             .Max => switch (scalar_ty.zigTypeTag()) {
                 .Int => return self.builder.buildIntMaxReduce(operand, scalar_ty.isSignedInt()),
-                .Float => return self.builder.buildFPMaxReduce(operand),
+                .Float => if (intrinsicsAllowed(scalar_ty, target)) {
+                    return self.builder.buildFPMaxReduce(operand);
+                },
                 else => unreachable,
             },
             .Add => switch (scalar_ty.zigTypeTag()) {
                 .Int => return self.builder.buildAddReduce(operand),
-                .Float => {
+                .Float => if (intrinsicsAllowed(scalar_ty, target)) {
                     const scalar_llvm_ty = try self.dg.lowerType(scalar_ty);
                     const neutral_value = scalar_llvm_ty.constReal(-0.0);
                     return self.builder.buildFPAddReduce(neutral_value, operand);
@@ -8716,7 +8860,7 @@ pub const FuncGen = struct {
             },
             .Mul => switch (scalar_ty.zigTypeTag()) {
                 .Int => return self.builder.buildMulReduce(operand),
-                .Float => {
+                .Float => if (intrinsicsAllowed(scalar_ty, target)) {
                     const scalar_llvm_ty = try self.dg.lowerType(scalar_ty);
                     const neutral_value = scalar_llvm_ty.constReal(1.0);
                     return self.builder.buildFPMulReduce(neutral_value, operand);
@@ -8724,6 +8868,44 @@ pub const FuncGen = struct {
                 else => unreachable,
             },
         }
+
+        // Reduction could not be performed with intrinsics.
+        // Use a manual loop over a softfloat call instead.
+        var fn_name_buf: [64]u8 = undefined;
+        const float_bits = scalar_ty.floatBits(target);
+        const fn_name = switch (reduce.operation) {
+            .Min => std.fmt.bufPrintZ(&fn_name_buf, "{s}fmin{s}", .{
+                libcFloatPrefix(float_bits), libcFloatSuffix(float_bits),
+            }) catch unreachable,
+            .Max => std.fmt.bufPrintZ(&fn_name_buf, "{s}fmax{s}", .{
+                libcFloatPrefix(float_bits), libcFloatSuffix(float_bits),
+            }) catch unreachable,
+            .Add => std.fmt.bufPrintZ(&fn_name_buf, "__add{s}f3", .{
+                compilerRtFloatAbbrev(float_bits),
+            }) catch unreachable,
+            .Mul => std.fmt.bufPrintZ(&fn_name_buf, "__mul{s}f3", .{
+                compilerRtFloatAbbrev(float_bits),
+            }) catch unreachable,
+            else => unreachable,
+        };
+        var init_value_payload = Value.Payload.Float_32{
+            .data = switch (reduce.operation) {
+                .Min => std.math.nan(f32),
+                .Max => std.math.nan(f32),
+                .Add => -0.0,
+                .Mul => 1.0,
+                else => unreachable,
+            },
+        };
+
+        const param_llvm_ty = try self.dg.lowerType(scalar_ty);
+        const param_types = [2]*llvm.Type{ param_llvm_ty, param_llvm_ty };
+        const libc_fn = self.getLibcFunction(fn_name, &param_types, param_llvm_ty);
+        const init_value = try self.dg.lowerValue(.{
+            .ty = scalar_ty,
+            .val = Value.initPayload(&init_value_payload.base),
+        });
+        return self.buildReducedCall(libc_fn, operand, operand_ty.vectorLen(), init_value);
     }
 
     fn airAggregateInit(self: *FuncGen, inst: Air.Inst.Index) !?*llvm.Value {
@@ -8852,7 +9034,7 @@ pub const FuncGen = struct {
                         llvm_usize.constInt(@intCast(c_uint, array_info.len), .False),
                     };
                     const elem_ptr = self.builder.buildInBoundsGEP(llvm_result_ty, alloca_inst, &indices, indices.len, "");
-                    const llvm_elem = try self.dg.lowerValue(.{
+                    const llvm_elem = try self.resolveValue(.{
                         .ty = array_info.elem_type,
                         .val = sent_val,
                     });
@@ -8897,7 +9079,7 @@ pub const FuncGen = struct {
             return union_llvm_ty.constInt(tag_int, .False);
         }
         assert(isByRef(union_ty));
-        // The llvm type of the alloca will the the named LLVM union type, which will not
+        // The llvm type of the alloca will be the named LLVM union type, and will not
         // necessarily match the format that we need, depending on which tag is active. We
         // must construct the correct unnamed struct type here and bitcast, in order to
         // then set the fields appropriately.
@@ -8922,7 +9104,7 @@ pub const FuncGen = struct {
                 const fields: [2]*llvm.Type = .{
                     field_llvm_ty, self.context.intType(8).arrayType(padding_len),
                 };
-                break :p self.context.structType(&fields, fields.len, .False);
+                break :p self.context.structType(&fields, fields.len, .True);
             };
             if (layout.tag_size == 0) {
                 const fields: [1]*llvm.Type = .{payload};
@@ -9015,7 +9197,13 @@ pub const FuncGen = struct {
         const target = self.dg.module.getTarget();
         switch (prefetch.cache) {
             .instruction => switch (target.cpu.arch) {
-                .x86_64, .i386 => return null,
+                .x86_64,
+                .i386,
+                .powerpc,
+                .powerpcle,
+                .powerpc64,
+                .powerpc64le,
+                => return null,
                 .arm, .armeb, .thumb, .thumbeb => {
                     switch (prefetch.rw) {
                         .write => return null,
@@ -9053,87 +9241,6 @@ pub const FuncGen = struct {
         };
         _ = self.builder.buildCall(fn_val.globalGetValueType(), fn_val, &params, params.len, .C, .Auto, "");
         return null;
-    }
-
-    fn softF80TruncOrExt(
-        self: *FuncGen,
-        operand: *llvm.Value,
-        src_bits: u16,
-        dest_bits: u16,
-    ) !?*llvm.Value {
-        const target = self.dg.module.getTarget();
-
-        var param_llvm_ty: *llvm.Type = self.context.intType(80);
-        var ret_llvm_ty: *llvm.Type = param_llvm_ty;
-        var fn_name: [*:0]const u8 = undefined;
-        var arg = operand;
-        var final_cast: ?*llvm.Type = null;
-
-        assert(src_bits == 80 or dest_bits == 80);
-
-        if (src_bits == 80) switch (dest_bits) {
-            16 => {
-                // See corresponding condition at definition of
-                // __truncxfhf2 in compiler-rt.
-                if (target.cpu.arch.isAARCH64()) {
-                    ret_llvm_ty = self.context.halfType();
-                } else {
-                    ret_llvm_ty = self.context.intType(16);
-                    final_cast = self.context.halfType();
-                }
-                fn_name = "__truncxfhf2";
-            },
-            32 => {
-                ret_llvm_ty = self.context.floatType();
-                fn_name = "__truncxfsf2";
-            },
-            64 => {
-                ret_llvm_ty = self.context.doubleType();
-                fn_name = "__truncxfdf2";
-            },
-            80 => return operand,
-            128 => {
-                ret_llvm_ty = self.context.fp128Type();
-                fn_name = "__extendxftf2";
-            },
-            else => unreachable,
-        } else switch (src_bits) {
-            16 => {
-                // See corresponding condition at definition of
-                // __extendhfxf2 in compiler-rt.
-                param_llvm_ty = if (target.cpu.arch.isAARCH64())
-                    self.context.halfType()
-                else
-                    self.context.intType(16);
-                arg = self.builder.buildBitCast(arg, param_llvm_ty, "");
-                fn_name = "__extendhfxf2";
-            },
-            32 => {
-                param_llvm_ty = self.context.floatType();
-                fn_name = "__extendsfxf2";
-            },
-            64 => {
-                param_llvm_ty = self.context.doubleType();
-                fn_name = "__extenddfxf2";
-            },
-            80 => return operand,
-            128 => {
-                param_llvm_ty = self.context.fp128Type();
-                fn_name = "__trunctfxf2";
-            },
-            else => unreachable,
-        }
-
-        const llvm_fn = self.dg.object.llvm_module.getNamedFunction(fn_name) orelse f: {
-            const param_types = [_]*llvm.Type{param_llvm_ty};
-            const fn_type = llvm.functionType(ret_llvm_ty, &param_types, param_types.len, .False);
-            break :f self.dg.object.llvm_module.addFunction(fn_name, fn_type);
-        };
-
-        var args: [1]*llvm.Value = .{arg};
-        const result = self.builder.buildCall(llvm_fn.globalGetValueType(), llvm_fn, &args, args.len, .C, .Auto, "");
-        const final_cast_llvm_ty = final_cast orelse return result;
-        return self.builder.buildBitCast(result, final_cast_llvm_ty, "");
     }
 
     fn getErrorNameTable(self: *FuncGen) !*llvm.Value {
@@ -10415,6 +10522,17 @@ fn backendSupportsF80(target: std.Target) bool {
 /// if it produces miscompilations.
 fn backendSupportsF16(target: std.Target) bool {
     return switch (target.cpu.arch) {
+        .powerpc,
+        .powerpcle,
+        .powerpc64,
+        .powerpc64le,
+        .wasm32,
+        .wasm64,
+        .mips,
+        .mipsel,
+        .mips64,
+        .mips64el,
+        => false,
         else => true,
     };
 }

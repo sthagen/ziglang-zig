@@ -598,6 +598,8 @@ test "shr" {
 pub fn rotr(comptime T: type, x: T, r: anytype) T {
     if (@typeInfo(T) == .Vector) {
         const C = @typeInfo(T).Vector.child;
+        if (C == u0) return 0;
+
         if (@typeInfo(C).Int.signedness == .signed) {
             @compileError("cannot rotate signed integers");
         }
@@ -606,8 +608,15 @@ pub fn rotr(comptime T: type, x: T, r: anytype) T {
     } else if (@typeInfo(T).Int.signedness == .signed) {
         @compileError("cannot rotate signed integer");
     } else {
-        const ar = @intCast(Log2Int(T), @mod(r, @typeInfo(T).Int.bits));
-        return x >> ar | x << (1 +% ~ar);
+        if (T == u0) return 0;
+
+        if (isPowerOfTwo(@typeInfo(T).Int.bits)) {
+            const ar = @intCast(Log2Int(T), @mod(r, @typeInfo(T).Int.bits));
+            return x >> ar | x << (1 +% ~ar);
+        } else {
+            const ar = @mod(r, @typeInfo(T).Int.bits);
+            return shr(T, x, ar) | shl(T, x, @typeInfo(T).Int.bits - ar);
+        }
     }
 }
 
@@ -618,6 +627,9 @@ test "rotr" {
         // https://github.com/ziglang/zig/issues/12012
         return error.SkipZigTest;
     }
+    try testing.expect(rotr(u0, 0b0, @as(usize, 3)) == 0b0);
+    try testing.expect(rotr(u5, 0b00001, @as(usize, 0)) == 0b00001);
+    try testing.expect(rotr(u6, 0b000001, @as(usize, 7)) == 0b100000);
     try testing.expect(rotr(u8, 0b00000001, @as(usize, 0)) == 0b00000001);
     try testing.expect(rotr(u8, 0b00000001, @as(usize, 9)) == 0b10000000);
     try testing.expect(rotr(u8, 0b00000001, @as(usize, 8)) == 0b00000001);
@@ -632,6 +644,8 @@ test "rotr" {
 pub fn rotl(comptime T: type, x: T, r: anytype) T {
     if (@typeInfo(T) == .Vector) {
         const C = @typeInfo(T).Vector.child;
+        if (C == u0) return 0;
+
         if (@typeInfo(C).Int.signedness == .signed) {
             @compileError("cannot rotate signed integers");
         }
@@ -640,8 +654,15 @@ pub fn rotl(comptime T: type, x: T, r: anytype) T {
     } else if (@typeInfo(T).Int.signedness == .signed) {
         @compileError("cannot rotate signed integer");
     } else {
-        const ar = @intCast(Log2Int(T), @mod(r, @typeInfo(T).Int.bits));
-        return x << ar | x >> 1 +% ~ar;
+        if (T == u0) return 0;
+
+        if (isPowerOfTwo(@typeInfo(T).Int.bits)) {
+            const ar = @intCast(Log2Int(T), @mod(r, @typeInfo(T).Int.bits));
+            return x << ar | x >> 1 +% ~ar;
+        } else {
+            const ar = @mod(r, @typeInfo(T).Int.bits);
+            return shl(T, x, ar) | shr(T, x, @typeInfo(T).Int.bits - ar);
+        }
     }
 }
 
@@ -652,6 +673,9 @@ test "rotl" {
         // https://github.com/ziglang/zig/issues/12012
         return error.SkipZigTest;
     }
+    try testing.expect(rotl(u0, 0b0, @as(usize, 3)) == 0b0);
+    try testing.expect(rotl(u5, 0b00001, @as(usize, 0)) == 0b00001);
+    try testing.expect(rotl(u6, 0b000001, @as(usize, 7)) == 0b000010);
     try testing.expect(rotl(u8, 0b00000001, @as(usize, 0)) == 0b00000001);
     try testing.expect(rotl(u8, 0b00000001, @as(usize, 9)) == 0b00000010);
     try testing.expect(rotl(u8, 0b00000001, @as(usize, 8)) == 0b00000001);
@@ -762,14 +786,14 @@ fn testOverflow() !void {
     try testing.expect((shlExact(i32, 0b11, 4) catch unreachable) == 0b110000);
 }
 
-/// Returns the absolute value of x, where x is a value of an integer
-/// type.
+/// Returns the absolute value of x, where x is a value of a signed integer type.
+/// See also: `absCast`
 pub fn absInt(x: anytype) !@TypeOf(x) {
     const T = @TypeOf(x);
     comptime assert(@typeInfo(T) == .Int); // must pass an integer to absInt
     comptime assert(@typeInfo(T).Int.signedness == .signed); // must pass a signed integer to absInt
 
-    if (x == minInt(@TypeOf(x))) {
+    if (x == minInt(T)) {
         return error.Overflow;
     } else {
         @setRuntimeSafety(false);
@@ -977,6 +1001,7 @@ pub inline fn fabs(value: anytype) @TypeOf(value) {
 
 /// Returns the absolute value of the integer parameter.
 /// Result is an unsigned integer.
+/// See also: `absInt`
 pub fn absCast(x: anytype) switch (@typeInfo(@TypeOf(x))) {
     .ComptimeInt => comptime_int,
     .Int => |int_info| std.meta.Int(.unsigned, int_info.bits),
@@ -1038,10 +1063,11 @@ test "negateCast" {
 /// return null.
 pub fn cast(comptime T: type, x: anytype) ?T {
     comptime assert(@typeInfo(T) == .Int); // must pass an integer
-    comptime assert(@typeInfo(@TypeOf(x)) == .Int); // must pass an integer
-    if (maxInt(@TypeOf(x)) > maxInt(T) and x > maxInt(T)) {
+    const is_comptime = @TypeOf(x) == comptime_int;
+    comptime assert(is_comptime or @typeInfo(@TypeOf(x)) == .Int); // must pass an integer
+    if ((is_comptime or maxInt(@TypeOf(x)) > maxInt(T)) and x > maxInt(T)) {
         return null;
-    } else if (minInt(@TypeOf(x)) < minInt(T) and x < minInt(T)) {
+    } else if ((is_comptime or minInt(@TypeOf(x)) < minInt(T)) and x < minInt(T)) {
         return null;
     } else {
         return @intCast(T, x);
@@ -1049,12 +1075,18 @@ pub fn cast(comptime T: type, x: anytype) ?T {
 }
 
 test "cast" {
+    try testing.expect(cast(u8, 300) == null);
     try testing.expect(cast(u8, @as(u32, 300)) == null);
+    try testing.expect(cast(i8, -200) == null);
     try testing.expect(cast(i8, @as(i32, -200)) == null);
+    try testing.expect(cast(u8, -1) == null);
     try testing.expect(cast(u8, @as(i8, -1)) == null);
+    try testing.expect(cast(u64, -1) == null);
     try testing.expect(cast(u64, @as(i8, -1)) == null);
 
+    try testing.expect(cast(u8, 255).? == @as(u8, 255));
     try testing.expect(cast(u8, @as(u32, 255)).? == @as(u8, 255));
+    try testing.expect(@TypeOf(cast(u8, 255).?) == u8);
     try testing.expect(@TypeOf(cast(u8, @as(u32, 255)).?) == u8);
 }
 

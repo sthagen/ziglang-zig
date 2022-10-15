@@ -89,16 +89,20 @@ test {
     _ = @import("behavior/bugs/12551.zig");
     _ = @import("behavior/bugs/12644.zig");
     _ = @import("behavior/bugs/12680.zig");
-    _ = @import("behavior/bugs/12776.zig");
     _ = @import("behavior/bugs/12786.zig");
     _ = @import("behavior/bugs/12794.zig");
     _ = @import("behavior/bugs/12801-1.zig");
     _ = @import("behavior/bugs/12801-2.zig");
     _ = @import("behavior/bugs/12885.zig");
+    _ = @import("behavior/bugs/12890.zig");
+    _ = @import("behavior/bugs/12891.zig");
     _ = @import("behavior/bugs/12911.zig");
     _ = @import("behavior/bugs/12928.zig");
     _ = @import("behavior/bugs/12945.zig");
+    _ = @import("behavior/bugs/12972.zig");
     _ = @import("behavior/bugs/12984.zig");
+    _ = @import("behavior/bugs/13068.zig");
+    _ = @import("behavior/bugs/13128.zig");
     _ = @import("behavior/byteswap.zig");
     _ = @import("behavior/byval_arg_var.zig");
     _ = @import("behavior/call.zig");
@@ -183,6 +187,8 @@ test {
         _ = @import("behavior/packed_struct_explicit_backing_int.zig");
         _ = @import("behavior/empty_union.zig");
         _ = @import("behavior/inline_switch.zig");
+        _ = @import("behavior/bugs/12723.zig");
+        _ = @import("behavior/bugs/12776.zig");
     }
 
     if (builtin.os.tag != .wasi) {

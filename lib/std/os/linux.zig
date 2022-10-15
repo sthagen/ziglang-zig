@@ -3174,6 +3174,17 @@ pub const sockaddr = extern struct {
         path: [108]u8,
     };
 
+    /// Packet socket address
+    pub const ll = extern struct {
+        family: sa_family_t = AF.PACKET,
+        protocol: u16,
+        ifindex: i32,
+        hatype: u16,
+        pkttype: u8,
+        halen: u8,
+        addr: [8]u8,
+    };
+
     /// Netlink socket address
     pub const nl = extern struct {
         family: sa_family_t = AF.NETLINK,
@@ -3750,6 +3761,8 @@ pub const IORING_CQE_F_BUFFER = 1 << 0;
 pub const IORING_CQE_F_MORE = 1 << 1;
 /// If set, more data to read after socket recv
 pub const IORING_CQE_F_SOCK_NONEMPTY = 1 << 2;
+/// Set for notification CQEs. Can be used to distinct them from sends.
+pub const IORING_CQE_F_NOTIF = 1 << 3;
 
 /// Magic offsets for the application to mmap the data it needs
 pub const IORING_OFF_SQ_RING = 0;

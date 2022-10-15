@@ -846,12 +846,12 @@ fn doALoopThing(id: EnumWithOneMember) void {
     }
 }
 
-test "comparison operator on enum with one member is comptime known" {
+test "comparison operator on enum with one member is comptime-known" {
     doALoopThing(EnumWithOneMember.Eof);
 }
 
 const State = enum { Start };
-test "switch on enum with one member is comptime known" {
+test "switch on enum with one member is comptime-known" {
     var state = State.Start;
     switch (state) {
         State.Start => return,
@@ -1168,11 +1168,4 @@ test "switch on an extern enum with negative value" {
 test "Non-exhaustive enum with nonstandard int size behaves correctly" {
     const E = enum(u15) { _ };
     try expect(@sizeOf(E) == @sizeOf(u15));
-}
-
-test "Non-exhaustive enum backed by comptime_int" {
-    const E = enum(comptime_int) { a, b, c, _ };
-    comptime var e: E = .a;
-    e = @intToEnum(E, 378089457309184723749);
-    try expect(@enumToInt(e) == 378089457309184723749);
 }

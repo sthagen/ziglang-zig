@@ -582,16 +582,16 @@ test "comparisons 0 <= uint and 0 > uint should be comptime" {
 }
 fn testCompTimeUIntComparisons(x: u32) void {
     if (!(0 <= x)) {
-        @compileError("this condition should be comptime known");
+        @compileError("this condition should be comptime-known");
     }
     if (0 > x) {
-        @compileError("this condition should be comptime known");
+        @compileError("this condition should be comptime-known");
     }
     if (!(x >= 0)) {
-        @compileError("this condition should be comptime known");
+        @compileError("this condition should be comptime-known");
     }
     if (x < 0) {
-        @compileError("this condition should be comptime known");
+        @compileError("this condition should be comptime-known");
     }
 }
 
@@ -1302,7 +1302,7 @@ test "repeated value is correctly expanded" {
     }
 }
 
-test "value in if block is comptime known" {
+test "value in if block is comptime-known" {
     if (builtin.zig_backend == .stage1) return error.SkipZigTest;
 
     const first = blk: {
@@ -1339,6 +1339,8 @@ test "lazy value is resolved as slice operand" {
 }
 
 test "break from inline loop depends on runtime condition" {
+    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
+
     const S = struct {
         fn foo(a: u8) bool {
             return a == 4;
@@ -1397,4 +1399,18 @@ test "continue in inline for inside a comptime switch" {
         else => {},
     }
     try expect(count == 4);
+}
+
+test "continue nested inline for loop" {
+    var a: u8 = 0;
+    loop: inline for ([_]u8{ 1, 2 }) |x| {
+        inline for ([_]u8{1}) |y| {
+            if (x == y) {
+                continue :loop;
+            }
+        }
+        a = x;
+        try expect(x == 2);
+    }
+    try expect(a == 2);
 }

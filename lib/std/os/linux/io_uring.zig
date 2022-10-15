@@ -474,8 +474,8 @@ pub const IO_Uring = struct {
         self: *IO_Uring,
         user_data: u64,
         fd: os.fd_t,
-        addr: *os.sockaddr,
-        addrlen: *os.socklen_t,
+        addr: ?*os.sockaddr,
+        addrlen: ?*os.socklen_t,
         flags: u32,
     ) !*linux.io_uring_sqe {
         const sqe = try self.get_sqe();
@@ -1292,8 +1292,8 @@ pub inline fn __io_uring_prep_poll_mask(poll_mask: u32) u32 {
 pub fn io_uring_prep_accept(
     sqe: *linux.io_uring_sqe,
     fd: os.fd_t,
-    addr: *os.sockaddr,
-    addrlen: *os.socklen_t,
+    addr: ?*os.sockaddr,
+    addrlen: ?*os.socklen_t,
     flags: u32,
 ) void {
     // `addr` holds a pointer to `sockaddr`, and `addr2` holds a pointer to socklen_t`.
@@ -2007,7 +2007,8 @@ test "accept/connect/send/recv" {
     try testing.expectEqual(linux.io_uring_cqe{
         .user_data = 0xffffffff,
         .res = buffer_recv.len,
-        .flags = 0,
+        // ignore IORING_CQE_F_SOCK_NONEMPTY since it is only set on some systems
+        .flags = cqe_recv.flags & linux.IORING_CQE_F_SOCK_NONEMPTY,
     }, cqe_recv);
 
     try testing.expectEqualSlices(u8, buffer_send[0..buffer_recv.len], buffer_recv[0..]);
@@ -2089,7 +2090,8 @@ test "sendmsg/recvmsg" {
     try testing.expectEqual(linux.io_uring_cqe{
         .user_data = 0x22222222,
         .res = buffer_recv.len,
-        .flags = 0,
+        // ignore IORING_CQE_F_SOCK_NONEMPTY since it is set non-deterministically
+        .flags = cqe_recvmsg.flags & linux.IORING_CQE_F_SOCK_NONEMPTY,
     }, cqe_recvmsg);
 
     try testing.expectEqualSlices(u8, buffer_send[0..buffer_recv.len], buffer_recv[0..]);
