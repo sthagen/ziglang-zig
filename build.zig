@@ -142,6 +142,10 @@ pub fn build(b: *Builder) !void {
     };
 
     const exe = b.addExecutable("zig", main_file);
+
+    const compile_step = b.step("compile", "Build the self-hosted compiler");
+    compile_step.dependOn(&exe.step);
+
     exe.stack_size = stack_size;
     exe.strip = strip;
     exe.sanitize_thread = sanitize_thread;
@@ -339,7 +343,10 @@ pub fn build(b: *Builder) !void {
             // That means we also have to rely on stage1 compiled c++ files. We parse config.h to find
             // the information passed on to us from cmake.
             if (cfg.cmake_prefix_path.len > 0) {
-                b.addSearchPrefix(cfg.cmake_prefix_path);
+                var it = mem.tokenize(u8, cfg.cmake_prefix_path, ";");
+                while (it.next()) |path| {
+                    b.addSearchPrefix(path);
+                }
             }
 
             try addCmakeCfgOptionsToExe(b, cfg, exe, use_zig_libcxx);

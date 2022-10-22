@@ -924,12 +924,12 @@ pub const Inst = struct {
         /// Implements the `@memset` builtin.
         /// Uses the `pl_node` union field with payload `Memset`.
         memset,
-        /// Implements the `@minimum` builtin.
+        /// Implements the `@min` builtin.
         /// Uses the `pl_node` union field with payload `Bin`
-        minimum,
-        /// Implements the `@maximum` builtin.
+        min,
+        /// Implements the `@max` builtin.
         /// Uses the `pl_node` union field with payload `Bin`
-        maximum,
+        max,
         /// Implements the `@cImport` builtin.
         /// Uses the `pl_node` union field with payload `Block`.
         c_import,
@@ -987,6 +987,15 @@ pub const Inst = struct {
         /// An errdefer statement with a code.
         /// Uses the `err_defer_code` union field.
         defer_err_code,
+
+        /// Requests that Sema update the saved error return trace index for the enclosing
+        /// block, if the operand is .none or of an error/error-union type.
+        /// Uses the `save_err_ret_index` field.
+        save_err_ret_index,
+        /// Sets error return trace to zero if no operand is given,
+        /// otherwise sets the value to the given amount.
+        /// Uses the `restore_err_ret_index` union field.
+        restore_err_ret_index,
 
         /// The ZIR instruction tag is one of the `Extended` ones.
         /// Uses the `extended` union field.
@@ -1217,10 +1226,10 @@ pub const Inst = struct {
                 .mul_add,
                 .builtin_call,
                 .field_parent_ptr,
-                .maximum,
+                .max,
                 .memcpy,
                 .memset,
-                .minimum,
+                .min,
                 .c_import,
                 .@"resume",
                 .@"await",
@@ -1236,6 +1245,8 @@ pub const Inst = struct {
                 //.try_ptr_inline,
                 .@"defer",
                 .defer_err_code,
+                .save_err_ret_index,
+                .restore_err_ret_index,
                 => false,
 
                 .@"break",
@@ -1305,6 +1316,8 @@ pub const Inst = struct {
                 .check_comptime_control_flow,
                 .@"defer",
                 .defer_err_code,
+                .restore_err_ret_index,
+                .save_err_ret_index,
                 => true,
 
                 .param,
@@ -1502,8 +1515,8 @@ pub const Inst = struct {
                 .mul_add,
                 .builtin_call,
                 .field_parent_ptr,
-                .maximum,
-                .minimum,
+                .max,
+                .min,
                 .c_import,
                 .@"resume",
                 .@"await",
@@ -1785,10 +1798,10 @@ pub const Inst = struct {
                 .mul_add = .pl_node,
                 .builtin_call = .pl_node,
                 .field_parent_ptr = .pl_node,
-                .maximum = .pl_node,
+                .max = .pl_node,
                 .memcpy = .pl_node,
                 .memset = .pl_node,
-                .minimum = .pl_node,
+                .min = .pl_node,
                 .c_import = .pl_node,
 
                 .alloc = .un_node,
@@ -1809,6 +1822,9 @@ pub const Inst = struct {
 
                 .@"defer" = .@"defer",
                 .defer_err_code = .defer_err_code,
+
+                .save_err_ret_index = .save_err_ret_index,
+                .restore_err_ret_index = .restore_err_ret_index,
 
                 .extended = .extended,
             });
@@ -1883,6 +1899,11 @@ pub const Inst = struct {
         ///  * 0bX0000000_00000000 - is volatile
         /// `operand` is payload index to `Asm`.
         @"asm",
+        /// Same as `asm` except the assembly template is not a string literal but a comptime
+        /// expression.
+        /// The `asm_source` field of the Asm is not a null-terminated string
+        /// but instead a Ref.
+        asm_expr,
         /// Log compile time variables and emit an error message.
         /// `operand` is payload index to `NodeMultiOp`.
         /// `small` is `operands_len`.
@@ -1969,6 +1990,9 @@ pub const Inst = struct {
         /// `small` 0=>weak 1=>strong
         /// `operand` is payload index to `Cmpxchg`.
         cmpxchg,
+        /// Implement the builtin `@addrSpaceCast`
+        /// `Operand` is payload index to `BinNode`. `lhs` is dest type, `rhs` is operand.
+        addrspace_cast,
 
         pub const InstData = struct {
             opcode: Extended,
@@ -2578,6 +2602,13 @@ pub const Inst = struct {
             err_code: Ref,
             payload_index: u32,
         },
+        save_err_ret_index: struct {
+            operand: Ref, // If error type (or .none), save new trace index
+        },
+        restore_err_ret_index: struct {
+            block: Ref, // If restored, the index is from this block's entrypoint
+            operand: Ref, // If non-error (or .none), then restore the index
+        },
 
         // Make sure we don't accidentally add a field to make this union
         // bigger than expected. Note that in Debug builds, Zig is allowed
@@ -2616,6 +2647,8 @@ pub const Inst = struct {
             str_op,
             @"defer",
             defer_err_code,
+            save_err_ret_index,
+            restore_err_ret_index,
         };
     };
 
@@ -2801,10 +2834,11 @@ pub const Inst = struct {
         pub const Flags = packed struct {
             /// std.builtin.CallOptions.Modifier in packed form
             pub const PackedModifier = u3;
-            pub const PackedArgsLen = u28;
+            pub const PackedArgsLen = u27;
 
             packed_modifier: PackedModifier,
             ensure_result_used: bool = false,
+            pop_error_return_trace: bool,
             args_len: PackedArgsLen,
 
             comptime {

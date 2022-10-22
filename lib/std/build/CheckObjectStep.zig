@@ -45,7 +45,9 @@ pub fn runAndCompare(self: *CheckObjectStep) *EmulatableRunStep {
     assert(dependencies_len > 0);
     const exe_step = self.step.dependencies.items[dependencies_len - 1];
     const exe = exe_step.cast(std.build.LibExeObjStep).?;
-    return EmulatableRunStep.create(self.builder, "EmulatableRun", exe);
+    const emulatable_step = EmulatableRunStep.create(self.builder, "EmulatableRun", exe);
+    emulatable_step.step.dependOn(&self.step);
+    return emulatable_step;
 }
 
 /// There two types of actions currently suported:
@@ -436,6 +438,7 @@ const MachODumper = struct {
         }
 
         if (opts.dump_symtab) {
+            try writer.print("{s}\n", .{symtab_label});
             for (symtab) |sym| {
                 if (sym.stab()) continue;
                 const sym_name = mem.sliceTo(@ptrCast([*:0]const u8, strtab.ptr + sym.n_strx), 0);

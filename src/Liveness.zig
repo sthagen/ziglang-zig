@@ -228,6 +228,7 @@ pub fn categorizeOperand(
         .frame_addr,
         .wasm_memory_size,
         .err_return_trace,
+        .save_err_return_trace_index,
         => return .none,
 
         .fence => return .write,
@@ -268,6 +269,7 @@ pub fn categorizeOperand(
         .bit_reverse,
         .splat,
         .error_set_has_value,
+        .addrspace_cast,
         => {
             const o = air_datas[inst].ty_op;
             if (o.operand == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
@@ -804,6 +806,7 @@ fn analyzeInst(
         .frame_addr,
         .wasm_memory_size,
         .err_return_trace,
+        .save_err_return_trace_index,
         => return trackOperands(a, new_set, inst, main_tomb, .{ .none, .none, .none }),
 
         .not,
@@ -844,6 +847,7 @@ fn analyzeInst(
         .bit_reverse,
         .splat,
         .error_set_has_value,
+        .addrspace_cast,
         => {
             const o = inst_datas[inst].ty_op;
             return trackOperands(a, new_set, inst, main_tomb, .{ o.operand, .none, .none });

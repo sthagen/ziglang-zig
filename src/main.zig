@@ -510,7 +510,6 @@ const usage_build_generic =
     \\  --verbose-link               Display linker invocations
     \\  --verbose-cc                 Display C compiler invocations
     \\  --verbose-air                Enable compiler debug output for Zig AIR
-    \\  --verbose-mir                Enable compiler debug output for Zig MIR
     \\  --verbose-llvm-ir            Enable compiler debug output for LLVM IR
     \\  --verbose-cimport            Enable compiler debug output for C imports
     \\  --verbose-llvm-cpu-features  Enable compiler debug output for LLVM CPU features
@@ -697,6 +696,7 @@ fn buildOutputType(
     var linker_print_gc_sections: bool = false;
     var linker_print_icf_sections: bool = false;
     var linker_print_map: bool = false;
+    var linker_z_nocopyreloc = false;
     var linker_z_nodelete = false;
     var linker_z_notext = false;
     var linker_z_defs = false;
@@ -941,6 +941,8 @@ fn buildOutputType(
                         };
                     } else if (mem.eql(u8, arg, "--name")) {
                         provided_name = args_iter.nextOrFatal();
+                        if (!mem.eql(u8, provided_name.?, fs.path.basename(provided_name.?)))
+                            fatal("invalid package name '{s}': cannot contain folder separators", .{provided_name.?});
                     } else if (mem.eql(u8, arg, "-rpath")) {
                         try rpath_list.append(args_iter.nextOrFatal());
                     } else if (mem.eql(u8, arg, "--library-directory") or mem.eql(u8, arg, "-L")) {
@@ -1261,6 +1263,8 @@ fn buildOutputType(
                             linker_z_defs = true;
                         } else if (mem.eql(u8, z_arg, "origin")) {
                             linker_z_origin = true;
+                        } else if (mem.eql(u8, z_arg, "nocopyreloc")) {
+                            linker_z_nocopyreloc = true;
                         } else if (mem.eql(u8, z_arg, "now")) {
                             linker_z_now = true;
                         } else if (mem.eql(u8, z_arg, "lazy")) {
@@ -1649,8 +1653,6 @@ fn buildOutputType(
                             };
                         }
                     },
-                    .dynamic => link_mode = .Dynamic,
-                    .static => link_mode = .Static,
                 }
             }
             // Parse linker args.
@@ -1824,6 +1826,8 @@ fn buildOutputType(
                         linker_z_defs = true;
                     } else if (mem.eql(u8, z_arg, "origin")) {
                         linker_z_origin = true;
+                    } else if (mem.eql(u8, z_arg, "nocopyreloc")) {
+                        linker_z_nocopyreloc = true;
                     } else if (mem.eql(u8, z_arg, "noexecstack")) {
                         // noexecstack is the default when linking with LLD
                     } else if (mem.eql(u8, z_arg, "now")) {
@@ -2893,6 +2897,7 @@ fn buildOutputType(
         .linker_print_map = linker_print_map,
         .linker_global_base = linker_global_base,
         .linker_export_symbol_names = linker_export_symbol_names.items,
+        .linker_z_nocopyreloc = linker_z_nocopyreloc,
         .linker_z_nodelete = linker_z_nodelete,
         .linker_z_notext = linker_z_notext,
         .linker_z_defs = linker_z_defs,
@@ -4680,8 +4685,6 @@ pub const ClangArgIterator = struct {
         weak_framework,
         headerpad_max_install_names,
         compress_debug_sections,
-        dynamic,
-        static,
     };
 
     const Args = struct {

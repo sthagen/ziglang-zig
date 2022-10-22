@@ -456,6 +456,7 @@ pub const Target = struct {
     pub const bpf = @import("target/bpf.zig");
     pub const csky = @import("target/csky.zig");
     pub const hexagon = @import("target/hexagon.zig");
+    pub const m68k = @import("target/m68k.zig");
     pub const mips = @import("target/mips.zig");
     pub const msp430 = @import("target/msp430.zig");
     pub const nvptx = @import("target/nvptx.zig");
@@ -951,6 +952,13 @@ pub const Target = struct {
                 };
             }
 
+            pub fn isNvptx(arch: Arch) bool {
+                return switch (arch) {
+                    .nvptx, .nvptx64 => true,
+                    else => false,
+                };
+            }
+
             pub fn parseCpuModel(arch: Arch, cpu_name: []const u8) !*const Cpu.Model {
                 for (arch.allCpuModels()) |cpu| {
                     if (mem.eql(u8, cpu_name, cpu.name)) {
@@ -1157,6 +1165,17 @@ pub const Target = struct {
                 };
             }
 
+            /// Returns whether this architecture supports the address space
+            pub fn supportsAddressSpace(arch: Arch, address_space: std.builtin.AddressSpace) bool {
+                const is_nvptx = arch == .nvptx or arch == .nvptx64;
+                return switch (address_space) {
+                    .generic => true,
+                    .fs, .gs, .ss => arch == .x86_64 or arch == .i386,
+                    .global, .constant, .local, .shared => arch == .amdgcn or is_nvptx,
+                    .param => is_nvptx,
+                };
+            }
+
             pub fn ptrBitWidth(arch: Arch) u16 {
                 switch (arch) {
                     .avr,
@@ -1335,6 +1354,7 @@ pub const Target = struct {
                     .avr => &avr.cpu.avr2,
                     .bpfel, .bpfeb => &bpf.cpu.generic,
                     .hexagon => &hexagon.cpu.generic,
+                    .m68k => &m68k.cpu.generic,
                     .mips, .mipsel => &mips.cpu.mips32,
                     .mips64, .mips64el => &mips.cpu.mips64,
                     .msp430 => &msp430.cpu.generic,

@@ -2786,6 +2786,12 @@ pub const Type = extern union {
 
             .pointer => self.castTag(.pointer).?.data.@"addrspace",
 
+            .optional => {
+                var buf: Payload.ElemType = undefined;
+                const child_type = self.optionalChild(&buf);
+                return child_type.ptrAddressSpace();
+            },
+
             else => unreachable,
         };
     }
@@ -2992,7 +2998,7 @@ pub const Type = extern union {
                         return child_type.abiAlignmentAdvanced(target, strat);
                     },
                     .lazy => |arena| switch (try child_type.abiAlignmentAdvanced(target, strat)) {
-                        .scalar => |x| return AbiAlignmentAdvanced{ .scalar = @maximum(x, 1) },
+                        .scalar => |x| return AbiAlignmentAdvanced{ .scalar = @max(x, 1) },
                         .val => return AbiAlignmentAdvanced{ .val = try Value.Tag.lazy_align.create(arena, ty) },
                     },
                 }
@@ -3008,7 +3014,7 @@ pub const Type = extern union {
                         if (!(try data.payload.hasRuntimeBitsAdvanced(false, sema_kit))) {
                             return AbiAlignmentAdvanced{ .scalar = code_align };
                         }
-                        return AbiAlignmentAdvanced{ .scalar = @maximum(
+                        return AbiAlignmentAdvanced{ .scalar = @max(
                             code_align,
                             (try data.payload.abiAlignmentAdvanced(target, strat)).scalar,
                         ) };
@@ -3017,7 +3023,7 @@ pub const Type = extern union {
                         switch (try data.payload.abiAlignmentAdvanced(target, strat)) {
                             .scalar => |payload_align| {
                                 return AbiAlignmentAdvanced{
-                                    .scalar = @maximum(code_align, payload_align),
+                                    .scalar = @max(code_align, payload_align),
                                 };
                             },
                             .val => {},
@@ -3071,14 +3077,14 @@ pub const Type = extern union {
                             .lazy => |arena| return AbiAlignmentAdvanced{ .val = try Value.Tag.lazy_align.create(arena, ty) },
                         },
                     };
-                    big_align = @maximum(big_align, field_align);
+                    big_align = @max(big_align, field_align);
 
                     // This logic is duplicated in Module.Struct.Field.alignment.
                     if (struct_obj.layout == .Extern or target.ofmt == .c) {
                         if (field.ty.isAbiInt() and field.ty.intInfo(target).bits >= 128) {
                             // The C ABI requires 128 bit integer fields of structs
                             // to be 16-bytes aligned.
-                            big_align = @maximum(big_align, 16);
+                            big_align = @max(big_align, 16);
                         }
                     }
                 }
@@ -3093,7 +3099,7 @@ pub const Type = extern union {
                     if (val.tag() != .unreachable_value) continue; // comptime field
 
                     switch (try field_ty.abiAlignmentAdvanced(target, strat)) {
-                        .scalar => |field_align| big_align = @maximum(big_align, field_align),
+                        .scalar => |field_align| big_align = @max(big_align, field_align),
                         .val => switch (strat) {
                             .eager => unreachable, // field type alignment not resolved
                             .sema_kit => unreachable, // passed to abiAlignmentAdvanced above
@@ -3188,7 +3194,7 @@ pub const Type = extern union {
                     .lazy => |arena| return AbiAlignmentAdvanced{ .val = try Value.Tag.lazy_align.create(arena, ty) },
                 },
             };
-            max_align = @maximum(max_align, field_align);
+            max_align = @max(max_align, field_align);
         }
         return AbiAlignmentAdvanced{ .scalar = max_align };
     }
@@ -3559,7 +3565,7 @@ pub const Type = extern union {
     }
 
     fn intAbiAlignment(bits: u16, target: Target) u32 {
-        return @minimum(
+        return @min(
             std.math.ceilPowerOfTwoPromote(u16, (bits + 7) / 8),
             target.maxIntAlignment(),
         );
@@ -3613,6 +3619,9 @@ pub const Type = extern union {
 
             .@"struct" => {
                 if (sema_kit) |sk| _ = try sk.sema.resolveTypeFields(sk.block, sk.src, ty);
+                if (ty.containerLayout() != .Packed) {
+                    return (try ty.abiSizeAdvanced(target, if (sema_kit) |sk| .{ .sema_kit = sk } else .eager)).scalar * 8;
+                }
                 var total: u64 = 0;
                 for (ty.structFields().values()) |field| {
                     total += try bitSizeAdvanced(field.ty, target, sema_kit);
@@ -3622,6 +3631,9 @@ pub const Type = extern union {
 
             .tuple, .anon_struct => {
                 if (sema_kit) |sk| _ = try sk.sema.resolveTypeFields(sk.block, sk.src, ty);
+                if (ty.containerLayout() != .Packed) {
+                    return (try ty.abiSizeAdvanced(target, if (sema_kit) |sk| .{ .sema_kit = sk } else .eager)).scalar * 8;
+                }
                 var total: u64 = 0;
                 for (ty.tupleFields().types) |field_ty| {
                     total += try bitSizeAdvanced(field_ty, target, sema_kit);
@@ -3637,12 +3649,15 @@ pub const Type = extern union {
 
             .@"union", .union_safety_tagged, .union_tagged => {
                 if (sema_kit) |sk| _ = try sk.sema.resolveTypeFields(sk.block, sk.src, ty);
+                if (ty.containerLayout() != .Packed) {
+                    return (try ty.abiSizeAdvanced(target, if (sema_kit) |sk| .{ .sema_kit = sk } else .eager)).scalar * 8;
+                }
                 const union_obj = ty.cast(Payload.Union).?.data;
                 assert(union_obj.haveFieldTypes());
 
                 var size: u64 = 0;
                 for (union_obj.fields.values()) |field| {
-                    size = @maximum(size, try bitSizeAdvanced(field.ty, target, sema_kit));
+                    size = @max(size, try bitSizeAdvanced(field.ty, target, sema_kit));
                 }
                 return size;
             },
@@ -5754,7 +5769,7 @@ pub const Type = extern union {
             }
 
             const field_align = field.alignment(it.target, it.struct_obj.layout);
-            it.big_align = @maximum(it.big_align, field_align);
+            it.big_align = @max(it.big_align, field_align);
             const field_offset = std.mem.alignForwardGeneric(u64, it.offset, field_align);
             it.offset = field_offset + field.ty.abiSize(it.target);
             return FieldOffset{ .field = i, .offset = field_offset };
@@ -5783,7 +5798,7 @@ pub const Type = extern union {
                         return field_offset.offset;
                 }
 
-                return std.mem.alignForwardGeneric(u64, it.offset, @maximum(it.big_align, 1));
+                return std.mem.alignForwardGeneric(u64, it.offset, @max(it.big_align, 1));
             },
 
             .tuple, .anon_struct => {
@@ -5801,12 +5816,12 @@ pub const Type = extern union {
                     }
 
                     const field_align = field_ty.abiAlignment(target);
-                    big_align = @maximum(big_align, field_align);
+                    big_align = @max(big_align, field_align);
                     offset = std.mem.alignForwardGeneric(u64, offset, field_align);
                     if (i == index) return offset;
                     offset += field_ty.abiSize(target);
                 }
-                offset = std.mem.alignForwardGeneric(u64, offset, @maximum(big_align, 1));
+                offset = std.mem.alignForwardGeneric(u64, offset, @max(big_align, 1));
                 return offset;
             },
 
@@ -6056,7 +6071,7 @@ pub const Type = extern union {
         pub const no_payload_count = @enumToInt(last_no_payload_tag) + 1;
 
         pub fn Type(comptime t: Tag) type {
-            // Keep in sync with tools/zig-gdb.py
+            // Keep in sync with tools/stage2_pretty_printers_common.py
             return switch (t) {
                 .u1,
                 .u8,
@@ -6768,6 +6783,13 @@ pub const CType = enum {
                 },
             },
 
+            .amdhsa, .amdpal => switch (self) {
+                .short, .ushort => return 16,
+                .int, .uint => return 32,
+                .long, .ulong, .longlong, .ulonglong => return 64,
+                .longdouble => return 128,
+            },
+
             .cloudabi,
             .kfreebsd,
             .lv2,
@@ -6777,13 +6799,11 @@ pub const CType = enum {
             .aix,
             .cuda,
             .nvcl,
-            .amdhsa,
             .ps4,
             .ps5,
             .elfiamcu,
             .mesa3d,
             .contiki,
-            .amdpal,
             .hermit,
             .hurd,
             .opencl,

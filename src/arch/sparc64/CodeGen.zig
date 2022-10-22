@@ -618,6 +618,7 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .union_init      => @panic("TODO try self.airUnionInit(inst)"),
             .prefetch        => try self.airPrefetch(inst),
             .mul_add         => @panic("TODO try self.airMulAdd(inst)"),
+            .addrspace_cast  => @panic("TODO try self.airAddrSpaceCast(int)"),
 
             .@"try"          => try self.airTry(inst),
             .try_ptr         => @panic("TODO try self.airTryPtr(inst)"),
@@ -678,6 +679,7 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .errunion_payload_ptr_set   => try self.airErrUnionPayloadPtrSet(inst),
             .err_return_trace           => @panic("TODO try self.airErrReturnTrace(inst)"),
             .set_err_return_trace       => @panic("TODO try self.airSetErrReturnTrace(inst)"),
+            .save_err_return_trace_index=> @panic("TODO try self.airSaveErrReturnTraceIndex(inst)"),
 
             .wrap_optional         => try self.airWrapOptional(inst),
             .wrap_errunion_payload => @panic("TODO try self.airWrapErrUnionPayload(inst)"),

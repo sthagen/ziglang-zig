@@ -720,6 +720,15 @@ pub const Decl = struct {
         var buffer = std.ArrayList(u8).init(mod.gpa);
         defer buffer.deinit();
         try decl.renderFullyQualifiedName(mod, buffer.writer());
+
+        // Sanitize the name for nvptx which is more restrictive.
+        if (mod.comp.bin_file.options.target.cpu.arch.isNvptx()) {
+            for (buffer.items) |*byte| switch (byte.*) {
+                '{', '}', '*', '[', ']', '(', ')', ',', ' ', '\'' => byte.* = '_',
+                else => {},
+            };
+        }
+
         return buffer.toOwnedSliceSentinel(0);
     }
 
@@ -983,7 +992,7 @@ pub const Struct = struct {
             if (field.ty.isAbiInt() and field.ty.intInfo(target).bits >= 128) {
                 // The C ABI requires 128 bit integer fields of structs
                 // to be 16-bytes aligned.
-                return @maximum(ty_abi_align, 16);
+                return @max(ty_abi_align, 16);
             }
 
             return ty_abi_align;
@@ -1317,7 +1326,7 @@ pub const Union = struct {
             if (!field.ty.hasRuntimeBits()) continue;
 
             const field_align = field.normalAlignment(target);
-            max_align = @maximum(max_align, field_align);
+            max_align = @max(max_align, field_align);
         }
         return max_align;
     }
@@ -1382,7 +1391,7 @@ pub const Union = struct {
                 most_aligned_field_size = field_size;
             }
         }
-        payload_align = @maximum(payload_align, 1);
+        payload_align = @max(payload_align, 1);
         if (!have_tag or !u.tag_ty.hasRuntimeBits()) {
             return .{
                 .abi_size = std.mem.alignForwardGeneric(u64, payload_size, payload_align),
@@ -1400,7 +1409,7 @@ pub const Union = struct {
         // Put the tag before or after the payload depending on which one's
         // alignment is greater.
         const tag_size = u.tag_ty.abiSize(target);
-        const tag_align = @maximum(1, u.tag_ty.abiAlignment(target));
+        const tag_align = @max(1, u.tag_ty.abiAlignment(target));
         var size: u64 = 0;
         var padding: u32 = undefined;
         if (tag_align >= payload_align) {
@@ -1422,7 +1431,7 @@ pub const Union = struct {
         }
         return .{
             .abi_size = size,
-            .abi_align = @maximum(tag_align, payload_align),
+            .abi_align = @max(tag_align, payload_align),
             .most_aligned_field = most_aligned_field,
             .most_aligned_field_size = most_aligned_field_size,
             .biggest_field = biggest_field,
@@ -2869,6 +2878,32 @@ pub const SrcLoc = struct {
                 };
                 return nodeToSpan(tree, full.ast.type_expr);
             },
+            .node_offset_store_ptr => |node_off| {
+                const tree = try src_loc.file_scope.getTree(gpa);
+                const node_tags = tree.nodes.items(.tag);
+                const node_datas = tree.nodes.items(.data);
+                const node = src_loc.declRelativeToNodeIndex(node_off);
+
+                switch (node_tags[node]) {
+                    .assign => {
+                        return nodeToSpan(tree, node_datas[node].lhs);
+                    },
+                    else => return nodeToSpan(tree, node),
+                }
+            },
+            .node_offset_store_operand => |node_off| {
+                const tree = try src_loc.file_scope.getTree(gpa);
+                const node_tags = tree.nodes.items(.tag);
+                const node_datas = tree.nodes.items(.data);
+                const node = src_loc.declRelativeToNodeIndex(node_off);
+
+                switch (node_tags[node]) {
+                    .assign => {
+                        return nodeToSpan(tree, node_datas[node].rhs);
+                    },
+                    else => return nodeToSpan(tree, node),
+                }
+            },
         }
     }
 
@@ -3204,6 +3239,12 @@ pub const LazySrcLoc = union(enum) {
     /// The source location points to the type of an array or struct initializer.
     /// The Decl is determined contextually.
     node_offset_init_ty: i32,
+    /// The source location points to the LHS of an assignment.
+    /// The Decl is determined contextually.
+    node_offset_store_ptr: i32,
+    /// The source location points to the RHS of an assignment.
+    /// The Decl is determined contextually.
+    node_offset_store_operand: i32,
 
     pub const nodeOffset = if (TracedOffset.want_tracing) nodeOffsetDebug else nodeOffsetRelease;
 
@@ -3287,6 +3328,8 @@ pub const LazySrcLoc = union(enum) {
             .node_offset_container_tag,
             .node_offset_field_default,
             .node_offset_init_ty,
+            .node_offset_store_ptr,
+            .node_offset_store_operand,
             => .{
                 .file_scope = decl.getFileScope(),
                 .parent_decl_node = decl.src_node,
@@ -4310,10 +4353,9 @@ pub fn ensureFuncBodyAnalyzed(mod: *Module, func: *Fn) SemaError!void {
                 comp.emit_llvm_bc == null);
 
             const dump_air = builtin.mode == .Debug and comp.verbose_air;
+            const dump_llvm_ir = builtin.mode == .Debug and comp.verbose_llvm_ir;
 
-            if (no_bin_file and !dump_air) {
-                return;
-            }
+            if (no_bin_file and !dump_air and !dump_llvm_ir) return;
 
             log.debug("analyze liveness of {s}", .{decl.name});
             var liveness = try Liveness.analyze(gpa, air);
@@ -4328,9 +4370,7 @@ pub fn ensureFuncBodyAnalyzed(mod: *Module, func: *Fn) SemaError!void {
                 std.debug.print("# End Function AIR: {s}\n\n", .{fqn});
             }
 
-            if (no_bin_file) {
-                return;
-            }
+            if (no_bin_file and !dump_llvm_ir) return;
 
             comp.bin_file.updateFunc(mod, func, air, liveness) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -4586,40 +4626,6 @@ fn semaDecl(mod: *Module, decl_index: Decl.Index) !bool {
     const ty_src: LazySrcLoc = .{ .node_offset_var_decl_ty = 0 };
     const init_src: LazySrcLoc = .{ .node_offset_var_decl_init = 0 };
     const decl_tv = try sema.resolveInstValue(&block_scope, init_src, result_ref, undefined);
-    const decl_align: u32 = blk: {
-        const align_ref = decl.zirAlignRef();
-        if (align_ref == .none) break :blk 0;
-        break :blk try sema.resolveAlign(&block_scope, align_src, align_ref);
-    };
-    const decl_linksection: ?[*:0]const u8 = blk: {
-        const linksection_ref = decl.zirLinksectionRef();
-        if (linksection_ref == .none) break :blk null;
-        const bytes = try sema.resolveConstString(&block_scope, section_src, linksection_ref, "linksection must be comptime-known");
-        if (mem.indexOfScalar(u8, bytes, 0) != null) {
-            return sema.fail(&block_scope, section_src, "linksection cannot contain null bytes", .{});
-        } else if (bytes.len == 0) {
-            return sema.fail(&block_scope, section_src, "linksection cannot be empty", .{});
-        }
-        break :blk (try decl_arena_allocator.dupeZ(u8, bytes)).ptr;
-    };
-    const target = sema.mod.getTarget();
-    const address_space = blk: {
-        const addrspace_ctx: Sema.AddressSpaceContext = switch (decl_tv.val.tag()) {
-            .function, .extern_fn => .function,
-            .variable => .variable,
-            else => .constant,
-        };
-
-        break :blk switch (decl.zirAddrspaceRef()) {
-            .none => switch (addrspace_ctx) {
-                .function => target_util.defaultAddressSpace(target, .function),
-                .variable => target_util.defaultAddressSpace(target, .global_mutable),
-                .constant => target_util.defaultAddressSpace(target, .global_constant),
-                else => unreachable,
-            },
-            else => |addrspace_ref| try sema.analyzeAddrspace(&block_scope, address_space_src, addrspace_ref, addrspace_ctx),
-        };
-    };
 
     // Note this resolves the type of the Decl, not the value; if this Decl
     // is a struct, for example, this resolves `type` (which needs no resolution),
@@ -4673,9 +4679,7 @@ fn semaDecl(mod: *Module, decl_index: Decl.Index) !bool {
 
             decl.ty = try decl_tv.ty.copy(decl_arena_allocator);
             decl.val = try decl_tv.val.copy(decl_arena_allocator);
-            decl.@"align" = decl_align;
-            decl.@"linksection" = decl_linksection;
-            decl.@"addrspace" = address_space;
+            // linksection, align, and addrspace were already set by Sema
             decl.has_tv = true;
             decl.owns_tv = owns_tv;
             decl_arena_state.* = decl_arena.state;
@@ -4753,9 +4757,40 @@ fn semaDecl(mod: *Module, decl_index: Decl.Index) !bool {
 
     decl.ty = try decl_tv.ty.copy(decl_arena_allocator);
     decl.val = try decl_tv.val.copy(decl_arena_allocator);
-    decl.@"align" = decl_align;
-    decl.@"linksection" = decl_linksection;
-    decl.@"addrspace" = address_space;
+    decl.@"align" = blk: {
+        const align_ref = decl.zirAlignRef();
+        if (align_ref == .none) break :blk 0;
+        break :blk try sema.resolveAlign(&block_scope, align_src, align_ref);
+    };
+    decl.@"linksection" = blk: {
+        const linksection_ref = decl.zirLinksectionRef();
+        if (linksection_ref == .none) break :blk null;
+        const bytes = try sema.resolveConstString(&block_scope, section_src, linksection_ref, "linksection must be comptime-known");
+        if (mem.indexOfScalar(u8, bytes, 0) != null) {
+            return sema.fail(&block_scope, section_src, "linksection cannot contain null bytes", .{});
+        } else if (bytes.len == 0) {
+            return sema.fail(&block_scope, section_src, "linksection cannot be empty", .{});
+        }
+        break :blk (try decl_arena_allocator.dupeZ(u8, bytes)).ptr;
+    };
+    decl.@"addrspace" = blk: {
+        const addrspace_ctx: Sema.AddressSpaceContext = switch (decl_tv.val.tag()) {
+            .function, .extern_fn => .function,
+            .variable => .variable,
+            else => .constant,
+        };
+
+        const target = sema.mod.getTarget();
+        break :blk switch (decl.zirAddrspaceRef()) {
+            .none => switch (addrspace_ctx) {
+                .function => target_util.defaultAddressSpace(target, .function),
+                .variable => target_util.defaultAddressSpace(target, .global_mutable),
+                .constant => target_util.defaultAddressSpace(target, .global_constant),
+                else => unreachable,
+            },
+            else => |addrspace_ref| try sema.analyzeAddressSpace(&block_scope, address_space_src, addrspace_ref, addrspace_ctx),
+        };
+    };
     decl.has_tv = true;
     decl_arena_state.* = decl_arena.state;
     decl.value_arena = decl_arena_state;
@@ -5491,7 +5526,7 @@ pub fn analyzeFnBody(mod: *Module, func: *Fn, arena: Allocator) SemaError!Air {
         .func = func,
         .fn_ret_ty = decl.ty.fnReturnType(),
         .owner_func = func,
-        .branch_quota = @maximum(func.branch_quota, Sema.default_branch_quota),
+        .branch_quota = @max(func.branch_quota, Sema.default_branch_quota),
     };
     defer sema.deinit();
 
@@ -5598,6 +5633,12 @@ pub fn analyzeFnBody(mod: *Module, func: *Fn, arena: Allocator) SemaError!Air {
 
     const last_arg_index = inner_block.instructions.items.len;
 
+    // Save the error trace as our first action in the function.
+    // If this is unnecessary after all, Liveness will clean it up for us.
+    const error_return_trace_index = try sema.analyzeSaveErrRetIndex(&inner_block);
+    sema.error_return_trace_index_on_fn_entry = error_return_trace_index;
+    inner_block.error_return_trace_index = error_return_trace_index;
+
     sema.analyzeBody(&inner_block, fn_info.body) catch |err| switch (err) {
         // TODO make these unreachable instead of @panic
         error.NeededSourceLocation => @panic("zig compiler bug: NeededSourceLocation"),
@@ -5605,6 +5646,18 @@ pub fn analyzeFnBody(mod: *Module, func: *Fn, arena: Allocator) SemaError!Air {
         error.ComptimeReturn => @panic("zig compiler bug: ComptimeReturn"),
         else => |e| return e,
     };
+
+    {
+        var it = sema.unresolved_inferred_allocs.keyIterator();
+        while (it.next()) |ptr_inst| {
+            // The lack of a resolve_inferred_alloc means that this instruction
+            // is unused so it just has to be a no-op.
+            sema.air_instructions.set(ptr_inst.*, .{
+                .tag = .alloc,
+                .data = .{ .ty = Type.initTag(.single_const_pointer_to_comptime_int) },
+            });
+        }
+    }
 
     // If we don't get an error return trace from a caller, create our own.
     if (func.calls_or_awaits_errorable_fn and
@@ -6475,7 +6528,14 @@ pub fn populateTestFunctions(mod: *Module) !void {
 pub fn linkerUpdateDecl(mod: *Module, decl_index: Decl.Index) !void {
     const comp = mod.comp;
 
-    if (comp.bin_file.options.emit == null) return;
+    const no_bin_file = (comp.bin_file.options.emit == null and
+        comp.emit_asm == null and
+        comp.emit_llvm_ir == null and
+        comp.emit_llvm_bc == null);
+
+    const dump_llvm_ir = builtin.mode == .Debug and comp.verbose_llvm_ir;
+
+    if (no_bin_file and !dump_llvm_ir) return;
 
     const decl = mod.declPtr(decl_index);
 

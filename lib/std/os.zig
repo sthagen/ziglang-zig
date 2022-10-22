@@ -500,9 +500,15 @@ pub fn abort() noreturn {
         @breakpoint();
         exit(1);
     }
+    if (builtin.os.tag == .cuda) {
+        // TODO: introduce `@trap` instead of abusing https://github.com/ziglang/zig/issues/2291
+        @"llvm.trap"();
+    }
 
     system.abort();
 }
+
+extern fn @"llvm.trap"() noreturn;
 
 pub const RaiseError = UnexpectedError;
 
@@ -636,7 +642,7 @@ pub fn read(fd: fd_t, buf: []u8) ReadError!usize {
         .macos, .ios, .watchos, .tvos => math.maxInt(i32),
         else => math.maxInt(isize),
     };
-    const adjusted_len = @minimum(max_count, buf.len);
+    const adjusted_len = @min(max_count, buf.len);
 
     while (true) {
         const rc = system.read(fd, buf.ptr, adjusted_len);
@@ -765,7 +771,7 @@ pub fn pread(fd: fd_t, buf: []u8, offset: u64) PReadError!usize {
         .macos, .ios, .watchos, .tvos => math.maxInt(i32),
         else => math.maxInt(isize),
     };
-    const adjusted_len = @minimum(max_count, buf.len);
+    const adjusted_len = @min(max_count, buf.len);
 
     const pread_sym = if (builtin.os.tag == .linux and builtin.link_libc)
         system.pread64
@@ -1021,7 +1027,7 @@ pub fn write(fd: fd_t, bytes: []const u8) WriteError!usize {
         .macos, .ios, .watchos, .tvos => math.maxInt(i32),
         else => math.maxInt(isize),
     };
-    const adjusted_len = @minimum(max_count, bytes.len);
+    const adjusted_len = @min(max_count, bytes.len);
 
     while (true) {
         const rc = system.write(fd, bytes.ptr, adjusted_len);
@@ -1177,7 +1183,7 @@ pub fn pwrite(fd: fd_t, bytes: []const u8, offset: u64) PWriteError!usize {
         .macos, .ios, .watchos, .tvos => math.maxInt(i32),
         else => math.maxInt(isize),
     };
-    const adjusted_len = @minimum(max_count, bytes.len);
+    const adjusted_len = @min(max_count, bytes.len);
 
     const pwrite_sym = if (builtin.os.tag == .linux and builtin.link_libc)
         system.pwrite64
@@ -1747,8 +1753,6 @@ pub const ExecveError = error{
     NameTooLong,
 } || UnexpectedError;
 
-/// Like `execve` except the parameters are null-terminated,
-/// matching the syscall API on all targets. This removes the need for an allocator.
 /// This function ignores PATH environment variable. See `execvpeZ` for that.
 pub fn execveZ(
     path: [*:0]const u8,
@@ -1846,8 +1850,6 @@ pub fn execvpeZ_expandArg0(
     return err;
 }
 
-/// Like `execvpe` except the parameters are null-terminated,
-/// matching the syscall API on all targets. This removes the need for an allocator.
 /// This function also uses the PATH environment variable to get the full path to the executable.
 /// If `file` is an absolute path, this is the same as `execveZ`.
 pub fn execvpeZ(
@@ -5918,6 +5920,7 @@ pub fn send(
         error.NetworkUnreachable => unreachable,
         error.AddressNotAvailable => unreachable,
         error.SocketNotConnected => unreachable,
+        error.UnreachableAddress => unreachable,
         else => |e| return e,
     };
 }
@@ -6003,8 +6006,8 @@ pub fn sendfile(
             }
 
             // Here we match BSD behavior, making a zero count value send as many bytes as possible.
-            const adjusted_count_tmp = if (in_len == 0) max_count else @minimum(in_len, @as(size_t, max_count));
-            // TODO we should not need this cast; improve return type of @minimum
+            const adjusted_count_tmp = if (in_len == 0) max_count else @min(in_len, @as(size_t, max_count));
+            // TODO we should not need this cast; improve return type of @min
             const adjusted_count = @intCast(usize, adjusted_count_tmp);
 
             const sendfile_sym = if (builtin.link_libc)
@@ -6088,7 +6091,7 @@ pub fn sendfile(
                 hdtr = &hdtr_data;
             }
 
-            const adjusted_count = @minimum(in_len, max_count);
+            const adjusted_count = @min(in_len, max_count);
 
             while (true) {
                 var sbytes: off_t = undefined;
@@ -6167,8 +6170,8 @@ pub fn sendfile(
                 hdtr = &hdtr_data;
             }
 
-            const adjusted_count_temporary = @minimum(in_len, @as(u63, max_count));
-            // TODO we should not need this int cast; improve the return type of `@minimum`
+            const adjusted_count_temporary = @min(in_len, @as(u63, max_count));
+            // TODO we should not need this int cast; improve the return type of `@min`
             const adjusted_count = @intCast(u63, adjusted_count_temporary);
 
             while (true) {
@@ -6223,8 +6226,8 @@ pub fn sendfile(
     rw: {
         var buf: [8 * 4096]u8 = undefined;
         // Here we match BSD behavior, making a zero count value send as many bytes as possible.
-        const adjusted_count_tmp = if (in_len == 0) buf.len else @minimum(buf.len, in_len);
-        // TODO we should not need this cast; improve return type of @minimum
+        const adjusted_count_tmp = if (in_len == 0) buf.len else @min(buf.len, in_len);
+        // TODO we should not need this cast; improve return type of @min
         const adjusted_count = @intCast(usize, adjusted_count_tmp);
         const amt_read = try pread(in_fd, buf[0..adjusted_count], in_offset);
         if (amt_read == 0) {
@@ -6326,7 +6329,7 @@ pub fn copy_file_range(fd_in: fd_t, off_in: u64, fd_out: fd_t, off_out: u64, len
     }
 
     var buf: [8 * 4096]u8 = undefined;
-    const adjusted_count = @minimum(buf.len, len);
+    const adjusted_count = @min(buf.len, len);
     const amt_read = try pread(fd_in, buf[0..adjusted_count], off_in);
     // TODO without @as the line below fails to compile for wasm32-wasi:
     // error: integer value 0 cannot be coerced to type 'os.PWriteError!usize'
@@ -6490,7 +6493,7 @@ pub fn dn_expand(
     const end = msg.ptr + msg.len;
     if (p == end or exp_dn.len == 0) return error.InvalidDnsPacket;
     var dest = exp_dn.ptr;
-    const dend = dest + @minimum(exp_dn.len, 254);
+    const dend = dest + @min(exp_dn.len, 254);
     // detect reference loop using an iteration counter
     var i: usize = 0;
     while (i < msg.len) : (i += 2) {
@@ -6545,6 +6548,7 @@ pub const SetSockOptError = error{
     NetworkSubsystemFailed,
     FileDescriptorNotASocket,
     SocketNotBound,
+    NoDevice,
 } || UnexpectedError;
 
 /// Set a socket's options.
@@ -6575,6 +6579,7 @@ pub fn setsockopt(fd: socket_t, level: u32, optname: u32, opt: []const u8) SetSo
             .NOMEM => return error.SystemResources,
             .NOBUFS => return error.SystemResources,
             .PERM => return error.PermissionDenied,
+            .NODEV => return error.NoDevice,
             else => |err| return unexpectedErrno(err),
         }
     }

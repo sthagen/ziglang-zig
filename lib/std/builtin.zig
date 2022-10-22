@@ -157,6 +157,7 @@ pub const CallingConvention = enum {
     SysV,
     Win64,
     PtxKernel,
+    AmdgpuKernel,
 };
 
 /// This data structure is used by the Zig language code generation and
@@ -832,6 +833,7 @@ pub fn default_panic(msg: []const u8, error_return_trace: ?*StackTrace, ret_addr
             // Didn't have boot_services, just fallback to whatever.
             std.os.abort();
         },
+        .cuda => std.os.abort(),
         else => {
             const first_trace_addr = ret_addr orelse @returnAddress();
             std.debug.panicImpl(error_return_trace, first_trace_addr, msg);
@@ -867,8 +869,10 @@ pub noinline fn returnError(st: *StackTrace) void {
 }
 
 pub inline fn addErrRetTraceAddr(st: *StackTrace, addr: usize) void {
-    st.instruction_addresses[st.index & (st.instruction_addresses.len - 1)] = addr;
-    st.index +%= 1;
+    if (st.index < st.instruction_addresses.len)
+        st.instruction_addresses[st.index] = addr;
+
+    st.index += 1;
 }
 
 const std = @import("std.zig");
