@@ -6960,7 +6960,11 @@ fn lowerUnnamedConst(self: *Self, tv: TypedValue) InnerError!MCValue {
     }
 }
 
-fn genTypedValue(self: *Self, typed_value: TypedValue) InnerError!MCValue {
+fn genTypedValue(self: *Self, arg_tv: TypedValue) InnerError!MCValue {
+    var typed_value = arg_tv;
+    if (typed_value.val.castTag(.runtime_value)) |rt| {
+        typed_value.val = rt.data;
+    }
     log.debug("genTypedValue: ty = {}, val = {}", .{ typed_value.ty.fmtDebug(), typed_value.val.fmtDebug() });
     if (typed_value.val.isUndef())
         return MCValue{ .undef = {} };
@@ -7149,7 +7153,7 @@ fn resolveCallingConventionValues(self: *Self, fn_ty: Type) !CallMCValues {
 
                 const classes: []const abi.Class = switch (self.target.os.tag) {
                     .windows => &[1]abi.Class{abi.classifyWindows(ty, self.target.*)},
-                    else => mem.sliceTo(&abi.classifySystemV(ty, self.target.*), .none),
+                    else => mem.sliceTo(&abi.classifySystemV(ty, self.target.*, .arg), .none),
                 };
                 if (classes.len > 1) {
                     return self.fail("TODO handle multiple classes per type", .{});

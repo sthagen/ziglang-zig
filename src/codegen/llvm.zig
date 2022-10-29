@@ -24,6 +24,8 @@ const CType = @import("../type.zig").CType;
 const x86_64_abi = @import("../arch/x86_64/abi.zig");
 const wasm_c_abi = @import("../arch/wasm/abi.zig");
 const aarch64_c_abi = @import("../arch/aarch64/abi.zig");
+const arm_c_abi = @import("../arch/arm/abi.zig");
+const riscv_c_abi = @import("../arch/riscv64/abi.zig");
 
 const Error = error{ OutOfMemory, CodegenFail };
 
@@ -1025,7 +1027,9 @@ pub const Object = struct {
                             dg.addArgAttr(llvm_func, llvm_arg_i, "noalias");
                         }
                     }
-                    dg.addArgAttr(llvm_func, llvm_arg_i, "nonnull");
+                    if (param_ty.zigTypeTag() != .Optional) {
+                        dg.addArgAttr(llvm_func, llvm_arg_i, "nonnull");
+                    }
                     if (!ptr_info.mutable) {
                         dg.addArgAttr(llvm_func, llvm_arg_i, "readonly");
                     }
@@ -1120,6 +1124,25 @@ pub const Object = struct {
                     args.appendAssumeCapacity(casted);
                 },
                 .float_array => {
+                    const param_ty = fn_info.param_types[it.zig_index - 1];
+                    const param_llvm_ty = try dg.lowerType(param_ty);
+                    const param = llvm_func.getParam(llvm_arg_i);
+                    llvm_arg_i += 1;
+
+                    const alignment = param_ty.abiAlignment(target);
+                    const arg_ptr = buildAllocaInner(builder, llvm_func, false, param_llvm_ty, alignment, target);
+                    const casted_ptr = builder.buildBitCast(arg_ptr, param.typeOf().pointerType(0), "");
+                    _ = builder.buildStore(param, casted_ptr);
+
+                    if (isByRef(param_ty)) {
+                        try args.append(arg_ptr);
+                    } else {
+                        const load_inst = builder.buildLoad(param_llvm_ty, arg_ptr, "");
+                        load_inst.setAlignment(alignment);
+                        try args.append(load_inst);
+                    }
+                },
+                .i32_array, .i64_array => {
                     const param_ty = fn_info.param_types[it.zig_index - 1];
                     const param_llvm_ty = try dg.lowerType(param_ty);
                     const param = llvm_func.getParam(llvm_arg_i);
@@ -1895,7 +1918,7 @@ pub const Object = struct {
 
                 if (ty.castTag(.@"struct")) |payload| {
                     const struct_obj = payload.data;
-                    if (struct_obj.layout == .Packed) {
+                    if (struct_obj.layout == .Packed and struct_obj.haveFieldTypes()) {
                         const info = struct_obj.backing_int_ty.intInfo(target);
                         const dwarf_encoding: c_uint = switch (info.signedness) {
                             .signed => DW.ATE.signed,
@@ -2578,6 +2601,8 @@ pub const DeclGen = struct {
                 .multiple_llvm_float,
                 .as_u16,
                 .float_array,
+                .i32_array,
+                .i64_array,
                 => continue,
 
                 .slice => unreachable, // extern functions do not support slice types.
@@ -3094,7 +3119,11 @@ pub const DeclGen = struct {
             .slice => {
                 const param_ty = fn_info.param_types[it.zig_index - 1];
                 var buf: Type.SlicePtrFieldTypeBuffer = undefined;
-                const ptr_ty = param_ty.slicePtrFieldType(&buf);
+                var opt_buf: Type.Payload.ElemType = undefined;
+                const ptr_ty = if (param_ty.zigTypeTag() == .Optional)
+                    param_ty.optionalChild(&opt_buf).slicePtrFieldType(&buf)
+                else
+                    param_ty.slicePtrFieldType(&buf);
                 const ptr_llvm_ty = try dg.lowerType(ptr_ty);
                 const len_llvm_ty = try dg.lowerType(Type.usize);
 
@@ -3132,6 +3161,11 @@ pub const DeclGen = struct {
                 const arr_ty = float_ty.arrayType(field_count);
                 try llvm_params.append(arr_ty);
             },
+            .i32_array, .i64_array => |arr_len| {
+                const elem_size: u8 = if (lowering == .i32_array) 32 else 64;
+                const arr_ty = dg.context.intType(elem_size).arrayType(arr_len);
+                try llvm_params.append(arr_ty);
+            },
         };
 
         return llvm.functionType(
@@ -3159,7 +3193,11 @@ pub const DeclGen = struct {
         return llvm_elem_ty;
     }
 
-    fn lowerValue(dg: *DeclGen, tv: TypedValue) Error!*llvm.Value {
+    fn lowerValue(dg: *DeclGen, arg_tv: TypedValue) Error!*llvm.Value {
+        var tv = arg_tv;
+        if (tv.val.castTag(.runtime_value)) |rt| {
+            tv.val = rt.data;
+        }
         if (tv.val.isUndef()) {
             const llvm_type = try dg.lowerType(tv.ty);
             return llvm_type.getUndef();
@@ -4822,6 +4860,25 @@ pub const FuncGen = struct {
                 load_inst.setAlignment(alignment);
                 try llvm_args.append(load_inst);
             },
+            .i32_array, .i64_array => |arr_len| {
+                const elem_size: u8 = if (lowering == .i32_array) 32 else 64;
+                const arg = args[it.zig_index - 1];
+                const arg_ty = self.air.typeOf(arg);
+                var llvm_arg = try self.resolveInst(arg);
+                if (!isByRef(arg_ty)) {
+                    const p = self.buildAlloca(llvm_arg.typeOf(), null);
+                    const store_inst = self.builder.buildStore(llvm_arg, p);
+                    store_inst.setAlignment(arg_ty.abiAlignment(target));
+                    llvm_arg = store_inst;
+                }
+
+                const array_llvm_ty = self.dg.context.intType(elem_size).arrayType(arr_len);
+                const casted = self.builder.buildBitCast(llvm_arg, array_llvm_ty.pointerType(0), "");
+                const alignment = arg_ty.abiAlignment(target);
+                const load_inst = self.builder.buildLoad(array_llvm_ty, casted, "");
+                load_inst.setAlignment(alignment);
+                try llvm_args.append(load_inst);
+            },
         };
 
         const call = self.builder.buildCall(
@@ -5387,10 +5444,11 @@ pub const FuncGen = struct {
         const llvm_usize = try self.dg.lowerType(Type.usize);
         const len = llvm_usize.constInt(array_ty.arrayLen(), .False);
         const slice_llvm_ty = try self.dg.lowerType(self.air.typeOfIndex(inst));
-        if (!array_ty.hasRuntimeBitsIgnoreComptime()) {
-            return self.builder.buildInsertValue(slice_llvm_ty.getUndef(), len, 1, "");
-        }
         const operand = try self.resolveInst(ty_op.operand);
+        if (!array_ty.hasRuntimeBitsIgnoreComptime()) {
+            const partial = self.builder.buildInsertValue(slice_llvm_ty.getUndef(), operand, 0, "");
+            return self.builder.buildInsertValue(partial, len, 1, "");
+        }
         const indices: [2]*llvm.Value = .{
             llvm_usize.constNull(), llvm_usize.constNull(),
         };
@@ -6269,18 +6327,24 @@ pub const FuncGen = struct {
         const operand_ty = self.air.typeOf(un_op);
         const optional_ty = if (operand_is_ptr) operand_ty.childType() else operand_ty;
         const optional_llvm_ty = try self.dg.lowerType(optional_ty);
+        var buf: Type.Payload.ElemType = undefined;
+        const payload_ty = optional_ty.optionalChild(&buf);
         if (optional_ty.optionalReprIsPayload()) {
             const loaded = if (operand_is_ptr)
                 self.builder.buildLoad(optional_llvm_ty, operand, "")
             else
                 operand;
+            if (payload_ty.isSlice()) {
+                const slice_ptr = self.builder.buildExtractValue(loaded, 0, "");
+                var slice_buf: Type.SlicePtrFieldTypeBuffer = undefined;
+                const ptr_ty = try self.dg.lowerType(payload_ty.slicePtrFieldType(&slice_buf));
+                return self.builder.buildICmp(pred, slice_ptr, ptr_ty.constNull(), "");
+            }
             return self.builder.buildICmp(pred, loaded, optional_llvm_ty.constNull(), "");
         }
 
         comptime assert(optional_layout_version == 3);
 
-        var buf: Type.Payload.ElemType = undefined;
-        const payload_ty = optional_ty.optionalChild(&buf);
         if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
             const loaded = if (operand_is_ptr)
                 self.builder.buildLoad(optional_llvm_ty, operand, "")
@@ -10083,10 +10147,16 @@ fn firstParamSRet(fn_info: Type.Payload.Function.Data, target: std.Target) bool 
             .mips, .mipsel => return false,
             .x86_64 => switch (target.os.tag) {
                 .windows => return x86_64_abi.classifyWindows(fn_info.return_type, target) == .memory,
-                else => return x86_64_abi.classifySystemV(fn_info.return_type, target)[0] == .memory,
+                else => return x86_64_abi.classifySystemV(fn_info.return_type, target, .ret)[0] == .memory,
             },
             .wasm32 => return wasm_c_abi.classifyType(fn_info.return_type, target)[0] == .indirect,
-            .aarch64, .aarch64_be => return aarch64_c_abi.classifyType(fn_info.return_type, target)[0] == .memory,
+            .aarch64, .aarch64_be => return aarch64_c_abi.classifyType(fn_info.return_type, target) == .memory,
+            .arm, .armeb => switch (arm_c_abi.classifyType(fn_info.return_type, target, .ret)) {
+                .memory, .i64_array => return true,
+                .i32_array => |size| return size != 1,
+                .byval => return false,
+            },
+            .riscv32, .riscv64 => return riscv_c_abi.classifyType(fn_info.return_type, target) == .memory,
             else => return false, // TODO investigate C ABI for other architectures
         },
         else => return false,
@@ -10139,7 +10209,7 @@ fn lowerFnRetTy(dg: *DeclGen, fn_info: Type.Payload.Function.Data) !*llvm.Type {
                         if (is_scalar) {
                             return dg.lowerType(fn_info.return_type);
                         }
-                        const classes = x86_64_abi.classifySystemV(fn_info.return_type, target);
+                        const classes = x86_64_abi.classifySystemV(fn_info.return_type, target, .ret);
                         if (classes[0] == .memory) {
                             return dg.context.voidType();
                         }
@@ -10197,22 +10267,44 @@ fn lowerFnRetTy(dg: *DeclGen, fn_info: Type.Payload.Function.Data) !*llvm.Type {
                     return dg.context.intType(@intCast(c_uint, abi_size * 8));
                 },
                 .aarch64, .aarch64_be => {
-                    if (is_scalar) {
-                        return dg.lowerType(fn_info.return_type);
+                    switch (aarch64_c_abi.classifyType(fn_info.return_type, target)) {
+                        .memory => return dg.context.voidType(),
+                        .float_array => return dg.lowerType(fn_info.return_type),
+                        .byval => return dg.lowerType(fn_info.return_type),
+                        .integer => {
+                            const bit_size = fn_info.return_type.bitSize(target);
+                            return dg.context.intType(@intCast(c_uint, bit_size));
+                        },
+                        .double_integer => return dg.context.intType(64).arrayType(2),
                     }
-                    const classes = aarch64_c_abi.classifyType(fn_info.return_type, target);
-                    if (classes[0] == .memory or classes[0] == .none) {
-                        return dg.context.voidType();
+                },
+                .arm, .armeb => {
+                    switch (arm_c_abi.classifyType(fn_info.return_type, target, .ret)) {
+                        .memory, .i64_array => return dg.context.voidType(),
+                        .i32_array => |len| if (len == 1) {
+                            return dg.context.intType(32);
+                        } else {
+                            return dg.context.voidType();
+                        },
+                        .byval => return dg.lowerType(fn_info.return_type),
                     }
-                    if (classes[0] == .float_array) {
-                        return dg.lowerType(fn_info.return_type);
+                },
+                .riscv32, .riscv64 => {
+                    switch (riscv_c_abi.classifyType(fn_info.return_type, target)) {
+                        .memory => return dg.context.voidType(),
+                        .integer => {
+                            const bit_size = fn_info.return_type.bitSize(target);
+                            return dg.context.intType(@intCast(c_uint, bit_size));
+                        },
+                        .double_integer => {
+                            var llvm_types_buffer: [2]*llvm.Type = .{
+                                dg.context.intType(64),
+                                dg.context.intType(64),
+                            };
+                            return dg.context.structType(&llvm_types_buffer, 2, .False);
+                        },
+                        .byval => return dg.lowerType(fn_info.return_type),
                     }
-                    if (classes[1] == .none) {
-                        const bit_size = fn_info.return_type.bitSize(target);
-                        return dg.context.intType(@intCast(c_uint, bit_size));
-                    }
-
-                    return dg.context.intType(64).arrayType(2);
                 },
                 // TODO investigate C ABI for other architectures
                 else => return dg.lowerType(fn_info.return_type),
@@ -10242,6 +10334,8 @@ const ParamTypeIterator = struct {
         slice,
         as_u16,
         float_array: u8,
+        i32_array: u8,
+        i64_array: u8,
     };
 
     pub fn next(it: *ParamTypeIterator) ?Lowering {
@@ -10274,7 +10368,8 @@ const ParamTypeIterator = struct {
             .Unspecified, .Inline => {
                 it.zig_index += 1;
                 it.llvm_index += 1;
-                if (ty.isSlice()) {
+                var buf: Type.Payload.ElemType = undefined;
+                if (ty.isSlice() or (ty.zigTypeTag() == .Optional and ty.optionalChild(&buf).isSlice())) {
                     return .slice;
                 } else if (isByRef(ty)) {
                     return .byref;
@@ -10288,15 +10383,6 @@ const ParamTypeIterator = struct {
             .C => {
                 const is_scalar = isScalar(ty);
                 switch (it.target.cpu.arch) {
-                    .riscv32, .riscv64 => {
-                        it.zig_index += 1;
-                        it.llvm_index += 1;
-                        if (ty.tag() == .f16) {
-                            return .as_u16;
-                        } else {
-                            return .byval;
-                        }
-                    },
                     .mips, .mipsel => {
                         it.zig_index += 1;
                         it.llvm_index += 1;
@@ -10334,17 +10420,17 @@ const ParamTypeIterator = struct {
                             else => unreachable,
                         },
                         else => {
-                            if (is_scalar) {
-                                it.zig_index += 1;
-                                it.llvm_index += 1;
-                                return .byval;
-                            }
-                            const classes = x86_64_abi.classifySystemV(ty, it.target);
+                            const classes = x86_64_abi.classifySystemV(ty, it.target, .arg);
                             if (classes[0] == .memory) {
                                 it.zig_index += 1;
                                 it.llvm_index += 1;
                                 it.byval_attr = true;
                                 return .byref;
+                            }
+                            if (is_scalar) {
+                                it.zig_index += 1;
+                                it.llvm_index += 1;
+                                return .byval;
                             }
                             var llvm_types_buffer: [8]u16 = undefined;
                             var llvm_types_index: u32 = 0;
@@ -10383,11 +10469,6 @@ const ParamTypeIterator = struct {
                                 it.llvm_index += 1;
                                 return .abi_sized_int;
                             }
-                            if (classes[0] == .sse and classes[1] == .none) {
-                                it.zig_index += 1;
-                                it.llvm_index += 1;
-                                return .byval;
-                            }
                             it.llvm_types_buffer = llvm_types_buffer;
                             it.llvm_types_len = llvm_types_index;
                             it.llvm_index += llvm_types_index;
@@ -10410,24 +10491,45 @@ const ParamTypeIterator = struct {
                     .aarch64, .aarch64_be => {
                         it.zig_index += 1;
                         it.llvm_index += 1;
-                        if (is_scalar) {
-                            return .byval;
+                        switch (aarch64_c_abi.classifyType(ty, it.target)) {
+                            .memory => return .byref,
+                            .float_array => |len| return Lowering{ .float_array = len },
+                            .byval => return .byval,
+                            .integer => {
+                                it.llvm_types_len = 1;
+                                it.llvm_types_buffer[0] = 64;
+                                return .multiple_llvm_ints;
+                            },
+                            .double_integer => return Lowering{ .i64_array = 2 },
                         }
-                        const classes = aarch64_c_abi.classifyType(ty, it.target);
-                        if (classes[0] == .memory) {
-                            return .byref;
+                    },
+                    .arm, .armeb => {
+                        it.zig_index += 1;
+                        it.llvm_index += 1;
+                        switch (arm_c_abi.classifyType(ty, it.target, .arg)) {
+                            .memory => {
+                                it.byval_attr = true;
+                                return .byref;
+                            },
+                            .byval => return .byval,
+                            .i32_array => |size| return Lowering{ .i32_array = size },
+                            .i64_array => |size| return Lowering{ .i64_array = size },
                         }
-                        if (classes[0] == .float_array) {
-                            return Lowering{ .float_array = @enumToInt(classes[1]) };
+                    },
+                    .riscv32, .riscv64 => {
+                        it.zig_index += 1;
+                        it.llvm_index += 1;
+                        if (ty.tag() == .f16) {
+                            return .as_u16;
                         }
-                        if (classes[1] == .none) {
-                            it.llvm_types_len = 1;
-                        } else {
-                            it.llvm_types_len = 2;
+                        switch (riscv_c_abi.classifyType(ty, it.target)) {
+                            .memory => {
+                                return .byref;
+                            },
+                            .byval => return .byval,
+                            .integer => return .abi_sized_int,
+                            .double_integer => return Lowering{ .i64_array = 2 },
                         }
-                        it.llvm_types_buffer[0] = 64;
-                        it.llvm_types_buffer[1] = 64;
-                        return .multiple_llvm_ints;
                     },
                     // TODO investigate C ABI for other architectures
                     else => {
@@ -10475,8 +10577,16 @@ fn ccAbiPromoteInt(
     };
     if (int_info.bits <= 16) return int_info.signedness;
     switch (target.cpu.arch) {
+        .riscv64 => {
+            if (int_info.bits == 32) {
+                // LLVM always signextends 32 bit ints, unsure if bug.
+                return .signed;
+            }
+            if (int_info.bits < 64) {
+                return int_info.signedness;
+            }
+        },
         .sparc64,
-        .riscv64,
         .powerpc64,
         .powerpc64le,
         => {
@@ -10634,8 +10744,8 @@ fn backendSupportsF128(target: std.Target) bool {
 fn intrinsicsAllowed(scalar_ty: Type, target: std.Target) bool {
     return switch (scalar_ty.tag()) {
         .f16 => backendSupportsF16(target),
-        .f80 => target.longDoubleIs(f80) and backendSupportsF80(target),
-        .f128 => target.longDoubleIs(f128) and backendSupportsF128(target),
+        .f80 => (CType.longdouble.sizeInBits(target) == 80) and backendSupportsF80(target),
+        .f128 => (CType.longdouble.sizeInBits(target) == 128) and backendSupportsF128(target),
         else => true,
     };
 }

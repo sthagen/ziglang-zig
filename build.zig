@@ -48,6 +48,8 @@ pub fn build(b: *Builder) !void {
 
     const fmt_build_zig = b.addFmt(&[_][]const u8{"build.zig"});
 
+    const only_c = b.option(bool, "only-c", "Translate the Zig compiler to C code, with only the C backend enabled") orelse false;
+
     const skip_debug = b.option(bool, "skip-debug", "Main test suite skips debug builds") orelse false;
     const skip_release = b.option(bool, "skip-release", "Main test suite skips release builds") orelse false;
     const skip_release_small = b.option(bool, "skip-release-small", "Main test suite skips release-small builds") orelse skip_release;
@@ -59,7 +61,11 @@ pub fn build(b: *Builder) !void {
     const skip_stage1 = b.option(bool, "skip-stage1", "Main test suite skips stage1 compile error tests") orelse false;
     const skip_run_translated_c = b.option(bool, "skip-run-translated-c", "Main test suite skips run-translated-c tests") orelse false;
     const skip_stage2_tests = b.option(bool, "skip-stage2-tests", "Main test suite skips self-hosted compiler tests") orelse false;
-    const skip_install_lib_files = b.option(bool, "skip-install-lib-files", "Do not copy lib/ files to installation prefix") orelse false;
+    const deprecated_skip_install_lib_files = b.option(bool, "skip-install-lib-files", "deprecated. see no-lib") orelse false;
+    if (deprecated_skip_install_lib_files) {
+        std.log.warn("-Dskip-install-lib-files is deprecated in favor of -Dno-lib", .{});
+    }
+    const skip_install_lib_files = b.option(bool, "no-lib", "skip copying of lib/ files to installation prefix. Useful for development") orelse deprecated_skip_install_lib_files;
 
     const only_install_lib_files = b.option(bool, "lib-files-only", "Only install library files") orelse false;
 
@@ -120,10 +126,10 @@ pub fn build(b: *Builder) !void {
         return;
 
     const tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
-    const tracy_callstack = b.option(bool, "tracy-callstack", "Include callstack information with Tracy data. Does nothing if -Dtracy is not provided") orelse false;
-    const tracy_allocation = b.option(bool, "tracy-allocation", "Include allocation information with Tracy data. Does nothing if -Dtracy is not provided") orelse false;
+    const tracy_callstack = b.option(bool, "tracy-callstack", "Include callstack information with Tracy data. Does nothing if -Dtracy is not provided") orelse (tracy != null);
+    const tracy_allocation = b.option(bool, "tracy-allocation", "Include allocation information with Tracy data. Does nothing if -Dtracy is not provided") orelse (tracy != null);
     const force_gpa = b.option(bool, "force-gpa", "Force the compiler to use GeneralPurposeAllocator") orelse false;
-    const link_libc = b.option(bool, "force-link-libc", "Force self-hosted compiler to link libc") orelse enable_llvm;
+    const link_libc = b.option(bool, "force-link-libc", "Force self-hosted compiler to link libc") orelse (enable_llvm or only_c);
     const sanitize_thread = b.option(bool, "sanitize-thread", "Enable thread-sanitization") orelse false;
     const strip = b.option(bool, "strip", "Omit debug information") orelse false;
     const use_zig0 = b.option(bool, "zig0", "Bootstrap using zig0") orelse false;
@@ -166,6 +172,10 @@ pub fn build(b: *Builder) !void {
         test_cases.want_lto = false;
     }
 
+    if (only_c) {
+        exe.ofmt = .c;
+    }
+
     const exe_options = b.addOptions();
     exe.addOptions("build_options", exe_options);
 
@@ -176,6 +186,7 @@ pub fn build(b: *Builder) !void {
     exe_options.addOption(bool, "llvm_has_csky", llvm_has_csky);
     exe_options.addOption(bool, "llvm_has_arc", llvm_has_arc);
     exe_options.addOption(bool, "force_gpa", force_gpa);
+    exe_options.addOption(bool, "only_c", only_c);
 
     if (link_libc) {
         exe.linkLibC();
@@ -371,7 +382,7 @@ pub fn build(b: *Builder) !void {
     if (tracy) |tracy_path| {
         const client_cpp = fs.path.join(
             b.allocator,
-            &[_][]const u8{ tracy_path, "TracyClient.cpp" },
+            &[_][]const u8{ tracy_path, "public", "TracyClient.cpp" },
         ) catch unreachable;
 
         // On mingw, we need to opt into windows 7+ to get some features required by tracy.
@@ -408,6 +419,7 @@ pub fn build(b: *Builder) !void {
     test_cases_options.addOption(bool, "llvm_has_csky", llvm_has_csky);
     test_cases_options.addOption(bool, "llvm_has_arc", llvm_has_arc);
     test_cases_options.addOption(bool, "force_gpa", force_gpa);
+    test_cases_options.addOption(bool, "only_c", only_c);
     test_cases_options.addOption(bool, "enable_qemu", b.enable_qemu);
     test_cases_options.addOption(bool, "enable_wine", b.enable_wine);
     test_cases_options.addOption(bool, "enable_wasmtime", b.enable_wasmtime);
@@ -508,6 +520,7 @@ pub fn build(b: *Builder) !void {
         b.enable_wasmtime,
         b.enable_wine,
     ));
+    test_step.dependOn(tests.addCAbiTests(b, skip_non_native));
     test_step.dependOn(tests.addLinkTests(b, test_filter, modes, enable_macos_sdk, skip_stage2_tests));
     test_step.dependOn(tests.addStackTraceTests(b, test_filter, modes));
     test_step.dependOn(tests.addCliTests(b, test_filter, modes));
@@ -626,6 +639,7 @@ fn addStaticLlvmOptionsToExe(exe: *std.build.LibExeObjStep) !void {
     }
 
     exe.linkSystemLibrary("z");
+    exe.linkSystemLibrary("zstd");
 
     // This means we rely on clang-or-zig-built LLVM, Clang, LLD libraries.
     exe.linkSystemLibrary("c++");
@@ -664,13 +678,12 @@ fn addCxxKnownPath(
     exe.addObjectFile(path_unpadded);
 
     // TODO a way to integrate with system c++ include files here
-    // cc -E -Wp,-v -xc++ /dev/null
+    // c++ -E -Wp,-v -xc++ /dev/null
     if (need_cpp_includes) {
         // I used these temporarily for testing something but we obviously need a
         // more general purpose solution here.
-        //exe.addIncludePath("/nix/store/fvf3qjqa5qpcjjkq37pb6ypnk1mzhf5h-gcc-9.3.0/lib/gcc/x86_64-unknown-linux-gnu/9.3.0/../../../../include/c++/9.3.0");
-        //exe.addIncludePath("/nix/store/fvf3qjqa5qpcjjkq37pb6ypnk1mzhf5h-gcc-9.3.0/lib/gcc/x86_64-unknown-linux-gnu/9.3.0/../../../../include/c++/9.3.0/x86_64-unknown-linux-gnu");
-        //exe.addIncludePath("/nix/store/fvf3qjqa5qpcjjkq37pb6ypnk1mzhf5h-gcc-9.3.0/lib/gcc/x86_64-unknown-linux-gnu/9.3.0/../../../../include/c++/9.3.0/backward");
+        //exe.addIncludePath("/nix/store/2lr0fc0ak8rwj0k8n3shcyz1hz63wzma-gcc-11.3.0/include/c++/11.3.0");
+        //exe.addIncludePath("/nix/store/2lr0fc0ak8rwj0k8n3shcyz1hz63wzma-gcc-11.3.0/include/c++/11.3.0/x86_64-unknown-linux-gnu");
     }
 }
 
