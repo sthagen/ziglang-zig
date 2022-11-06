@@ -8,7 +8,8 @@ var log_err_count: usize = 0;
 
 pub fn main() void {
     if (builtin.zig_backend != .stage1 and
-        (builtin.zig_backend != .stage2_llvm or builtin.cpu.arch == .wasm32))
+        (builtin.zig_backend != .stage2_llvm or builtin.cpu.arch == .wasm32) and
+        builtin.zig_backend != .stage2_c)
     {
         return main2() catch @panic("test failure");
     }
@@ -129,7 +130,9 @@ pub fn main2() anyerror!void {
     }
     if (builtin.zig_backend == .stage2_wasm or
         builtin.zig_backend == .stage2_x86_64 or
-        builtin.zig_backend == .stage2_llvm)
+        builtin.zig_backend == .stage2_aarch64 or
+        builtin.zig_backend == .stage2_llvm or
+        builtin.zig_backend == .stage2_c)
     {
         const passed = builtin.test_functions.len - skipped - failed;
         const stderr = std.io.getStdErr();

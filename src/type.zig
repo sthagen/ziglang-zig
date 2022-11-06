@@ -2919,7 +2919,10 @@ pub const Type = extern union {
                     return AbiAlignmentAdvanced{ .scalar = abiAlignment(u80_ty, target) };
                 },
             },
-            .f128 => return AbiAlignmentAdvanced{ .scalar = 16 },
+            .f128 => switch (CType.longdouble.sizeInBits(target)) {
+                128 => return AbiAlignmentAdvanced{ .scalar = CType.longdouble.alignment(target) },
+                else => return AbiAlignmentAdvanced{ .scalar = 16 },
+            },
 
             // TODO revisit this when we have the concept of the error tag type
             .anyerror_void_error_union,
@@ -3941,10 +3944,7 @@ pub const Type = extern union {
             .optional => {
                 var buf: Payload.ElemType = undefined;
                 const child_type = self.optionalChild(&buf);
-                // optionals of zero sized pointers behave like bools
-                if (!child_type.hasRuntimeBits()) return false;
                 if (child_type.zigTypeTag() != .Pointer) return false;
-
                 const info = child_type.ptrInfo().data;
                 switch (info.size) {
                     .Slice, .C => return false,
@@ -5282,7 +5282,7 @@ pub const Type = extern union {
     // Works for vectors and vectors of integers.
     pub fn minInt(ty: Type, arena: Allocator, target: Target) !Value {
         const scalar = try minIntScalar(ty.scalarType(), arena, target);
-        if (ty.zigTypeTag() == .Vector) {
+        if (ty.zigTypeTag() == .Vector and scalar.tag() != .the_only_possible_value) {
             return Value.Tag.repeated.create(arena, scalar);
         } else {
             return scalar;
@@ -5294,12 +5294,16 @@ pub const Type = extern union {
         assert(ty.zigTypeTag() == .Int);
         const info = ty.intInfo(target);
 
+        if (info.bits == 0) {
+            return Value.initTag(.the_only_possible_value);
+        }
+
         if (info.signedness == .unsigned) {
             return Value.zero;
         }
 
-        if (info.bits <= 6) {
-            const n: i64 = -(@as(i64, 1) << @truncate(u6, info.bits - 1));
+        if (std.math.cast(u6, info.bits - 1)) |shift| {
+            const n = @as(i64, std.math.minInt(i64)) >> (63 - shift);
             return Value.Tag.int_i64.create(arena, n);
         }
 
@@ -5319,13 +5323,23 @@ pub const Type = extern union {
         assert(self.zigTypeTag() == .Int);
         const info = self.intInfo(target);
 
-        if (info.bits <= 6) switch (info.signedness) {
+        if (info.bits == 0) {
+            return Value.initTag(.the_only_possible_value);
+        }
+
+        switch (info.bits - @boolToInt(info.signedness == .signed)) {
+            0 => return Value.zero,
+            1 => return Value.one,
+            else => {},
+        }
+
+        if (std.math.cast(u6, info.bits - 1)) |shift| switch (info.signedness) {
             .signed => {
-                const n: i64 = (@as(i64, 1) << @truncate(u6, info.bits - 1)) - 1;
+                const n = @as(i64, std.math.maxInt(i64)) >> (63 - shift);
                 return Value.Tag.int_i64.create(arena, n);
             },
             .unsigned => {
-                const n: u64 = (@as(u64, 1) << @truncate(u6, info.bits)) - 1;
+                const n = @as(u64, std.math.maxInt(u64)) >> (63 - shift);
                 return Value.Tag.int_u64.create(arena, n);
             },
         };
@@ -6636,7 +6650,7 @@ pub const CType = enum {
                     .long, .ulong => return target.cpu.arch.ptrBitWidth(),
                     .longlong, .ulonglong, .double => return 64,
                     .longdouble => switch (target.cpu.arch) {
-                        .i386 => switch (target.abi) {
+                        .x86 => switch (target.abi) {
                             .android => return 64,
                             else => return 80,
                         },
@@ -6724,7 +6738,7 @@ pub const CType = enum {
                     .long, .ulong => return target.cpu.arch.ptrBitWidth(),
                     .longlong, .ulonglong, .double => return 64,
                     .longdouble => switch (target.cpu.arch) {
-                        .i386 => switch (target.abi) {
+                        .x86 => switch (target.abi) {
                             .android => return 64,
                             else => return 80,
                         },
@@ -6778,7 +6792,7 @@ pub const CType = enum {
             },
 
             .windows, .uefi => switch (target.cpu.arch) {
-                .i386 => switch (self) {
+                .x86 => switch (self) {
                     .short, .ushort => return 16,
                     .int, .uint, .float => return 32,
                     .long, .ulong => return 32,
@@ -6814,7 +6828,7 @@ pub const CType = enum {
                 .short, .ushort => return 16,
                 .int, .uint, .float => return 32,
                 .long, .ulong => switch (target.cpu.arch) {
-                    .i386, .arm, .aarch64_32 => return 32,
+                    .x86, .arm, .aarch64_32 => return 32,
                     .x86_64 => switch (target.abi) {
                         .gnux32, .muslx32 => return 32,
                         else => return 64,
@@ -6823,7 +6837,7 @@ pub const CType = enum {
                 },
                 .longlong, .ulonglong, .double => return 64,
                 .longdouble => switch (target.cpu.arch) {
-                    .i386 => switch (target.abi) {
+                    .x86 => switch (target.abi) {
                         .android => return 64,
                         else => return 80,
                     },
@@ -6882,7 +6896,7 @@ pub const CType = enum {
                 .short, .ushort => return 2,
                 else => return 1,
             },
-            .i386 => switch (target.os.tag) {
+            .x86 => switch (target.os.tag) {
                 .windows, .uefi => switch (self) {
                     .longlong, .ulonglong, .double => return 8,
                     .longdouble => switch (target.abi) {
@@ -6923,7 +6937,7 @@ pub const CType = enum {
 
                 .arc,
                 .csky,
-                .i386,
+                .x86,
                 .xcore,
                 .dxil,
                 .loongarch32,
@@ -7020,7 +7034,7 @@ pub const CType = enum {
                 .double => return 4,
                 .longlong, .ulonglong => return 8,
             },
-            .i386 => switch (target.os.tag) {
+            .x86 => switch (target.os.tag) {
                 .windows, .uefi => switch (self) {
                     .longdouble => switch (target.abi) {
                         .gnu, .gnuilp32, .cygnus => return 4,
@@ -7073,7 +7087,7 @@ pub const CType = enum {
                 .bpfeb,
                 .hexagon,
                 .hsail64,
-                .i386,
+                .x86,
                 .loongarch64,
                 .m68k,
                 .mips,

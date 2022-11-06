@@ -182,7 +182,7 @@ pub fn dumpStackTraceFromBase(bp: usize, ip: usize) void {
             // therefore, we do a check for `return_address == 0` before subtracting 1 from it to avoid
             // an overflow. We do not need to signal `StackIterator` as it will correctly detect this
             // condition on the subsequent iteration and return `null` thus terminating the loop.
-            // same behaviour for i386-windows-msvc
+            // same behaviour for x86-windows-msvc
             const address = if (return_address == 0) return_address else return_address - 1;
             printSourceAtAddress(debug_info, stderr, address, tty_config) catch return;
         }
@@ -568,7 +568,7 @@ pub fn writeCurrentStackTrace(
         // therefore, we do a check for `return_address == 0` before subtracting 1 from it to avoid
         // an overflow. We do not need to signal `StackIterator` as it will correctly detect this
         // condition on the subsequent iteration and return `null` thus terminating the loop.
-        // same behaviour for i386-windows-msvc
+        // same behaviour for x86-windows-msvc
         const address = if (return_address == 0) return_address else return_address - 1;
         try printSourceAtAddress(debug_info, out_stream, address, tty_config);
     }
@@ -1222,7 +1222,13 @@ pub const DebugInfo = struct {
     }
 
     pub fn getModuleForAddress(self: *DebugInfo, address: usize) !*ModuleDebugInfo {
-        if (comptime builtin.target.isDarwin()) {
+        if (builtin.zig_backend == .stage2_c) {
+            return @as(error{
+                InvalidDebugInfo,
+                MissingDebugInfo,
+                UnsupportedBackend,
+            }, error.UnsupportedBackend);
+        } else if (comptime builtin.target.isDarwin()) {
             return self.lookupModuleDyld(address);
         } else if (native_os == .windows) {
             return self.lookupModuleWin32(address);
@@ -1916,7 +1922,7 @@ fn handleSegfaultPosix(sig: i32, info: *const os.siginfo_t, ctx_ptr: ?*const any
     }
 
     switch (native_arch) {
-        .i386 => {
+        .x86 => {
             const ctx = @ptrCast(*const os.ucontext_t, @alignCast(@alignOf(os.ucontext_t), ctx_ptr));
             const ip = @intCast(usize, ctx.mcontext.gregs[os.REG.EIP]);
             const bp = @intCast(usize, ctx.mcontext.gregs[os.REG.EBP]);

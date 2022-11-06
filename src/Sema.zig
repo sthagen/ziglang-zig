@@ -71,8 +71,8 @@ preallocated_new_func: ?*Module.Fn = null,
 /// TODO: after upgrading to use InternPool change the key here to be an
 /// InternPool value index.
 types_to_resolve: std.ArrayListUnmanaged(Air.Inst.Ref) = .{},
-/// These are lazily created runtime blocks from inline_block instructions.
-/// They are created when an inline_break passes through a runtime condition, because
+/// These are lazily created runtime blocks from block_inline instructions.
+/// They are created when an break_inline passes through a runtime condition, because
 /// Sema must convert comptime control flow to runtime control flow, which means
 /// breaking from a block.
 post_hoc_blocks: std.AutoHashMapUnmanaged(Air.Inst.Index, *LabeledBlock) = .{},
@@ -147,7 +147,7 @@ pub const Block = struct {
     /// for the one that will be the same for all Block instances.
     src_decl: Decl.Index,
     /// Non zero if a non-inline loop or a runtime conditional have been encountered.
-    /// Stores to to comptime variables are only allowed when var.runtime_index <= runtime_index.
+    /// Stores to comptime variables are only allowed when var.runtime_index <= runtime_index.
     runtime_index: Value.RuntimeIndex = .zero,
     inline_block: Zir.Inst.Index = 0,
 
@@ -1391,9 +1391,8 @@ fn analyzeBodyInner(
                     // If this block contains a function prototype, we need to reset the
                     // current list of parameters and restore it later.
                     // Note: this probably needs to be resolved in a more general manner.
-                    if (tags[inline_body[inline_body.len - 1]] == .repeat_inline) {
-                        child_block.inline_block = inline_body[0];
-                    } else child_block.inline_block = block.inline_block;
+                    child_block.inline_block =
+                        if (tags[inline_body[inline_body.len - 1]] == .repeat_inline) inline_body[0] else inst;
 
                     var label: Block.Label = .{
                         .zir_block = inst,
@@ -5002,7 +5001,7 @@ fn zirCImport(sema: *Sema, parent_block: *Block, inst: Zir.Inst.Index) CompileEr
     var c_import_buf = std.ArrayList(u8).init(sema.gpa);
     defer c_import_buf.deinit();
 
-    var comptime_reason = .{ .c_import = .{
+    var comptime_reason: Block.ComptimeReason = .{ .c_import = .{
         .block = parent_block,
         .src = src,
     } };
@@ -8416,20 +8415,20 @@ fn funcCommon(
         if (switch (cc_workaround) {
             .Unspecified, .C, .Naked, .Async, .Inline => null,
             .Interrupt => switch (arch) {
-                .i386, .x86_64, .avr, .msp430 => null,
-                else => @as([]const u8, "i386, x86_64, AVR, and MSP430"),
+                .x86, .x86_64, .avr, .msp430 => null,
+                else => @as([]const u8, "x86, x86_64, AVR, and MSP430"),
             },
             .Signal => switch (arch) {
                 .avr => null,
                 else => @as([]const u8, "AVR"),
             },
             .Stdcall, .Fastcall, .Thiscall => switch (arch) {
-                .i386 => null,
-                else => @as([]const u8, "i386"),
+                .x86 => null,
+                else => @as([]const u8, "x86"),
             },
             .Vectorcall => switch (arch) {
-                .i386, .aarch64, .aarch64_be, .aarch64_32 => null,
-                else => @as([]const u8, "i386 and AArch64"),
+                .x86, .aarch64, .aarch64_be, .aarch64_32 => null,
+                else => @as([]const u8, "x86 and AArch64"),
             },
             .APCS, .AAPCS, .AAPCSVFP => switch (arch) {
                 .arm, .armeb, .aarch64, .aarch64_be, .aarch64_32, .thumb, .thumbeb => null,
@@ -9663,6 +9662,9 @@ fn zirSwitchBlock(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError
     const extra = sema.code.extraData(Zir.Inst.SwitchBlock, inst_data.payload_index);
 
     const operand = try sema.resolveInst(extra.data.operand);
+    // AstGen guarantees that the instruction immediately following
+    // switch_cond(_ref) is a dbg_stmt
+    const cond_dbg_node_index = Zir.refToIndex(extra.data.operand).? + 1;
 
     var header_extra_index: usize = extra.end;
 
@@ -10359,6 +10361,7 @@ fn zirSwitchBlock(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError
         if (backend_supports_is_named_enum and block.wantSafety() and operand_ty.zigTypeTag() == .Enum and
             (!operand_ty.isNonexhaustiveEnum() or union_originally))
         {
+            try sema.zirDbgStmt(block, cond_dbg_node_index);
             const ok = try block.addUnOp(.is_named_enum_value, operand);
             try sema.addSafetyCheck(block, ok, .corrupt_switch);
         }
@@ -10828,6 +10831,7 @@ fn zirSwitchBlock(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError
         if (backend_supports_is_named_enum and special.body.len != 0 and block.wantSafety() and
             operand_ty.zigTypeTag() == .Enum and (!operand_ty.isNonexhaustiveEnum() or union_originally))
         {
+            try sema.zirDbgStmt(&case_block, cond_dbg_node_index);
             const ok = try case_block.addUnOp(.is_named_enum_value, operand);
             try sema.addSafetyCheck(&case_block, ok, .corrupt_switch);
         }
@@ -10851,6 +10855,7 @@ fn zirSwitchBlock(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError
             // We still need a terminator in this block, but we have proven
             // that it is unreachable.
             if (case_block.wantSafety()) {
+                try sema.zirDbgStmt(&case_block, cond_dbg_node_index);
                 _ = try sema.safetyPanic(&case_block, src, .corrupt_switch);
             } else {
                 _ = try case_block.addNoOp(.unreach);
@@ -15932,12 +15937,10 @@ fn zirBoolBr(
     const gpa = sema.gpa;
 
     if (try sema.resolveDefinedValue(parent_block, lhs_src, lhs)) |lhs_val| {
-        if (lhs_val.toBool() == is_bool_or) {
-            if (is_bool_or) {
-                return Air.Inst.Ref.bool_true;
-            } else {
-                return Air.Inst.Ref.bool_false;
-            }
+        if (is_bool_or and lhs_val.toBool()) {
+            return Air.Inst.Ref.bool_true;
+        } else if (!is_bool_or and !lhs_val.toBool()) {
+            return Air.Inst.Ref.bool_false;
         }
         // comptime-known left-hand side. No need for a block here; the result
         // is simply the rhs expression. Here we rely on there only being 1
@@ -15977,7 +15980,18 @@ fn zirBoolBr(
         _ = try rhs_block.addBr(block_inst, rhs_result);
     }
 
-    return finishCondBr(sema, parent_block, &child_block, &then_block, &else_block, lhs, block_inst);
+    const result = finishCondBr(sema, parent_block, &child_block, &then_block, &else_block, lhs, block_inst);
+    if (!sema.typeOf(rhs_result).isNoReturn()) {
+        if (try sema.resolveDefinedValue(rhs_block, sema.src, rhs_result)) |rhs_val| {
+            if (is_bool_or and rhs_val.toBool()) {
+                return Air.Inst.Ref.bool_true;
+            } else if (!is_bool_or and !rhs_val.toBool()) {
+                return Air.Inst.Ref.bool_false;
+            }
+        }
+    }
+
+    return result;
 }
 
 fn finishCondBr(
@@ -16612,7 +16626,17 @@ fn zirPtrType(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air
     const bitoffset_src: LazySrcLoc = .{ .node_offset_ptr_bitoffset = extra.data.src_node };
     const hostsize_src: LazySrcLoc = .{ .node_offset_ptr_hostsize = extra.data.src_node };
 
-    const unresolved_elem_ty = try sema.resolveType(block, elem_ty_src, extra.data.elem_type);
+    const unresolved_elem_ty = blk: {
+        const air_inst = try sema.resolveInst(extra.data.elem_type);
+        const ty = sema.analyzeAsType(block, elem_ty_src, air_inst) catch |err| {
+            if (err == error.AnalysisFail and sema.err != null and sema.typeOf(air_inst).isSinglePointer()) {
+                try sema.errNote(block, elem_ty_src, sema.err.?, "use '.*' to dereference pointer", .{});
+            }
+            return err;
+        };
+        if (ty.tag() == .generic_poison) return error.GenericPoison;
+        break :blk ty;
+    };
     const target = sema.mod.getTarget();
 
     var extra_i = extra.end;
@@ -18224,7 +18248,7 @@ fn zirReify(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstData, in
                 var buffer: Value.ToTypeBuffer = undefined;
                 gop.value_ptr.* = .{
                     .ty = try field_type_val.toType(&buffer).copy(new_decl_arena_allocator),
-                    .abi_align = @intCast(u32, alignment_val.toUnsignedInt(target)),
+                    .abi_align = @intCast(u32, (try alignment_val.getUnsignedIntAdvanced(target, sema.kit(block, src))).?),
                 };
             }
 
@@ -18658,6 +18682,13 @@ fn zirFloatToInt(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!
     }
 
     try sema.requireRuntimeBlock(block, inst_data.src(), operand_src);
+    if (dest_ty.intInfo(sema.mod.getTarget()).bits == 0) {
+        if (block.wantSafety()) {
+            const ok = try block.addBinOp(if (block.float_mode == .Optimized) .cmp_eq_optimized else .cmp_eq, operand, try sema.addConstant(operand_ty, Value.zero));
+            try sema.addSafetyCheck(block, ok, .integer_part_out_of_bounds);
+        }
+        return sema.addConstant(dest_ty, Value.zero);
+    }
     const result = try block.addTyOp(if (block.float_mode == .Optimized) .float_to_int_optimized else .float_to_int, dest_ty, operand);
     if (block.wantSafety()) {
         const back = try block.addTyOp(.int_to_float, operand_ty, result);
@@ -18923,6 +18954,9 @@ fn zirPtrCast(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air
         }
         if (!dest_ty.ptrAllowsZero() and operand_val.isNull()) {
             return sema.fail(block, operand_src, "null pointer casted to type {}", .{dest_ty.fmt(sema.mod)});
+        }
+        if (dest_ty.zigTypeTag() == .Optional and sema.typeOf(ptr).zigTypeTag() != .Optional) {
+            return sema.addConstant(dest_ty, try Value.Tag.opt_payload.create(sema.arena, operand_val));
         }
         return sema.addConstant(aligned_dest_ty, operand_val);
     }
@@ -23911,9 +23945,20 @@ fn coerceExtra(
             // cast from ?*T and ?[*]T to ?*anyopaque
             // but don't do it if the source type is a double pointer
             if (dest_ty.isPtrLikeOptional() and dest_ty.elemType2().tag() == .anyopaque and
-                inst_ty.isPtrLikeOptional() and inst_ty.elemType2().zigTypeTag() != .Pointer)
-            {
+                inst_ty.isPtrAtRuntime())
+            anyopaque_check: {
                 if (!sema.checkPtrAttributes(dest_ty, inst_ty, &in_memory_result)) break :optional;
+                const elem_ty = inst_ty.elemType2();
+                if (elem_ty.zigTypeTag() == .Pointer or elem_ty.isPtrLikeOptional()) {
+                    in_memory_result = .{ .double_ptr_to_anyopaque = .{
+                        .actual = inst_ty,
+                        .wanted = dest_ty,
+                    } };
+                    break :optional;
+                }
+                // Let the logic below handle wrapping the optional now that
+                // it has been checked to correctly coerce.
+                if (!inst_ty.isPtrLikeOptional()) break :anyopaque_check;
                 return sema.coerceCompatiblePtrs(block, dest_ty, inst, inst_src);
             }
 
@@ -24036,9 +24081,16 @@ fn coerceExtra(
 
             // cast from *T and [*]T to *anyopaque
             // but don't do it if the source type is a double pointer
-            if (dest_info.pointee_type.tag() == .anyopaque and inst_ty.zigTypeTag() == .Pointer and
-                inst_ty.childType().zigTypeTag() != .Pointer and sema.checkPtrAttributes(dest_ty, inst_ty, &in_memory_result))
-            {
+            if (dest_info.pointee_type.tag() == .anyopaque and inst_ty.zigTypeTag() == .Pointer) {
+                if (!sema.checkPtrAttributes(dest_ty, inst_ty, &in_memory_result)) break :pointer;
+                const elem_ty = inst_ty.elemType2();
+                if (elem_ty.zigTypeTag() == .Pointer or elem_ty.isPtrLikeOptional()) {
+                    in_memory_result = .{ .double_ptr_to_anyopaque = .{
+                        .actual = inst_ty,
+                        .wanted = dest_ty,
+                    } };
+                    break :pointer;
+                }
                 return sema.coerceCompatiblePtrs(block, dest_ty, inst, inst_src);
             }
 
@@ -24520,6 +24572,7 @@ const InMemoryCoercionResult = union(enum) {
     ptr_allowzero: Pair,
     ptr_bit_range: BitRange,
     ptr_alignment: IntPair,
+    double_ptr_to_anyopaque: Pair,
 
     const Pair = struct {
         actual: Type,
@@ -24809,6 +24862,12 @@ const InMemoryCoercionResult = union(enum) {
             .ptr_alignment => |pair| {
                 try sema.errNote(block, src, msg, "pointer alignment '{}' cannot cast into pointer alignment '{}'", .{
                     pair.actual, pair.wanted,
+                });
+                break;
+            },
+            .double_ptr_to_anyopaque => |pair| {
+                try sema.errNote(block, src, msg, "cannot implicitly cast double pointer '{}' to anyopaque pointer '{}'", .{
+                    pair.actual.fmt(sema.mod), pair.wanted.fmt(sema.mod),
                 });
                 break;
             },
@@ -27501,9 +27560,7 @@ fn analyzeIsNonErrComptimeOnly(
                 // Try to avoid resolving inferred error set if possible.
                 if (ies.errors.count() != 0) break :blk;
                 if (ies.is_anyerror) break :blk;
-                var it = ies.inferred_error_sets.keyIterator();
-                while (it.next()) |other_error_set_ptr| {
-                    const other_ies: *Module.Fn.InferredErrorSet = other_error_set_ptr.*;
+                for (ies.inferred_error_sets.keys()) |other_ies| {
                     if (ies == other_ies) continue;
                     try sema.resolveInferredErrorSet(block, src, other_ies);
                     if (other_ies.is_anyerror) {
@@ -29424,9 +29481,7 @@ fn resolveInferredErrorSet(
 
     ies.is_resolved = true;
 
-    var it = ies.inferred_error_sets.keyIterator();
-    while (it.next()) |other_error_set_ptr| {
-        const other_ies: *Module.Fn.InferredErrorSet = other_error_set_ptr.*;
+    for (ies.inferred_error_sets.keys()) |other_ies| {
         if (ies == other_ies) continue;
         try sema.resolveInferredErrorSet(block, src, other_ies);
 
@@ -30758,7 +30813,7 @@ pub fn analyzeAddressSpace(
 
     const supported = switch (address_space) {
         .generic => true,
-        .gs, .fs, .ss => (arch == .i386 or arch == .x86_64) and ctx == .pointer,
+        .gs, .fs, .ss => (arch == .x86 or arch == .x86_64) and ctx == .pointer,
         // TODO: check that .shared and .local are left uninitialized
         .param => is_nv,
         .global, .shared, .local => is_gpu,

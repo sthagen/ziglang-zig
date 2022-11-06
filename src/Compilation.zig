@@ -48,6 +48,7 @@ bin_file: *link.File,
 c_object_table: std.AutoArrayHashMapUnmanaged(*CObject, void) = .{},
 /// This is a pointer to a local variable inside `update()`.
 whole_cache_manifest: ?*Cache.Manifest = null,
+whole_cache_manifest_mutex: std.Thread.Mutex = .{},
 
 link_error_flags: link.File.ErrorFlags = .{},
 
@@ -1091,10 +1092,10 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
     // Once they are capable this condition could be removed. When removing this condition,
     // also test the use case of `build-obj -fcompiler-rt` with the native backends
     // and make sure the compiler-rt symbols are emitted.
-    const capable_of_building_compiler_rt = build_options.have_llvm;
+    const capable_of_building_compiler_rt = build_options.have_llvm and options.target.os.tag != .plan9;
 
-    const capable_of_building_zig_libc = build_options.have_llvm;
-    const capable_of_building_ssp = build_options.have_llvm;
+    const capable_of_building_zig_libc = build_options.have_llvm and options.target.os.tag != .plan9;
+    const capable_of_building_ssp = build_options.have_llvm and options.target.os.tag != .plan9;
 
     const comp: *Compilation = comp: {
         // For allocations that have the same lifetime as Compilation. This arena is used only during this
@@ -2199,8 +2200,8 @@ pub fn update(comp: *Compilation) !void {
         // We are about to obtain this lock, so here we give other processes a chance first.
         comp.bin_file.releaseLock();
 
-        comp.whole_cache_manifest = &man;
         man = comp.cache_parent.obtain();
+        comp.whole_cache_manifest = &man;
         try comp.addNonIncrementalStuffToCacheManifest(&man);
 
         const is_hit = man.hit() catch |err| {
@@ -3103,13 +3104,16 @@ fn processOneJob(comp: *Compilation, job: Job) !void {
                         .decl_index = decl_index,
                         .decl = decl,
                         .fwd_decl = fwd_decl.toManaged(gpa),
-                        .typedefs = c_codegen.TypedefMap.initContext(gpa, .{
-                            .mod = module,
-                        }),
+                        .typedefs = c_codegen.TypedefMap.initContext(gpa, .{ .mod = module }),
                         .typedefs_arena = typedefs_arena.allocator(),
                     };
-                    defer dg.fwd_decl.deinit();
-                    defer dg.typedefs.deinit();
+                    defer {
+                        for (dg.typedefs.values()) |typedef| {
+                            module.gpa.free(typedef.rendered);
+                        }
+                        dg.typedefs.deinit();
+                        dg.fwd_decl.deinit();
+                    }
 
                     c_codegen.genHeader(&dg) catch |err| switch (err) {
                         error.AnalysisFail => {
@@ -3595,6 +3599,8 @@ pub fn cImport(comp: *Compilation, c_src: []const u8) !CImportResult {
         const dep_basename = std.fs.path.basename(out_dep_path);
         try man.addDepFilePost(zig_cache_tmp_dir, dep_basename);
         if (comp.whole_cache_manifest) |whole_cache_manifest| {
+            comp.whole_cache_manifest_mutex.lock();
+            defer comp.whole_cache_manifest_mutex.unlock();
             try whole_cache_manifest.addDepFilePost(zig_cache_tmp_dir, dep_basename);
         }
 
@@ -4057,6 +4063,11 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: *std.P
             const dep_basename = std.fs.path.basename(dep_file_path);
             // Add the files depended on to the cache system.
             try man.addDepFilePost(zig_cache_tmp_dir, dep_basename);
+            if (comp.whole_cache_manifest) |whole_cache_manifest| {
+                comp.whole_cache_manifest_mutex.lock();
+                defer comp.whole_cache_manifest_mutex.unlock();
+                try whole_cache_manifest.addDepFilePost(zig_cache_tmp_dir, dep_basename);
+            }
             // Just to save disk space, we delete the file because it is never needed again.
             zig_cache_tmp_dir.deleteFile(dep_basename) catch |err| {
                 log.warn("failed to delete '{s}': {s}", .{ dep_file_path, @errorName(err) });
@@ -4270,7 +4281,7 @@ pub fn addCCArgs(
                 },
                 .ios, .tvos, .watchos => switch (target.cpu.arch) {
                     // Pass the proper -m<os>-version-min argument for darwin.
-                    .i386, .x86_64 => {
+                    .x86, .x86_64 => {
                         const ver = target.os.version_range.semver.min;
                         try argv.append(try std.fmt.allocPrint(
                             arena,
@@ -4958,7 +4969,7 @@ pub fn getZigBackend(comp: Compilation) std.builtin.CompilerBackend {
         .wasm32, .wasm64 => std.builtin.CompilerBackend.stage2_wasm,
         .arm, .armeb, .thumb, .thumbeb => .stage2_arm,
         .x86_64 => .stage2_x86_64,
-        .i386 => .stage2_x86,
+        .x86 => .stage2_x86,
         .aarch64, .aarch64_be, .aarch64_32 => .stage2_aarch64,
         .riscv64 => .stage2_riscv64,
         .sparc64 => .stage2_sparc64,

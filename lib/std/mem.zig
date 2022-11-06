@@ -2891,6 +2891,7 @@ test "rotate" {
 /// Replace needle with replacement as many times as possible, writing to an output buffer which is assumed to be of
 /// appropriate size. Use replacementSize to calculate an appropriate buffer size.
 /// The needle must not be empty.
+/// Returns the number of replacements made.
 pub fn replace(comptime T: type, input: []const T, needle: []const T, replacement: []const T, output: []T) usize {
     // Empty needle will loop until output buffer overflows.
     assert(needle.len > 0);
@@ -3551,12 +3552,14 @@ test "sliceAsBytes preserves pointer attributes" {
 
 /// Round an address up to the next (or current) aligned address.
 /// The alignment must be a power of 2 and greater than 0.
+/// Asserts that rounding up the address does not cause integer overflow.
 pub fn alignForward(addr: usize, alignment: usize) usize {
     return alignForwardGeneric(usize, addr, alignment);
 }
 
 /// Round an address up to the next (or current) aligned address.
 /// The alignment must be a power of 2 and greater than 0.
+/// Asserts that rounding up the address does not cause integer overflow.
 pub fn alignForwardGeneric(comptime T: type, addr: T, alignment: T) T {
     return alignBackwardGeneric(T, addr + (alignment - 1), alignment);
 }

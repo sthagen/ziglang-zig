@@ -24,6 +24,7 @@ const Liveness = @import("../Liveness.zig");
 const LlvmObject = @import("../codegen/llvm.zig").Object;
 const Module = @import("../Module.zig");
 const Object = @import("Coff/Object.zig");
+const Relocation = @import("Coff/Relocation.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const TypedValue = @import("../TypedValue.zig");
 
@@ -123,36 +124,11 @@ const Entry = struct {
     sym_index: u32,
 };
 
-pub const Reloc = struct {
-    @"type": enum {
-        got,
-        direct,
-        import,
-    },
-    target: SymbolWithLoc,
-    offset: u32,
-    addend: u32,
-    pcrel: bool,
-    length: u2,
-    dirty: bool = true,
-
-    /// Returns an Atom which is the target node of this relocation edge (if any).
-    fn getTargetAtom(self: Reloc, coff_file: *Coff) ?*Atom {
-        switch (self.@"type") {
-            .got => return coff_file.getGotAtomForSymbol(self.target),
-            .direct => return coff_file.getAtomForSymbol(self.target),
-            .import => return coff_file.getImportAtomForSymbol(self.target),
-        }
-    }
-};
-
-const RelocTable = std.AutoHashMapUnmanaged(*Atom, std.ArrayListUnmanaged(Reloc));
+const RelocTable = std.AutoHashMapUnmanaged(*Atom, std.ArrayListUnmanaged(Relocation));
 const BaseRelocationTable = std.AutoHashMapUnmanaged(*Atom, std.ArrayListUnmanaged(u32));
 const UnnamedConstTable = std.AutoHashMapUnmanaged(Module.Decl.Index, std.ArrayListUnmanaged(*Atom));
 
 const default_file_alignment: u16 = 0x200;
-const default_image_base_dll: u64 = 0x10000000;
-const default_image_base_exe: u64 = 0x400000;
 const default_size_of_stack_reserve: u32 = 0x1000000;
 const default_size_of_stack_commit: u32 = 0x1000;
 const default_size_of_heap_reserve: u32 = 0x100000;
@@ -857,54 +833,12 @@ fn markRelocsDirtyByAddress(self: *Coff, addr: u32) void {
 
 fn resolveRelocs(self: *Coff, atom: *Atom) !void {
     const relocs = self.relocs.get(atom) orelse return;
-    const source_sym = atom.getSymbol(self);
-    const source_section = self.sections.get(@enumToInt(source_sym.section_number) - 1).header;
-    const file_offset = source_section.pointer_to_raw_data + source_sym.value - source_section.virtual_address;
 
     log.debug("relocating '{s}'", .{atom.getName(self)});
 
     for (relocs.items) |*reloc| {
         if (!reloc.dirty) continue;
-
-        const target_atom = reloc.getTargetAtom(self) orelse continue;
-        const target_vaddr = target_atom.getSymbol(self).value;
-        const target_vaddr_with_addend = target_vaddr + reloc.addend;
-
-        log.debug("  ({x}: [() => 0x{x} ({s})) ({s}) (in file at 0x{x})", .{
-            source_sym.value + reloc.offset,
-            target_vaddr_with_addend,
-            self.getSymbolName(reloc.target),
-            @tagName(reloc.@"type"),
-            file_offset + reloc.offset,
-        });
-
-        reloc.dirty = false;
-
-        if (reloc.pcrel) {
-            const source_vaddr = source_sym.value + reloc.offset;
-            const disp =
-                @intCast(i32, target_vaddr_with_addend) - @intCast(i32, source_vaddr) - 4;
-            try self.base.file.?.pwriteAll(mem.asBytes(&disp), file_offset + reloc.offset);
-            continue;
-        }
-
-        switch (self.ptr_width) {
-            .p32 => try self.base.file.?.pwriteAll(
-                mem.asBytes(&@intCast(u32, target_vaddr_with_addend + default_image_base_exe)),
-                file_offset + reloc.offset,
-            ),
-            .p64 => switch (reloc.length) {
-                2 => try self.base.file.?.pwriteAll(
-                    mem.asBytes(&@truncate(u32, target_vaddr_with_addend + default_image_base_exe)),
-                    file_offset + reloc.offset,
-                ),
-                3 => try self.base.file.?.pwriteAll(
-                    mem.asBytes(&(target_vaddr_with_addend + default_image_base_exe)),
-                    file_offset + reloc.offset,
-                ),
-                else => unreachable,
-            },
-        }
+        try reloc.resolve(atom, self);
     }
 }
 
@@ -1294,7 +1228,7 @@ pub fn updateDeclExports(
             const exported_decl = module.declPtr(exp.exported_decl);
             if (exported_decl.getFunction() == null) continue;
             const winapi_cc = switch (self.base.options.target.cpu.arch) {
-                .i386 => std.builtin.CallingConvention.Stdcall,
+                .x86 => std.builtin.CallingConvention.Stdcall,
                 else => std.builtin.CallingConvention.C,
             };
             const decl_cc = exported_decl.ty.fnCallingConvention();
@@ -1831,11 +1765,7 @@ fn writeHeader(self: *Coff) !void {
     const subsystem: coff.Subsystem = .WINDOWS_CUI;
     const size_of_image: u32 = self.getSizeOfImage();
     const size_of_headers: u32 = mem.alignForwardGeneric(u32, self.getSizeOfHeaders(), default_file_alignment);
-    const image_base = self.base.options.image_base_override orelse switch (self.base.options.output_mode) {
-        .Exe => default_image_base_exe,
-        .Lib => default_image_base_dll,
-        else => unreachable,
-    };
+    const image_base = self.getImageBase();
 
     const base_of_code = self.sections.get(self.text_section_index.?).header.virtual_address;
     const base_of_data = self.sections.get(self.data_section_index.?).header.virtual_address;
@@ -2040,6 +1970,19 @@ pub fn getEntryPoint(self: Coff) ?SymbolWithLoc {
     const entry_name = self.base.options.entry orelse "wWinMainCRTStartup"; // TODO this is incomplete
     const global_index = self.resolver.get(entry_name) orelse return null;
     return self.globals.items[global_index];
+}
+
+pub fn getImageBase(self: Coff) u64 {
+    const image_base: u64 = self.base.options.image_base_override orelse switch (self.base.options.output_mode) {
+        .Exe => switch (self.base.options.target.cpu.arch) {
+            .aarch64 => @as(u64, 0x140000000),
+            .x86_64, .x86 => 0x400000,
+            else => unreachable, // unsupported target architecture
+        },
+        .Lib => 0x10000000,
+        .Obj => 0,
+    };
+    return image_base;
 }
 
 /// Returns pointer-to-symbol described by `sym_loc` descriptor.

@@ -10,14 +10,14 @@ const fs = std.fs;
 const InstallDirectoryOptions = std.build.InstallDirectoryOptions;
 const assert = std.debug.assert;
 
-const zig_version = std.builtin.Version{ .major = 0, .minor = 10, .patch = 0 };
+const zig_version = std.builtin.Version{ .major = 0, .minor = 11, .patch = 0 };
 const stack_size = 32 * 1024 * 1024;
 
 pub fn build(b: *Builder) !void {
     b.setPreferredReleaseMode(.ReleaseFast);
     const test_step = b.step("test", "Run all the tests");
     const mode = b.standardReleaseOptions();
-    const target = b.standardTargetOptions(.{});
+    var target = b.standardTargetOptions(.{});
     const single_threaded = b.option(bool, "single-threaded", "Build artifacts that run in single threaded mode");
     const use_zig_libcxx = b.option(bool, "use-zig-libcxx", "If libc++ is needed, use zig's bundled version, don't try to integrate with the system") orelse false;
 
@@ -141,6 +141,10 @@ pub fn build(b: *Builder) !void {
         break :blk 4;
     };
 
+    if (only_c) {
+        target.ofmt = .c;
+    }
+
     const main_file: ?[]const u8 = mf: {
         if (!have_stage1) break :mf "src/main.zig";
         if (use_zig0) break :mf null;
@@ -170,10 +174,6 @@ pub fn build(b: *Builder) !void {
         // LTO is currently broken on mingw, this can be removed when it's fixed.
         exe.want_lto = false;
         test_cases.want_lto = false;
-    }
-
-    if (only_c) {
-        exe.ofmt = .c;
     }
 
     const exe_options = b.addOptions();
@@ -215,7 +215,7 @@ pub fn build(b: *Builder) !void {
 
         switch (mem.count(u8, git_describe, "-")) {
             0 => {
-                // Tagged release version (e.g. 0.9.0).
+                // Tagged release version (e.g. 0.10.0).
                 if (!mem.eql(u8, git_describe, version_string)) {
                     std.debug.print("Zig version '{s}' does not match Git tag '{s}'\n", .{ version_string, git_describe });
                     std.process.exit(1);
@@ -223,7 +223,7 @@ pub fn build(b: *Builder) !void {
                 break :v version_string;
             },
             2 => {
-                // Untagged development build (e.g. 0.9.0-dev.2025+ecf0050a9).
+                // Untagged development build (e.g. 0.10.0-dev.2025+ecf0050a9).
                 var it = mem.split(u8, git_describe, "-");
                 const tagged_ancestor = it.first();
                 const commit_height = it.next().?;
