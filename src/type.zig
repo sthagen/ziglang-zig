@@ -3574,15 +3574,13 @@ pub const Type = extern union {
             .u128, .i128, .f128 => return 128,
 
             .@"struct" => {
-                if (sema_kit) |sk| _ = try sk.sema.resolveTypeFields(sk.block, sk.src, ty);
-                if (ty.containerLayout() != .Packed) {
+                const struct_obj = ty.castTag(.@"struct").?.data;
+                if (struct_obj.layout != .Packed) {
                     return (try ty.abiSizeAdvanced(target, if (sema_kit) |sk| .{ .sema_kit = sk } else .eager)).scalar * 8;
                 }
-                var total: u64 = 0;
-                for (ty.structFields().values()) |field| {
-                    total += try bitSizeAdvanced(field.ty, target, sema_kit);
-                }
-                return total;
+                if (sema_kit) |sk| _ = try sk.sema.resolveTypeLayout(sk.block, sk.src, ty);
+                assert(struct_obj.haveLayout());
+                return try struct_obj.backing_int_ty.bitSizeAdvanced(target, sema_kit);
             },
 
             .tuple, .anon_struct => {
@@ -5015,22 +5013,22 @@ pub const Type = extern union {
                 if (enum_full.tag_ty.hasRuntimeBits()) {
                     return null;
                 }
-                if (enum_full.fields.count() == 1) {
-                    if (enum_full.values.count() == 0) {
-                        return Value.zero;
+                switch (enum_full.fields.count()) {
+                    0 => return Value.initTag(.unreachable_value),
+                    1 => if (enum_full.values.count() == 0) {
+                        return Value.zero; // auto-numbered
                     } else {
                         return enum_full.values.keys()[0];
-                    }
-                } else {
-                    return null;
+                    },
+                    else => return null,
                 }
             },
             .enum_simple => {
                 const enum_simple = ty.castTag(.enum_simple).?.data;
-                if (enum_simple.fields.count() == 1) {
-                    return Value.zero;
-                } else {
-                    return null;
+                switch (enum_simple.fields.count()) {
+                    0 => return Value.initTag(.unreachable_value),
+                    1 => return Value.zero,
+                    else => return null,
                 }
             },
             .enum_nonexhaustive => {
@@ -5044,6 +5042,7 @@ pub const Type = extern union {
             .@"union", .union_safety_tagged, .union_tagged => {
                 const union_obj = ty.cast(Payload.Union).?.data;
                 const tag_val = union_obj.tag_ty.onePossibleValue() orelse return null;
+                if (union_obj.fields.count() == 0) return Value.initTag(.unreachable_value);
                 const only_field = union_obj.fields.values()[0];
                 const val_val = only_field.ty.onePossibleValue() orelse return null;
                 _ = tag_val;
@@ -5464,13 +5463,13 @@ pub const Type = extern union {
         }
         const S = struct {
             fn fieldWithRange(int_ty: Type, int_val: Value, end: usize, m: *Module) ?usize {
-                if (int_val.compareWithZero(.lt)) return null;
+                if (int_val.compareAllWithZero(.lt)) return null;
                 var end_payload: Value.Payload.U64 = .{
                     .base = .{ .tag = .int_u64 },
                     .data = end,
                 };
                 const end_val = Value.initPayload(&end_payload.base);
-                if (int_val.compare(.gte, end_val, int_ty, m)) return null;
+                if (int_val.compareAll(.gte, end_val, int_ty, m)) return null;
                 return @intCast(usize, int_val.toUnsignedInt(m.getTarget()));
             }
         };
@@ -6456,12 +6455,12 @@ pub const Type = extern union {
                 if (!d.mutable and d.pointee_type.eql(Type.u8, mod)) {
                     switch (d.size) {
                         .Slice => {
-                            if (sent.compareWithZero(.eq)) {
+                            if (sent.compareAllWithZero(.eq)) {
                                 return Type.initTag(.const_slice_u8_sentinel_0);
                             }
                         },
                         .Many => {
-                            if (sent.compareWithZero(.eq)) {
+                            if (sent.compareAllWithZero(.eq)) {
                                 return Type.initTag(.manyptr_const_u8_sentinel_0);
                             }
                         },
