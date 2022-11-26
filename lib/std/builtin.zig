@@ -38,12 +38,13 @@ pub const StackTrace = struct {
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
+        if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
+
         // TODO: re-evaluate whether to use format() methods at all.
         // Until then, avoid an error when using GeneralPurposeAllocator with WebAssembly
         // where it tries to call detectTTYConfig here.
         if (builtin.os.tag == .freestanding) return;
 
-        _ = fmt;
         _ = options;
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
@@ -167,7 +168,7 @@ pub const AddressSpace = enum {
     gs,
     fs,
     ss,
-    // GPU address spaces
+    // GPU address spaces.
     global,
     constant,
     param,
@@ -534,7 +535,7 @@ pub const Version = struct {
                 return std.fmt.format(out_stream, "{d}.{d}.{d}", .{ self.major, self.minor, self.patch });
             }
         } else {
-            @compileError("Unknown format string: '" ++ fmt ++ "'");
+            std.fmt.invalidFmtError(fmt, self);
         }
     }
 };
@@ -867,6 +868,26 @@ pub noinline fn returnError(st: *StackTrace) void {
     @setRuntimeSafety(false);
     addErrRetTraceAddr(st, @returnAddress());
 }
+
+pub const panic_messages = struct {
+    pub const unreach = "reached unreachable code";
+    pub const unwrap_null = "attempt to use null value";
+    pub const cast_to_null = "cast causes pointer to be null";
+    pub const incorrect_alignment = "incorrect alignment";
+    pub const invalid_error_code = "invalid error code";
+    pub const cast_truncated_data = "integer cast truncated bits";
+    pub const negative_to_unsigned = "attempt to cast negative value to unsigned integer";
+    pub const integer_overflow = "integer overflow";
+    pub const shl_overflow = "left shift overflowed bits";
+    pub const shr_overflow = "right shift overflowed bits";
+    pub const divide_by_zero = "division by zero";
+    pub const exact_division_remainder = "exact division produced remainder";
+    pub const inactive_union_field = "access of inactive union field";
+    pub const integer_part_out_of_bounds = "integer part of floating point value out of bounds";
+    pub const corrupt_switch = "switch on corrupt value";
+    pub const shift_rhs_too_big = "shift amount is greater than the type size";
+    pub const invalid_enum_value = "invalid enum value";
+};
 
 pub inline fn addErrRetTraceAddr(st: *StackTrace, addr: usize) void {
     if (st.index < st.instruction_addresses.len)

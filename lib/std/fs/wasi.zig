@@ -62,7 +62,7 @@ pub const PreopenType = union(PreopenTypeTag) {
     }
 
     pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, out_stream: anytype) !void {
-        _ = fmt;
+        if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
         _ = options;
         try out_stream.print("PreopenType{{ ", .{});
         switch (self) {
@@ -80,13 +80,13 @@ pub const Preopen = struct {
     fd: fd_t,
 
     /// Type of the preopen.
-    @"type": PreopenType,
+    type: PreopenType,
 
     /// Construct new `Preopen` instance.
     pub fn new(fd: fd_t, preopen_type: PreopenType) Preopen {
         return Preopen{
             .fd = fd,
-            .@"type" = preopen_type,
+            .type = preopen_type,
         };
     }
 };
@@ -125,7 +125,7 @@ pub const PreopenList = struct {
     /// Release all allocated memory.
     pub fn deinit(pm: Self) void {
         for (pm.buffer.items) |preopen| {
-            switch (preopen.@"type") {
+            switch (preopen.type) {
                 PreopenType.Dir => |path| pm.buffer.allocator.free(path),
             }
         }
@@ -161,7 +161,7 @@ pub const PreopenList = struct {
 
         // Clear contents if we're being called again
         for (self.toOwnedSlice()) |preopen| {
-            switch (preopen.@"type") {
+            switch (preopen.type) {
                 PreopenType.Dir => |path| self.buffer.allocator.free(path),
             }
         }
@@ -202,10 +202,7 @@ pub const PreopenList = struct {
             // POSIX paths, relative to "/" or `cwd_root` depending on whether they start with "."
             const path = if (cwd_root) |cwd| blk: {
                 const resolve_paths: []const []const u8 = if (raw_path[0] == '.') &.{ cwd, raw_path } else &.{ "/", raw_path };
-                break :blk fs.path.resolve(self.buffer.allocator, resolve_paths) catch |err| switch (err) {
-                    error.CurrentWorkingDirectoryUnlinked => unreachable, // root is absolute, so CWD not queried
-                    else => |e| return e,
-                };
+                break :blk try fs.path.resolve(self.buffer.allocator, resolve_paths);
             } else blk: {
                 // If we were provided no CWD root, we preserve the preopen dir without resolving
                 break :blk try self.buffer.allocator.dupe(u8, raw_path);
@@ -226,7 +223,7 @@ pub const PreopenList = struct {
         var best_match: ?PreopenUri = null;
 
         for (self.buffer.items) |preopen| {
-            if (preopen.@"type".getRelativePath(preopen_type)) |rel_path| {
+            if (preopen.type.getRelativePath(preopen_type)) |rel_path| {
                 if (best_match == null or rel_path.len <= best_match.?.relative_path.len) {
                     best_match = PreopenUri{
                         .base = preopen,
@@ -253,7 +250,7 @@ pub const PreopenList = struct {
     /// Otherwise, return `null`.
     pub fn find(self: Self, preopen_type: PreopenType) ?*const Preopen {
         for (self.buffer.items) |*preopen| {
-            if (preopen.@"type".eql(preopen_type)) {
+            if (preopen.type.eql(preopen_type)) {
                 return preopen;
             }
         }
@@ -280,7 +277,7 @@ test "extracting WASI preopens" {
     try preopens.populate(null);
 
     const preopen = preopens.find(PreopenType{ .Dir = "." }) orelse unreachable;
-    try std.testing.expect(preopen.@"type".eql(PreopenType{ .Dir = "." }));
+    try std.testing.expect(preopen.type.eql(PreopenType{ .Dir = "." }));
 
     const po_type1 = PreopenType{ .Dir = "/" };
     try std.testing.expect(std.mem.eql(u8, po_type1.getRelativePath(.{ .Dir = "/" }).?, ""));

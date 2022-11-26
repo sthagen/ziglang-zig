@@ -60,7 +60,7 @@ pub fn classifyWindows(ty: Type, target: Target) Class {
     }
 }
 
-pub const Context = enum { ret, arg };
+pub const Context = enum { ret, arg, other };
 
 /// There are a maximum of 8 possible return slots. Returned values are in
 /// the beginning of the array; unused slots are filled with .none.
@@ -138,7 +138,18 @@ pub fn classifySystemV(ty: Type, target: Target, ctx: Context) [8]Class {
             const elem_ty = ty.childType();
             if (ctx == .arg) {
                 const bit_size = ty.bitSize(target);
-                if (bit_size > 128) return memory_class;
+                if (bit_size > 128) {
+                    const has_avx512 = target.cpu.features.isEnabled(@enumToInt(std.Target.x86.Feature.avx512f));
+                    if (has_avx512 and bit_size <= 512) return .{
+                        .integer, .integer, .integer, .integer,
+                        .integer, .integer, .integer, .integer,
+                    };
+                    if (has_avx512 and bit_size <= 256) return .{
+                        .integer, .integer, .integer, .integer,
+                        .none,    .none,    .none,    .none,
+                    };
+                    return memory_class;
+                }
                 if (bit_size > 80) return .{
                     .integer, .integer, .none, .none,
                     .none,    .none,    .none, .none,
@@ -181,7 +192,8 @@ pub fn classifySystemV(ty: Type, target: Target, ctx: Context) [8]Class {
                 .sse,   .sseup, .sseup, .sseup,
                 .sseup, .sseup, .sseup, .none,
             };
-            if (bits <= 512) return .{
+            // LLVM always returns vectors byval
+            if (bits <= 512 or ctx == .ret) return .{
                 .sse,   .sseup, .sseup, .sseup,
                 .sseup, .sseup, .sseup, .sseup,
             };
@@ -219,7 +231,7 @@ pub fn classifySystemV(ty: Type, target: Target, ctx: Context) [8]Class {
                     }
                 }
                 const field_size = field.ty.abiSize(target);
-                const field_class_array = classifySystemV(field.ty, target, .arg);
+                const field_class_array = classifySystemV(field.ty, target, .other);
                 const field_class = std.mem.sliceTo(&field_class_array, .none);
                 if (byte_i + field_size <= 8) {
                     // Combine this field with the previous one.
@@ -333,7 +345,7 @@ pub fn classifySystemV(ty: Type, target: Target, ctx: Context) [8]Class {
                     }
                 }
                 // Combine this field with the previous one.
-                const field_class = classifySystemV(field.ty, target, .arg);
+                const field_class = classifySystemV(field.ty, target, .other);
                 for (result) |*result_item, i| {
                     const field_item = field_class[i];
                     // "If both classes are equal, this is the resulting class."
@@ -507,3 +519,49 @@ pub const RegisterClass = struct {
         break :blk set;
     };
 };
+
+const testing = std.testing;
+const Module = @import("../../Module.zig");
+const Value = @import("../../value.zig").Value;
+const builtin = @import("builtin");
+
+fn _field(comptime tag: Type.Tag, offset: u32) Module.Struct.Field {
+    return .{
+        .ty = Type.initTag(tag),
+        .default_val = Value.initTag(.unreachable_value),
+        .abi_align = 0,
+        .offset = offset,
+        .is_comptime = false,
+    };
+}
+
+test "C_C_D" {
+    var fields = Module.Struct.Fields{};
+    // const C_C_D = extern struct { v1: i8, v2: i8, v3: f64 };
+    try fields.ensureTotalCapacity(testing.allocator, 3);
+    defer fields.deinit(testing.allocator);
+    fields.putAssumeCapacity("v1", _field(.i8, 0));
+    fields.putAssumeCapacity("v2", _field(.i8, 1));
+    fields.putAssumeCapacity("v3", _field(.f64, 4));
+
+    var C_C_D_struct = Module.Struct{
+        .fields = fields,
+        .namespace = undefined,
+        .owner_decl = undefined,
+        .zir_index = undefined,
+        .layout = .Extern,
+        .status = .fully_resolved,
+        .known_non_opv = true,
+        .is_tuple = false,
+    };
+    var C_C_D = Type.Payload.Struct{ .data = &C_C_D_struct };
+
+    try testing.expectEqual(
+        [_]Class{ .integer, .sse, .none, .none, .none, .none, .none, .none },
+        classifySystemV(Type.initPayload(&C_C_D.base), builtin.target, .ret),
+    );
+    try testing.expectEqual(
+        [_]Class{ .integer, .sse, .none, .none, .none, .none, .none, .none },
+        classifySystemV(Type.initPayload(&C_C_D.base), builtin.target, .arg),
+    );
+}

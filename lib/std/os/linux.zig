@@ -1523,6 +1523,21 @@ pub fn timerfd_settime(fd: i32, flags: u32, new_value: *const itimerspec, old_va
     return syscall4(.timerfd_settime, @bitCast(usize, @as(isize, fd)), flags, @ptrToInt(new_value), @ptrToInt(old_value));
 }
 
+// Flags for the 'setitimer' system call
+pub const ITIMER = enum(i32) {
+    REAL = 0,
+    VIRTUAL = 1,
+    PROF = 2,
+};
+
+pub fn getitimer(which: i32, curr_value: *itimerspec) usize {
+    return syscall2(.getitimer, @bitCast(usize, @as(isize, which)), @ptrToInt(curr_value));
+}
+
+pub fn setitimer(which: i32, new_value: *const itimerspec, old_value: ?*itimerspec) usize {
+    return syscall3(.setitimer, @bitCast(usize, @as(isize, which)), @ptrToInt(new_value), @ptrToInt(old_value));
+}
+
 pub fn unshare(flags: usize) usize {
     return syscall1(.unshare, flags);
 }
@@ -3295,8 +3310,8 @@ pub const mmsghdr_const = extern struct {
 pub const epoll_data = extern union {
     ptr: usize,
     fd: i32,
-    @"u32": u32,
-    @"u64": u64,
+    u32: u32,
+    u64: u64,
 };
 
 pub const epoll_event = switch (builtin.zig_backend) {
@@ -5109,7 +5124,7 @@ pub const nlmsghdr = extern struct {
     len: u32,
 
     /// Message content
-    @"type": NetlinkMessageType,
+    type: NetlinkMessageType,
 
     /// Additional flags
     flags: u16,
@@ -5126,7 +5141,7 @@ pub const ifinfomsg = extern struct {
     __pad1: u8 = 0,
 
     /// ARPHRD_*
-    @"type": c_ushort,
+    type: c_ushort,
 
     /// Link index
     index: c_int,
@@ -5143,7 +5158,7 @@ pub const rtattr = extern struct {
     len: c_ushort,
 
     /// Type of option
-    @"type": IFLA,
+    type: IFLA,
 
     pub const ALIGNTO = 4;
 };
@@ -5498,6 +5513,7 @@ pub const PERF = struct {
         RAW,
         BREAKPOINT,
         MAX,
+        _,
     };
 
     pub const COUNT = struct {
