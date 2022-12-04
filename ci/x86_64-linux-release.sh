@@ -8,9 +8,9 @@ set -e
 ARCH="$(uname -m)"
 TARGET="$ARCH-linux-musl"
 MCPU="baseline"
-CACHE_BASENAME="zig+llvm+lld+clang-$TARGET-0.11.0-dev.256+271cc52a1"
+CACHE_BASENAME="zig+llvm+lld+clang-$TARGET-0.11.0-dev.448+e6e459e9e"
 PREFIX="$HOME/deps/$CACHE_BASENAME"
-ZIG="$PREFIX/bin/zig"
+ZIG="$PREFIX/bin/zig" 
 
 export PATH="$HOME/deps/wasmtime-v2.0.2-$ARCH-linux:$HOME/deps/qemu-linux-x86_64-6.1.0.1/bin:$PATH"
 
@@ -23,13 +23,13 @@ git fetch --tags
 export CC="$ZIG cc -target $TARGET -mcpu=$MCPU"
 export CXX="$ZIG c++ -target $TARGET -mcpu=$MCPU"
 
-rm -rf build-debug
-mkdir build-debug
-cd build-debug
+rm -rf build-release
+mkdir build-release
+cd build-release
 cmake .. \
-  -DCMAKE_INSTALL_PREFIX="stage3-debug" \
+  -DCMAKE_INSTALL_PREFIX="stage3-release" \
   -DCMAKE_PREFIX_PATH="$PREFIX" \
-  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_BUILD_TYPE=Release \
   -DZIG_TARGET_TRIPLE="$TARGET" \
   -DZIG_TARGET_MCPU="$MCPU" \
   -DZIG_STATIC=ON \
@@ -43,17 +43,15 @@ unset CXX
 ninja install
 
 echo "Looking for non-conforming code formatting..."
-stage3-debug/bin/zig fmt --check .. \
+stage3-release/bin/zig fmt --check .. \
   --exclude ../test/cases/ \
   --exclude ../build-debug \
   --exclude ../build-release
 
 # simultaneously test building self-hosted without LLVM and with 32-bit arm
-stage3-debug/bin/zig build -Dtarget=arm-linux-musleabihf
+stage3-release/bin/zig build -Dtarget=arm-linux-musleabihf
 
-# building docs disabled due to:
-# https://github.com/ziglang/zig/issues/13546
-stage3-debug/bin/zig build test \
+stage3-release/bin/zig build test docs \
   -fqemu \
   -fwasmtime \
   -Dstatic-llvm \
@@ -61,10 +59,24 @@ stage3-debug/bin/zig build test \
   --search-prefix "$PREFIX" \
   --zig-lib-dir "$(pwd)/../lib"
 
-# langref disabled due to:
-# https://github.com/ziglang/zig/issues/13546
-## Look for HTML errors.
-#tidy --drop-empty-elements no -qe ../zig-cache/langref.html
+# Look for HTML errors.
+tidy --drop-empty-elements no -qe ../zig-cache/langref.html
 
 # Produce the experimental std lib documentation.
-stage3-debug/bin/zig test ../lib/std/std.zig -femit-docs -fno-emit-bin --zig-lib-dir ../lib
+stage3-release/bin/zig test ../lib/std/std.zig -femit-docs -fno-emit-bin --zig-lib-dir ../lib
+
+stage3-release/bin/zig build \
+  --prefix stage4-release \
+  -Denable-llvm \
+  -Denable-stage1 \
+  -Dno-lib \
+  -Drelease \
+  -Dstrip \
+  -Dtarget=$TARGET \
+  -Duse-zig-libcxx \
+  -Dversion-string="$(stage3-release/bin/zig version)"
+
+# diff returns an error code if the files differ.
+echo "If the following command fails, it means nondeterminism has been"
+echo "introduced, making stage3 and stage4 no longer byte-for-byte identical."
+diff stage3-release/bin/zig stage4-release/bin/zig

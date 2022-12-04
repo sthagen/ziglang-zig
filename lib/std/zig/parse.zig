@@ -72,8 +72,8 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) Allocator.Error!Ast {
         .source = source,
         .tokens = tokens.toOwnedSlice(),
         .nodes = parser.nodes.toOwnedSlice(),
-        .extra_data = parser.extra_data.toOwnedSlice(gpa),
-        .errors = parser.errors.toOwnedSlice(gpa),
+        .extra_data = try parser.extra_data.toOwnedSlice(gpa),
+        .errors = try parser.errors.toOwnedSlice(gpa),
     };
 }
 
@@ -131,9 +131,21 @@ const Parser = struct {
         return @intCast(Node.Index, i);
     }
 
-    fn reserveNode(p: *Parser) !usize {
+    fn reserveNode(p: *Parser, tag: Ast.Node.Tag) !usize {
         try p.nodes.resize(p.gpa, p.nodes.len + 1);
+        p.nodes.items(.tag)[p.nodes.len - 1] = tag;
         return p.nodes.len - 1;
+    }
+
+    fn unreserveNode(p: *Parser, node_index: usize) void {
+        if (p.nodes.len == node_index) {
+            p.nodes.resize(p.gpa, p.nodes.len - 1) catch unreachable;
+        } else {
+            // There is zombie node left in the tree, let's make it as inoffensive as possible
+            // (sadly there's no no-op node)
+            p.nodes.items(.tag)[node_index] = .unreachable_literal;
+            p.nodes.items(.main_token)[node_index] = p.tok_i;
+        }
     }
 
     fn addExtra(p: *Parser, extra: anytype) Allocator.Error!Node.Index {
@@ -637,13 +649,15 @@ const Parser = struct {
                     return fn_proto;
                 },
                 .l_brace => {
-                    const fn_decl_index = try p.reserveNode();
-                    const body_block = try p.parseBlock();
-                    assert(body_block != 0);
                     if (is_extern) {
                         try p.warnMsg(.{ .tag = .extern_fn_body, .token = extern_export_inline_token });
                         return null_node;
                     }
+                    const fn_decl_index = try p.reserveNode(.fn_decl);
+                    errdefer p.unreserveNode(fn_decl_index);
+
+                    const body_block = try p.parseBlock();
+                    assert(body_block != 0);
                     return p.setNode(fn_decl_index, .{
                         .tag = .fn_decl,
                         .main_token = p.nodes.items(.main_token)[fn_proto],
@@ -724,7 +738,8 @@ const Parser = struct {
         const fn_token = p.eatToken(.keyword_fn) orelse return null_node;
 
         // We want the fn proto node to be before its children in the array.
-        const fn_proto_index = try p.reserveNode();
+        const fn_proto_index = try p.reserveNode(.fn_proto);
+        errdefer p.unreserveNode(fn_proto_index);
 
         _ = p.eatToken(.identifier);
         const params = try p.parseParamDeclList();
@@ -935,13 +950,15 @@ const Parser = struct {
     ///      / LabeledStatement
     ///      / SwitchExpr
     ///      / AssignExpr SEMICOLON
-    fn parseStatement(p: *Parser) Error!Node.Index {
+    fn parseStatement(p: *Parser, allow_defer_var: bool) Error!Node.Index {
         const comptime_token = p.eatToken(.keyword_comptime);
 
-        const var_decl = try p.parseVarDecl();
-        if (var_decl != 0) {
-            try p.expectSemicolon(.expected_semi_after_decl, true);
-            return var_decl;
+        if (allow_defer_var) {
+            const var_decl = try p.parseVarDecl();
+            if (var_decl != 0) {
+                try p.expectSemicolon(.expected_semi_after_decl, true);
+                return var_decl;
+            }
         }
 
         if (comptime_token) |token| {
@@ -978,7 +995,7 @@ const Parser = struct {
                     },
                 });
             },
-            .keyword_defer => return p.addNode(.{
+            .keyword_defer => if (allow_defer_var) return p.addNode(.{
                 .tag = .@"defer",
                 .main_token = p.nextToken(),
                 .data = .{
@@ -986,7 +1003,7 @@ const Parser = struct {
                     .rhs = try p.expectBlockExprStatement(),
                 },
             }),
-            .keyword_errdefer => return p.addNode(.{
+            .keyword_errdefer => if (allow_defer_var) return p.addNode(.{
                 .tag = .@"errdefer",
                 .main_token = p.nextToken(),
                 .data = .{
@@ -1025,8 +1042,8 @@ const Parser = struct {
         return null_node;
     }
 
-    fn expectStatement(p: *Parser) !Node.Index {
-        const statement = try p.parseStatement();
+    fn expectStatement(p: *Parser, allow_defer_var: bool) !Node.Index {
+        const statement = try p.parseStatement(allow_defer_var);
         if (statement == 0) {
             return p.fail(.expected_statement);
         }
@@ -1038,7 +1055,7 @@ const Parser = struct {
     /// statement, returns 0.
     fn expectStatementRecoverable(p: *Parser) Error!Node.Index {
         while (true) {
-            return p.expectStatement() catch |err| switch (err) {
+            return p.expectStatement(true) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.ParseError => {
                     p.findNextStmt(); // Try to skip to the next statement.
@@ -1099,7 +1116,7 @@ const Parser = struct {
             });
         };
         _ = try p.parsePayload();
-        const else_expr = try p.expectStatement();
+        const else_expr = try p.expectStatement(false);
         return p.addNode(.{
             .tag = .@"if",
             .main_token = if_token,
@@ -1211,7 +1228,7 @@ const Parser = struct {
                 .lhs = array_expr,
                 .rhs = try p.addExtra(Node.If{
                     .then_expr = then_expr,
-                    .else_expr = try p.expectStatement(),
+                    .else_expr = try p.expectStatement(false),
                 }),
             },
         });
@@ -1294,7 +1311,7 @@ const Parser = struct {
             }
         };
         _ = try p.parsePayload();
-        const else_expr = try p.expectStatement();
+        const else_expr = try p.expectStatement(false);
         return p.addNode(.{
             .tag = .@"while",
             .main_token = while_token,

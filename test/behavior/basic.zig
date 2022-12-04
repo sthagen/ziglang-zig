@@ -739,7 +739,6 @@ test "thread local variable" {
 }
 
 test "result location is optional inside error union" {
-    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
@@ -755,7 +754,6 @@ fn maybe(x: bool) anyerror!?u32 {
 }
 
 test "pointer to thread local array" {
-    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
@@ -790,7 +788,6 @@ test "extern variable with non-pointer opaque type" {
         return error.SkipZigTest;
     }
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
@@ -1126,4 +1123,15 @@ test "pointer to zero sized global is mutable" {
         var thing: Thing = undefined;
     };
     try expect(@TypeOf(&S.thing) == *S.Thing);
+}
+
+test "returning an opaque type from a function" {
+    const S = struct {
+        fn foo(comptime a: u32) type {
+            return opaque {
+                const b = a;
+            };
+        }
+    };
+    try expect(S.foo(123).b == 123);
 }

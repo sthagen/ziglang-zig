@@ -693,7 +693,7 @@ pub const Object = struct {
         for (mod.decl_exports.values()) |export_list, i| {
             const decl_index = export_keys[i];
             const llvm_global = object.decl_map.get(decl_index) orelse continue;
-            for (export_list) |exp| {
+            for (export_list.items) |exp| {
                 // Detect if the LLVM global has already been created as an extern. In such
                 // case, we need to replace all uses of it with this exported global.
                 // TODO update std.builtin.ExportOptions to have the name be a
@@ -1179,8 +1179,7 @@ pub const Object = struct {
 
             llvm_func.fnSetSubprogram(subprogram);
 
-            const lexical_block = dib.createLexicalBlock(subprogram.toScope(), di_file.?, line_number, 1);
-            di_scope = lexical_block.toScope();
+            di_scope = subprogram.toScope();
         }
 
         var fg: FuncGen = .{
@@ -1216,8 +1215,7 @@ pub const Object = struct {
             else => |e| return e,
         };
 
-        const decl_exports = module.decl_exports.get(decl_index) orelse &[0]*Module.Export{};
-        try o.updateDeclExports(module, decl_index, decl_exports);
+        try o.updateDeclExports(module, decl_index, module.getDeclExports(decl_index));
     }
 
     pub fn updateDecl(self: *Object, module: *Module, decl_index: Module.Decl.Index) !void {
@@ -1240,8 +1238,7 @@ pub const Object = struct {
             },
             else => |e| return e,
         };
-        const decl_exports = module.decl_exports.get(decl_index) orelse &[0]*Module.Export{};
-        try self.updateDeclExports(module, decl_index, decl_exports);
+        try self.updateDeclExports(module, decl_index, module.getDeclExports(decl_index));
     }
 
     /// TODO replace this with a call to `Module::getNamedValue`. This will require adding
@@ -1393,9 +1390,10 @@ pub const Object = struct {
             return @ptrCast(*llvm.DIFile, gop.value_ptr.*);
         }
         const dir_path = file.pkg.root_src_directory.path orelse ".";
-        const sub_file_path_z = try gpa.dupeZ(u8, file.sub_file_path);
+        const sub_file_path_z = try gpa.dupeZ(u8, std.fs.path.basename(file.sub_file_path));
         defer gpa.free(sub_file_path_z);
-        const dir_path_z = try gpa.dupeZ(u8, dir_path);
+        const stage1_workaround = std.fs.path.dirname(file.sub_file_path) orelse "";
+        const dir_path_z = try std.fs.path.joinZ(gpa, &.{ dir_path, stage1_workaround });
         defer gpa.free(dir_path_z);
         const di_file = o.di_builder.?.createFile(sub_file_path_z, dir_path_z);
         gop.value_ptr.* = di_file.toNode();
@@ -6090,6 +6088,12 @@ pub const FuncGen = struct {
         const insert_block = self.builder.getInsertBlock();
         if (isByRef(operand_ty)) {
             _ = dib.insertDeclareAtEnd(operand, di_local_var, debug_loc, insert_block);
+        } else if (self.dg.module.comp.bin_file.options.optimize_mode == .Debug) {
+            const alignment = operand_ty.abiAlignment(self.dg.module.getTarget());
+            const alloca = self.buildAlloca(operand.typeOf(), alignment);
+            const store_inst = self.builder.buildStore(operand, alloca);
+            store_inst.setAlignment(alignment);
+            _ = dib.insertDeclareAtEnd(alloca, di_local_var, debug_loc, insert_block);
         } else {
             _ = dib.insertDbgValueIntrinsicAtEnd(operand, di_local_var, debug_loc, insert_block);
         }
@@ -8028,6 +8032,12 @@ pub const FuncGen = struct {
             const insert_block = self.builder.getInsertBlock();
             if (isByRef(inst_ty)) {
                 _ = dib.insertDeclareAtEnd(arg_val, di_local_var, debug_loc, insert_block);
+            } else if (self.dg.module.comp.bin_file.options.optimize_mode == .Debug) {
+                const alignment = inst_ty.abiAlignment(self.dg.module.getTarget());
+                const alloca = self.buildAlloca(arg_val.typeOf(), alignment);
+                const store_inst = self.builder.buildStore(arg_val, alloca);
+                store_inst.setAlignment(alignment);
+                _ = dib.insertDeclareAtEnd(alloca, di_local_var, debug_loc, insert_block);
             } else {
                 _ = dib.insertDbgValueIntrinsicAtEnd(arg_val, di_local_var, debug_loc, insert_block);
             }
@@ -8136,7 +8146,10 @@ pub const FuncGen = struct {
                 .write, .noret, .complex => return false,
                 .tomb => return true,
             }
-        } else unreachable;
+        }
+        // The only way to get here is to hit the end of a loop instruction
+        // (implicit repeat).
+        return false;
     }
 
     fn airLoad(fg: *FuncGen, body_tail: []const Air.Inst.Index) !?*llvm.Value {
@@ -8919,7 +8932,7 @@ pub const FuncGen = struct {
             if (elem.isUndef()) {
                 val.* = llvm_i32.getUndef();
             } else {
-                const int = elem.toSignedInt();
+                const int = elem.toSignedInt(self.dg.module.getTarget());
                 const unsigned = if (int >= 0) @intCast(u32, int) else @intCast(u32, ~int + a_len);
                 val.* = llvm_i32.constInt(unsigned, .False);
             }
@@ -9228,6 +9241,21 @@ pub const FuncGen = struct {
         const target = self.dg.module.getTarget();
         const layout = union_ty.unionGetLayout(target);
         const union_obj = union_ty.cast(Type.Payload.Union).?.data;
+
+        if (union_obj.layout == .Packed) {
+            const big_bits = union_ty.bitSize(target);
+            const int_llvm_ty = self.dg.context.intType(@intCast(c_uint, big_bits));
+            const field = union_obj.fields.values()[extra.field_index];
+            const non_int_val = try self.resolveInst(extra.init);
+            const ty_bit_size = @intCast(u16, field.ty.bitSize(target));
+            const small_int_ty = self.dg.context.intType(ty_bit_size);
+            const small_int_val = if (field.ty.isPtrAtRuntime())
+                self.builder.buildPtrToInt(non_int_val, small_int_ty, "")
+            else
+                self.builder.buildBitCast(non_int_val, small_int_ty, "");
+            return self.builder.buildZExtOrBitCast(small_int_val, int_llvm_ty, "");
+        }
+
         const tag_int = blk: {
             const tag_ty = union_ty.unionTagTypeHypothetical();
             const union_field_name = union_obj.fields.keys()[extra.field_index];

@@ -187,7 +187,7 @@ pub const Value = extern union {
         bound_fn,
         /// The ABI alignment of the payload type.
         lazy_align,
-        /// The ABI alignment of the payload type.
+        /// The ABI size of the payload type.
         lazy_size,
 
         pub const last_no_payload_tag = Tag.empty_array;
@@ -1201,8 +1201,8 @@ pub const Value = extern union {
     }
 
     /// Asserts the value is an integer and it fits in a i64
-    pub fn toSignedInt(self: Value) i64 {
-        switch (self.tag()) {
+    pub fn toSignedInt(val: Value, target: Target) i64 {
+        switch (val.tag()) {
             .zero,
             .bool_false,
             .the_only_possible_value, // i0, u0
@@ -1212,10 +1212,19 @@ pub const Value = extern union {
             .bool_true,
             => return 1,
 
-            .int_u64 => return @intCast(i64, self.castTag(.int_u64).?.data),
-            .int_i64 => return self.castTag(.int_i64).?.data,
-            .int_big_positive => return self.castTag(.int_big_positive).?.asBigInt().to(i64) catch unreachable,
-            .int_big_negative => return self.castTag(.int_big_negative).?.asBigInt().to(i64) catch unreachable,
+            .int_u64 => return @intCast(i64, val.castTag(.int_u64).?.data),
+            .int_i64 => return val.castTag(.int_i64).?.data,
+            .int_big_positive => return val.castTag(.int_big_positive).?.asBigInt().to(i64) catch unreachable,
+            .int_big_negative => return val.castTag(.int_big_negative).?.asBigInt().to(i64) catch unreachable,
+
+            .lazy_align => {
+                const ty = val.castTag(.lazy_align).?.data;
+                return @intCast(i64, ty.abiAlignment(target));
+            },
+            .lazy_size => {
+                const ty = val.castTag(.lazy_size).?.data;
+                return @intCast(i64, ty.abiSize(target));
+            },
 
             .undef => unreachable,
             else => unreachable,
@@ -1677,22 +1686,8 @@ pub const Value = extern union {
                 @panic("TODO implement i64 Value clz");
             },
             .int_big_positive => {
-                // TODO: move this code into std lib big ints
                 const bigint = val.castTag(.int_big_positive).?.asBigInt();
-                // Limbs are stored in little-endian order but we need
-                // to iterate big-endian.
-                var total_limb_lz: u64 = 0;
-                var i: usize = bigint.limbs.len;
-                const bits_per_limb = @sizeOf(std.math.big.Limb) * 8;
-                while (i != 0) {
-                    i -= 1;
-                    const limb = bigint.limbs[i];
-                    const this_limb_lz = @clz(limb);
-                    total_limb_lz += this_limb_lz;
-                    if (this_limb_lz != bits_per_limb) break;
-                }
-                const total_limb_bits = bigint.limbs.len * bits_per_limb;
-                return total_limb_lz + ty_bits - total_limb_bits;
+                return bigint.clz(ty_bits);
             },
             .int_big_negative => {
                 @panic("TODO implement int_big_negative Value clz");
@@ -1701,6 +1696,12 @@ pub const Value = extern union {
             .the_only_possible_value => {
                 assert(ty_bits == 0);
                 return ty_bits;
+            },
+
+            .lazy_align, .lazy_size => {
+                var bigint_buf: BigIntSpace = undefined;
+                const bigint = val.toBigIntAdvanced(&bigint_buf, target, null) catch unreachable;
+                return bigint.clz(ty_bits);
             },
 
             else => unreachable,
@@ -1721,16 +1722,8 @@ pub const Value = extern union {
                 @panic("TODO implement i64 Value ctz");
             },
             .int_big_positive => {
-                // TODO: move this code into std lib big ints
                 const bigint = val.castTag(.int_big_positive).?.asBigInt();
-                // Limbs are stored in little-endian order.
-                var result: u64 = 0;
-                for (bigint.limbs) |limb| {
-                    const limb_tz = @ctz(limb);
-                    result += limb_tz;
-                    if (limb_tz != @sizeOf(std.math.big.Limb) * 8) break;
-                }
-                return result;
+                return bigint.ctz();
             },
             .int_big_negative => {
                 @panic("TODO implement int_big_negative Value ctz");
@@ -1739,6 +1732,12 @@ pub const Value = extern union {
             .the_only_possible_value => {
                 assert(ty_bits == 0);
                 return ty_bits;
+            },
+
+            .lazy_align, .lazy_size => {
+                var bigint_buf: BigIntSpace = undefined;
+                const bigint = val.toBigIntAdvanced(&bigint_buf, target, null) catch unreachable;
+                return bigint.ctz();
             },
 
             else => unreachable,
@@ -2904,6 +2903,12 @@ pub const Value = extern union {
                 assert(index == 0);
                 return val;
             },
+
+            .opt_payload_ptr => return val.castTag(.opt_payload_ptr).?.data.container_ptr.elemValueAdvanced(mod, index, arena, buffer),
+            .eu_payload_ptr => return val.castTag(.eu_payload_ptr).?.data.container_ptr.elemValueAdvanced(mod, index, arena, buffer),
+
+            .opt_payload => return val.castTag(.opt_payload).?.data.elemValueAdvanced(mod, index, arena, buffer),
+            .eu_payload => return val.castTag(.eu_payload).?.data.elemValueAdvanced(mod, index, arena, buffer),
 
             else => unreachable,
         }

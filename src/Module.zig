@@ -30,6 +30,7 @@ const Sema = @import("Sema.zig");
 const target_util = @import("target.zig");
 const build_options = @import("build_options");
 const Liveness = @import("Liveness.zig");
+const isUpDir = @import("introspect.zig").isUpDir;
 
 /// General-purpose allocator. Used for both temporary and long-term storage.
 gpa: Allocator,
@@ -52,12 +53,12 @@ local_zir_cache: Compilation.Directory,
 /// map of Decl indexes to details about them being exported.
 /// The Export memory is owned by the `export_owners` table; the slice itself
 /// is owned by this table. The slice is guaranteed to not be empty.
-decl_exports: std.AutoArrayHashMapUnmanaged(Decl.Index, []*Export) = .{},
+decl_exports: std.AutoArrayHashMapUnmanaged(Decl.Index, ArrayListUnmanaged(*Export)) = .{},
 /// This models the Decls that perform exports, so that `decl_exports` can be updated when a Decl
 /// is modified. Note that the key of this table is not the Decl being exported, but the Decl that
 /// is performing the export of another Decl.
 /// This table owns the Export memory.
-export_owners: std.AutoArrayHashMapUnmanaged(Decl.Index, []*Export) = .{},
+export_owners: std.AutoArrayHashMapUnmanaged(Decl.Index, ArrayListUnmanaged(*Export)) = .{},
 /// The set of all the Zig source files in the Module. We keep track of this in order
 /// to iterate over it and check which source files have been modified on the file system when
 /// an update is requested, as well as to cache `@import` results.
@@ -79,7 +80,7 @@ embed_table: std.StringHashMapUnmanaged(*EmbedFile) = .{},
 /// This table uses an optional index so that when a Decl is destroyed, the string literal
 /// is still reclaimable by a future Decl.
 string_literal_table: std.HashMapUnmanaged(StringLiteralContext.Key, Decl.OptionalIndex, StringLiteralContext, std.hash_map.default_max_load_percentage) = .{},
-string_literal_bytes: std.ArrayListUnmanaged(u8) = .{},
+string_literal_bytes: ArrayListUnmanaged(u8) = .{},
 
 /// The set of all the generic function instantiations. This is used so that when a generic
 /// function is called twice with the same comptime parameter arguments, both calls dispatch
@@ -162,7 +163,7 @@ test_functions: std.AutoArrayHashMapUnmanaged(Decl.Index, void) = .{},
 ///    multi-threaded contention on an atomic counter.
 allocated_decls: std.SegmentedList(Decl, 0) = .{},
 /// When a Decl object is freed from `allocated_decls`, it is pushed into this stack.
-decls_free_list: std.ArrayListUnmanaged(Decl.Index) = .{},
+decls_free_list: ArrayListUnmanaged(Decl.Index) = .{},
 
 global_assembly: std.AutoHashMapUnmanaged(Decl.Index, []u8) = .{},
 
@@ -172,7 +173,7 @@ reference_table: std.AutoHashMapUnmanaged(Decl.Index, struct {
 }) = .{},
 
 pub const StringLiteralContext = struct {
-    bytes: *std.ArrayListUnmanaged(u8),
+    bytes: *ArrayListUnmanaged(u8),
 
     pub const Key = struct {
         index: u32,
@@ -191,7 +192,7 @@ pub const StringLiteralContext = struct {
 };
 
 pub const StringLiteralAdapter = struct {
-    bytes: *std.ArrayListUnmanaged(u8),
+    bytes: *ArrayListUnmanaged(u8),
 
     pub fn eql(self: @This(), a_slice: []const u8, b: StringLiteralContext.Key) bool {
         const b_slice = self.bytes.items[b.index..][0..b.len];
@@ -939,6 +940,7 @@ pub const Struct = struct {
     requires_comptime: PropertyBoolean = .unknown,
     have_field_inits: bool = false,
     is_tuple: bool,
+    assumed_runtime_bits: bool = false,
 
     pub const Fields = std.StringArrayHashMapUnmanaged(Field);
 
@@ -1204,6 +1206,7 @@ pub const Union = struct {
         fully_resolved,
     },
     requires_comptime: PropertyBoolean = .unknown,
+    assumed_runtime_bits: bool = false,
 
     pub const Field = struct {
         /// undefined until `status` is `have_field_types` or `have_layout`.
@@ -1895,11 +1898,11 @@ pub const File = struct {
 
     /// Used by change detection algorithm, after astgen, contains the
     /// set of decls that existed in the previous ZIR but not in the new one.
-    deleted_decls: std.ArrayListUnmanaged(Decl.Index) = .{},
+    deleted_decls: ArrayListUnmanaged(Decl.Index) = .{},
     /// Used by change detection algorithm, after astgen, contains the
     /// set of decls that existed both in the previous ZIR and in the new one,
     /// but their source code has been modified.
-    outdated_decls: std.ArrayListUnmanaged(Decl.Index) = .{},
+    outdated_decls: ArrayListUnmanaged(Decl.Index) = .{},
 
     /// The most recent successful ZIR for this file, with no errors.
     /// This is only populated when a previously successful ZIR
@@ -3437,12 +3440,12 @@ pub fn deinit(mod: *Module) void {
 
     mod.compile_log_decls.deinit(gpa);
 
-    for (mod.decl_exports.values()) |export_list| {
-        gpa.free(export_list);
+    for (mod.decl_exports.values()) |*export_list| {
+        export_list.deinit(gpa);
     }
     mod.decl_exports.deinit(gpa);
 
-    for (mod.export_owners.values()) |value| {
+    for (mod.export_owners.values()) |*value| {
         freeExportList(gpa, value);
     }
     mod.export_owners.deinit(gpa);
@@ -3532,13 +3535,13 @@ pub fn declIsRoot(mod: *Module, decl_index: Decl.Index) bool {
     return decl_index == decl.src_namespace.getDeclIndex();
 }
 
-fn freeExportList(gpa: Allocator, export_list: []*Export) void {
-    for (export_list) |exp| {
+fn freeExportList(gpa: Allocator, export_list: *ArrayListUnmanaged(*Export)) void {
+    for (export_list.items) |exp| {
         gpa.free(exp.options.name);
         if (exp.options.section) |s| gpa.free(s);
         gpa.destroy(exp);
     }
-    gpa.free(export_list);
+    export_list.deinit(gpa);
 }
 
 const data_has_safety_tag = @sizeOf(Zir.Inst.Data) != 8;
@@ -3821,7 +3824,7 @@ pub fn astGenFile(mod: *Module, file: *File) !void {
                     .byte_abs = token_starts[parse_err.token] + extra_offset,
                 },
             },
-            .msg = msg.toOwnedSlice(),
+            .msg = try msg.toOwnedSlice(),
         };
         if (token_tags[parse_err.token + @boolToInt(parse_err.token_is_prev)] == .invalid) {
             const bad_off = @intCast(u32, file.tree.tokenSlice(parse_err.token + @boolToInt(parse_err.token_is_prev)).len);
@@ -3844,7 +3847,7 @@ pub fn astGenFile(mod: *Module, file: *File) !void {
                     .parent_decl_node = 0,
                     .lazy = .{ .token_abs = note.token },
                 },
-                .msg = msg.toOwnedSlice(),
+                .msg = try msg.toOwnedSlice(),
             };
         }
 
@@ -3980,7 +3983,7 @@ fn updateZirRefs(mod: *Module, file: *File, old_zir: Zir) !void {
     // Walk the Decl graph, updating ZIR indexes, strings, and populating
     // the deleted and outdated lists.
 
-    var decl_stack: std.ArrayListUnmanaged(Decl.Index) = .{};
+    var decl_stack: ArrayListUnmanaged(Decl.Index) = .{};
     defer decl_stack.deinit(gpa);
 
     const root_decl = file.root_decl.unwrap().?;
@@ -4145,7 +4148,7 @@ pub fn mapOldZirToNew(
         old_inst: Zir.Inst.Index,
         new_inst: Zir.Inst.Index,
     };
-    var match_stack: std.ArrayListUnmanaged(MatchedZirDecl) = .{};
+    var match_stack: ArrayListUnmanaged(MatchedZirDecl) = .{};
     defer match_stack.deinit(gpa);
 
     // Main struct inst is always the same
@@ -4957,15 +4960,19 @@ pub fn importFile(
     const resolved_root_path = try std.fs.path.resolve(gpa, &[_][]const u8{cur_pkg_dir_path});
     defer gpa.free(resolved_root_path);
 
-    if (!mem.startsWith(u8, resolved_path, resolved_root_path) or
-        // This prevents this check from triggering when the name of the
-        // imported file starts with the root path's directory name.
-        !std.fs.path.isSep(resolved_path[resolved_root_path.len]))
-    {
+    const sub_file_path = p: {
+        if (mem.startsWith(u8, resolved_path, resolved_root_path)) {
+            // +1 for the directory separator here.
+            break :p try gpa.dupe(u8, resolved_path[resolved_root_path.len + 1 ..]);
+        }
+        if (mem.eql(u8, resolved_root_path, ".") and
+            !isUpDir(resolved_path) and
+            !std.fs.path.isAbsolute(resolved_path))
+        {
+            break :p try gpa.dupe(u8, resolved_path);
+        }
         return error.ImportOutsidePkgPath;
-    }
-    // +1 for the directory separator here.
-    const sub_file_path = try gpa.dupe(u8, resolved_path[resolved_root_path.len + 1 ..]);
+    };
     errdefer gpa.free(sub_file_path);
 
     log.debug("new importFile. resolved_root_path={s}, resolved_path={s}, sub_file_path={s}, import_string={s}", .{
@@ -5015,11 +5022,19 @@ pub fn embedFile(mod: *Module, cur_file: *File, rel_file_path: []const u8) !*Emb
     const resolved_root_path = try std.fs.path.resolve(gpa, &[_][]const u8{cur_pkg_dir_path});
     defer gpa.free(resolved_root_path);
 
-    if (!mem.startsWith(u8, resolved_path, resolved_root_path)) {
+    const sub_file_path = p: {
+        if (mem.startsWith(u8, resolved_path, resolved_root_path)) {
+            // +1 for the directory separator here.
+            break :p try gpa.dupe(u8, resolved_path[resolved_root_path.len + 1 ..]);
+        }
+        if (mem.eql(u8, resolved_root_path, ".") and
+            !isUpDir(resolved_path) and
+            !std.fs.path.isAbsolute(resolved_path))
+        {
+            break :p try gpa.dupe(u8, resolved_path);
+        }
         return error.ImportOutsidePkgPath;
-    }
-    // +1 for the directory separator here.
-    const sub_file_path = try gpa.dupe(u8, resolved_path[resolved_root_path.len + 1 ..]);
+    };
     errdefer gpa.free(sub_file_path);
 
     var file = try cur_file.pkg.root_src_directory.handle.openFile(sub_file_path, .{});
@@ -5475,12 +5490,12 @@ pub fn abortAnonDecl(mod: *Module, decl_index: Decl.Index) void {
 /// Delete all the Export objects that are caused by this Decl. Re-analysis of
 /// this Decl will cause them to be re-created (or not).
 fn deleteDeclExports(mod: *Module, decl_index: Decl.Index) void {
-    const kv = mod.export_owners.fetchSwapRemove(decl_index) orelse return;
+    var export_owners = (mod.export_owners.fetchSwapRemove(decl_index) orelse return).value;
 
-    for (kv.value) |exp| {
+    for (export_owners.items) |exp| {
         if (mod.decl_exports.getPtr(exp.exported_decl)) |value_ptr| {
             // Remove exports with owner_decl matching the regenerating decl.
-            const list = value_ptr.*;
+            const list = value_ptr.items;
             var i: usize = 0;
             var new_len = list.len;
             while (i < new_len) {
@@ -5491,7 +5506,7 @@ fn deleteDeclExports(mod: *Module, decl_index: Decl.Index) void {
                     i += 1;
                 }
             }
-            value_ptr.* = mod.gpa.shrink(list, new_len);
+            value_ptr.shrinkAndFree(mod.gpa, new_len);
             if (new_len == 0) {
                 assert(mod.decl_exports.swapRemove(exp.exported_decl));
             }
@@ -5514,7 +5529,7 @@ fn deleteDeclExports(mod: *Module, decl_index: Decl.Index) void {
         mod.gpa.free(exp.options.name);
         mod.gpa.destroy(exp);
     }
-    mod.gpa.free(kv.value);
+    export_owners.deinit(mod.gpa);
 }
 
 pub fn analyzeFnBody(mod: *Module, func: *Fn, arena: Allocator) SemaError!Air {
@@ -5582,7 +5597,7 @@ pub fn analyzeFnBody(mod: *Module, func: *Fn, arena: Allocator) SemaError!Air {
     const runtime_params_len = @intCast(u32, fn_ty_info.param_types.len);
     try inner_block.instructions.ensureTotalCapacityPrecise(gpa, runtime_params_len);
     try sema.air_instructions.ensureUnusedCapacity(gpa, fn_info.total_params_len * 2); // * 2 for the `addType`
-    try sema.inst_map.ensureUnusedCapacity(gpa, fn_info.total_params_len);
+    try sema.inst_map.ensureSpaceForInstructions(gpa, fn_info.param_body);
 
     var runtime_param_index: usize = 0;
     var total_param_index: usize = 0;
@@ -5732,8 +5747,8 @@ pub fn analyzeFnBody(mod: *Module, func: *Fn, arena: Allocator) SemaError!Air {
 
     return Air{
         .instructions = sema.air_instructions.toOwnedSlice(),
-        .extra = sema.air_extra.toOwnedSlice(gpa),
-        .values = sema.air_values.toOwnedSlice(gpa),
+        .extra = try sema.air_extra.toOwnedSlice(gpa),
+        .values = try sema.air_values.toOwnedSlice(gpa),
     };
 }
 
@@ -6402,7 +6417,7 @@ pub fn processExports(mod: *Module) !void {
     var it = mod.decl_exports.iterator();
     while (it.next()) |entry| {
         const exported_decl = entry.key_ptr.*;
-        const exports = entry.value_ptr.*;
+        const exports = entry.value_ptr.items;
         for (exports) |new_export| {
             const gop = try symbol_exports.getOrPut(gpa, new_export.options.name);
             if (gop.found_existing) {
@@ -6681,4 +6696,12 @@ pub fn addGlobalAssembly(mod: *Module, decl_index: Decl.Index, source: []const u
 
 pub fn wantDllExports(mod: Module) bool {
     return mod.comp.bin_file.options.dll_export_fns and mod.getTarget().os.tag == .windows;
+}
+
+pub fn getDeclExports(mod: Module, decl_index: Decl.Index) []const *Export {
+    if (mod.decl_exports.get(decl_index)) |l| {
+        return l.items;
+    } else {
+        return &[0]*Export{};
+    }
 }

@@ -68,6 +68,19 @@ pub const DebugInfoOutput = union(enum) {
     none,
 };
 
+/// Helper struct to denote that the value is in memory but requires a linker relocation fixup:
+/// * got - the value is referenced indirectly via GOT entry index (the linker emits a got-type reloc)
+/// * direct - the value is referenced directly via symbol index index (the linker emits a displacement reloc)
+/// * import - the value is referenced indirectly via import entry index (the linker emits an import-type reloc)
+pub const LinkerLoad = struct {
+    type: enum {
+        got,
+        direct,
+        import,
+    },
+    sym_index: u32,
+};
+
 pub fn generateFunction(
     bin_file: *link.File,
     src_loc: Module.SrcLoc,
@@ -459,7 +472,7 @@ pub fn generateSymbol(
             if (info.bits <= 8) {
                 const x: u8 = switch (info.signedness) {
                     .unsigned => @intCast(u8, typed_value.val.toUnsignedInt(target)),
-                    .signed => @bitCast(u8, @intCast(i8, typed_value.val.toSignedInt())),
+                    .signed => @bitCast(u8, @intCast(i8, typed_value.val.toSignedInt(target))),
                 };
                 try code.append(x);
                 return Result{ .appended = {} };
@@ -488,13 +501,13 @@ pub fn generateSymbol(
                 },
                 .signed => {
                     if (info.bits <= 16) {
-                        const x = @intCast(i16, typed_value.val.toSignedInt());
+                        const x = @intCast(i16, typed_value.val.toSignedInt(target));
                         mem.writeInt(i16, try code.addManyAsArray(2), x, endian);
                     } else if (info.bits <= 32) {
-                        const x = @intCast(i32, typed_value.val.toSignedInt());
+                        const x = @intCast(i32, typed_value.val.toSignedInt(target));
                         mem.writeInt(i32, try code.addManyAsArray(4), x, endian);
                     } else {
-                        const x = typed_value.val.toSignedInt();
+                        const x = typed_value.val.toSignedInt(target);
                         mem.writeInt(i64, try code.addManyAsArray(8), x, endian);
                     }
                 },
@@ -536,13 +549,13 @@ pub fn generateSymbol(
                 },
                 .signed => {
                     if (info.bits <= 16) {
-                        const x = @intCast(i16, int_val.toSignedInt());
+                        const x = @intCast(i16, int_val.toSignedInt(target));
                         mem.writeInt(i16, try code.addManyAsArray(2), x, endian);
                     } else if (info.bits <= 32) {
-                        const x = @intCast(i32, int_val.toSignedInt());
+                        const x = @intCast(i32, int_val.toSignedInt(target));
                         mem.writeInt(i32, try code.addManyAsArray(4), x, endian);
                     } else {
-                        const x = int_val.toSignedInt();
+                        const x = int_val.toSignedInt(target);
                         mem.writeInt(i64, try code.addManyAsArray(8), x, endian);
                     }
                 },
@@ -556,14 +569,42 @@ pub fn generateSymbol(
         },
         .Struct => {
             if (typed_value.ty.containerLayout() == .Packed) {
-                return Result{
-                    .fail = try ErrorMsg.create(
-                        bin_file.allocator,
-                        src_loc,
-                        "TODO implement generateSymbol for packed struct",
-                        .{},
-                    ),
-                };
+                const struct_obj = typed_value.ty.castTag(.@"struct").?.data;
+                const fields = struct_obj.fields.values();
+                const field_vals = typed_value.val.castTag(.aggregate).?.data;
+                const abi_size = math.cast(usize, typed_value.ty.abiSize(target)) orelse return error.Overflow;
+                const current_pos = code.items.len;
+                const mod = bin_file.options.module.?;
+                try code.resize(current_pos + abi_size);
+                var bits: u16 = 0;
+
+                for (field_vals) |field_val, index| {
+                    const field_ty = fields[index].ty;
+                    // pointer may point to a decl which must be marked used
+                    // but can also result in a relocation. Therefore we handle those seperately.
+                    if (field_ty.zigTypeTag() == .Pointer) {
+                        const field_size = math.cast(usize, field_ty.abiSize(target)) orelse return error.Overflow;
+                        var tmp_list = try std.ArrayList(u8).initCapacity(code.allocator, field_size);
+                        defer tmp_list.deinit();
+                        switch (try generateSymbol(bin_file, src_loc, .{
+                            .ty = field_ty,
+                            .val = field_val,
+                        }, &tmp_list, debug_output, reloc_info)) {
+                            .appended => {
+                                mem.copy(u8, code.items[current_pos..], tmp_list.items);
+                            },
+                            .externally_managed => |external_slice| {
+                                mem.copy(u8, code.items[current_pos..], external_slice);
+                            },
+                            .fail => |em| return Result{ .fail = em },
+                        }
+                    } else {
+                        field_val.writeToPackedMemory(field_ty, mod, code.items[current_pos..], bits);
+                    }
+                    bits += @intCast(u16, field_ty.bitSize(target));
+                }
+
+                return Result{ .appended = {} };
             }
 
             const struct_begin = code.items.len;
