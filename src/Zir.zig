@@ -71,7 +71,7 @@ pub fn extraData(code: Zir, comptime T: type, index: usize) struct { data: T, en
     var i: usize = index;
     var result: T = undefined;
     inline for (fields) |field| {
-        @field(result, field.name) = switch (field.field_type) {
+        @field(result, field.name) = switch (field.type) {
             u32 => code.extra[i],
             Inst.Ref => @intToEnum(Inst.Ref, code.extra[i]),
             i32 => @bitCast(i32, code.extra[i]),
@@ -1993,6 +1993,18 @@ pub const Inst = struct {
         /// Implement the builtin `@addrSpaceCast`
         /// `Operand` is payload index to `BinNode`. `lhs` is dest type, `rhs` is operand.
         addrspace_cast,
+        /// Implement builtin `@cVaArg`.
+        /// `operand` is payload index to `BinNode`.
+        c_va_arg,
+        /// Implement builtin `@cVaStart`.
+        /// `operand` is payload index to `UnNode`.
+        c_va_copy,
+        /// Implement builtin `@cVaStart`.
+        /// `operand` is payload index to `UnNode`.
+        c_va_end,
+        /// Implement builtin `@cVaStart`.
+        /// `operand` is `src_node: i32`.
+        c_va_start,
 
         pub const InstData = struct {
             opcode: Extended,
@@ -2070,7 +2082,7 @@ pub const Inst = struct {
         address_space_type,
         float_mode_type,
         reduce_op_type,
-        call_options_type,
+        modifier_type,
         prefetch_options_type,
         export_options_type,
         extern_options_type,
@@ -2345,9 +2357,9 @@ pub const Inst = struct {
                 .ty = Type.initTag(.type),
                 .val = Value.initTag(.reduce_op_type),
             },
-            .call_options_type = .{
+            .modifier_type = .{
                 .ty = Type.initTag(.type),
-                .val = Value.initTag(.call_options_type),
+                .val = Value.initTag(.modifier_type),
             },
             .prefetch_options_type = .{
                 .ty = Type.initTag(.type),
@@ -2832,7 +2844,7 @@ pub const Inst = struct {
         callee: Ref,
 
         pub const Flags = packed struct {
-            /// std.builtin.CallOptions.Modifier in packed form
+            /// std.builtin.CallModifier in packed form
             pub const PackedModifier = u3;
             pub const PackedArgsLen = u27;
 
@@ -2844,7 +2856,7 @@ pub const Inst = struct {
             comptime {
                 if (@sizeOf(Flags) != 4 or @bitSizeOf(Flags) != 32)
                     @compileError("Layout of Call.Flags needs to be updated!");
-                if (@bitSizeOf(std.builtin.CallOptions.Modifier) != @bitSizeOf(PackedModifier))
+                if (@bitSizeOf(std.builtin.CallModifier) != @bitSizeOf(PackedModifier))
                     @compileError("Call.Flags.PackedModifier needs to be updated!");
             }
         };
@@ -2860,7 +2872,7 @@ pub const Inst = struct {
         // Note: Flags *must* come first so that unusedResultExpr
         // can find it when it goes to modify them.
         flags: Flags,
-        options: Ref,
+        modifier: Ref,
         callee: Ref,
         args: Ref,
 

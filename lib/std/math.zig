@@ -195,13 +195,8 @@ test "approxEqAbs and approxEqRel" {
     }
 }
 
-pub fn doNotOptimizeAway(value: anytype) void {
-    // TODO: use @declareSideEffect() when it is available.
-    // https://github.com/ziglang/zig/issues/6168
-    const T = @TypeOf(value);
-    var x: T = undefined;
-    const p = @ptrCast(*volatile T, &x);
-    p.* = x;
+pub fn doNotOptimizeAway(val: anytype) void {
+    return mem.doNotOptimizeAway(val);
 }
 
 pub fn raiseInvalid() void {
@@ -528,12 +523,6 @@ pub fn shl(comptime T: type, a: T, shift_amt: anytype) T {
 }
 
 test "shl" {
-    if ((builtin.zig_backend == .stage1 or builtin.zig_backend == .stage2_llvm) and
-        builtin.cpu.arch == .aarch64)
-    {
-        // https://github.com/ziglang/zig/issues/12012
-        return error.SkipZigTest;
-    }
     try testing.expect(shl(u8, 0b11111111, @as(usize, 3)) == 0b11111000);
     try testing.expect(shl(u8, 0b11111111, @as(usize, 8)) == 0);
     try testing.expect(shl(u8, 0b11111111, @as(usize, 9)) == 0);
@@ -574,12 +563,6 @@ pub fn shr(comptime T: type, a: T, shift_amt: anytype) T {
 }
 
 test "shr" {
-    if ((builtin.zig_backend == .stage1 or builtin.zig_backend == .stage2_llvm) and
-        builtin.cpu.arch == .aarch64)
-    {
-        // https://github.com/ziglang/zig/issues/12012
-        return error.SkipZigTest;
-    }
     try testing.expect(shr(u8, 0b11111111, @as(usize, 3)) == 0b00011111);
     try testing.expect(shr(u8, 0b11111111, @as(usize, 8)) == 0);
     try testing.expect(shr(u8, 0b11111111, @as(usize, 9)) == 0);
@@ -621,12 +604,6 @@ pub fn rotr(comptime T: type, x: T, r: anytype) T {
 }
 
 test "rotr" {
-    if ((builtin.zig_backend == .stage1 or builtin.zig_backend == .stage2_llvm) and
-        builtin.cpu.arch == .aarch64)
-    {
-        // https://github.com/ziglang/zig/issues/12012
-        return error.SkipZigTest;
-    }
     try testing.expect(rotr(u0, 0b0, @as(usize, 3)) == 0b0);
     try testing.expect(rotr(u5, 0b00001, @as(usize, 0)) == 0b00001);
     try testing.expect(rotr(u6, 0b000001, @as(usize, 7)) == 0b100000);
@@ -667,12 +644,6 @@ pub fn rotl(comptime T: type, x: T, r: anytype) T {
 }
 
 test "rotl" {
-    if ((builtin.zig_backend == .stage1 or builtin.zig_backend == .stage2_llvm) and
-        builtin.cpu.arch == .aarch64)
-    {
-        // https://github.com/ziglang/zig/issues/12012
-        return error.SkipZigTest;
-    }
     try testing.expect(rotl(u0, 0b0, @as(usize, 3)) == 0b0);
     try testing.expect(rotl(u5, 0b00001, @as(usize, 0)) == 0b00001);
     try testing.expect(rotl(u6, 0b000001, @as(usize, 7)) == 0b000010);
@@ -1466,6 +1437,19 @@ pub const CompareOperator = enum {
     gt,
     /// Not equal (`!=`)
     neq,
+
+    /// Reverse the direction of the comparison.
+    /// Use when swapping the left and right hand operands.
+    pub fn reverse(op: CompareOperator) CompareOperator {
+        return switch (op) {
+            .lt => .gt,
+            .lte => .gte,
+            .gt => .lt,
+            .gte => .lte,
+            .eq => .eq,
+            .neq => .neq,
+        };
+    }
 };
 
 /// This function does the same thing as comparison operators, however the
@@ -1523,6 +1507,15 @@ test "order.compare" {
     try testing.expect(order(1, 0).compare(.gte));
     try testing.expect(order(1, 0).compare(.gt));
     try testing.expect(order(1, 0).compare(.neq));
+}
+
+test "compare.reverse" {
+    inline for (@typeInfo(CompareOperator).Enum.fields) |op_field| {
+        const op = @intToEnum(CompareOperator, op_field.value);
+        try testing.expect(compare(2, op, 3) == compare(3, op.reverse(), 2));
+        try testing.expect(compare(3, op, 3) == compare(3, op.reverse(), 3));
+        try testing.expect(compare(4, op, 3) == compare(3, op.reverse(), 4));
+    }
 }
 
 /// Returns a mask of all ones if value is true,
@@ -1695,7 +1688,7 @@ fn testSign() !void {
 }
 
 test "sign" {
-    if (builtin.zig_backend == .stage1 or builtin.zig_backend == .stage2_llvm) {
+    if (builtin.zig_backend == .stage2_llvm) {
         // https://github.com/ziglang/zig/issues/12012
         return error.SkipZigTest;
     }

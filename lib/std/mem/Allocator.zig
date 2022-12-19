@@ -20,7 +20,7 @@ pub const VTable = struct {
     /// `ret_addr` is optionally provided as the first return address of the
     /// allocation call stack. If the value is `0` it means no return address
     /// has been provided.
-    alloc: std.meta.FnPtr(fn (ctx: *anyopaque, len: usize, ptr_align: u8, ret_addr: usize) ?[*]u8),
+    alloc: *const fn (ctx: *anyopaque, len: usize, ptr_align: u8, ret_addr: usize) ?[*]u8,
 
     /// Attempt to expand or shrink memory in place. `buf.len` must equal the
     /// length requested from the most recent successful call to `alloc` or
@@ -37,7 +37,7 @@ pub const VTable = struct {
     /// `ret_addr` is optionally provided as the first return address of the
     /// allocation call stack. If the value is `0` it means no return address
     /// has been provided.
-    resize: std.meta.FnPtr(fn (ctx: *anyopaque, buf: []u8, buf_align: u8, new_len: usize, ret_addr: usize) bool),
+    resize: *const fn (ctx: *anyopaque, buf: []u8, buf_align: u8, new_len: usize, ret_addr: usize) bool,
 
     /// Free and invalidate a buffer.
     ///
@@ -50,7 +50,7 @@ pub const VTable = struct {
     /// `ret_addr` is optionally provided as the first return address of the
     /// allocation call stack. If the value is `0` it means no return address
     /// has been provided.
-    free: std.meta.FnPtr(fn (ctx: *anyopaque, buf: []u8, buf_align: u8, ret_addr: usize) void),
+    free: *const fn (ctx: *anyopaque, buf: []u8, buf_align: u8, ret_addr: usize) void,
 };
 
 pub fn noResize(
@@ -200,12 +200,9 @@ pub fn allocAdvancedWithRetAddr(
     n: usize,
     return_address: usize,
 ) Error![]align(alignment orelse @alignOf(T)) T {
-    const a = if (alignment) |a| blk: {
-        if (a == @alignOf(T)) return allocAdvancedWithRetAddr(self, T, null, n, return_address);
-        break :blk a;
-    } else @alignOf(T);
+    const a = alignment orelse @alignOf(T);
 
-    // The Zig Allocator interface is not intended to solve allocations beyond
+    // The Zig Allocator interface is not intended to solve alignments beyond
     // the minimum OS page size. For these use cases, the caller must use OS
     // APIs directly.
     comptime assert(a <= mem.page_size);

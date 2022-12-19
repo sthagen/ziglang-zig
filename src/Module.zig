@@ -31,6 +31,7 @@ const target_util = @import("target.zig");
 const build_options = @import("build_options");
 const Liveness = @import("Liveness.zig");
 const isUpDir = @import("introspect.zig").isUpDir;
+const clang = @import("clang.zig");
 
 /// General-purpose allocator. Used for both temporary and long-term storage.
 gpa: Allocator,
@@ -71,7 +72,7 @@ import_table: std.StringArrayHashMapUnmanaged(*File) = .{},
 /// Keys are fully resolved file paths. This table owns the keys and values.
 embed_table: std.StringHashMapUnmanaged(*EmbedFile) = .{},
 
-/// This is a temporary addition to stage2 in order to match stage1 behavior,
+/// This is a temporary addition to stage2 in order to match legacy behavior,
 /// however the end-game once the lang spec is settled will be to use a global
 /// InternPool for comptime memoized objects, making this behavior consistent across all types,
 /// not only string literals. Or, we might decide to not guarantee string literals
@@ -111,6 +112,9 @@ failed_embed_files: std.AutoArrayHashMapUnmanaged(*EmbedFile, *ErrorMsg) = .{},
 /// Using a map here for consistency with the other fields here.
 /// The ErrorMsg memory is owned by the `Export`, using Module's general purpose allocator.
 failed_exports: std.AutoArrayHashMapUnmanaged(*Export, *ErrorMsg) = .{},
+/// If a decl failed due to a cimport error, the corresponding Clang errors
+/// are stored here.
+cimport_errors: std.AutoArrayHashMapUnmanaged(Decl.Index, []CImportError) = .{},
 
 /// Candidates for deletion. After a semantic analysis update completes, this list
 /// contains Decls that need to be deleted if they end up having no references to them.
@@ -171,6 +175,21 @@ reference_table: std.AutoHashMapUnmanaged(Decl.Index, struct {
     referencer: Decl.Index,
     src: LazySrcLoc,
 }) = .{},
+
+pub const CImportError = struct {
+    offset: u32,
+    line: u32,
+    column: u32,
+    path: ?[*:0]u8,
+    source_line: ?[*:0]u8,
+    msg: [*:0]u8,
+
+    pub fn deinit(err: CImportError, gpa: Allocator) void {
+        if (err.path) |some| gpa.free(std.mem.span(some));
+        if (err.source_line) |some| gpa.free(std.mem.span(some));
+        gpa.free(std.mem.span(err.msg));
+    }
+};
 
 pub const StringLiteralContext = struct {
     bytes: *ArrayListUnmanaged(u8),
@@ -2215,6 +2234,12 @@ pub const SrcLoc = struct {
                 assert(src_loc.file_scope.tree_loaded);
                 return nodeToSpan(tree, node);
             },
+            .node_offset_main_token => |node_off| {
+                const tree = try src_loc.file_scope.getTree(gpa);
+                const node = src_loc.declRelativeToNodeIndex(node_off);
+                const main_token = tree.nodes.items(.main_token)[node];
+                return tokensToSpan(tree, main_token, main_token, main_token);
+            },
             .node_offset_bin_op => |node_off| {
                 const tree = try src_loc.file_scope.getTree(gpa);
                 const node = src_loc.declRelativeToNodeIndex(node_off);
@@ -3009,6 +3034,10 @@ pub const LazySrcLoc = union(enum) {
     /// from its containing Decl node AST index.
     /// The Decl is determined contextually.
     node_offset: TracedOffset,
+    /// The source location points to the main token of an AST node, found
+    /// by taking this AST node index offset from the containing Decl AST node.
+    /// The Decl is determined contextually.
+    node_offset_main_token: i32,
     /// The source location points to the beginning of a struct initializer.
     /// The Decl is determined contextually.
     node_offset_initializer: i32,
@@ -3275,6 +3304,7 @@ pub const LazySrcLoc = union(enum) {
             .byte_offset,
             .token_offset,
             .node_offset,
+            .node_offset_main_token,
             .node_offset_initializer,
             .node_offset_var_decl_ty,
             .node_offset_var_decl_align,
@@ -3438,6 +3468,11 @@ pub fn deinit(mod: *Module) void {
     }
     mod.failed_exports.deinit(gpa);
 
+    for (mod.cimport_errors.values()) |errs| {
+        for (errs) |err| err.deinit(gpa);
+    }
+    mod.cimport_errors.deinit(gpa);
+
     mod.compile_log_decls.deinit(gpa);
 
     for (mod.decl_exports.values()) |*export_list| {
@@ -3544,17 +3579,15 @@ fn freeExportList(gpa: Allocator, export_list: *ArrayListUnmanaged(*Export)) voi
     export_list.deinit(gpa);
 }
 
+// TODO https://github.com/ziglang/zig/issues/8643
 const data_has_safety_tag = @sizeOf(Zir.Inst.Data) != 8;
-// TODO This is taking advantage of matching stage1 debug union layout.
-// We need a better language feature for initializing a union with
-// a runtime-known tag.
-const Stage1DataLayout = extern struct {
+const HackDataLayout = extern struct {
     data: [8]u8 align(@alignOf(Zir.Inst.Data)),
     safety_tag: u8,
 };
 comptime {
     if (data_has_safety_tag) {
-        assert(@sizeOf(Stage1DataLayout) == @sizeOf(Zir.Inst.Data));
+        assert(@sizeOf(HackDataLayout) == @sizeOf(Zir.Inst.Data));
     }
 }
 
@@ -3695,7 +3728,7 @@ pub fn astGenFile(mod: *Module, file: *File) !void {
                 const tags = zir.instructions.items(.tag);
                 for (zir.instructions.items(.data)) |*data, i| {
                     const union_tag = Zir.Inst.Tag.data_tags[@enumToInt(tags[i])];
-                    const as_struct = @ptrCast(*Stage1DataLayout, data);
+                    const as_struct = @ptrCast(*HackDataLayout, data);
                     as_struct.* = .{
                         .safety_tag = @enumToInt(union_tag),
                         .data = safety_buffer[i],
@@ -3881,7 +3914,7 @@ pub fn astGenFile(mod: *Module, file: *File) !void {
     if (data_has_safety_tag) {
         // The `Data` union has a safety tag but in the file format we store it without.
         for (file.zir.instructions.items(.data)) |*data, i| {
-            const as_struct = @ptrCast(*const Stage1DataLayout, data);
+            const as_struct = @ptrCast(*const HackDataLayout, data);
             safety_buffer[i] = as_struct.data;
         }
     }
@@ -4123,7 +4156,7 @@ pub fn populateBuiltinFile(mod: *Module) !void {
     file.status = .success_zir;
 }
 
-pub fn writeBuiltinFile(file: *File, builtin_pkg: *Package) !void {
+fn writeBuiltinFile(file: *File, builtin_pkg: *Package) !void {
     var af = try builtin_pkg.root_src_directory.handle.atomicFile(builtin_pkg.root_src_path, .{});
     defer af.deinit();
     try af.file.writeAll(file.source);
@@ -5372,6 +5405,9 @@ pub fn clearDecl(
     if (mod.failed_decls.fetchSwapRemove(decl_index)) |kv| {
         kv.value.destroy(gpa);
     }
+    if (mod.cimport_errors.fetchSwapRemove(decl_index)) |kv| {
+        for (kv.value) |err| err.deinit(gpa);
+    }
     if (mod.emit_h) |emit_h| {
         if (emit_h.failed_decls.fetchSwapRemove(decl_index)) |kv| {
             kv.value.destroy(gpa);
@@ -5758,6 +5794,9 @@ fn markOutdatedDecl(mod: *Module, decl_index: Decl.Index) !void {
     try mod.comp.work_queue.writeItem(.{ .analyze_decl = decl_index });
     if (mod.failed_decls.fetchSwapRemove(decl_index)) |kv| {
         kv.value.destroy(mod.gpa);
+    }
+    if (mod.cimport_errors.fetchSwapRemove(decl_index)) |kv| {
+        for (kv.value) |err| err.deinit(mod.gpa);
     }
     if (decl.has_tv and decl.owns_tv) {
         if (decl.val.castTag(.function)) |payload| {

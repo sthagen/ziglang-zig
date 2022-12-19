@@ -71,7 +71,7 @@ pub const Value = extern union {
         address_space_type,
         float_mode_type,
         reduce_op_type,
-        call_options_type,
+        modifier_type,
         prefetch_options_type,
         export_options_type,
         extern_options_type,
@@ -264,7 +264,7 @@ pub const Value = extern union {
                 .address_space_type,
                 .float_mode_type,
                 .reduce_op_type,
-                .call_options_type,
+                .modifier_type,
                 .prefetch_options_type,
                 .export_options_type,
                 .extern_options_type,
@@ -338,7 +338,7 @@ pub const Value = extern union {
         }
 
         pub fn Data(comptime t: Tag) type {
-            return std.meta.fieldInfo(t.Type(), .data).field_type;
+            return std.meta.fieldInfo(t.Type(), .data).type;
         }
     };
 
@@ -467,7 +467,7 @@ pub const Value = extern union {
             .address_space_type,
             .float_mode_type,
             .reduce_op_type,
-            .call_options_type,
+            .modifier_type,
             .prefetch_options_type,
             .export_options_type,
             .extern_options_type,
@@ -723,7 +723,7 @@ pub const Value = extern union {
             .address_space_type => return out_stream.writeAll("std.builtin.AddressSpace"),
             .float_mode_type => return out_stream.writeAll("std.builtin.FloatMode"),
             .reduce_op_type => return out_stream.writeAll("std.builtin.ReduceOp"),
-            .call_options_type => return out_stream.writeAll("std.builtin.CallOptions"),
+            .modifier_type => return out_stream.writeAll("std.builtin.CallModifier"),
             .prefetch_options_type => return out_stream.writeAll("std.builtin.PrefetchOptions"),
             .export_options_type => return out_stream.writeAll("std.builtin.ExportOptions"),
             .extern_options_type => return out_stream.writeAll("std.builtin.ExternOptions"),
@@ -963,7 +963,7 @@ pub const Value = extern union {
             .address_space_type => Type.initTag(.address_space),
             .float_mode_type => Type.initTag(.float_mode),
             .reduce_op_type => Type.initTag(.reduce_op),
-            .call_options_type => Type.initTag(.call_options),
+            .modifier_type => Type.initTag(.modifier),
             .prefetch_options_type => Type.initTag(.prefetch_options),
             .export_options_type => Type.initTag(.export_options),
             .extern_options_type => Type.initTag(.extern_options),
@@ -1756,17 +1756,8 @@ pub const Value = extern union {
                 const info = ty.intInfo(target);
 
                 var buffer: Value.BigIntSpace = undefined;
-                const operand_bigint = val.toBigInt(&buffer, target);
-
-                var limbs_buffer: [4]std.math.big.Limb = undefined;
-                var result_bigint = BigIntMutable{
-                    .limbs = &limbs_buffer,
-                    .positive = undefined,
-                    .len = undefined,
-                };
-                result_bigint.popCount(operand_bigint, info.bits);
-
-                return result_bigint.toConst().to(u64) catch unreachable;
+                const int = val.toBigInt(&buffer, target);
+                return @intCast(u64, int.popCount(info.bits));
             },
         }
     }
@@ -2419,7 +2410,6 @@ pub const Value = extern union {
         if (val.tag() == .runtime_value) return;
 
         switch (zig_ty_tag) {
-            .BoundFn => unreachable, // TODO remove this from the language
             .Opaque => unreachable, // Cannot hash opaque types
 
             .Void,
@@ -2566,7 +2556,6 @@ pub const Value = extern union {
         if (val.tag() == .runtime_value) return;
 
         switch (ty.zigTypeTag()) {
-            .BoundFn => unreachable, // TODO remove this from the language
             .Opaque => unreachable, // Cannot hash opaque types
             .Void,
             .NoReturn,
@@ -4196,8 +4185,12 @@ pub const Value = extern union {
         const result_limbs = lhs_bigint.limbs.len -| (shift / (@sizeOf(std.math.big.Limb) * 8));
         if (result_limbs == 0) {
             // The shift is enough to remove all the bits from the number, which means the
-            // result is zero.
-            return Value.zero;
+            // result is 0 or -1 depending on the sign.
+            if (lhs_bigint.positive) {
+                return Value.zero;
+            } else {
+                return Value.negative_one;
+            }
         }
 
         const limbs = try allocator.alloc(

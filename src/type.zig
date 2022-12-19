@@ -129,7 +129,6 @@ pub const Type = extern union {
             .empty_struct,
             .empty_struct_literal,
             .@"struct",
-            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -147,6 +146,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
+            .modifier,
             => return .Enum,
 
             .@"union",
@@ -177,15 +177,15 @@ pub const Type = extern union {
             .Float,
             .ComptimeFloat,
             .ComptimeInt,
-            .Vector, // TODO some vectors require is_equality_cmp==true
             => true,
+
+            .Vector => ty.elemType2().isSelfComparable(is_equality_cmp),
 
             .Bool,
             .Type,
             .Void,
             .ErrorSet,
             .Fn,
-            .BoundFn,
             .Opaque,
             .AnyFrame,
             .Enum,
@@ -748,6 +748,8 @@ pub const Type = extern union {
                     return false;
                 if (info_a.host_size != info_b.host_size)
                     return false;
+                if (info_a.vector_index != info_b.vector_index)
+                    return false;
                 if (info_a.@"allowzero" != info_b.@"allowzero")
                     return false;
                 if (info_a.mutable != info_b.mutable)
@@ -886,7 +888,6 @@ pub const Type = extern union {
 
             // we can't compare these based on tags because it wouldn't detect if,
             // for example, a was resolved into .@"struct" but b was one of these tags.
-            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -915,6 +916,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
+            .modifier,
             => unreachable, // needed to resolve the type before now
 
             .@"union", .union_safety_tagged, .union_tagged => {
@@ -1126,6 +1128,7 @@ pub const Type = extern union {
                 std.hash.autoHash(hasher, info.@"addrspace");
                 std.hash.autoHash(hasher, info.bit_offset);
                 std.hash.autoHash(hasher, info.host_size);
+                std.hash.autoHash(hasher, info.vector_index);
                 std.hash.autoHash(hasher, info.@"allowzero");
                 std.hash.autoHash(hasher, info.mutable);
                 std.hash.autoHash(hasher, info.@"volatile");
@@ -1195,7 +1198,6 @@ pub const Type = extern union {
             },
 
             // we can't hash these based on tags because they wouldn't match the expanded version.
-            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -1223,6 +1225,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
+            .modifier,
             => unreachable, // needed to resolve the type before now
 
             .@"union", .union_safety_tagged, .union_tagged => {
@@ -1334,7 +1337,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .call_options,
+            .modifier,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -1467,6 +1470,7 @@ pub const Type = extern union {
                     .@"addrspace" = payload.@"addrspace",
                     .bit_offset = payload.bit_offset,
                     .host_size = payload.host_size,
+                    .vector_index = payload.vector_index,
                     .@"allowzero" = payload.@"allowzero",
                     .mutable = payload.mutable,
                     .@"volatile" = payload.@"volatile",
@@ -1554,10 +1558,10 @@ pub const Type = extern union {
     ) @TypeOf(writer).Error!void {
         _ = options;
         comptime assert(unused_format_string.len == 0);
-        if (@import("builtin").zig_backend != .stage1) {
-            // This is disabled to work around a stage2 bug where this function recursively
-            // causes more generic function instantiations resulting in an infinite loop
-            // in the compiler.
+        if (true) {
+            // This is disabled to work around a bug where this function
+            // recursively causes more generic function instantiations
+            // resulting in an infinite loop in the compiler.
             try writer.writeAll("[TODO fix internal compiler bug regarding dump]");
             return;
         }
@@ -1666,7 +1670,7 @@ pub const Type = extern union {
                 .address_space => return writer.writeAll("std.builtin.AddressSpace"),
                 .float_mode => return writer.writeAll("std.builtin.FloatMode"),
                 .reduce_op => return writer.writeAll("std.builtin.ReduceOp"),
-                .call_options => return writer.writeAll("std.builtin.CallOptions"),
+                .modifier => return writer.writeAll("std.builtin.CallModifier"),
                 .prefetch_options => return writer.writeAll("std.builtin.PrefetchOptions"),
                 .export_options => return writer.writeAll("std.builtin.ExportOptions"),
                 .extern_options => return writer.writeAll("std.builtin.ExternOptions"),
@@ -1855,11 +1859,16 @@ pub const Type = extern union {
                         .C => try writer.writeAll("[*c]"),
                         .Slice => try writer.writeAll("[]"),
                     }
-                    if (payload.@"align" != 0 or payload.host_size != 0) {
+                    if (payload.@"align" != 0 or payload.host_size != 0 or payload.vector_index != .none) {
                         try writer.print("align({d}", .{payload.@"align"});
 
                         if (payload.bit_offset != 0 or payload.host_size != 0) {
                             try writer.print(":{d}:{d}", .{ payload.bit_offset, payload.host_size });
+                        }
+                        if (payload.vector_index == .runtime) {
+                            try writer.writeAll(":?");
+                        } else if (payload.vector_index != .none) {
+                            try writer.print(":{d}", .{@enumToInt(payload.vector_index)});
                         }
                         try writer.writeAll(") ");
                     }
@@ -1944,7 +1953,7 @@ pub const Type = extern union {
             .address_space => unreachable,
             .float_mode => unreachable,
             .reduce_op => unreachable,
-            .call_options => unreachable,
+            .modifier => unreachable,
             .prefetch_options => unreachable,
             .export_options => unreachable,
             .extern_options => unreachable,
@@ -2185,11 +2194,16 @@ pub const Type = extern union {
                     .C => try writer.writeAll("[*c]"),
                     .Slice => try writer.writeAll("[]"),
                 }
-                if (info.@"align" != 0 or info.host_size != 0) {
+                if (info.@"align" != 0 or info.host_size != 0 or info.vector_index != .none) {
                     try writer.print("align({d}", .{info.@"align"});
 
                     if (info.bit_offset != 0 or info.host_size != 0) {
                         try writer.print(":{d}:{d}", .{ info.bit_offset, info.host_size });
+                    }
+                    if (info.vector_index == .runtime) {
+                        try writer.writeAll(":?");
+                    } else if (info.vector_index != .none) {
+                        try writer.print(":{d}", .{@enumToInt(info.vector_index)});
                     }
                     try writer.writeAll(") ");
                 }
@@ -2312,7 +2326,7 @@ pub const Type = extern union {
             .address_space => return Value.initTag(.address_space_type),
             .float_mode => return Value.initTag(.float_mode_type),
             .reduce_op => return Value.initTag(.reduce_op_type),
-            .call_options => return Value.initTag(.call_options_type),
+            .modifier => return Value.initTag(.modifier_type),
             .prefetch_options => return Value.initTag(.prefetch_options_type),
             .export_options => return Value.initTag(.export_options_type),
             .extern_options => return Value.initTag(.extern_options_type),
@@ -2386,7 +2400,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .call_options,
+            .modifier,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -2632,7 +2646,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .call_options,
+            .modifier,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -2874,7 +2888,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .call_options,
+            .modifier,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -3258,7 +3272,7 @@ pub const Type = extern union {
             .inferred_alloc_mut => unreachable,
             .var_args_param => unreachable,
             .generic_poison => unreachable,
-            .call_options => unreachable, // missing call to resolveTypeFields
+            .modifier => unreachable, // missing call to resolveTypeFields
             .prefetch_options => unreachable, // missing call to resolveTypeFields
             .export_options => unreachable, // missing call to resolveTypeFields
             .extern_options => unreachable, // missing call to resolveTypeFields
@@ -3475,7 +3489,10 @@ pub const Type = extern union {
                     return AbiSizeAdvanced{ .scalar = 0 };
                 }
 
-                if (!child_type.hasRuntimeBits()) return AbiSizeAdvanced{ .scalar = 1 };
+                if (!(child_type.hasRuntimeBitsAdvanced(false, strat) catch |err| switch (err) {
+                    error.NeedLazy => return AbiSizeAdvanced{ .val = try Value.Tag.lazy_size.create(strat.lazy, ty) },
+                    else => |e| return e,
+                })) return AbiSizeAdvanced{ .scalar = 1 };
 
                 if (ty.optionalReprIsPayload()) {
                     return abiSizeAdvanced(child_type, target, strat);
@@ -3504,7 +3521,10 @@ pub const Type = extern union {
                 // in abiAlignmentAdvanced.
                 const data = ty.castTag(.error_union).?.data;
                 const code_size = abiSize(Type.anyerror, target);
-                if (!data.payload.hasRuntimeBits()) {
+                if (!(data.payload.hasRuntimeBitsAdvanced(false, strat) catch |err| switch (err) {
+                    error.NeedLazy => return AbiSizeAdvanced{ .val = try Value.Tag.lazy_size.create(strat.lazy, ty) },
+                    else => |e| return e,
+                })) {
                     // Same as anyerror.
                     return AbiSizeAdvanced{ .scalar = code_size };
                 }
@@ -3754,7 +3774,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .call_options,
+            .modifier,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -3865,6 +3885,7 @@ pub const Type = extern union {
                     payload.@"addrspace" != .generic or
                     payload.bit_offset != 0 or
                     payload.host_size != 0 or
+                    payload.vector_index != .none or
                     payload.@"allowzero" or
                     payload.@"volatile")
                 {
@@ -3877,6 +3898,7 @@ pub const Type = extern union {
                                 .@"addrspace" = payload.@"addrspace",
                                 .bit_offset = payload.bit_offset,
                                 .host_size = payload.host_size,
+                                .vector_index = payload.vector_index,
                                 .@"allowzero" = payload.@"allowzero",
                                 .mutable = payload.mutable,
                                 .@"volatile" = payload.@"volatile",
@@ -4074,7 +4096,6 @@ pub const Type = extern union {
             => return true,
 
             .Opaque => return is_extern,
-            .BoundFn,
             .ComptimeFloat,
             .ComptimeInt,
             .EnumLiteral,
@@ -4281,7 +4302,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .call_options,
+            .modifier,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -4308,7 +4329,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .call_options,
+            .modifier,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -4587,7 +4608,7 @@ pub const Type = extern union {
     }
 
     /// Asserts the type is an integer, enum, error set, or vector of one of them.
-    pub fn intInfo(self: Type, target: Target) struct { signedness: std.builtin.Signedness, bits: u16 } {
+    pub fn intInfo(self: Type, target: Target) std.builtin.Type.Int {
         var ty = self;
         while (true) switch (ty.tag()) {
             .int_unsigned => return .{
@@ -4992,7 +5013,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .call_options,
+            .modifier,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -5167,7 +5188,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .call_options,
+            .modifier,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -5485,7 +5506,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .call_options,
+            .modifier,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -5567,7 +5588,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .call_options,
+            .modifier,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -5670,7 +5691,6 @@ pub const Type = extern union {
         switch (ty.tag()) {
             .@"struct" => {
                 const struct_obj = ty.castTag(.@"struct").?.data;
-                assert(struct_obj.layout != .Packed);
                 const field = struct_obj.fields.values()[index];
                 if (field.is_comptime) {
                     return field.default_val;
@@ -5881,7 +5901,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .call_options,
+            .modifier,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -5929,7 +5949,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .call_options,
+            .modifier,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -5994,7 +6014,7 @@ pub const Type = extern union {
         address_space,
         float_mode,
         reduce_op,
-        call_options,
+        modifier,
         prefetch_options,
         export_options,
         extern_options,
@@ -6134,7 +6154,7 @@ pub const Type = extern union {
                 .address_space,
                 .float_mode,
                 .reduce_op,
-                .call_options,
+                .modifier,
                 .prefetch_options,
                 .export_options,
                 .extern_options,
@@ -6202,7 +6222,7 @@ pub const Type = extern union {
         }
 
         pub fn Data(comptime t: Tag) type {
-            return std.meta.fieldInfo(t.Type(), .data).field_type;
+            return std.meta.fieldInfo(t.Type(), .data).type;
         }
     };
 
@@ -6367,10 +6387,17 @@ pub const Type = extern union {
                 /// When host_size=pointee_abi_size and bit_offset=0, this must be
                 /// represented with host_size=0 instead.
                 host_size: u16 = 0,
+                vector_index: VectorIndex = .none,
                 @"allowzero": bool = false,
                 mutable: bool = true, // TODO rename this to const, not mutable
                 @"volatile": bool = false,
                 size: std.builtin.Type.Pointer.Size = .One,
+
+                pub const VectorIndex = enum(u32) {
+                    none = std.math.maxInt(u32),
+                    runtime = std.math.maxInt(u32) - 1,
+                    _,
+                };
 
                 pub fn alignment(data: Data, target: Target) u32 {
                     if (data.@"align" != 0) return data.@"align";
@@ -6526,7 +6553,8 @@ pub const Type = extern union {
         }
 
         if (d.@"align" == 0 and d.@"addrspace" == .generic and
-            d.bit_offset == 0 and d.host_size == 0 and !d.@"allowzero" and !d.@"volatile")
+            d.bit_offset == 0 and d.host_size == 0 and d.vector_index == .none and
+            !d.@"allowzero" and !d.@"volatile")
         {
             if (d.sentinel) |sent| {
                 if (!d.mutable and d.pointee_type.eql(Type.u8, mod)) {
@@ -6551,9 +6579,7 @@ pub const Type = extern union {
                     else => {},
                 }
             } else {
-                // TODO stage1 type inference bug
                 const T = Type.Tag;
-
                 const type_payload = try arena.create(Type.Payload.ElemType);
                 type_payload.* = .{
                     .base = .{

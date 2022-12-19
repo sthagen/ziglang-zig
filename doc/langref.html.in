@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Documentation - The Zig Programming Language</title>
-    <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAgklEQVR4AWMYWuD7EllJIM4G4g4g5oIJ/odhOJ8wToOxSTXgNxDHoeiBMfA4+wGShjyYOCkG/IGqWQziEzYAoUAeiF9D5U+DxEg14DRU7jWIT5IBIOdCxf+A+CQZAAoopEB7QJwBCBwHiip8UYmRdrAlDpIMgApwQZNnNii5Dq0MBgCxxycBnwEd+wAAAABJRU5ErkJggg=="/>
+    <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAgklEQVR4AWMYWuD7EllJIM4G4g4g5oIJ/odhOJ8wToOxSTXgNxDHoeiBMfA4+wGShjyYOCkG/IGqWQziEzYAoUAeiF9D5U+DxEg14DRU7jWIT5IBIOdCxf+A+CQZAAoopEB7QJwBCBwHiip8UYmRdrAlDpIMgApwQZNnNii5Dq0MBgCxxycBnwEd+wAAAABJRU5ErkJggg==">
     <style>
       :root{
          --nav-width: 24em;
@@ -2305,7 +2305,7 @@ comptime {
     assert(message.len == 5);
 }
 
-// A string literal is a single-item pointer to an array literal.
+// A string literal is a single-item pointer to an array.
 const same_message = "hello";
 
 comptime {
@@ -2415,8 +2415,8 @@ test "anonymous list literal syntax" {
 }
       {#code_end#}
       <p>
-      If there is no type in the result location then an anonymous list literal actually
-      turns into a {#link|struct#} with numbered field names:
+      If there is no type in the {#link|result location|Result Location Semantics#} then an
+      anonymous list literal actually turns into a {#link|struct#} with numbered field names:
       </p>
       {#code_begin|test|infer_list_literal#}
 const std = @import("std");
@@ -2511,7 +2511,7 @@ test "null terminated array" {
       and vectors. Zig provides the {#link|@splat#} builtin to easily convert from scalars
       to vectors, and it supports {#link|@reduce#} and array indexing syntax to convert
       from vectors to scalars. Vectors also support assignment to and from fixed-length
-      arrays with comptime known length.
+      arrays with comptime-known length.
       </p>
       <p>
       For rearranging elements within and between vectors, Zig provides the {#link|@shuffle#} and {#link|@select#} functions.
@@ -2557,7 +2557,7 @@ test "Conversion between vectors, arrays, and slices" {
     var offset: u32 = 1;
     // To extract a comptime-known length from a runtime-known offset,
     // first extract a new slice from the starting offset, then an array of
-    // comptime known length
+    // comptime-known length
     const vec3: @Vector(2, f32) = slice[offset..][0..2].*;
     try expectEqual(slice[offset], vec2[0]);
     try expectEqual(slice[offset + 1], vec2[1]);
@@ -2691,7 +2691,8 @@ const expect = @import("std").testing.expect;
 
 test "pointer slicing" {
     var array = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
-    const slice = array[2..4];
+    var start: usize = 2;
+    const slice = array[start..4];
     try expect(slice.len == 2);
 
     try expect(array[3] == 4);
@@ -2975,8 +2976,10 @@ test "using slices for strings" {
     const world: []const u8 = "世界";
 
     var all_together: [100]u8 = undefined;
-    // You can use slice syntax on an array to convert an array into a slice.
-    const all_together_slice = all_together[0..];
+    // You can use slice syntax with at least one runtime-know index on an
+    // array to convert an array into a slice.
+    var start : usize = 0;
+    const all_together_slice = all_together[start..];
     // String concatenation example.
     const hello_world = try fmt.bufPrint(all_together_slice, "{s} {s}", .{ hello, world });
 
@@ -3002,7 +3005,8 @@ test "slice pointer" {
     // The slice is mutable because we sliced a mutable pointer.
     try expect(@TypeOf(slice) == []u8);
 
-    // Again, slicing with constant indexes will produce another pointer to an array:
+    // Again, slicing with comptime-known indexes will produce another pointer
+    // to an array:
     const ptr2 = slice[2..3];
     try expect(ptr2.len == 1);
     try expect(ptr2[0] == 3);
@@ -3013,7 +3017,7 @@ test "slice pointer" {
 
       {#header_open|Sentinel-Terminated Slices#}
       <p>
-      The syntax {#syntax#}[:x]T{#endsyntax#} is a slice which has a runtime known length
+      The syntax {#syntax#}[:x]T{#endsyntax#} is a slice which has a runtime-known length
       and also guarantees a sentinel value at the element indexed by the length. The type does not
       guarantee that there are no sentinel elements before that. Sentinel-terminated slices allow element
       access to the {#syntax#}len{#endsyntax#} index.
@@ -3233,7 +3237,7 @@ test "default struct initialization fields" {
         .b = 5,
     };
     if (x.a + x.b != 1239) {
-        @compileError("it's even comptime known!");
+        @compileError("it's even comptime-known!");
     }
 }
       {#code_end#}
@@ -3472,7 +3476,7 @@ test "aligned struct fields" {
           that variable.</li>
           <li>If the struct is in the {#syntax#}return{#endsyntax#} expression, it gets named after
           the function it is returning from, with the parameter values serialized.</li>
-          <li>Otherwise, the struct gets a name such as <code>(anonymous struct at file.zig:7:38)</code>.</li>
+          <li>Otherwise, the struct gets a name such as <code>(filename.funcname.__struct_ID)</code>.</li>
           <li>If the struct is declared inside another struct, it gets named after both the parent
           struct and the name inferred by the previous rules, separated by a dot.</li>
       </ul>
@@ -3497,7 +3501,8 @@ fn List(comptime T: type) type {
       {#header_open|Anonymous Struct Literals#}
       <p>
       Zig allows omitting the struct type of a literal. When the result is {#link|coerced|Type Coercion#},
-      the struct literal will directly instantiate the result location, with no copy:
+      the struct literal will directly instantiate the {#link|result location|Result Location Semantics#},
+      with no copy:
       </p>
       {#code_begin|test|struct_result#}
 const std = @import("std");
@@ -3515,8 +3520,8 @@ test "anonymous struct literal" {
 }
       {#code_end#}
       <p>
-      The struct type can be inferred. Here the result location does not include a type, and
-      so Zig infers the type:
+      The struct type can be inferred. Here the {#link|result location|Result Location Semantics#}
+      does not include a type, and so Zig infers the type:
       </p>
       {#code_begin|test|struct_anon#}
 const std = @import("std");
@@ -3584,7 +3589,7 @@ const Type = enum {
     not_ok,
 };
 
-// Declare a specific instance of the enum variant.
+// Declare a specific enum field.
 const c = Type.ok;
 
 // If you want access to the ordinal value of an enum, you
@@ -3633,13 +3638,13 @@ test "enum method" {
     try expect(!p.isClubs());
 }
 
-// An enum variant of different types can be switched upon.
+// An enum can be switched upon.
 const Foo = enum {
     string,
     number,
     none,
 };
-test "enum variant switch" {
+test "enum switch" {
     const p = Foo.number;
     const what_is_it = switch (p) {
         Foo.string => "this is a string",
@@ -3819,7 +3824,7 @@ test "simple union" {
       to use with {#link|switch#} expressions.
       Tagged unions coerce to their tag type: {#link|Type Coercion: unions and enums#}.
       </p>
-      {#code_begin|test|test_switch_tagged_union#}
+      {#code_begin|test|test_tagged_union#}
 const std = @import("std");
 const expect = std.testing.expect;
 
@@ -3845,14 +3850,6 @@ test "switch on tagged union" {
 test "get tag type" {
     try expect(std.meta.Tag(ComplexType) == ComplexTypeTag);
 }
-
-test "coerce to enum" {
-    const c1 = ComplexType{ .ok = 42 };
-    const c2 = ComplexType.not_ok;
-
-    try expect(c1 == .ok);
-    try expect(c2 == .not_ok);
-}
       {#code_end#}
       <p>In order to modify the payload of a tagged union in a switch expression,
       place a {#syntax#}*{#endsyntax#} before the variable name to make it a pointer:
@@ -3872,7 +3869,6 @@ const ComplexType = union(ComplexTypeTag) {
 
 test "modify tagged union in switch" {
     var c = ComplexType{ .ok = 42 };
-    try expect(@as(ComplexTypeTag, c) == ComplexTypeTag.ok);
 
     switch (c) {
         ComplexTypeTag.ok => |*value| value.* += 1,
@@ -4256,8 +4252,8 @@ fn isFieldOptional(comptime T: type, field_index: usize) !bool {
     const fields = @typeInfo(T).Struct.fields;
     return switch (field_index) {
         // This prong is analyzed `fields.len - 1` times with `idx` being an
-        // unique comptime known value each time.
-        inline 0...fields.len - 1 => |idx| @typeInfo(fields[idx].field_type) == .Optional,
+        // unique comptime-known value each time.
+        inline 0...fields.len - 1 => |idx| @typeInfo(fields[idx].type) == .Optional,
         else => return error.IndexOutOfBounds,
     };
 }
@@ -4274,7 +4270,7 @@ test "using @typeInfo with runtime values" {
 }
 
 // Calls to `isFieldOptional` on `Struct1` get unrolled to an equivalent
-// of this function: 
+// of this function:
 fn isFieldOptionalUnrolled(field_index: usize) !bool {
     return switch (field_index) {
         0 => false,
@@ -4351,8 +4347,8 @@ const U = union(enum) {
 
 fn getNum(u: U) u32 {
     switch (u) {
-        // Here `num` is a runtime known value that is either
-        // `u.a` or `u.b` and `tag` is `u`'s comptime known tag value.
+        // Here `num` is a runtime-known value that is either
+        // `u.a` or `u.b` and `tag` is `u`'s comptime-known tag value.
         inline else => |num, tag| {
             if (tag == .b) {
                 return @floatToInt(u32, num);
@@ -4958,6 +4954,20 @@ fn deferUnwindExample() void {
 test "defer unwinding" {
     deferUnwindExample();
 }
+      {#code_end#}
+      {#code_begin|test_err|cannot return from defer expression#}
+// Inside a defer expression the return statement is not allowed.
+fn deferInvalidExample() !void {
+    defer {
+        return error.DeferError;
+    }
+
+    return error.DeferError;
+}
+      {#code_end#}
+      {#code_begin|test|errdefer#}
+const std = @import("std");
+const print = std.debug.print;
 
 // The errdefer keyword is similar to defer, but will only execute if the
 // scope returns with an error.
@@ -4975,19 +4985,6 @@ fn deferErrorExample(is_error: bool) !void {
     errdefer {
         print("encountered an error!\n", .{});
     }
-
-    // inside a defer method the return statement
-    // is not allowed.
-    // The following lines produce the following
-    // error if uncomment
-    // ```
-    // defer.zig:73:9: error: cannot return from defer expression
-    // return error.DeferError;
-    // ```
-    //
-    //defer {
-    //    return error.DeferError;
-    //}
 
     if (is_error) {
         return error.DeferError;
@@ -5240,11 +5237,15 @@ test "fn type inference" {
       {#header_close#}
       {#header_open|Function Reflection#}
       {#code_begin|test|test_fn_reflection#}
-const expect = @import("std").testing.expect;
+const std = @import("std");
+const math = std.math;
+const testing = std.testing;
 
 test "fn reflection" {
-    try expect(@typeInfo(@TypeOf(expect)).Fn.args[0].arg_type.? == bool);
-    try expect(@typeInfo(@TypeOf(expect)).Fn.is_var_args == false);
+    try testing.expect(@typeInfo(@TypeOf(testing.expect)).Fn.params[0].type.? == bool);
+    try testing.expect(@typeInfo(@TypeOf(testing.tmpDir)).Fn.return_type.? == testing.TmpDir);
+
+    try testing.expect(@typeInfo(@TypeOf(math.Log2Int)).Fn.is_generic);
 }
       {#code_end#}
       {#header_close#}
@@ -5462,7 +5463,8 @@ fn doAThing(str: []u8) !void {
       <p>
       Here we know for sure that "1234" will parse successfully. So we put the
       {#syntax#}unreachable{#endsyntax#} value on the right hand side. {#syntax#}unreachable{#endsyntax#} generates
-      a panic in Debug and ReleaseSafe modes and undefined behavior in ReleaseFast mode. So, while we're debugging the
+      a panic in {#link|Debug#} and {#link|ReleaseSafe#} modes and undefined behavior in
+      {#link|ReleaseFast#} and {#link|ReleaseSmall#} modes. So, while we're debugging the
       application, if there <em>was</em> a surprise error here, the application would crash
       appropriately.
       </p>
@@ -6241,10 +6243,6 @@ test "implicit unsigned integer to signed integer" {
 }
 
 test "float widening" {
-    // Note: there is an open issue preventing this from working on aarch64:
-    // https://github.com/ziglang/zig/issues/3282
-    if (builtin.target.cpu.arch == .aarch64) return error.SkipZigTest;
-
     var a: f16 = 12.34;
     var b: f32 = a;
     var c: f64 = b;
@@ -6398,7 +6396,7 @@ test "coercion to error unions" {
 const std = @import("std");
 const expect = std.testing.expect;
 
-test "coercing large integer type to smaller one when value is comptime known to fit" {
+test "coercing large integer type to smaller one when value is comptime-known to fit" {
     const x: u64 = 255;
     const y: u8 = x;
     try expect(y == 255);
@@ -7803,7 +7801,7 @@ comptime {
       {#header_close#}
 
       {#header_open|@call#}
-      <pre>{#syntax#}@call(options: std.builtin.CallOptions, function: anytype, args: anytype) anytype{#endsyntax#}</pre>
+      <pre>{#syntax#}@call(modifier: std.builtin.CallModifier, function: anytype, args: anytype) anytype{#endsyntax#}</pre>
       <p>
       Calls a function, in the same way that invoking an expression with parentheses does:
       </p>
@@ -7811,7 +7809,7 @@ comptime {
 const expect = @import("std").testing.expect;
 
 test "noinline function call" {
-    try expect(@call(.{}, add, .{3, 9}) == 12);
+    try expect(@call(.auto, add, .{3, 9}) == 12);
 }
 
 fn add(a: i32, b: i32) i32 {
@@ -7820,48 +7818,41 @@ fn add(a: i32, b: i32) i32 {
       {#code_end#}
       <p>
       {#syntax#}@call{#endsyntax#} allows more flexibility than normal function call syntax does. The
-      {#syntax#}CallOptions{#endsyntax#} struct is reproduced here:
+      {#syntax#}CallModifier{#endsyntax#} enum is reproduced here:
       </p>
-      {#syntax_block|zig|builtin.CallOptions struct#}
-pub const CallOptions = struct {
-    modifier: Modifier = .auto,
+      {#syntax_block|zig|builtin.CallModifier struct#}
+pub const CallModifier = enum {
+    /// Equivalent to function call syntax.
+    auto,
 
-    /// Only valid when `Modifier` is `Modifier.async_kw`.
-    stack: ?[]align(std.Target.stack_align) u8 = null,
+    /// Equivalent to async keyword used with function call syntax.
+    async_kw,
 
-    pub const Modifier = enum {
-        /// Equivalent to function call syntax.
-        auto,
+    /// Prevents tail call optimization. This guarantees that the return
+    /// address will point to the callsite, as opposed to the callsite's
+    /// callsite. If the call is otherwise required to be tail-called
+    /// or inlined, a compile error is emitted instead.
+    never_tail,
 
-        /// Equivalent to async keyword used with function call syntax.
-        async_kw,
+    /// Guarantees that the call will not be inlined. If the call is
+    /// otherwise required to be inlined, a compile error is emitted instead.
+    never_inline,
 
-        /// Prevents tail call optimization. This guarantees that the return
-        /// address will point to the callsite, as opposed to the callsite's
-        /// callsite. If the call is otherwise required to be tail-called
-        /// or inlined, a compile error is emitted instead.
-        never_tail,
+    /// Asserts that the function call will not suspend. This allows a
+    /// non-async function to call an async function.
+    no_async,
 
-        /// Guarantees that the call will not be inlined. If the call is
-        /// otherwise required to be inlined, a compile error is emitted instead.
-        never_inline,
+    /// Guarantees that the call will be generated with tail call optimization.
+    /// If this is not possible, a compile error is emitted instead.
+    always_tail,
 
-        /// Asserts that the function call will not suspend. This allows a
-        /// non-async function to call an async function.
-        no_async,
+    /// Guarantees that the call will inlined at the callsite.
+    /// If this is not possible, a compile error is emitted instead.
+    always_inline,
 
-        /// Guarantees that the call will be generated with tail call optimization.
-        /// If this is not possible, a compile error is emitted instead.
-        always_tail,
-
-        /// Guarantees that the call will inlined at the callsite.
-        /// If this is not possible, a compile error is emitted instead.
-        always_inline,
-
-        /// Evaluates the call at compile-time. If the call cannot be completed at
-        /// compile-time, a compile error is emitted instead.
-        compile_time,
-    };
+    /// Evaluates the call at compile-time. If the call cannot be completed at
+    /// compile-time, a compile error is emitted instead.
+    compile_time,
 };
       {#end_syntax_block#}
       {#header_close#}
@@ -8095,6 +8086,35 @@ test "main" {
       temporary buffer.
       </p>
       {#see_also|Import from C Header File|@cImport|@cDefine|@cInclude#}
+      {#header_close#}
+
+      {#header_open|@cVaArg#}
+      <pre>{#syntax#}@cVaArg(operand: *std.builtin.VaList, comptime T: type) T{#endsyntax#}</pre>
+      <p>
+      Implements the C macro {#syntax#}va_arg{#endsyntax#}.
+      </p>
+      {#see_also|@cVaCopy|@cVaEnd|@cVaStart#}
+      {#header_close#}
+      {#header_open|@cVaCopy#}
+      <pre>{#syntax#}@cVaCopy(src: *std.builtin.VaList) std.builtin.VaList{#endsyntax#}</pre>
+      <p>
+      Implements the C macro {#syntax#}va_copy{#endsyntax#}.
+      </p>
+      {#see_also|@cVaArg|@cVaEnd|@cVaStart#}
+      {#header_close#}
+      {#header_open|@cVaEnd#}
+      <pre>{#syntax#}@cVaEnd(src: *std.builtin.VaList) void{#endsyntax#}</pre>
+      <p>
+      Implements the C macro {#syntax#}va_end{#endsyntax#}.
+      </p>
+      {#see_also|@cVaArg|@cVaCopy|@cVaStart#}
+      {#header_close#}
+      {#header_open|@cVaStart#}
+      <pre>{#syntax#}@cVaStart() std.builtin.VaList{#endsyntax#}</pre>
+      <p>
+      Implements the C macro {#syntax#}va_start{#endsyntax#}. Only valid inside a variadic function.
+      </p>
+      {#see_also|@cVaArg|@cVaCopy|@cVaEnd#}
       {#header_close#}
 
       {#header_open|@divExact#}
@@ -9365,12 +9385,7 @@ test "integer truncation" {
           <li>{#link|union#}</li>
       </ul>
       <p>
-      For these types, {#syntax#}@Type{#endsyntax#} is not available:
-      </p>
-      <ul>
-          <li>{#link|Functions#}</li>
-          <li>BoundFn</li>
-      </ul>
+      {#syntax#}@Type{#endsyntax#} is not available for {#link|Functions#}.
       {#header_close#}
       {#header_open|@typeInfo#}
       <pre>{#syntax#}@typeInfo(comptime T: type) std.builtin.Type{#endsyntax#}</pre>
@@ -10645,18 +10660,18 @@ const c = @cImport({
         when linking with C code.
       </p>
       {#syntax_block|c|varytarget.h#}long FOO = __LONG_MAX__;{#end_syntax_block#}
-      {#shell_samp#}$ zig translate-c -target <em>thumb-freestanding-gnueabihf</em> varytarget.h|grep FOO
-pub export var FOO: c_long = <em>2147483647</em>;
-$ zig translate-c -target <em>x86_64-macos-gnu</em> varytarget.h|grep FOO
-pub export var FOO: c_long = <em>9223372036854775807</em>;{#end_shell_samp#}
+      {#shell_samp#}$ zig translate-c -target thumb-freestanding-gnueabihf varytarget.h|grep FOO
+pub export var FOO: c_long = 2147483647;
+$ zig translate-c -target x86_64-macos-gnu varytarget.h|grep FOO
+pub export var FOO: c_long = 9223372036854775807;{#end_shell_samp#}
       {#syntax_block|c|varycflags.h#}enum FOO { BAR };
 int do_something(enum FOO foo);
       {#end_syntax_block#}
       {#shell_samp#}$ zig translate-c varycflags.h|grep -B1 do_something
-pub const enum_FOO = <em>c_uint</em>;
+pub const enum_FOO = c_uint;
 pub extern fn do_something(foo: enum_FOO) c_int;
-$ zig translate-c <em>-cflags -fshort-enums --</em> varycflags.h|grep -B1 do_something
-pub const enum_FOO = <em>u8</em>;
+$ zig translate-c -cflags -fshort-enums -- varycflags.h|grep -B1 do_something
+pub const enum_FOO = u8;
 pub extern fn do_something(foo: enum_FOO) c_int;{#end_shell_samp#}
       {#header_close#}
       {#header_open|@cImport vs translate-c#}
@@ -10800,6 +10815,51 @@ pub const MAKELOCAL = @compileError("unable to translate C expr: unexpected toke
         <p>{#syntax#}ptr_to_struct_array[index].struct_member{#endsyntax#}</p>
       {#header_close#}
 
+      {#header_open|C Variadic Functions#}
+      <p>Zig supports extern variadic functions.</p>
+      {#code_begin|test|variadic_function#}
+      {#link_libc#}
+      {#code_verbose_cimport#}
+const std = @import("std");
+const testing = std.testing;
+
+pub extern "c" fn printf(format: [*:0]const u8, ...) c_int;
+
+test "variadic function" {
+    try testing.expect(printf("Hello, world!\n") == 14);
+    try testing.expect(@typeInfo(@TypeOf(printf)).Fn.is_var_args);
+}
+      {#code_end#}
+      <p>
+        Variadic functions can be implemented using {#link|@cVaStart#}, {#link|@cVaEnd#}, {#link|@cVaArg#} and {#link|@cVaCopy#}
+      </p>
+      {#code_begin|test|defining_variadic_function#}
+const std = @import("std");
+const testing = std.testing;
+const builtin = @import("builtin");
+
+fn add(count: c_int, ...) callconv(.C) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    var i: usize = 0;
+    var sum: c_int = 0;
+    while (i < count) : (i += 1) {
+        sum += @cVaArg(&ap, c_int);
+    }
+    return sum;
+}
+
+test "defining a variadic function" {
+    // Variadic functions are currently disabled on some targets due to miscompilations.
+    if (builtin.cpu.arch == .aarch64 and builtin.os.tag != .windows and builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.cpu.arch == .x86_64 and builtin.os.tag == .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(c_int, 0), add(0));
+    try std.testing.expectEqual(@as(c_int, 1), add(1, @as(c_int, 1)));
+    try std.testing.expectEqual(@as(c_int, 3), add(2, @as(c_int, 1), @as(c_int, 2)));
+}
+      {#code_end#}
+      {#header_close#}
       {#header_open|Exporting a C Library#}
       <p>
       One of the primary use cases for Zig is exporting a library with the C ABI for other programming languages
@@ -10961,24 +11021,28 @@ pub fn main() !void {
       {#code_begin|exe|preopens#}
       {#target_wasi#}
 const std = @import("std");
-const PreopenList = std.fs.wasi.PreopenList;
+const fs = std.fs;
 
 pub fn main() !void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
     const gpa = general_purpose_allocator.allocator();
 
-    var preopens = PreopenList.init(gpa);
-    defer preopens.deinit();
+    var arena_instance = std.heap.ArenaAllocator.init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
 
-    try preopens.populate(null);
+    const preopens = try fs.wasi.preopensAlloc(arena);
 
-    for (preopens.asSlice()) |preopen, i| {
-        std.debug.print("{}: {}\n", .{ i, preopen });
+    for (preopens.names) |preopen, i| {
+        std.debug.print("{}: {s}\n", .{ i, preopen });
     }
 }
       {#code_end#}
       {#shell_samp#}$ wasmtime --dir=. preopens.wasm
-0: Preopen{ .fd = 3, .type = PreopenType{ .Dir = '.' } }
+0: stdin
+1: stdout
+2: stderr
+3: .
       {#end_shell_samp#}
       {#header_close#}
       {#header_close#}
@@ -11886,7 +11950,7 @@ fn readU32Be() u32 {}
             Depending on the build mode, {#syntax#}unreachable{#endsyntax#} may emit a panic.
             <ul>
               <li>Emits a panic in {#syntax#}Debug{#endsyntax#} and {#syntax#}ReleaseSafe{#endsyntax#} mode, or when using <kbd>zig test</kbd>.</li>
-              <li>Does not emit a panic in {#syntax#}ReleaseFast{#endsyntax#} mode, unless <kbd>zig test</kbd> is being used.</li>
+              <li>Does not emit a panic in {#syntax#}ReleaseFast{#endsyntax#} and {#syntax#}ReleaseSmall{#endsyntax#} mode.</li>
               <li>See also {#link|unreachable#}</li>
             </ul>
           </td>

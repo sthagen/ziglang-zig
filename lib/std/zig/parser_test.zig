@@ -106,29 +106,6 @@ test "zig fmt: rewrite callconv(.Inline) to the inline keyword" {
     );
 }
 
-// TODO Remove this after zig 0.10.0 is released.
-test "zig fmt: rewrite c_void to anyopaque" {
-    try testTransform(
-        \\const Foo = struct {
-        \\    c_void: *c_void,
-        \\};
-        \\
-        \\fn foo(a: ?*c_void) !*c_void {
-        \\    return a orelse unreachable;
-        \\}
-        \\
-    ,
-        \\const Foo = struct {
-        \\    c_void: *anyopaque,
-        \\};
-        \\
-        \\fn foo(a: ?*anyopaque) !*anyopaque {
-        \\    return a orelse unreachable;
-        \\}
-        \\
-    );
-}
-
 test "zig fmt: simple top level comptime block" {
     try testCanonical(
         \\// line comment
@@ -233,6 +210,13 @@ test "zig fmt: top-level fields" {
         \\a: did_you_know,
         \\b: all_files_are,
         \\structs: ?x,
+        \\
+    );
+}
+
+test "zig fmt: top-level tuple function call type" {
+    try testCanonical(
+        \\foo()
         \\
     );
 }
@@ -4235,6 +4219,18 @@ test "zig fmt: remove newlines surrounding doc comment within container decl" {
 
 test "zig fmt: invalid else branch statement" {
     try testError(
+        \\/// This is a doc comment for a comptime block.
+        \\comptime {}
+        \\/// This is a doc comment for a test
+        \\test "This is my test" {}
+    , &[_]Error{
+        .comptime_doc_comment,
+        .test_doc_comment,
+    });
+}
+
+test "zig fmt: invalid else branch statement" {
+    try testError(
         \\comptime {
         \\    if (true) {} else var a = 0;
         \\    if (true) {} else defer {}
@@ -5506,6 +5502,35 @@ test "zig fmt: canonicalize symbols (keywords)" {
         \\    _ = @"return": {
         \\        break :@"return" 4;
         \\    };
+        \\}
+        \\
+    );
+}
+
+test "zig fmt: no space before newline before multiline string" {
+    try testCanonical(
+        \\const S = struct {
+        \\    text: []const u8,
+        \\    comment: []const u8,
+        \\};
+        \\
+        \\test {
+        \\    const s1 = .{
+        \\        .text =
+        \\        \\hello
+        \\        \\world
+        \\        ,
+        \\        .comment = "test",
+        \\    };
+        \\    _ = s1;
+        \\    const s2 = .{
+        \\        .comment = "test",
+        \\        .text =
+        \\        \\hello
+        \\        \\world
+        \\        ,
+        \\    };
+        \\    _ = s2;
         \\}
         \\
     );

@@ -125,7 +125,7 @@ pub fn extraData(tree: Ast, index: usize, comptime T: type) T {
     const fields = std.meta.fields(T);
     var result: T = undefined;
     inline for (fields) |field, i| {
-        comptime assert(field.field_type == Node.Index);
+        comptime assert(field.type == Node.Index);
         @field(result, field.name) = tree.extra_data[index + i];
     }
     return result;
@@ -2009,8 +2009,6 @@ fn fullStructInit(tree: Ast, info: full.StructInit.Components) full.StructInit {
 
 fn fullPtrType(tree: Ast, info: full.PtrType.Components) full.PtrType {
     const token_tags = tree.tokens.items(.tag);
-    // TODO: looks like stage1 isn't quite smart enough to handle enum
-    // literals in some places here
     const Size = std.builtin.Type.Pointer.Size;
     const size: Size = switch (token_tags[info.main_token]) {
         .asterisk,
@@ -2191,9 +2189,9 @@ fn fullCall(tree: Ast, info: full.Call.Components) full.Call {
         .ast = info,
         .async_token = null,
     };
-    const maybe_async_token = tree.firstToken(info.fn_expr) - 1;
-    if (token_tags[maybe_async_token] == .keyword_async) {
-        result.async_token = maybe_async_token;
+    const first_token = tree.firstToken(info.fn_expr);
+    if (first_token != 0 and token_tags[first_token - 1] == .keyword_async) {
+        result.async_token = first_token - 1;
     }
     return result;
 }
