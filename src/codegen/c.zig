@@ -653,7 +653,7 @@ pub const DeclGen = struct {
                     }
                     try writer.print("{ }", .{fmtIdent(field_info.name)});
                 } else {
-                    try dg.renderParentPtr(writer, field_ptr.container_ptr, field_info.ty);
+                    try dg.renderParentPtr(writer, field_ptr.container_ptr, container_ptr_ty);
                 }
             },
             .elem_ptr => {
@@ -1066,7 +1066,10 @@ pub const DeclGen = struct {
                             var index: usize = 0;
                             while (index < ai.len) : (index += 1) {
                                 const elem_val = try val.elemValue(dg.module, arena_allocator, index);
-                                const elem_val_u8 = @intCast(u8, elem_val.toUnsignedInt(target));
+                                const elem_val_u8 = if (elem_val.isUndef())
+                                    undefPattern(u8)
+                                else
+                                    @intCast(u8, elem_val.toUnsignedInt(target));
                                 try writeStringLiteralChar(writer, elem_val_u8);
                             }
                             if (ai.sentinel) |s| {
@@ -3591,6 +3594,10 @@ fn airOverflow(f: *Function, inst: Air.Inst.Index, operation: []const u8, info: 
 }
 
 fn airNot(f: *Function, inst: Air.Inst.Index) !CValue {
+    const inst_ty = f.air.typeOfIndex(inst);
+    if (inst_ty.tag() != .bool)
+        return try airUnBuiltinCall(f, inst, "not", .Bits);
+
     const ty_op = f.air.instructions.items(.data)[inst].ty_op;
 
     if (f.liveness.isUnused(inst)) {
@@ -3602,11 +3609,10 @@ fn airNot(f: *Function, inst: Air.Inst.Index) !CValue {
     try reap(f, inst, &.{ty_op.operand});
 
     const writer = f.object.writer();
-    const inst_ty = f.air.typeOfIndex(inst);
     const local = try f.allocLocal(inst, inst_ty);
     try f.writeCValue(writer, local, .Other);
     try writer.writeAll(" = ");
-    try writer.writeByte(if (inst_ty.tag() == .bool) '!' else '~');
+    try writer.writeByte('!');
     try f.writeCValue(writer, op, .Other);
     try writer.writeAll(";\n");
 
@@ -5131,7 +5137,9 @@ fn structFieldPtr(f: *Function, inst: Air.Inst.Index, struct_ptr_ty: Type, struc
         .begin, .end => {
             try writer.writeByte('(');
             try f.writeCValue(writer, struct_ptr, .Other);
-            try writer.print(")[{}]", .{@boolToInt(field_loc == .end)});
+            try writer.print(")[{}]", .{
+                @boolToInt(field_loc == .end and struct_ty.hasRuntimeBitsIgnoreComptime()),
+            });
         },
         .field => |field| if (extra_name != .none) {
             try f.writeCValueDerefMember(writer, struct_ptr, extra_name);

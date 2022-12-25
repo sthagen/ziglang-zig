@@ -472,6 +472,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/compiler_rt/truncxfhf2.zig"
     "${CMAKE_SOURCE_DIR}/lib/compiler_rt/truncxfsf2.zig"
     "${CMAKE_SOURCE_DIR}/lib/compiler_rt/udivmod.zig"
+    "${CMAKE_SOURCE_DIR}/lib/compiler_rt/udivmodei4.zig"
     "${CMAKE_SOURCE_DIR}/lib/compiler_rt/udivmodti4.zig"
     "${CMAKE_SOURCE_DIR}/lib/compiler_rt/udivti3.zig"
     "${CMAKE_SOURCE_DIR}/lib/compiler_rt/umodti3.zig"
@@ -708,6 +709,8 @@ target_link_libraries(zigcpp LINK_PUBLIC
 )
 
 if(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "AMD64")
+  set(HOST_TARGET_ARCH "x86_64")
+elseif(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "amd64")
   set(HOST_TARGET_ARCH "x86_64")
 elseif(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm64")
   set(HOST_TARGET_ARCH "aarch64")

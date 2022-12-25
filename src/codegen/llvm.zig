@@ -2969,7 +2969,7 @@ pub const DeclGen = struct {
 
                 comptime assert(struct_layout_version == 2);
                 var offset: u64 = 0;
-                var big_align: u32 = 0;
+                var big_align: u32 = 1;
                 var any_underaligned_fields = false;
 
                 for (struct_obj.fields.values()) |field| {
@@ -4033,16 +4033,23 @@ pub const DeclGen = struct {
                             const final_llvm_ty = (try dg.lowerType(ptr_child_ty)).pointerType(0);
                             break :blk field_addr.constIntToPtr(final_llvm_ty);
                         }
-                        bitcast_needed = !field_ty.eql(ptr_child_ty, dg.module);
 
                         var ty_buf: Type.Payload.Pointer = undefined;
-                        const llvm_field_index = llvmFieldIndex(parent_ty, field_index, target, &ty_buf).?;
-                        const indices: [2]*llvm.Value = .{
-                            llvm_u32.constInt(0, .False),
-                            llvm_u32.constInt(llvm_field_index, .False),
-                        };
+
                         const parent_llvm_ty = try dg.lowerType(parent_ty);
-                        break :blk parent_llvm_ty.constInBoundsGEP(parent_llvm_ptr, &indices, indices.len);
+                        if (llvmFieldIndex(parent_ty, field_index, target, &ty_buf)) |llvm_field_index| {
+                            bitcast_needed = !field_ty.eql(ptr_child_ty, dg.module);
+                            const indices: [2]*llvm.Value = .{
+                                llvm_u32.constInt(0, .False),
+                                llvm_u32.constInt(llvm_field_index, .False),
+                            };
+                            break :blk parent_llvm_ty.constInBoundsGEP(parent_llvm_ptr, &indices, indices.len);
+                        } else {
+                            bitcast_needed = !parent_ty.eql(ptr_child_ty, dg.module);
+                            const llvm_index = llvm_u32.constInt(@boolToInt(parent_ty.hasRuntimeBitsIgnoreComptime()), .False);
+                            const indices: [1]*llvm.Value = .{llvm_index};
+                            break :blk parent_llvm_ty.constInBoundsGEP(parent_llvm_ptr, &indices, indices.len);
+                        }
                     },
                     .Pointer => {
                         assert(parent_ty.isSlice());
@@ -4117,7 +4124,7 @@ pub const DeclGen = struct {
             else => unreachable,
         };
         if (bitcast_needed) {
-            return llvm_ptr.constBitCast((try dg.lowerType(ptr_child_ty)).pointerType(0));
+            return llvm_ptr.constBitCast((try dg.lowerPtrElemTy(ptr_child_ty)).pointerType(0));
         } else {
             return llvm_ptr;
         }
@@ -5966,7 +5973,7 @@ pub const FuncGen = struct {
                         const shift_amt = containing_int.typeOf().constInt(bit_offset, .False);
                         const shifted_value = self.builder.buildLShr(containing_int, shift_amt, "");
                         const elem_llvm_ty = try self.dg.lowerType(field_ty);
-                        if (field_ty.zigTypeTag() == .Float) {
+                        if (field_ty.zigTypeTag() == .Float or field_ty.zigTypeTag() == .Vector) {
                             const elem_bits = @intCast(c_uint, field_ty.bitSize(target));
                             const same_size_int = self.context.intType(elem_bits);
                             const truncated_int = self.builder.buildTrunc(shifted_value, same_size_int, "");
@@ -5989,7 +5996,7 @@ pub const FuncGen = struct {
                     assert(struct_ty.containerLayout() == .Packed);
                     const containing_int = struct_llvm_val;
                     const elem_llvm_ty = try self.dg.lowerType(field_ty);
-                    if (field_ty.zigTypeTag() == .Float) {
+                    if (field_ty.zigTypeTag() == .Float or field_ty.zigTypeTag() == .Vector) {
                         const elem_bits = @intCast(c_uint, field_ty.bitSize(target));
                         const same_size_int = self.context.intType(elem_bits);
                         const truncated_int = self.builder.buildTrunc(containing_int, same_size_int, "");
@@ -9766,8 +9773,8 @@ pub const FuncGen = struct {
                         // end of the struct. Treat our struct pointer as an array of two and get
                         // the index to the element at index `1` to get a pointer to the end of
                         // the struct.
-                        const llvm_usize = try self.dg.lowerType(Type.usize);
-                        const llvm_index = llvm_usize.constInt(1, .False);
+                        const llvm_u32 = self.dg.context.intType(32);
+                        const llvm_index = llvm_u32.constInt(@boolToInt(struct_ty.hasRuntimeBitsIgnoreComptime()), .False);
                         const indices: [1]*llvm.Value = .{llvm_index};
                         return self.builder.buildInBoundsGEP(struct_llvm_ty, struct_ptr, &indices, indices.len, "");
                     }
@@ -9889,7 +9896,7 @@ pub const FuncGen = struct {
             return result_ptr;
         }
 
-        if (info.pointee_type.zigTypeTag() == .Float) {
+        if (info.pointee_type.zigTypeTag() == .Float or info.pointee_type.zigTypeTag() == .Vector) {
             const same_size_int = self.context.intType(elem_bits);
             const truncated_int = self.builder.buildTrunc(shifted_value, same_size_int, "");
             return self.builder.buildBitCast(truncated_int, elem_llvm_ty, "");

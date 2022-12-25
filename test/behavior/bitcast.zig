@@ -334,6 +334,11 @@ test "comptime @bitCast packed struct to int and back" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
+    if (comptime builtin.zig_backend == .stage2_llvm and builtin.cpu.arch.endian() == .Big) {
+        // https://github.com/ziglang/zig/issues/13782
+        return error.SkipZigTest;
+    }
+
     const S = packed struct {
         void: void = {},
         uint: u8 = 13,
@@ -358,9 +363,6 @@ test "comptime @bitCast packed struct to int and back" {
     const rt_cast = @bitCast(S, i);
     const ct_cast = comptime @bitCast(S, @as(Int, 0));
     inline for (@typeInfo(S).Struct.fields) |field| {
-        if (@typeInfo(field.type) == .Vector)
-            continue; //TODO: https://github.com/ziglang/zig/issues/13201
-
         try expectEqual(@field(rt_cast, field.name), @field(ct_cast, field.name));
     }
 }
