@@ -2013,7 +2013,7 @@ fn breakExpr(parent_gz: *GenZir, parent_scope: *Scope, node: Ast.Node.Index) Inn
             },
             .local_val => scope = scope.cast(Scope.LocalVal).?.parent,
             .local_ptr => scope = scope.cast(Scope.LocalPtr).?.parent,
-            .namespace => break,
+            .namespace, .enum_namespace => break,
             .defer_normal, .defer_error => scope = scope.cast(Scope.Defer).?.parent,
             .top => unreachable,
         }
@@ -2088,7 +2088,7 @@ fn continueExpr(parent_gz: *GenZir, parent_scope: *Scope, node: Ast.Node.Index) 
                 try parent_gz.addDefer(defer_scope.index, defer_scope.len);
             },
             .defer_error => scope = scope.cast(Scope.Defer).?.parent,
-            .namespace => break,
+            .namespace, .enum_namespace => break,
             .top => unreachable,
         }
     }
@@ -2179,7 +2179,7 @@ fn checkLabelRedefinition(astgen: *AstGen, parent_scope: *Scope, label: Ast.Toke
             .local_val => scope = scope.cast(Scope.LocalVal).?.parent,
             .local_ptr => scope = scope.cast(Scope.LocalPtr).?.parent,
             .defer_normal, .defer_error => scope = scope.cast(Scope.Defer).?.parent,
-            .namespace => break,
+            .namespace, .enum_namespace => break,
             .top => unreachable,
         }
     }
@@ -2505,7 +2505,6 @@ fn addEnsureResult(gz: *GenZir, maybe_unused_result: Zir.Inst.Ref, statement: As
             .err_union_code,
             .err_union_code_ptr,
             .ptr_type,
-            .overflow_arithmetic_ptr,
             .enum_literal,
             .merge_error_sets,
             .error_union_type,
@@ -2543,7 +2542,6 @@ fn addEnsureResult(gz: *GenZir, maybe_unused_result: Zir.Inst.Ref, statement: As
             .type_info,
             .size_of,
             .bit_size_of,
-            .log2_int_type,
             .typeof_log2_int_type,
             .ptr_to_int,
             .align_of,
@@ -2731,7 +2729,7 @@ fn countDefers(outer_scope: *Scope, inner_scope: *Scope) struct {
                 const have_err_payload = defer_scope.remapped_err_code != 0;
                 need_err_code = need_err_code or have_err_payload;
             },
-            .namespace => unreachable,
+            .namespace, .enum_namespace => unreachable,
             .top => unreachable,
         }
     }
@@ -2801,7 +2799,7 @@ fn genDefers(
                     .normal_only => continue,
                 }
             },
-            .namespace => unreachable,
+            .namespace, .enum_namespace => unreachable,
             .top => unreachable,
         }
     }
@@ -2837,7 +2835,7 @@ fn checkUsed(gz: *GenZir, outer_scope: *Scope, inner_scope: *Scope) InnerError!v
                 scope = s.parent;
             },
             .defer_normal, .defer_error => scope = scope.cast(Scope.Defer).?.parent,
-            .namespace => unreachable,
+            .namespace, .enum_namespace => unreachable,
             .top => unreachable,
         }
     }
@@ -3367,7 +3365,7 @@ fn ptrType(
     var trailing_count: u32 = 0;
 
     if (ptr_info.ast.sentinel != 0) {
-        sentinel_ref = try expr(gz, scope, .{ .rl = .{ .ty = elem_type } }, ptr_info.ast.sentinel);
+        sentinel_ref = try comptimeExpr(gz, scope, .{ .rl = .{ .ty = elem_type } }, ptr_info.ast.sentinel);
         trailing_count += 1;
     }
     if (ptr_info.ast.align_node != 0) {
@@ -3470,7 +3468,7 @@ fn arrayTypeSentinel(gz: *GenZir, scope: *Scope, ri: ResultInfo, node: Ast.Node.
     }
     const len = try reachableExpr(gz, scope, .{ .rl = .{ .coerced_ty = .usize_type } }, len_node, node);
     const elem_type = try typeExpr(gz, scope, extra.elem_type);
-    const sentinel = try reachableExpr(gz, scope, .{ .rl = .{ .coerced_ty = elem_type } }, extra.sentinel, node);
+    const sentinel = try reachableExprComptime(gz, scope, .{ .rl = .{ .coerced_ty = elem_type } }, extra.sentinel, node, true);
 
     const result = try gz.addPlNode(.array_type_sentinel, node, Zir.Inst.ArrayTypeSentinel{
         .len = len,
@@ -4280,7 +4278,7 @@ fn testDecl(
                 .local_val, .local_ptr => unreachable, // a test cannot be in a local scope
                 .gen_zir => s = s.cast(GenZir).?.parent,
                 .defer_normal, .defer_error => s = s.cast(Scope.Defer).?.parent,
-                .namespace => {
+                .namespace, .enum_namespace => {
                     const ns = s.cast(Scope.Namespace).?;
                     if (ns.decls.get(name_str_index)) |i| {
                         if (found_already) |f| {
@@ -4965,6 +4963,7 @@ fn containerDecl(
             defer block_scope.unstack();
 
             _ = try astgen.scanDecls(&namespace, container_decl.ast.members);
+            namespace.base.tag = .enum_namespace;
 
             const arg_inst: Zir.Inst.Ref = if (container_decl.ast.arg != 0)
                 try comptimeExpr(&block_scope, &namespace.base, .{ .rl = .{ .ty = .type_type } }, container_decl.ast.arg)
@@ -4979,6 +4978,7 @@ fn containerDecl(
             for (container_decl.ast.members) |member_node| {
                 if (member_node == counts.nonexhaustive_node)
                     continue;
+                namespace.base.tag = .namespace;
                 var member = switch (try containerMember(&block_scope, &namespace.base, &wip_members, member_node)) {
                     .decl => continue,
                     .field => |field| field,
@@ -5012,6 +5012,7 @@ fn containerDecl(
                             },
                         );
                     }
+                    namespace.base.tag = .enum_namespace;
                     const tag_value_inst = try expr(&block_scope, &namespace.base, .{ .rl = .{ .ty = arg_inst } }, member.ast.value_expr);
                     wip_members.appendToField(@enumToInt(tag_value_inst));
                 }
@@ -6944,7 +6945,13 @@ fn switchExpr(
                 // it as the break operand.
                 if (body_len < 2)
                     break :blk;
-                const store_inst = payloads.items[end_index - 2];
+
+                var store_index = end_index - 2;
+                while (true) : (store_index -= 1) switch (zir_tags[payloads.items[store_index]]) {
+                    .dbg_block_end, .dbg_block_begin, .dbg_stmt, .dbg_var_val, .dbg_var_ptr => {},
+                    else => break,
+                };
+                const store_inst = payloads.items[store_index];
                 if (zir_tags[store_inst] != .store_to_block_ptr or
                     zir_datas[store_inst].bin.lhs != block_scope.rl_ptr)
                     break :blk;
@@ -7292,7 +7299,7 @@ fn localVarRef(
         },
         .gen_zir => s = s.cast(GenZir).?.parent,
         .defer_normal, .defer_error => s = s.cast(Scope.Defer).?.parent,
-        .namespace => {
+        .namespace, .enum_namespace => {
             const ns = s.cast(Scope.Namespace).?;
             if (ns.decls.get(name_str_index)) |i| {
                 if (found_already) |f| {
@@ -7304,7 +7311,7 @@ fn localVarRef(
                 // We found a match but must continue looking for ambiguous references to decls.
                 found_already = i;
             }
-            num_namespaces_out += 1;
+            if (s.tag == .namespace) num_namespaces_out += 1;
             capturing_namespace = ns;
             s = ns.parent;
         },
@@ -7931,7 +7938,7 @@ fn builtinCall(
                         },
                         .gen_zir => s = s.cast(GenZir).?.parent,
                         .defer_normal, .defer_error => s = s.cast(Scope.Defer).?.parent,
-                        .namespace => {
+                        .namespace, .enum_namespace => {
                             const ns = s.cast(Scope.Namespace).?;
                             if (ns.decls.get(decl_name)) |i| {
                                 if (found_already) |f| {
@@ -8236,21 +8243,7 @@ fn builtinCall(
         .add_with_overflow => return overflowArithmetic(gz, scope, ri, node, params, .add_with_overflow),
         .sub_with_overflow => return overflowArithmetic(gz, scope, ri, node, params, .sub_with_overflow),
         .mul_with_overflow => return overflowArithmetic(gz, scope, ri, node, params, .mul_with_overflow),
-        .shl_with_overflow => {
-            const int_type = try typeExpr(gz, scope, params[0]);
-            const log2_int_type = try gz.addUnNode(.log2_int_type, int_type, params[0]);
-            const ptr_type = try gz.addUnNode(.overflow_arithmetic_ptr, int_type, params[0]);
-            const lhs = try expr(gz, scope, .{ .rl = .{ .ty = int_type } }, params[1]);
-            const rhs = try expr(gz, scope, .{ .rl = .{ .ty = log2_int_type } }, params[2]);
-            const ptr = try expr(gz, scope, .{ .rl = .{ .ty = ptr_type } }, params[3]);
-            const result = try gz.addExtendedPayload(.shl_with_overflow, Zir.Inst.OverflowArithmetic{
-                .node = gz.nodeIndexToRelative(node),
-                .lhs = lhs,
-                .rhs = rhs,
-                .ptr = ptr,
-            });
-            return rvalue(gz, ri, result, node);
-        },
+        .shl_with_overflow => return overflowArithmetic(gz, scope, ri, node, params, .shl_with_overflow),
 
         .atomic_load => {
             const result = try gz.addPlNode(.atomic_load, node, Zir.Inst.AtomicLoad{
@@ -8691,16 +8684,12 @@ fn overflowArithmetic(
     params: []const Ast.Node.Index,
     tag: Zir.Inst.Extended,
 ) InnerError!Zir.Inst.Ref {
-    const int_type = try typeExpr(gz, scope, params[0]);
-    const ptr_type = try gz.addUnNode(.overflow_arithmetic_ptr, int_type, params[0]);
-    const lhs = try expr(gz, scope, .{ .rl = .{ .ty = int_type } }, params[1]);
-    const rhs = try expr(gz, scope, .{ .rl = .{ .ty = int_type } }, params[2]);
-    const ptr = try expr(gz, scope, .{ .rl = .{ .ty = ptr_type } }, params[3]);
-    const result = try gz.addExtendedPayload(tag, Zir.Inst.OverflowArithmetic{
+    const lhs = try expr(gz, scope, .{ .rl = .none }, params[0]);
+    const rhs = try expr(gz, scope, .{ .rl = .none }, params[1]);
+    const result = try gz.addExtendedPayload(tag, Zir.Inst.BinNode{
         .node = gz.nodeIndexToRelative(node),
         .lhs = lhs,
         .rhs = rhs,
-        .ptr = ptr,
     });
     return rvalue(gz, ri, result, node);
 }
@@ -10561,6 +10550,12 @@ const Scope = struct {
                 else => return null,
             }
         }
+        if (T == Namespace) {
+            switch (base.tag) {
+                .namespace, .enum_namespace => return @fieldParentPtr(T, "base", base),
+                else => return null,
+            }
+        }
         if (base.tag != T.base_tag)
             return null;
 
@@ -10573,7 +10568,7 @@ const Scope = struct {
             .local_val => base.cast(LocalVal).?.parent,
             .local_ptr => base.cast(LocalPtr).?.parent,
             .defer_normal, .defer_error => base.cast(Defer).?.parent,
-            .namespace => base.cast(Namespace).?.parent,
+            .namespace, .enum_namespace => base.cast(Namespace).?.parent,
             .top => null,
         };
     }
@@ -10585,6 +10580,7 @@ const Scope = struct {
         defer_normal,
         defer_error,
         namespace,
+        enum_namespace,
         top,
     };
 
@@ -12170,7 +12166,7 @@ const GenZir = struct {
 
         const new_index = @intCast(Zir.Inst.Index, gz.astgen.instructions.len);
         try gz.astgen.instructions.append(gpa, .{ .tag = .dbg_block_end, .data = undefined });
-        try gz.instructions.insert(gpa, gz.instructions.items.len - 1, new_index);
+        try gz.instructions.append(gpa, new_index);
     }
 };
 
@@ -12261,7 +12257,7 @@ fn detectLocalShadowing(
             }
             s = local_ptr.parent;
         },
-        .namespace => {
+        .namespace, .enum_namespace => {
             outer_scope = true;
             const ns = s.cast(Scope.Namespace).?;
             const decl_node = ns.decls.get(ident_name) orelse {
@@ -12429,7 +12425,7 @@ fn scanDecls(astgen: *AstGen, namespace: *Scope.Namespace, members: []const Ast.
                 }
                 s = local_ptr.parent;
             },
-            .namespace => s = s.cast(Scope.Namespace).?.parent,
+            .namespace, .enum_namespace => s = s.cast(Scope.Namespace).?.parent,
             .gen_zir => s = s.cast(GenZir).?.parent,
             .defer_normal, .defer_error => s = s.cast(Scope.Defer).?.parent,
             .top => break,

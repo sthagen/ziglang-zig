@@ -4,8 +4,6 @@ const expect = std.testing.expect;
 const native_endian = builtin.target.cpu.arch.endian();
 
 test "reinterpret bytes as integer with nonzero offset" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-
     try testReinterpretBytesAsInteger();
     comptime try testReinterpretBytesAsInteger();
 }
@@ -38,7 +36,6 @@ fn testReinterpretWithOffsetAndNoWellDefinedLayout() !void {
 }
 
 test "reinterpret bytes inside auto-layout struct as integer with nonzero offset" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     try testReinterpretStructWrappedBytesAsInteger();
@@ -173,7 +170,6 @@ test "lower reinterpreted comptime field ptr" {
 }
 
 test "reinterpret struct field at comptime" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const numNative = comptime Bytes.init(0x12345678);
@@ -236,7 +232,6 @@ test "ptrcast of const integer has the correct object size" {
 
 test "implicit optional pointer to optional anyopaque pointer" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     var buf: [4]u8 = "aoeu".*;
@@ -261,4 +256,29 @@ test "@ptrCast slice to slice" {
     alias[1] = 42;
     try expect(buf[1] == 42);
     try expect(alias.len == 4);
+}
+
+test "comptime @ptrCast a subset of an array, then write through it" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+
+    comptime {
+        var buff: [16]u8 align(4) = undefined;
+        const len_bytes = @ptrCast(*u32, &buff);
+        len_bytes.* = 16;
+        std.mem.copy(u8, buff[4..], "abcdef");
+    }
+}
+
+test "@ptrCast undefined value at comptime" {
+    const S = struct {
+        fn transmute(comptime T: type, comptime U: type, value: T) U {
+            return @ptrCast(*const U, &value).*;
+        }
+    };
+    comptime {
+        var x = S.transmute([]u8, i32, undefined);
+        _ = x;
+    }
 }

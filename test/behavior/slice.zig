@@ -28,7 +28,6 @@ comptime {
 }
 
 test "slicing" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     var array: [20]i32 = undefined;
@@ -64,7 +63,6 @@ test "comptime slice of undefined pointer of length 0" {
 }
 
 test "implicitly cast array of size 0 to slice" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     var msg = [_]u8{};
@@ -121,7 +119,6 @@ test "slice of type" {
 }
 
 test "generic malloc free" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
@@ -233,7 +230,6 @@ fn sliceFromLenToLen(a_slice: []u8, start: usize, end: usize) []u8 {
 }
 
 test "C pointer" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     var buf: [*c]const u8 = "kjdhfkjdhfdkjhfkfjhdfkjdhfkdjhfdkjhf";
@@ -288,7 +284,6 @@ test "slice type with custom alignment" {
 }
 
 test "obtaining a null terminated slice" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     // here we have a normal array
@@ -590,7 +585,6 @@ test "array mult of slice gives ptr to array" {
 }
 
 test "slice bounds in comptime concatenation" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const bs = comptime blk: {
@@ -711,4 +705,45 @@ test "global slice field access" {
     S.slice.ptr += 1;
     S.slice.len -= 2;
     try expectEqualStrings("trin", S.slice);
+}
+
+test "slice of void" {
+    var n: usize = 10;
+    var arr: [12]void = undefined;
+    const slice = @as([]void, &arr)[0..n];
+    try expect(slice.len == n);
+}
+
+test "slice with dereferenced value" {
+    var a: usize = 0;
+    var idx: *usize = &a;
+    _ = blk: {
+        var array = [_]u8{};
+        break :blk array[idx.*..];
+    };
+    const res = blk: {
+        var array = [_]u8{};
+        break :blk array[idx.*..];
+    };
+    try expect(res.len == 0);
+}
+
+test "empty slice ptr is non null" {
+    if (builtin.zig_backend == .stage2_aarch64 and builtin.os.tag == .macos) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64 and (builtin.os.tag == .macos or builtin.os.tag == .windows)) return error.SkipZigTest; // TODO
+
+    const empty_slice: []u8 = &[_]u8{};
+    const p: [*]u8 = empty_slice.ptr + 0;
+    const t = @ptrCast([*]i8, p);
+    try expect(@ptrToInt(t) == @ptrToInt(empty_slice.ptr));
+}
+
+test "slice decays to many pointer" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+
+    var buf: [8]u8 = "abcdefg\x00".*;
+    const p: [*:0]const u8 = buf[0..7 :0];
+    try expectEqualStrings(buf[0..7], std.mem.span(p));
 }

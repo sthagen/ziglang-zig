@@ -145,7 +145,6 @@ fn fnWithUnreachable() noreturn {
 
 test "extern struct with stdcallcc fn pointer" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
 
     const S = extern struct {
         ptr: *const fn () callconv(if (builtin.target.cpu.arch == .x86) .Stdcall else .C) i32,
@@ -196,7 +195,6 @@ fn addPointCoords(pt: Point) i32 {
 }
 
 test "pass by non-copying value through var arg" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     try expect((try addPointCoordsVar(Point{ .x = 1, .y = 2 })) == 3);
@@ -292,7 +290,6 @@ fn voidFun(a: i32, b: void, c: i32, d: void) !void {
 }
 
 test "call function with empty string" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     acceptsString("");
@@ -410,7 +407,6 @@ test "function with inferred error set but returning no error" {
 }
 
 test "import passed byref to function in return type" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const S = struct {
@@ -445,7 +441,6 @@ test "implicit cast function to function ptr" {
 
 test "method call with optional and error union first param" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const S = struct {
@@ -461,4 +456,64 @@ test "method call with optional and error union first param" {
     var s: S = .{};
     try s.opt();
     try s.errUnion();
+}
+
+test "using @ptrCast on function pointers" {
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+
+    const S = struct {
+        const A = struct { data: [4]u8 };
+
+        fn at(arr: *const A, index: usize) *const u8 {
+            return &arr.data[index];
+        }
+
+        fn run() !void {
+            const a = A{ .data = "abcd".* };
+            const casted_fn = @ptrCast(*const fn (*const anyopaque, usize) *const u8, &at);
+            const casted_impl = @ptrCast(*const anyopaque, &a);
+            const ptr = casted_fn(casted_impl, 2);
+            try expect(ptr.* == 'c');
+        }
+    };
+
+    try S.run();
+    // https://github.com/ziglang/zig/issues/2626
+    // try comptime S.run();
+}
+
+test "function returns function returning type" {
+    const S = struct {
+        fn a() fn () type {
+            return (struct {
+                fn b() type {
+                    return u32;
+                }
+            }).b;
+        }
+    };
+    try expect(S.a()() == u32);
+}
+
+test "peer type resolution of inferred error set with non-void payload" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+
+    const S = struct {
+        fn openDataFile(mode: enum { read, write }) !u32 {
+            return switch (mode) {
+                .read => foo(),
+                .write => bar(),
+            };
+        }
+        fn foo() error{ a, b }!u32 {
+            return 1;
+        }
+        fn bar() error{ c, d }!u32 {
+            return 2;
+        }
+    };
+    try expect(try S.openDataFile(.read) == 1);
 }

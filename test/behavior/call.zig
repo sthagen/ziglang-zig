@@ -107,7 +107,6 @@ test "result location of function call argument through runtime condition and st
 }
 
 test "function call with 40 arguments" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const S = struct {
@@ -380,4 +379,35 @@ test "generic function with generic function parameter" {
         }
     };
     try S.f(S.g, 123);
+}
+
+test "recursive inline call with comptime known argument" {
+    const S = struct {
+        inline fn foo(x: i32) i32 {
+            if (x <= 0) {
+                return 0;
+            } else {
+                return x * 2 + foo(x - 1);
+            }
+        }
+    };
+
+    try expect(S.foo(4) == 20);
+}
+
+test "inline while with @call" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+
+    const S = struct {
+        fn inc(a: *u32) void {
+            a.* += 1;
+        }
+    };
+    var a: u32 = 0;
+    comptime var i = 0;
+    inline while (i < 10) : (i += 1) {
+        @call(.auto, S.inc, .{&a});
+    }
+    try expect(a == 10);
 }
