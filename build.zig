@@ -43,6 +43,7 @@ pub fn build(b: *Builder) !void {
     ) catch unreachable;
     const docgen_cmd = docgen_exe.run();
     docgen_cmd.addArgs(&[_][]const u8{
+        "--zig",
         rel_zig_exe,
         "doc" ++ fs.path.sep_str ++ "langref.html.in",
         langref_out_path,
@@ -440,7 +441,7 @@ pub fn build(b: *Builder) !void {
         b.enable_wine,
         enable_symlinks_windows,
     ));
-    test_step.dependOn(tests.addCAbiTests(b, skip_non_native));
+    test_step.dependOn(tests.addCAbiTests(b, skip_non_native, skip_release));
     test_step.dependOn(tests.addLinkTests(b, test_filter, modes, enable_macos_sdk, skip_stage2_tests, enable_symlinks_windows));
     test_step.dependOn(tests.addStackTraceTests(b, test_filter, modes));
     test_step.dependOn(tests.addCliTests(b, test_filter, modes));
@@ -574,8 +575,11 @@ fn addCmakeCfgOptionsToExe(
                 };
                 exe.linkSystemLibrary("unwind");
             },
-            .ios, .macos, .watchos, .tvos, .windows => {
+            .ios, .macos, .watchos, .tvos => {
                 exe.linkLibCpp();
+            },
+            .windows => {
+                if (exe.target.getAbi() != .msvc) exe.linkLibCpp();
             },
             .freebsd => {
                 if (static) {

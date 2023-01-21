@@ -2083,15 +2083,15 @@ pub const Object = struct {
                 comptime assert(struct_layout_version == 2);
                 var offset: u64 = 0;
 
-                for (fields.values()) |field, i| {
-                    if (field.is_comptime or !field.ty.hasRuntimeBits()) continue;
-
+                var it = ty.castTag(.@"struct").?.data.runtimeFieldIterator();
+                while (it.next()) |field_and_index| {
+                    const field = field_and_index.field;
                     const field_size = field.ty.abiSize(target);
                     const field_align = field.alignment(target, layout);
                     const field_offset = std.mem.alignForwardGeneric(u64, offset, field_align);
                     offset = field_offset + field_size;
 
-                    const field_name = try gpa.dupeZ(u8, fields.keys()[i]);
+                    const field_name = try gpa.dupeZ(u8, fields.keys()[field_and_index.index]);
                     defer gpa.free(field_name);
 
                     try di_fields.append(gpa, dib.createMemberType(
@@ -2985,9 +2985,9 @@ pub const DeclGen = struct {
                 var big_align: u32 = 1;
                 var any_underaligned_fields = false;
 
-                for (struct_obj.fields.values()) |field| {
-                    if (field.is_comptime or !field.ty.hasRuntimeBits()) continue;
-
+                var it = struct_obj.runtimeFieldIterator();
+                while (it.next()) |field_and_index| {
+                    const field = field_and_index.field;
                     const field_align = field.alignment(target, struct_obj.layout);
                     const field_ty_align = field.ty.abiAlignment(target);
                     any_underaligned_fields = any_underaligned_fields or
@@ -3370,7 +3370,7 @@ pub const DeclGen = struct {
                     return llvm_int.constIntToPtr(try dg.lowerType(tv.ty));
                 },
                 .field_ptr, .opt_payload_ptr, .eu_payload_ptr, .elem_ptr => {
-                    return dg.lowerParentPtr(tv.val);
+                    return dg.lowerParentPtr(tv.val, tv.ty.ptrInfo().data.bit_offset % 8 == 0);
                 },
                 .null_value, .zero => {
                     const llvm_type = try dg.lowerType(tv.ty);
@@ -3378,7 +3378,7 @@ pub const DeclGen = struct {
                 },
                 .opt_payload => {
                     const payload = tv.val.castTag(.opt_payload).?.data;
-                    return dg.lowerParentPtr(payload);
+                    return dg.lowerParentPtr(payload, tv.ty.ptrInfo().data.bit_offset % 8 == 0);
                 },
                 else => |tag| return dg.todo("implement const of pointer type '{}' ({})", .{
                     tv.ty.fmtDebug(), tag,
@@ -3714,9 +3714,9 @@ pub const DeclGen = struct {
                 var big_align: u32 = 0;
                 var need_unnamed = false;
 
-                for (struct_obj.fields.values()) |field, i| {
-                    if (field.is_comptime or !field.ty.hasRuntimeBits()) continue;
-
+                var it = struct_obj.runtimeFieldIterator();
+                while (it.next()) |field_and_index| {
+                    const field = field_and_index.field;
                     const field_align = field.alignment(target, struct_obj.layout);
                     big_align = @max(big_align, field_align);
                     const prev_offset = offset;
@@ -3732,7 +3732,7 @@ pub const DeclGen = struct {
 
                     const field_llvm_val = try dg.lowerValue(.{
                         .ty = field.ty,
-                        .val = field_vals[i],
+                        .val = field_vals[field_and_index.index],
                     });
 
                     need_unnamed = need_unnamed or dg.isUnnamedType(field.ty, field_llvm_val);
@@ -3967,7 +3967,7 @@ pub const DeclGen = struct {
         return try dg.lowerDeclRefValue(.{ .ty = ptr_ty, .val = ptr_val }, decl_index);
     }
 
-    fn lowerParentPtr(dg: *DeclGen, ptr_val: Value) Error!*llvm.Value {
+    fn lowerParentPtr(dg: *DeclGen, ptr_val: Value, byte_aligned: bool) Error!*llvm.Value {
         const target = dg.module.getTarget();
         switch (ptr_val.tag()) {
             .decl_ref_mut => {
@@ -3996,7 +3996,7 @@ pub const DeclGen = struct {
             },
             .field_ptr => {
                 const field_ptr = ptr_val.castTag(.field_ptr).?.data;
-                const parent_llvm_ptr = try dg.lowerParentPtr(field_ptr.container_ptr);
+                const parent_llvm_ptr = try dg.lowerParentPtr(field_ptr.container_ptr, byte_aligned);
                 const parent_ty = field_ptr.container_ty;
 
                 const field_index = @intCast(u32, field_ptr.field_index);
@@ -4026,6 +4026,7 @@ pub const DeclGen = struct {
                     },
                     .Struct => {
                         if (parent_ty.containerLayout() == .Packed) {
+                            if (!byte_aligned) return parent_llvm_ptr;
                             const llvm_usize = dg.context.intType(target.cpu.arch.ptrBitWidth());
                             const base_addr = parent_llvm_ptr.constPtrToInt(llvm_usize);
                             // count bits of fields before this one
@@ -4072,7 +4073,7 @@ pub const DeclGen = struct {
             },
             .elem_ptr => {
                 const elem_ptr = ptr_val.castTag(.elem_ptr).?.data;
-                const parent_llvm_ptr = try dg.lowerParentPtr(elem_ptr.array_ptr);
+                const parent_llvm_ptr = try dg.lowerParentPtr(elem_ptr.array_ptr, true);
 
                 const llvm_usize = try dg.lowerType(Type.usize);
                 const indices: [1]*llvm.Value = .{
@@ -4083,7 +4084,7 @@ pub const DeclGen = struct {
             },
             .opt_payload_ptr => {
                 const opt_payload_ptr = ptr_val.castTag(.opt_payload_ptr).?.data;
-                const parent_llvm_ptr = try dg.lowerParentPtr(opt_payload_ptr.container_ptr);
+                const parent_llvm_ptr = try dg.lowerParentPtr(opt_payload_ptr.container_ptr, true);
                 var buf: Type.Payload.ElemType = undefined;
 
                 const payload_ty = opt_payload_ptr.container_ty.optionalChild(&buf);
@@ -4105,7 +4106,7 @@ pub const DeclGen = struct {
             },
             .eu_payload_ptr => {
                 const eu_payload_ptr = ptr_val.castTag(.eu_payload_ptr).?.data;
-                const parent_llvm_ptr = try dg.lowerParentPtr(eu_payload_ptr.container_ptr);
+                const parent_llvm_ptr = try dg.lowerParentPtr(eu_payload_ptr.container_ptr, true);
 
                 const payload_ty = eu_payload_ptr.container_ty.errorUnionPayload();
                 if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
@@ -10354,9 +10355,9 @@ fn llvmFieldIndex(
     assert(layout != .Packed);
 
     var llvm_field_index: c_uint = 0;
-    for (ty.structFields().values()) |field, i| {
-        if (field.is_comptime or !field.ty.hasRuntimeBits()) continue;
-
+    var it = ty.castTag(.@"struct").?.data.runtimeFieldIterator();
+    while (it.next()) |field_and_index| {
+        const field = field_and_index.field;
         const field_align = field.alignment(target, layout);
         big_align = @max(big_align, field_align);
         const prev_offset = offset;
@@ -10367,7 +10368,7 @@ fn llvmFieldIndex(
             llvm_field_index += 1;
         }
 
-        if (field_index <= i) {
+        if (field_index == field_and_index.index) {
             ptr_pl_buf.* = .{
                 .data = .{
                     .pointee_type = field.ty,
@@ -10395,7 +10396,12 @@ fn firstParamSRet(fn_info: Type.Payload.Function.Data, target: std.Target) bool 
             .mips, .mipsel => return false,
             .x86_64 => switch (target.os.tag) {
                 .windows => return x86_64_abi.classifyWindows(fn_info.return_type, target) == .memory,
-                else => return x86_64_abi.classifySystemV(fn_info.return_type, target, .ret)[0] == .memory,
+                else => {
+                    const class = x86_64_abi.classifySystemV(fn_info.return_type, target, .ret);
+                    if (class[0] == .memory) return true;
+                    if (class[0] == .x87 and class[2] != .none) return true;
+                    return false;
+                },
             },
             .wasm32 => return wasm_c_abi.classifyType(fn_info.return_type, target)[0] == .indirect,
             .aarch64, .aarch64_be => return aarch64_c_abi.classifyType(fn_info.return_type, target) == .memory,
@@ -10407,6 +10413,7 @@ fn firstParamSRet(fn_info: Type.Payload.Function.Data, target: std.Target) bool 
             .riscv32, .riscv64 => return riscv_c_abi.classifyType(fn_info.return_type, target) == .memory,
             else => return false, // TODO investigate C ABI for other architectures
         },
+        .Stdcall => return !isScalar(fn_info.return_type),
         else => return false,
     }
 }
@@ -10469,22 +10476,26 @@ fn lowerFnRetTy(dg: *DeclGen, fn_info: Type.Payload.Function.Data) !*llvm.Type {
                                     llvm_types_buffer[llvm_types_index] = dg.context.intType(64);
                                     llvm_types_index += 1;
                                 },
-                                .sse => {
+                                .sse, .sseup => {
                                     llvm_types_buffer[llvm_types_index] = dg.context.doubleType();
                                     llvm_types_index += 1;
                                 },
-                                .sseup => {
-                                    llvm_types_buffer[llvm_types_index] = dg.context.doubleType();
+                                .float => {
+                                    llvm_types_buffer[llvm_types_index] = dg.context.floatType();
+                                    llvm_types_index += 1;
+                                },
+                                .float_combine => {
+                                    llvm_types_buffer[llvm_types_index] = dg.context.floatType().vectorType(2);
                                     llvm_types_index += 1;
                                 },
                                 .x87 => {
+                                    if (llvm_types_index != 0 or classes[2] != .none) {
+                                        return dg.context.voidType();
+                                    }
                                     llvm_types_buffer[llvm_types_index] = dg.context.x86FP80Type();
                                     llvm_types_index += 1;
                                 },
-                                .x87up => {
-                                    llvm_types_buffer[llvm_types_index] = dg.context.x86FP80Type();
-                                    llvm_types_index += 1;
-                                },
+                                .x87up => continue,
                                 .complex_x87 => {
                                     @panic("TODO");
                                 },
@@ -10556,6 +10567,13 @@ fn lowerFnRetTy(dg: *DeclGen, fn_info: Type.Payload.Function.Data) !*llvm.Type {
                 },
                 // TODO investigate C ABI for other architectures
                 else => return dg.lowerType(fn_info.return_type),
+            }
+        },
+        .Stdcall => {
+            if (isScalar(fn_info.return_type)) {
+                return dg.lowerType(fn_info.return_type);
+            } else {
+                return dg.context.voidType();
             }
         },
         else => return dg.lowerType(fn_info.return_type),
@@ -10658,8 +10676,7 @@ const ParamTypeIterator = struct {
                             .memory => {
                                 it.zig_index += 1;
                                 it.llvm_index += 1;
-                                it.byval_attr = true;
-                                return .byref;
+                                return .byref_mut;
                             },
                             .sse => {
                                 it.zig_index += 1;
@@ -10689,22 +10706,25 @@ const ParamTypeIterator = struct {
                                         llvm_types_buffer[llvm_types_index] = dg.context.intType(64);
                                         llvm_types_index += 1;
                                     },
-                                    .sse => {
+                                    .sse, .sseup => {
                                         llvm_types_buffer[llvm_types_index] = dg.context.doubleType();
                                         llvm_types_index += 1;
                                     },
-                                    .sseup => {
-                                        llvm_types_buffer[llvm_types_index] = dg.context.doubleType();
+                                    .float => {
+                                        llvm_types_buffer[llvm_types_index] = dg.context.floatType();
+                                        llvm_types_index += 1;
+                                    },
+                                    .float_combine => {
+                                        llvm_types_buffer[llvm_types_index] = dg.context.floatType().vectorType(2);
                                         llvm_types_index += 1;
                                     },
                                     .x87 => {
-                                        llvm_types_buffer[llvm_types_index] = dg.context.x86FP80Type();
-                                        llvm_types_index += 1;
+                                        it.zig_index += 1;
+                                        it.llvm_index += 1;
+                                        it.byval_attr = true;
+                                        return .byref;
                                     },
-                                    .x87up => {
-                                        llvm_types_buffer[llvm_types_index] = dg.context.x86FP80Type();
-                                        llvm_types_index += 1;
-                                    },
+                                    .x87up => unreachable,
                                     .complex_x87 => {
                                         @panic("TODO");
                                     },
@@ -10784,6 +10804,17 @@ const ParamTypeIterator = struct {
                         it.llvm_index += 1;
                         return .byval;
                     },
+                }
+            },
+            .Stdcall => {
+                it.zig_index += 1;
+                it.llvm_index += 1;
+
+                if (isScalar(ty)) {
+                    return .byval;
+                } else {
+                    it.byval_attr = true;
+                    return .byref;
                 }
             },
             else => {

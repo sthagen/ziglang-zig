@@ -3,6 +3,8 @@ index: u32,
 
 pub const Bundle = @import("Certificate/Bundle.zig");
 
+pub const Version = enum { v1, v2, v3 };
+
 pub const Algorithm = enum {
     sha1WithRSAEncryption,
     sha224WithRSAEncryption,
@@ -13,6 +15,8 @@ pub const Algorithm = enum {
     ecdsa_with_SHA256,
     ecdsa_with_SHA384,
     ecdsa_with_SHA512,
+    md2WithRSAEncryption,
+    md5WithRSAEncryption,
 
     pub const map = std.ComptimeStringMap(Algorithm, .{
         .{ &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x05 }, .sha1WithRSAEncryption },
@@ -24,6 +28,8 @@ pub const Algorithm = enum {
         .{ &[_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02 }, .ecdsa_with_SHA256 },
         .{ &[_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x03 }, .ecdsa_with_SHA384 },
         .{ &[_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x04 }, .ecdsa_with_SHA512 },
+        .{ &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x02 }, .md2WithRSAEncryption },
+        .{ &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x04 }, .md5WithRSAEncryption },
     });
 
     pub fn Hash(comptime algorithm: Algorithm) type {
@@ -33,6 +39,8 @@ pub const Algorithm = enum {
             .ecdsa_with_SHA256, .sha256WithRSAEncryption => crypto.hash.sha2.Sha256,
             .ecdsa_with_SHA384, .sha384WithRSAEncryption => crypto.hash.sha2.Sha384,
             .ecdsa_with_SHA512, .sha512WithRSAEncryption => crypto.hash.sha2.Sha512,
+            .md2WithRSAEncryption => @compileError("unimplemented"),
+            .md5WithRSAEncryption => crypto.hash.Md5,
         };
     }
 };
@@ -53,10 +61,13 @@ pub const Attribute = enum {
     countryName,
     localityName,
     stateOrProvinceName,
+    streetAddress,
     organizationName,
     organizationalUnitName,
+    postalCode,
     organizationIdentifier,
     pkcs9_emailAddress,
+    domainComponent,
 
     pub const map = std.ComptimeStringMap(Attribute, .{
         .{ &[_]u8{ 0x55, 0x04, 0x03 }, .commonName },
@@ -64,19 +75,24 @@ pub const Attribute = enum {
         .{ &[_]u8{ 0x55, 0x04, 0x06 }, .countryName },
         .{ &[_]u8{ 0x55, 0x04, 0x07 }, .localityName },
         .{ &[_]u8{ 0x55, 0x04, 0x08 }, .stateOrProvinceName },
+        .{ &[_]u8{ 0x55, 0x04, 0x09 }, .streetAddress },
         .{ &[_]u8{ 0x55, 0x04, 0x0A }, .organizationName },
         .{ &[_]u8{ 0x55, 0x04, 0x0B }, .organizationalUnitName },
+        .{ &[_]u8{ 0x55, 0x04, 0x11 }, .postalCode },
         .{ &[_]u8{ 0x55, 0x04, 0x61 }, .organizationIdentifier },
         .{ &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x01 }, .pkcs9_emailAddress },
+        .{ &[_]u8{ 0x09, 0x92, 0x26, 0x89, 0x93, 0xF2, 0x2C, 0x64, 0x01, 0x19 }, .domainComponent },
     });
 };
 
 pub const NamedCurve = enum {
     secp384r1,
+    secp521r1,
     X9_62_prime256v1,
 
     pub const map = std.ComptimeStringMap(NamedCurve, .{
         .{ &[_]u8{ 0x2B, 0x81, 0x04, 0x00, 0x22 }, .secp384r1 },
+        .{ &[_]u8{ 0x2B, 0x81, 0x04, 0x00, 0x23 }, .secp521r1 },
         .{ &[_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 }, .X9_62_prime256v1 },
     });
 };
@@ -91,17 +107,40 @@ pub const ExtensionId = enum {
     crl_number,
     certificate_policies,
     authority_key_identifier,
+    msCertsrvCAVersion,
+    commonName,
+    ext_key_usage,
+    crl_distribution_points,
+    info_access,
+    entrustVersInfo,
+    enroll_certtype,
+    pe_logotype,
+    netscape_cert_type,
+    netscape_comment,
 
     pub const map = std.ComptimeStringMap(ExtensionId, .{
+        .{ &[_]u8{ 0x55, 0x04, 0x03 }, .commonName },
+        .{ &[_]u8{ 0x55, 0x1D, 0x01 }, .authority_key_identifier },
+        .{ &[_]u8{ 0x55, 0x1D, 0x07 }, .subject_alt_name },
         .{ &[_]u8{ 0x55, 0x1D, 0x0E }, .subject_key_identifier },
         .{ &[_]u8{ 0x55, 0x1D, 0x0F }, .key_usage },
+        .{ &[_]u8{ 0x55, 0x1D, 0x0A }, .basic_constraints },
         .{ &[_]u8{ 0x55, 0x1D, 0x10 }, .private_key_usage_period },
         .{ &[_]u8{ 0x55, 0x1D, 0x11 }, .subject_alt_name },
         .{ &[_]u8{ 0x55, 0x1D, 0x12 }, .issuer_alt_name },
         .{ &[_]u8{ 0x55, 0x1D, 0x13 }, .basic_constraints },
         .{ &[_]u8{ 0x55, 0x1D, 0x14 }, .crl_number },
+        .{ &[_]u8{ 0x55, 0x1D, 0x1F }, .crl_distribution_points },
         .{ &[_]u8{ 0x55, 0x1D, 0x20 }, .certificate_policies },
         .{ &[_]u8{ 0x55, 0x1D, 0x23 }, .authority_key_identifier },
+        .{ &[_]u8{ 0x55, 0x1D, 0x25 }, .ext_key_usage },
+        .{ &[_]u8{ 0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x15, 0x01 }, .msCertsrvCAVersion },
+        .{ &[_]u8{ 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x01 }, .info_access },
+        .{ &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF6, 0x7D, 0x07, 0x41, 0x00 }, .entrustVersInfo },
+        .{ &[_]u8{ 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x14, 0x02 }, .enroll_certtype },
+        .{ &[_]u8{ 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x0c }, .pe_logotype },
+        .{ &[_]u8{ 0x60, 0x86, 0x48, 0x01, 0x86, 0xf8, 0x42, 0x01, 0x01 }, .netscape_cert_type },
+        .{ &[_]u8{ 0x60, 0x86, 0x48, 0x01, 0x86, 0xf8, 0x42, 0x01, 0x0d }, .netscape_comment },
     });
 };
 
@@ -130,6 +169,7 @@ pub const Parsed = struct {
     message_slice: Slice,
     subject_alt_name_slice: Slice,
     validity: Validity,
+    version: Version,
 
     pub const PubKeyAlgo = union(AlgorithmCategory) {
         rsaEncryption: void,
@@ -235,6 +275,10 @@ pub const Parsed = struct {
                 parsed_issuer.pub_key_algo,
                 parsed_issuer.pubKey(),
             ),
+
+            .md2WithRSAEncryption, .md5WithRSAEncryption => {
+                return error.CertificateSignatureAlgorithmUnsupported;
+            },
         }
     }
 
@@ -272,36 +316,63 @@ pub const Parsed = struct {
         return error.CertificateHostMismatch;
     }
 
+    // Check hostname according to RFC2818 specification:
+    //
+    // If more than one identity of a given type is present in
+    // the certificate (e.g., more than one DNSName name, a match in any one
+    // of the set is considered acceptable.) Names may contain the wildcard
+    // character * which is considered to match any single domain name
+    // component or component fragment. E.g., *.a.com matches foo.a.com but
+    // not bar.foo.a.com. f*.com matches foo.com but not bar.com.
     fn checkHostName(host_name: []const u8, dns_name: []const u8) bool {
         if (mem.eql(u8, dns_name, host_name)) {
             return true; // exact match
         }
 
-        if (mem.startsWith(u8, dns_name, "*.")) {
-            // wildcard certificate, matches any subdomain
-            // TODO: I think wildcards are not supposed to match any prefix but
-            // only match exactly one subdomain.
-            if (mem.endsWith(u8, host_name, dns_name[1..])) {
-                // The host_name has a subdomain, but the important part matches.
-                return true;
-            }
-            if (mem.eql(u8, dns_name[2..], host_name)) {
-                // The host_name has no subdomain and matches exactly.
-                return true;
-            }
-        }
+        var it_host = std.mem.split(u8, host_name, ".");
+        var it_dns = std.mem.split(u8, dns_name, ".");
 
-        return false;
+        const len_match = while (true) {
+            const host = it_host.next();
+            const dns = it_dns.next();
+
+            if (host == null or dns == null) {
+                break host == null and dns == null;
+            }
+
+            // If not a wildcard and they dont
+            // match then there is no match.
+            if (mem.eql(u8, dns.?, "*") == false and mem.eql(u8, dns.?, host.?) == false) {
+                return false;
+            }
+        };
+
+        // If the components are not the same
+        // length then there is no match.
+        return len_match;
     }
 };
+
+test "Parsed.checkHostName" {
+    const expectEqual = std.testing.expectEqual;
+
+    try expectEqual(true, Parsed.checkHostName("ziglang.org", "ziglang.org"));
+    try expectEqual(true, Parsed.checkHostName("bar.ziglang.org", "*.ziglang.org"));
+    try expectEqual(false, Parsed.checkHostName("foo.bar.ziglang.org", "*.ziglang.org"));
+    try expectEqual(false, Parsed.checkHostName("ziglang.org", "zig*.org"));
+    try expectEqual(false, Parsed.checkHostName("lang.org", "zig*.org"));
+}
 
 pub fn parse(cert: Certificate) !Parsed {
     const cert_bytes = cert.buffer;
     const certificate = try der.Element.parse(cert_bytes, cert.index);
     const tbs_certificate = try der.Element.parse(cert_bytes, certificate.slice.start);
-    const version = try der.Element.parse(cert_bytes, tbs_certificate.slice.start);
-    try checkVersion(cert_bytes, version);
-    const serial_number = try der.Element.parse(cert_bytes, version.slice.end);
+    const version_elem = try der.Element.parse(cert_bytes, tbs_certificate.slice.start);
+    const version = try parseVersion(cert_bytes, version_elem);
+    const serial_number = if (@bitCast(u8, version_elem.identifier) == 0xa0)
+        try der.Element.parse(cert_bytes, version_elem.slice.end)
+    else
+        version_elem;
     // RFC 5280, section 4.1.2.3:
     // "This field MUST contain the same algorithm identifier as
     // the signatureAlgorithm field in the sequence Certificate."
@@ -348,13 +419,16 @@ pub fn parse(cert: Certificate) !Parsed {
             var atav_i = atav.slice.start;
             while (atav_i < atav.slice.end) {
                 const ty_elem = try der.Element.parse(cert_bytes, atav_i);
-                const ty = try parseAttribute(cert_bytes, ty_elem);
                 const val = try der.Element.parse(cert_bytes, ty_elem.slice.end);
+                atav_i = val.slice.end;
+                const ty = parseAttribute(cert_bytes, ty_elem) catch |err| switch (err) {
+                    error.CertificateHasUnrecognizedObjectId => continue,
+                    else => |e| return e,
+                };
                 switch (ty) {
                     .commonName => common_name = val.slice,
                     else => {},
                 }
-                atav_i = val.slice.end;
             }
             rdn_i = atav.slice.end;
         }
@@ -370,6 +444,9 @@ pub fn parse(cert: Certificate) !Parsed {
     // Extensions
     var subject_alt_name_slice = der.Element.Slice.empty;
     ext: {
+        if (version == .v1)
+            break :ext;
+
         if (pub_key_info.slice.end >= tbs_certificate.slice.end)
             break :ext;
 
@@ -415,6 +492,7 @@ pub fn parse(cert: Certificate) !Parsed {
             .not_after = not_after_utc,
         },
         .subject_alt_name_slice = subject_alt_name_slice,
+        .version = version,
     };
 }
 
@@ -588,12 +666,24 @@ fn parseEnum(comptime E: type, bytes: []const u8, element: der.Element) !E {
     return E.map.get(oid_bytes) orelse return error.CertificateHasUnrecognizedObjectId;
 }
 
-pub fn checkVersion(bytes: []const u8, version: der.Element) !void {
-    if (@bitCast(u8, version.identifier) != 0xa0 or
-        !mem.eql(u8, bytes[version.slice.start..version.slice.end], "\x02\x01\x02"))
-    {
-        return error.UnsupportedCertificateVersion;
+pub fn parseVersion(bytes: []const u8, version_elem: der.Element) !Version {
+    if (@bitCast(u8, version_elem.identifier) != 0xa0)
+        return .v1;
+
+    if (version_elem.slice.end - version_elem.slice.start != 3)
+        return error.CertificateFieldHasInvalidLength;
+
+    const encoded_version = bytes[version_elem.slice.start..version_elem.slice.end];
+
+    if (mem.eql(u8, encoded_version, "\x02\x01\x02")) {
+        return .v3;
+    } else if (mem.eql(u8, encoded_version, "\x02\x01\x01")) {
+        return .v2;
+    } else if (mem.eql(u8, encoded_version, "\x02\x01\x00")) {
+        return .v1;
     }
+
+    return error.UnsupportedCertificateVersion;
 }
 
 fn verifyRsa(
@@ -690,6 +780,9 @@ fn verify_ecdsa(
     };
 
     switch (sig_named_curve) {
+        .secp521r1 => {
+            return error.CertificateSignatureNamedCurveUnsupported;
+        },
         .secp384r1 => {
             const P = crypto.ecc.P384;
             const Ecdsa = crypto.sign.ecdsa.Ecdsa(P, Hash);

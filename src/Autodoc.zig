@@ -7,6 +7,7 @@ const Compilation = @import("Compilation.zig");
 const Module = @import("Module.zig");
 const File = Module.File;
 const Package = @import("Package.zig");
+const Tokenizer = std.zig.Tokenizer;
 const Zir = @import("Zir.zig");
 const Ref = Zir.Inst.Ref;
 const log = std.log.scoped(.autodoc);
@@ -214,8 +215,13 @@ pub fn generateZirData(self: *Autodoc) !void {
         .enclosing_type = main_type_index,
     };
 
-    try self.ast_nodes.append(self.arena, .{ .name = "(root)" });
+    const maybe_tldoc_comment = try self.getTLDocComment(file);
+    try self.ast_nodes.append(self.arena, .{
+        .name = "(root)",
+        .docs = maybe_tldoc_comment,
+    });
     try self.files.put(self.arena, file, main_type_index);
+
     _ = try self.walkInstruction(file, &root_scope, .{}, Zir.main_struct_inst, false);
 
     if (self.ref_paths_pending_on_decls.count() > 0) {
@@ -247,21 +253,14 @@ pub fn generateZirData(self: *Autodoc) !void {
         .comptimeExprs = self.comptime_exprs.items,
     };
 
-    if (self.doc_location.directory) |d| {
-        d.handle.makeDir(
-            self.doc_location.basename,
-        ) catch |e| switch (e) {
-            error.PathAlreadyExists => {},
-            else => |err| return err,
-        };
-    } else {
-        self.module.zig_cache_artifact_directory.handle.makeDir(
-            self.doc_location.basename,
-        ) catch |e| switch (e) {
-            error.PathAlreadyExists => {},
-            else => |err| return err,
-        };
-    }
+    const base_dir = self.doc_location.directory orelse
+        self.module.zig_cache_artifact_directory;
+
+    base_dir.handle.makeDir(self.doc_location.basename) catch |e| switch (e) {
+        error.PathAlreadyExists => {},
+        else => |err| return err,
+    };
+
     const output_dir = if (self.doc_location.directory) |d|
         try d.handle.openDir(self.doc_location.basename, .{})
     else
@@ -914,7 +913,11 @@ fn walkInstruction(
                     .parent = null,
                     .enclosing_type = main_type_index,
                 };
-                try self.ast_nodes.append(self.arena, .{ .name = "(root)" });
+                const maybe_tldoc_comment = try self.getTLDocComment(file);
+                try self.ast_nodes.append(self.arena, .{
+                    .name = "(root)",
+                    .docs = maybe_tldoc_comment,
+                });
                 try self.files.put(self.arena, new_file, main_type_index);
                 return self.walkInstruction(
                     new_file,
@@ -2506,16 +2509,25 @@ fn walkInstruction(
                     };
                 },
                 .variable => {
+                    const extra = file.zir.extraData(Zir.Inst.ExtendedVar, extended.operand);
+
                     const small = @bitCast(Zir.Inst.ExtendedVar.Small, extended.small);
-                    var extra_index: usize = extended.operand;
+                    var extra_index: usize = extra.end;
                     if (small.has_lib_name) extra_index += 1;
                     if (small.has_align) extra_index += 1;
 
-                    const value: DocData.WalkResult = if (small.has_init) .{
-                        .expr = .{ .void = .{} },
-                    } else .{
-                        .expr = .{ .void = .{} },
+                    const var_type = try self.walkRef(file, parent_scope, parent_src, extra.data.var_type, need_type);
+
+                    var value: DocData.WalkResult = .{
+                        .typeRef = var_type.expr,
+                        .expr = .{ .undefined = .{} },
                     };
+
+                    if (small.has_init) {
+                        const var_init_ref = @intToEnum(Ref, file.zir.extra[extra_index]);
+                        const var_init = try self.walkRef(file, parent_scope, parent_src, var_init_ref, need_type);
+                        value.expr = var_init.expr;
+                    }
 
                     return value;
                 },
@@ -3213,13 +3225,15 @@ fn walkDecls(
         //     .declRef => |d| .{ .declRef = d },
         // };
 
+        const kind: []const u8 = if (try self.declIsVar(file, value_pl_node.src_node, parent_src)) "var" else "const";
+
         self.decls.items[decls_slot_index] = .{
             ._analyzed = true,
             .name = name,
             .src = ast_node_index,
             //.typeRef = decl_type_ref,
             .value = walk_result,
-            .kind = "const", // find where this information can be found
+            .kind = kind,
         };
 
         // Unblock any pending decl path that was waiting for this decl.
@@ -4382,4 +4396,34 @@ fn srcLocInfo(
         .bytes = start,
         .src_node = sn,
     };
+}
+
+fn declIsVar(
+    self: Autodoc,
+    file: *File,
+    src_node: i32,
+    parent_src: SrcLocInfo,
+) !bool {
+    const sn = @intCast(u32, @intCast(i32, parent_src.src_node) + src_node);
+    const tree = try file.getTree(self.module.gpa);
+    const node_idx = @bitCast(Ast.Node.Index, sn);
+    const tokens = tree.nodes.items(.main_token);
+    const tags = tree.tokens.items(.tag);
+
+    const tok_idx = tokens[node_idx];
+
+    // tags[tok_idx] is the token called 'mut token' in AstGen
+    return (tags[tok_idx] == .keyword_var);
+}
+
+fn getTLDocComment(self: *Autodoc, file: *File) ![]const u8 {
+    const source = (try file.getSource(self.module.gpa)).bytes;
+    var tokenizer = Tokenizer.init(source);
+    var tok = tokenizer.next();
+    var comment = std.ArrayList(u8).init(self.arena);
+    while (tok.tag == .container_doc_comment) : (tok = tokenizer.next()) {
+        try comment.appendSlice(source[tok.loc.start + 3 .. tok.loc.end + 1]);
+    }
+
+    return comment.items;
 }
