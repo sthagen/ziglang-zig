@@ -4513,7 +4513,7 @@ pub fn faccessatW(dirfd: fd_t, sub_path_w: [*:0]const u16, mode: u32, flags: u32
     var nt_name = windows.UNICODE_STRING{
         .Length = path_len_bytes,
         .MaximumLength = path_len_bytes,
-        .Buffer = @intToPtr([*]u16, @ptrToInt(sub_path_w)),
+        .Buffer = @qualCast([*:0]u16, sub_path_w),
     };
     var attr = windows.OBJECT_ATTRIBUTES{
         .Length = @sizeOf(windows.OBJECT_ATTRIBUTES),
@@ -6028,7 +6028,7 @@ pub fn sendfile(
                     .BADF => unreachable, // Always a race condition.
                     .FAULT => unreachable, // Segmentation fault.
                     .OVERFLOW => unreachable, // We avoid passing too large of a `count`.
-                    .NOTCONN => unreachable, // `out_fd` is an unconnected socket.
+                    .NOTCONN => return error.BrokenPipe, // `out_fd` is an unconnected socket
 
                     .INVAL, .NOSYS => {
                         // EINVAL could be any of the following situations:
@@ -6096,7 +6096,7 @@ pub fn sendfile(
 
                     .BADF => unreachable, // Always a race condition.
                     .FAULT => unreachable, // Segmentation fault.
-                    .NOTCONN => unreachable, // `out_fd` is an unconnected socket.
+                    .NOTCONN => return error.BrokenPipe, // `out_fd` is an unconnected socket
 
                     .INVAL, .OPNOTSUPP, .NOTSOCK, .NOSYS => {
                         // EINVAL could be any of the following situations:
@@ -6178,7 +6178,7 @@ pub fn sendfile(
                     .BADF => unreachable, // Always a race condition.
                     .FAULT => unreachable, // Segmentation fault.
                     .INVAL => unreachable,
-                    .NOTCONN => unreachable, // `out_fd` is an unconnected socket.
+                    .NOTCONN => return error.BrokenPipe, // `out_fd` is an unconnected socket
 
                     .OPNOTSUPP, .NOTSOCK, .NOSYS => break :sf,
 
@@ -6472,7 +6472,7 @@ pub fn recvfrom(
                 .BADF => unreachable, // always a race condition
                 .FAULT => unreachable,
                 .INVAL => unreachable,
-                .NOTCONN => unreachable,
+                .NOTCONN => return error.SocketNotConnected,
                 .NOTSOCK => unreachable,
                 .INTR => continue,
                 .AGAIN => return error.WouldBlock,
