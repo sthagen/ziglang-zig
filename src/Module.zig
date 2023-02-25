@@ -144,10 +144,6 @@ stage1_flags: packed struct {
 } = .{},
 
 job_queued_update_builtin_zig: bool = true,
-/// This makes it so that we can run `zig test` on the standard library.
-/// Otherwise, the logic for scanning test decls skips all of them because
-/// `main_pkg != std_pkg`.
-main_pkg_is_std: bool,
 
 compile_log_text: ArrayListUnmanaged(u8) = .{},
 
@@ -268,7 +264,7 @@ pub const MemoizedCall = struct {
         if (a.func != b.func) return false;
 
         assert(a.args.len == b.args.len);
-        for (a.args) |a_arg, arg_i| {
+        for (a.args, 0..) |a_arg, arg_i| {
             const b_arg = b.args[arg_i];
             if (!a_arg.eql(b_arg, ctx.module)) {
                 return false;
@@ -1082,7 +1078,7 @@ pub const Struct = struct {
         assert(s.layout == .Packed);
         assert(s.haveLayout());
         var bit_sum: u64 = 0;
-        for (s.fields.values()) |field, i| {
+        for (s.fields.values(), 0..) |field, i| {
             if (i == index) {
                 return @intCast(u16, bit_sum);
             }
@@ -1341,7 +1337,7 @@ pub const Union = struct {
         assert(u.haveFieldTypes());
         var most_alignment: u32 = 0;
         var most_index: usize = undefined;
-        for (u.fields.values()) |field, i| {
+        for (u.fields.values(), 0..) |field, i| {
             if (!field.ty.hasRuntimeBits()) continue;
 
             const field_align = field.normalAlignment(target);
@@ -1405,7 +1401,7 @@ pub const Union = struct {
         var payload_size: u64 = 0;
         var payload_align: u32 = 0;
         const fields = u.fields.values();
-        for (fields) |field, i| {
+        for (fields, 0..) |field, i| {
             if (!field.ty.hasRuntimeBitsIgnoreComptime()) continue;
 
             const field_align = a: {
@@ -1950,7 +1946,7 @@ pub const File = struct {
     prev_zir: ?*Zir = null,
 
     /// A single reference to a file.
-    const Reference = union(enum) {
+    pub const Reference = union(enum) {
         /// The file is imported directly (i.e. not as a package) with @import.
         import: SrcLoc,
         /// The file is the root of a package.
@@ -2113,7 +2109,27 @@ pub const File = struct {
 
     /// Add a reference to this file during AstGen.
     pub fn addReference(file: *File, mod: Module, ref: Reference) !void {
-        try file.references.append(mod.gpa, ref);
+        // Don't add the same module root twice. Note that since we always add module roots at the
+        // front of the references array (see below), this loop is actually O(1) on valid code.
+        if (ref == .root) {
+            for (file.references.items) |other| {
+                switch (other) {
+                    .root => |r| if (ref.root == r) return,
+                    else => break, // reached the end of the "is-root" references
+                }
+            }
+        }
+
+        switch (ref) {
+            // We put root references at the front of the list both to make the above loop fast and
+            // to make multi-module errors more helpful (since "root-of" notes are generally more
+            // informative than "imported-from" notes). This path is hit very rarely, so the speed
+            // of the insert operation doesn't matter too much.
+            .root => try file.references.insert(mod.gpa, 0, ref),
+
+            // Other references we'll just put at the end.
+            else => try file.references.append(mod.gpa, ref),
+        }
 
         const pkg = switch (ref) {
             .import => |loc| loc.file_scope.pkg,
@@ -2128,7 +2144,10 @@ pub const File = struct {
         file.multi_pkg = true;
         file.status = .astgen_failure;
 
-        std.debug.assert(file.zir_loaded);
+        // We can only mark children as failed if the ZIR is loaded, which may not
+        // be the case if there were other astgen failures in this file
+        if (!file.zir_loaded) return;
+
         const imports_index = file.zir.extra[@enumToInt(Zir.ExtraIndex.imports)];
         if (imports_index == 0) return;
         const extra = file.zir.extraData(Zir.Inst.Imports, imports_index);
@@ -2461,6 +2480,55 @@ pub const SrcLoc = struct {
                     else => unreachable,
                 };
                 return nodeToSpan(tree, src_node);
+            },
+            .for_input => |for_input| {
+                const tree = try src_loc.file_scope.getTree(gpa);
+                const node = src_loc.declRelativeToNodeIndex(for_input.for_node_offset);
+                const for_full = tree.fullFor(node).?;
+                const src_node = for_full.ast.inputs[for_input.input_index];
+                return nodeToSpan(tree, src_node);
+            },
+            .for_capture_from_input => |node_off| {
+                const tree = try src_loc.file_scope.getTree(gpa);
+                const token_tags = tree.tokens.items(.tag);
+                const input_node = src_loc.declRelativeToNodeIndex(node_off);
+                // We have to actually linear scan the whole AST to find the for loop
+                // that contains this input.
+                const node_tags = tree.nodes.items(.tag);
+                for (node_tags, 0..) |node_tag, node_usize| {
+                    const node = @intCast(Ast.Node.Index, node_usize);
+                    switch (node_tag) {
+                        .for_simple, .@"for" => {
+                            const for_full = tree.fullFor(node).?;
+                            for (for_full.ast.inputs, 0..) |input, input_index| {
+                                if (input_node == input) {
+                                    var count = input_index;
+                                    var tok = for_full.payload_token;
+                                    while (true) {
+                                        switch (token_tags[tok]) {
+                                            .comma => {
+                                                count -= 1;
+                                                tok += 1;
+                                            },
+                                            .identifier => {
+                                                if (count == 0)
+                                                    return tokensToSpan(tree, tok, tok + 1, tok);
+                                                tok += 1;
+                                            },
+                                            .asterisk => {
+                                                if (count == 0)
+                                                    return tokensToSpan(tree, tok, tok + 2, tok);
+                                                tok += 1;
+                                            },
+                                            else => unreachable,
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        else => continue,
+                    }
+                } else unreachable;
             },
             .node_offset_bin_lhs => |node_off| {
                 const tree = try src_loc.file_scope.getTree(gpa);
@@ -3114,6 +3182,20 @@ pub const LazySrcLoc = union(enum) {
     /// The source location points to the RHS of an assignment.
     /// The Decl is determined contextually.
     node_offset_store_operand: i32,
+    /// The source location points to a for loop input.
+    /// The Decl is determined contextually.
+    for_input: struct {
+        /// Points to the for loop AST node.
+        for_node_offset: i32,
+        /// Picks one of the inputs from the condition.
+        input_index: u32,
+    },
+    /// The source location points to one of the captures of a for loop, found
+    /// by taking this AST node index offset from the containing
+    /// Decl AST node, which points to one of the input nodes of a for loop.
+    /// Next, navigate to the corresponding capture.
+    /// The Decl is determined contextually.
+    for_capture_from_input: i32,
 
     pub const nodeOffset = if (TracedOffset.want_tracing) nodeOffsetDebug else nodeOffsetRelease;
 
@@ -3200,6 +3282,8 @@ pub const LazySrcLoc = union(enum) {
             .node_offset_init_ty,
             .node_offset_store_ptr,
             .node_offset_store_operand,
+            .for_input,
+            .for_capture_from_input,
             => .{
                 .file_scope = decl.getFileScope(),
                 .parent_decl_node = decl.src_node,
@@ -3258,10 +3342,19 @@ pub fn deinit(mod: *Module) void {
     // The callsite of `Compilation.create` owns the `main_pkg`, however
     // Module owns the builtin and std packages that it adds.
     if (mod.main_pkg.table.fetchRemove("builtin")) |kv| {
+        gpa.free(kv.key);
         kv.value.destroy(gpa);
     }
     if (mod.main_pkg.table.fetchRemove("std")) |kv| {
-        kv.value.destroy(gpa);
+        gpa.free(kv.key);
+        // It's possible for main_pkg to be std when running 'zig test'! In this case, we must not
+        // destroy it, since it would lead to a double-free.
+        if (kv.value != mod.main_pkg) {
+            kv.value.destroy(gpa);
+        }
+    }
+    if (mod.main_pkg.table.fetchRemove("root")) |kv| {
+        gpa.free(kv.key);
     }
     if (mod.root_pkg != mod.main_pkg) {
         mod.root_pkg.destroy(gpa);
@@ -3553,7 +3646,7 @@ pub fn astGenFile(mod: *Module, file: *File) !void {
             }
             if (data_has_safety_tag) {
                 const tags = zir.instructions.items(.tag);
-                for (zir.instructions.items(.data)) |*data, i| {
+                for (zir.instructions.items(.data), 0..) |*data, i| {
                     const union_tag = Zir.Inst.Tag.data_tags[@enumToInt(tags[i])];
                     const as_struct = @ptrCast(*HackDataLayout, data);
                     as_struct.* = .{
@@ -3740,7 +3833,7 @@ pub fn astGenFile(mod: *Module, file: *File) !void {
         @ptrCast([*]const u8, file.zir.instructions.items(.data).ptr);
     if (data_has_safety_tag) {
         // The `Data` union has a safety tag but in the file format we store it without.
-        for (file.zir.instructions.items(.data)) |*data, i| {
+        for (file.zir.instructions.items(.data), 0..) |*data, i| {
             const as_struct = @ptrCast(*const HackDataLayout, data);
             safety_buffer[i] = as_struct.data;
         }
@@ -4743,11 +4836,14 @@ pub fn importPkg(mod: *Module, pkg: *Package) !ImportFileResult {
 
     const gop = try mod.import_table.getOrPut(gpa, resolved_path);
     errdefer _ = mod.import_table.pop();
-    if (gop.found_existing) return ImportFileResult{
-        .file = gop.value_ptr.*,
-        .is_new = false,
-        .is_pkg = true,
-    };
+    if (gop.found_existing) {
+        try gop.value_ptr.*.addReference(mod.*, .{ .root = pkg });
+        return ImportFileResult{
+            .file = gop.value_ptr.*,
+            .is_new = false,
+            .is_pkg = true,
+        };
+    }
 
     const sub_file_path = try gpa.dupe(u8, pkg.root_src_path);
     errdefer gpa.free(sub_file_path);
@@ -5143,22 +5239,14 @@ fn scanDecl(iter: *ScanDeclIter, decl_sub_index: usize, flags: u4) Allocator.Err
                 // test decl with no name. Skip the part where we check against
                 // the test name filter.
                 if (!comp.bin_file.options.is_test) break :blk false;
-                if (decl_pkg != mod.main_pkg) {
-                    if (!mod.main_pkg_is_std) break :blk false;
-                    const std_pkg = mod.main_pkg.table.get("std").?;
-                    if (std_pkg != decl_pkg) break :blk false;
-                }
+                if (decl_pkg != mod.main_pkg) break :blk false;
                 try mod.test_functions.put(gpa, new_decl_index, {});
                 break :blk true;
             },
             else => blk: {
                 if (!is_named_test) break :blk false;
                 if (!comp.bin_file.options.is_test) break :blk false;
-                if (decl_pkg != mod.main_pkg) {
-                    if (!mod.main_pkg_is_std) break :blk false;
-                    const std_pkg = mod.main_pkg.table.get("std").?;
-                    if (std_pkg != decl_pkg) break :blk false;
-                }
+                if (decl_pkg != mod.main_pkg) break :blk false;
                 if (comp.test_filter) |test_filter| {
                     if (mem.indexOf(u8, decl_name, test_filter) == null) {
                         break :blk false;
@@ -6293,7 +6381,7 @@ pub fn populateTestFunctions(
         // Add a dependency on each test name and function pointer.
         try array_decl.dependencies.ensureUnusedCapacity(gpa, test_fn_vals.len * 2);
 
-        for (mod.test_functions.keys()) |test_decl_index, i| {
+        for (mod.test_functions.keys(), 0..) |test_decl_index, i| {
             const test_decl = mod.declPtr(test_decl_index);
             const test_name_slice = mem.sliceTo(test_decl.name, 0);
             const test_name_decl_index = n: {

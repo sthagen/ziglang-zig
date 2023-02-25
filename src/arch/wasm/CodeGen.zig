@@ -1255,7 +1255,7 @@ fn genFunc(func: *CodeGen) InnerError!void {
         // reserve space and insert all prologue instructions at the front of the instruction list
         // We insert them in reserve order as there is no insertSlice in multiArrayList.
         try func.mir_instructions.ensureUnusedCapacity(func.gpa, prologue.items.len);
-        for (prologue.items) |_, index| {
+        for (prologue.items, 0..) |_, index| {
             const inst = prologue.items[prologue.items.len - 1 - index];
             func.mir_instructions.insertAssumeCapacity(0, inst);
         }
@@ -2896,7 +2896,7 @@ fn lowerConstant(func: *CodeGen, arg_val: Value, ty: Type) InnerError!WValue {
             const struct_obj = ty.castTag(.@"struct").?.data;
             assert(struct_obj.layout == .Packed);
             var buf: [8]u8 = .{0} ** 8; // zero the buffer so we do not read 0xaa as integer
-            val.writeToPackedMemory(ty, func.bin_file.base.options.module.?, &buf, 0);
+            val.writeToPackedMemory(ty, func.bin_file.base.options.module.?, &buf, 0) catch unreachable;
             var payload: Value.Payload.U64 = .{
                 .base = .{ .tag = .int_u64 },
                 .data = std.mem.readIntLittle(u64, &buf),
@@ -2907,7 +2907,7 @@ fn lowerConstant(func: *CodeGen, arg_val: Value, ty: Type) InnerError!WValue {
         .Vector => {
             assert(determineSimdStoreStrategy(ty, target) == .direct);
             var buf: [16]u8 = undefined;
-            val.writeToMemory(ty, func.bin_file.base.options.module.?, &buf);
+            val.writeToMemory(ty, func.bin_file.base.options.module.?, &buf) catch unreachable;
             return func.storeSimdImmd(buf);
         },
         else => |zig_type| return func.fail("Wasm TODO: LowerConstant for zigTypeTag {}", .{zig_type}),
@@ -3117,7 +3117,7 @@ fn mergeBranch(func: *CodeGen, branch: *const Branch) !void {
     const target_values = target_slice.items(.value);
 
     try parent.values.ensureUnusedCapacity(func.gpa, branch.values.count());
-    for (target_keys) |key, index| {
+    for (target_keys, 0..) |key, index| {
         // TODO: process deaths from branches
         parent.values.putAssumeCapacity(key, target_values[index]);
     }
@@ -3501,7 +3501,7 @@ fn airSwitchBr(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         const values = try func.gpa.alloc(CaseValue, items.len);
         errdefer func.gpa.free(values);
 
-        for (items) |ref, i| {
+        for (items, 0..) |ref, i| {
             const item_val = func.air.value(ref).?;
             const int_val = func.valueAsI32(item_val, target_ty);
             if (lowest_maybe == null or int_val < lowest_maybe.?) {
@@ -3561,7 +3561,7 @@ fn airSwitchBr(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         while (value <= highest) : (value += 1) {
             // idx represents the branch we jump to
             const idx = blk: {
-                for (case_list.items) |case, idx| {
+                for (case_list.items, 0..) |case, idx| {
                     for (case.values) |case_value| {
                         if (case_value.integer == value) break :blk @intCast(u32, idx);
                     }
@@ -3588,7 +3588,7 @@ fn airSwitchBr(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     };
 
     try func.branches.ensureUnusedCapacity(func.gpa, case_list.items.len + @boolToInt(has_else_body));
-    for (case_list.items) |case, index| {
+    for (case_list.items, 0..) |case, index| {
         // when sparse, we use if/else-chain, so emit conditional checks
         if (is_sparse) {
             // for single value prong we can emit a simple if
@@ -4558,7 +4558,7 @@ fn airAggregateInit(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                     // copy stack pointer into a temporary local, which is
                     // moved for each element to store each value in the right position.
                     const offset = try func.buildPointerOffset(result, 0, .new);
-                    for (elements) |elem, elem_index| {
+                    for (elements, 0..) |elem, elem_index| {
                         const elem_val = try func.resolveInst(elem);
                         try func.store(offset, elem_val, elem_ty, 0);
 
@@ -4587,7 +4587,7 @@ fn airAggregateInit(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                     // we ensure a new local is created so it's zero-initialized
                     const result = try func.ensureAllocLocal(backing_type);
                     var current_bit: u16 = 0;
-                    for (elements) |elem, elem_index| {
+                    for (elements, 0..) |elem, elem_index| {
                         const field = fields[elem_index];
                         if (!field.ty.hasRuntimeBitsIgnoreComptime()) continue;
 
@@ -4623,7 +4623,7 @@ fn airAggregateInit(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                 else => {
                     const result = try func.allocStack(result_ty);
                     const offset = try func.buildPointerOffset(result, 0, .new); // pointer to offset
-                    for (elements) |elem, elem_index| {
+                    for (elements, 0..) |elem, elem_index| {
                         if (result_ty.structFieldValueComptime(elem_index) != null) continue;
 
                         const elem_ty = result_ty.structFieldType(elem_index);
@@ -4944,8 +4944,8 @@ fn airFieldParentPtr(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     if (func.liveness.isUnused(inst)) return func.finishAir(inst, .none, &.{extra.field_ptr});
 
     const field_ptr = try func.resolveInst(extra.field_ptr);
-    const struct_ty = func.air.getRefType(ty_pl.ty).childType();
-    const field_offset = struct_ty.structFieldOffset(extra.field_index, func.target);
+    const parent_ty = func.air.getRefType(ty_pl.ty).childType();
+    const field_offset = parent_ty.structFieldOffset(extra.field_index, func.target);
 
     const result = if (field_offset != 0) result: {
         const base = try func.buildPointerOffset(field_ptr, 0, .new);
@@ -6149,7 +6149,7 @@ fn callIntrinsic(
     } else WValue{ .none = {} };
 
     // Lower all arguments to the stack before we call our function
-    for (args) |arg, arg_i| {
+    for (args, 0..) |arg, arg_i| {
         assert(!(want_sret_param and arg == .stack));
         assert(param_types[arg_i].hasRuntimeBitsIgnoreComptime());
         try func.lowerArg(.C, param_types[arg_i], arg);

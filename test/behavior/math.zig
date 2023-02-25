@@ -1221,7 +1221,7 @@ test "quad hex float literal parsing accurate" {
                 0xb6a0000000000000,
             };
 
-            for (exp2ft) |x, i| {
+            for (exp2ft, 0..) |x, i| {
                 try expect(@bitCast(u64, x) == answers[i]);
             }
         }
@@ -1463,7 +1463,6 @@ test "vector integer addition" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const S = struct {

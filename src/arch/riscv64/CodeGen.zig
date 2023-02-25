@@ -1689,7 +1689,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
     // Due to incremental compilation, how function calls are generated depends
     // on linking.
     if (self.bin_file.cast(link.File.Elf)) |elf_file| {
-        for (info.args) |mc_arg, arg_i| {
+        for (info.args, 0..) |mc_arg, arg_i| {
             const arg = args[arg_i];
             const arg_ty = self.air.typeOf(arg);
             const arg_mcv = try self.resolveInst(args[arg_i]);
@@ -2338,7 +2338,20 @@ fn airPtrToInt(self: *Self, inst: Air.Inst.Index) !void {
 
 fn airBitCast(self: *Self, inst: Air.Inst.Index) !void {
     const ty_op = self.air.instructions.items(.data)[inst].ty_op;
-    const result = try self.resolveInst(ty_op.operand);
+    const result = if (self.liveness.isUnused(inst)) .dead else result: {
+        const operand = try self.resolveInst(ty_op.operand);
+        if (self.reuseOperand(inst, ty_op.operand, 0, operand)) break :result operand;
+
+        const operand_lock = switch (operand) {
+            .register => |reg| self.register_manager.lockReg(reg),
+            else => null,
+        };
+        defer if (operand_lock) |lock| self.register_manager.unlockReg(lock);
+
+        const dest = try self.allocRegOrMem(inst, true);
+        try self.setRegOrMem(self.air.typeOfIndex(inst), dest, operand);
+        break :result dest;
+    };
     return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
 }
 
@@ -2727,7 +2740,7 @@ fn resolveCallingConventionValues(self: *Self, fn_ty: Type) !CallMCValues {
             var next_stack_offset: u32 = 0;
             const argument_registers = [_]Register{ .a0, .a1, .a2, .a3, .a4, .a5, .a6, .a7 };
 
-            for (param_types) |ty, i| {
+            for (param_types, 0..) |ty, i| {
                 const param_size = @intCast(u32, ty.abiSize(self.target.*));
                 if (param_size <= 8) {
                     if (next_register < argument_registers.len) {
