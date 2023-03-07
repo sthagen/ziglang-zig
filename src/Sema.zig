@@ -574,11 +574,13 @@ pub const Block = struct {
         });
     }
 
-    fn addCmpVector(block: *Block, lhs: Air.Inst.Ref, rhs: Air.Inst.Ref, cmp_op: std.math.CompareOperator, vector_ty: Air.Inst.Ref) !Air.Inst.Ref {
+    fn addCmpVector(block: *Block, lhs: Air.Inst.Ref, rhs: Air.Inst.Ref, cmp_op: std.math.CompareOperator) !Air.Inst.Ref {
         return block.addInst(.{
             .tag = if (block.float_mode == .Optimized) .cmp_vector_optimized else .cmp_vector,
             .data = .{ .ty_pl = .{
-                .ty = vector_ty,
+                .ty = try block.sema.addType(
+                    try Type.vector(block.sema.arena, block.sema.typeOf(lhs).vectorLen(), Type.bool),
+                ),
                 .payload = try block.sema.addExtra(Air.VectorCmp{
                     .lhs = lhs,
                     .rhs = rhs,
@@ -1101,6 +1103,7 @@ fn analyzeBodyInner(
             .@"unreachable" => break sema.zirUnreachable(block, inst),
             .panic          => break sema.zirPanic(block, inst, false),
             .panic_comptime => break sema.zirPanic(block, inst, true),
+            .trap           => break sema.zirTrap(block, inst),
             // zig fmt: on
 
             .extended => ext: {
@@ -1164,6 +1167,11 @@ fn analyzeBodyInner(
                     },
                     .set_align_stack => {
                         try sema.zirSetAlignStack(block, extended);
+                        i += 1;
+                        continue;
+                    },
+                    .set_cold => {
+                        try sema.zirSetCold(block, extended);
                         i += 1;
                         continue;
                     },
@@ -1301,11 +1309,6 @@ fn analyzeBodyInner(
             },
             .export_value => {
                 try sema.zirExportValue(block, inst);
-                i += 1;
-                continue;
-            },
-            .set_cold => {
-                try sema.zirSetCold(block, inst);
                 i += 1;
                 continue;
             },
@@ -5144,6 +5147,14 @@ fn zirPanic(sema: *Sema, block: *Block, inst: Zir.Inst.Index, force_comptime: bo
     return always_noreturn;
 }
 
+fn zirTrap(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Zir.Inst.Index {
+    const src_node = sema.code.instructions.items(.data)[inst].node;
+    const src = LazySrcLoc.nodeOffset(src_node);
+    sema.src = src;
+    _ = try block.addNoOp(.trap);
+    return always_noreturn;
+}
+
 fn zirLoop(sema: *Sema, parent_block: *Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
     const tracy = trace(@src());
     defer tracy.end();
@@ -5721,10 +5732,10 @@ fn zirSetAlignStack(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.Inst
     gop.value_ptr.* = .{ .alignment = alignment, .src = src };
 }
 
-fn zirSetCold(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!void {
-    const inst_data = sema.code.instructions.items(.data)[inst].un_node;
-    const operand_src: LazySrcLoc = .{ .node_offset_builtin_call_arg0 = inst_data.src_node };
-    const is_cold = try sema.resolveConstBool(block, operand_src, inst_data.operand, "operand to @setCold must be comptime-known");
+fn zirSetCold(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstData) CompileError!void {
+    const extra = sema.code.extraData(Zir.Inst.UnNode, extended.operand).data;
+    const operand_src: LazySrcLoc = .{ .node_offset_builtin_call_arg0 = extra.node };
+    const is_cold = try sema.resolveConstBool(block, operand_src, extra.operand, "operand to @setCold must be comptime-known");
     const func = sema.func orelse return; // does nothing outside a function
     func.is_cold = is_cold;
 }
@@ -9403,7 +9414,7 @@ fn intCast(
                 const ok = if (is_vector) ok: {
                     const zeros = try Value.Tag.repeated.create(sema.arena, Value.zero);
                     const zero_inst = try sema.addConstant(sema.typeOf(operand), zeros);
-                    const is_in_range = try block.addCmpVector(operand, zero_inst, .eq, try sema.addType(operand_ty));
+                    const is_in_range = try block.addCmpVector(operand, zero_inst, .eq);
                     const all_in_range = try block.addInst(.{
                         .tag = .reduce,
                         .data = .{ .reduce = .{ .operand = is_in_range, .operation = .And } },
@@ -9457,7 +9468,7 @@ fn intCast(
                 const dest_range = try sema.addConstant(unsigned_operand_ty, dest_range_val);
 
                 const ok = if (is_vector) ok: {
-                    const is_in_range = try block.addCmpVector(diff_unsigned, dest_range, .lte, try sema.addType(operand_ty));
+                    const is_in_range = try block.addCmpVector(diff_unsigned, dest_range, .lte);
                     const all_in_range = try block.addInst(.{
                         .tag = if (block.float_mode == .Optimized) .reduce_optimized else .reduce,
                         .data = .{ .reduce = .{
@@ -9474,7 +9485,7 @@ fn intCast(
                 try sema.addSafetyCheck(block, ok, .cast_truncated_data);
             } else {
                 const ok = if (is_vector) ok: {
-                    const is_in_range = try block.addCmpVector(diff, dest_max, .lte, try sema.addType(operand_ty));
+                    const is_in_range = try block.addCmpVector(diff, dest_max, .lte);
                     const all_in_range = try block.addInst(.{
                         .tag = if (block.float_mode == .Optimized) .reduce_optimized else .reduce,
                         .data = .{ .reduce = .{
@@ -9495,7 +9506,7 @@ fn intCast(
             const ok = if (is_vector) ok: {
                 const zero_val = try Value.Tag.repeated.create(sema.arena, Value.zero);
                 const zero_inst = try sema.addConstant(operand_ty, zero_val);
-                const is_in_range = try block.addCmpVector(operand, zero_inst, .gte, try sema.addType(operand_ty));
+                const is_in_range = try block.addCmpVector(operand, zero_inst, .gte);
                 const all_in_range = try block.addInst(.{
                     .tag = if (block.float_mode == .Optimized) .reduce_optimized else .reduce,
                     .data = .{ .reduce = .{
@@ -12007,7 +12018,7 @@ fn zirShl(
 
             const ok = if (rhs_ty.zigTypeTag() == .Vector) ok: {
                 const bit_count_inst = try sema.addConstant(rhs_ty, try Value.Tag.repeated.create(sema.arena, bit_count_val));
-                const lt = try block.addCmpVector(rhs, bit_count_inst, .lt, try sema.addType(rhs_ty));
+                const lt = try block.addCmpVector(rhs, bit_count_inst, .lt);
                 break :ok try block.addInst(.{
                     .tag = .reduce,
                     .data = .{ .reduce = .{
@@ -12163,7 +12174,7 @@ fn zirShr(
 
             const ok = if (rhs_ty.zigTypeTag() == .Vector) ok: {
                 const bit_count_inst = try sema.addConstant(rhs_ty, try Value.Tag.repeated.create(sema.arena, bit_count_val));
-                const lt = try block.addCmpVector(rhs, bit_count_inst, .lt, try sema.addType(rhs_ty));
+                const lt = try block.addCmpVector(rhs, bit_count_inst, .lt);
                 break :ok try block.addInst(.{
                     .tag = .reduce,
                     .data = .{ .reduce = .{
@@ -12182,7 +12193,7 @@ fn zirShr(
             const back = try block.addBinOp(.shl, result, rhs);
 
             const ok = if (rhs_ty.zigTypeTag() == .Vector) ok: {
-                const eql = try block.addCmpVector(lhs, back, .eq, try sema.addType(rhs_ty));
+                const eql = try block.addCmpVector(lhs, back, .eq);
                 break :ok try block.addInst(.{
                     .tag = if (block.float_mode == .Optimized) .reduce_optimized else .reduce,
                     .data = .{ .reduce = .{
@@ -13183,7 +13194,7 @@ fn zirDivExact(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             const floored = try block.addUnOp(.floor, result);
 
             if (resolved_type.zigTypeTag() == .Vector) {
-                const eql = try block.addCmpVector(result, floored, .eq, try sema.addType(resolved_type));
+                const eql = try block.addCmpVector(result, floored, .eq);
                 break :ok try block.addInst(.{
                     .tag = switch (block.float_mode) {
                         .Strict => .reduce,
@@ -13207,7 +13218,7 @@ fn zirDivExact(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             if (resolved_type.zigTypeTag() == .Vector) {
                 const zero_val = try Value.Tag.repeated.create(sema.arena, Value.zero);
                 const zero = try sema.addConstant(resolved_type, zero_val);
-                const eql = try block.addCmpVector(remainder, zero, .eq, try sema.addType(resolved_type));
+                const eql = try block.addCmpVector(remainder, zero, .eq);
                 break :ok try block.addInst(.{
                     .tag = .reduce,
                     .data = .{ .reduce = .{
@@ -13505,14 +13516,13 @@ fn addDivIntOverflowSafety(
 
     var ok: Air.Inst.Ref = .none;
     if (resolved_type.zigTypeTag() == .Vector) {
-        const vector_ty_ref = try sema.addType(resolved_type);
         if (maybe_lhs_val == null) {
             const min_int_ref = try sema.addConstant(resolved_type, min_int);
-            ok = try block.addCmpVector(casted_lhs, min_int_ref, .neq, vector_ty_ref);
+            ok = try block.addCmpVector(casted_lhs, min_int_ref, .neq);
         }
         if (maybe_rhs_val == null) {
             const neg_one_ref = try sema.addConstant(resolved_type, neg_one);
-            const rhs_ok = try block.addCmpVector(casted_rhs, neg_one_ref, .neq, vector_ty_ref);
+            const rhs_ok = try block.addCmpVector(casted_rhs, neg_one_ref, .neq);
             if (ok == .none) {
                 ok = rhs_ok;
             } else {
@@ -13564,7 +13574,7 @@ fn addDivByZeroSafety(
     const ok = if (resolved_type.zigTypeTag() == .Vector) ok: {
         const zero_val = try Value.Tag.repeated.create(sema.arena, Value.zero);
         const zero = try sema.addConstant(resolved_type, zero_val);
-        const ok = try block.addCmpVector(casted_rhs, zero, .neq, try sema.addType(resolved_type));
+        const ok = try block.addCmpVector(casted_rhs, zero, .neq);
         break :ok try block.addInst(.{
             .tag = if (is_int) .reduce else .reduce_optimized,
             .data = .{ .reduce = .{
@@ -15193,9 +15203,7 @@ fn cmpSelf(
     };
     try sema.requireRuntimeBlock(block, src, runtime_src);
     if (resolved_type.zigTypeTag() == .Vector) {
-        const result_ty = try Type.vector(sema.arena, resolved_type.vectorLen(), Type.bool);
-        const result_ty_ref = try sema.addType(result_ty);
-        return block.addCmpVector(casted_lhs, casted_rhs, op, result_ty_ref);
+        return block.addCmpVector(casted_lhs, casted_rhs, op);
     }
     const tag = Air.Inst.Tag.fromCmpOp(op, block.float_mode == .Optimized);
     return block.addBinOp(tag, casted_lhs, casted_rhs);
@@ -23026,7 +23034,7 @@ fn panicSentinelMismatch(
 
     const ok = if (sentinel_ty.zigTypeTag() == .Vector) ok: {
         const eql =
-            try parent_block.addCmpVector(expected_sentinel, actual_sentinel, .eq, try sema.addType(sentinel_ty));
+            try parent_block.addCmpVector(expected_sentinel, actual_sentinel, .eq);
         break :ok try parent_block.addInst(.{
             .tag = .reduce,
             .data = .{ .reduce = .{
@@ -29359,8 +29367,7 @@ fn cmpVector(
     };
 
     try sema.requireRuntimeBlock(block, src, runtime_src);
-    const result_ty_inst = try sema.addType(result_ty);
-    return block.addCmpVector(lhs, rhs, op, result_ty_inst);
+    return block.addCmpVector(lhs, rhs, op);
 }
 
 fn wrapOptional(
