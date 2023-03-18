@@ -29,7 +29,7 @@ const Allocator = std.mem.Allocator;
 const Preopen = std.fs.wasi.Preopen;
 const PreopenList = std.fs.wasi.PreopenList;
 
-pub const darwin = @import("os/darwin.zig");
+pub const darwin = std.c;
 pub const dragonfly = std.c;
 pub const freebsd = std.c;
 pub const haiku = std.c;
@@ -41,7 +41,6 @@ pub const plan9 = @import("os/plan9.zig");
 pub const uefi = @import("os/uefi.zig");
 pub const wasi = @import("os/wasi.zig");
 pub const windows = @import("os/windows.zig");
-pub const ptrace = @import("os/ptrace.zig");
 
 comptime {
     assert(@import("std") == std); // std lib tests require --zig-lib-dir
@@ -766,6 +765,9 @@ pub fn read(fd: fd_t, buf: []u8) ReadError!usize {
 /// This operation is non-atomic on the following systems:
 /// * Windows
 /// On these systems, the read races with concurrent writes to the same file descriptor.
+///
+/// This function assumes that all vectors, including zero-length vectors, have
+/// a pointer within the address space of the application.
 pub fn readv(fd: fd_t, iov: []const iovec) ReadError!usize {
     if (builtin.os.tag == .windows) {
         // TODO improve this to use ReadFileScatter
@@ -1167,6 +1169,9 @@ pub fn write(fd: fd_t, bytes: []const u8) WriteError!usize {
 /// used to perform the I/O. `error.WouldBlock` is not possible on Windows.
 ///
 /// If `iov.len` is larger than `IOV_MAX`, a partial write will occur.
+///
+/// This function assumes that all vectors, including zero-length vectors, have
+/// a pointer within the address space of the application.
 pub fn writev(fd: fd_t, iov: []const iovec_const) WriteError!usize {
     if (builtin.os.tag == .windows) {
         // TODO improve this to use WriteFileScatter
@@ -3469,7 +3474,7 @@ pub fn bind(sock: socket_t, addr: *const sockaddr, len: socklen_t) BindError!voi
         const rc = system.bind(sock, addr, len);
         switch (errno(rc)) {
             .SUCCESS => return,
-            .ACCES => return error.AccessDenied,
+            .ACCES, .PERM => return error.AccessDenied,
             .ADDRINUSE => return error.AddressInUse,
             .BADF => unreachable, // always a race condition if this error is returned
             .INVAL => unreachable, // invalid parameters
@@ -4000,8 +4005,28 @@ pub const WaitPidResult = struct {
 pub fn waitpid(pid: pid_t, flags: u32) WaitPidResult {
     const Status = if (builtin.link_libc) c_int else u32;
     var status: Status = undefined;
+    const coerced_flags = if (builtin.link_libc) @intCast(c_int, flags) else flags;
     while (true) {
-        const rc = system.waitpid(pid, &status, if (builtin.link_libc) @intCast(c_int, flags) else flags);
+        const rc = system.waitpid(pid, &status, coerced_flags);
+        switch (errno(rc)) {
+            .SUCCESS => return .{
+                .pid = @intCast(pid_t, rc),
+                .status = @bitCast(u32, status),
+            },
+            .INTR => continue,
+            .CHILD => unreachable, // The process specified does not exist. It would be a race condition to handle this error.
+            .INVAL => unreachable, // Invalid flags.
+            else => unreachable,
+        }
+    }
+}
+
+pub fn wait4(pid: pid_t, flags: u32, ru: ?*rusage) WaitPidResult {
+    const Status = if (builtin.link_libc) c_int else u32;
+    var status: Status = undefined;
+    const coerced_flags = if (builtin.link_libc) @intCast(c_int, flags) else flags;
+    while (true) {
+        const rc = system.wait4(pid, &status, coerced_flags, ru);
         switch (errno(rc)) {
             .SUCCESS => return .{
                 .pid = @intCast(pid_t, rc),
@@ -7098,6 +7123,28 @@ pub fn timerfd_gettime(fd: i32) TimerFdGetError!linux.itimerspec {
         .BADF => error.InvalidHandle,
         .FAULT => unreachable,
         .INVAL => unreachable,
+        else => |err| return unexpectedErrno(err),
+    };
+}
+
+pub const PtraceError = error{
+    DeviceBusy,
+    ProcessNotFound,
+    PermissionDenied,
+} || UnexpectedError;
+
+/// TODO on other OSes
+pub fn ptrace(request: i32, pid: pid_t, addr: ?[*]u8, signal: i32) PtraceError!void {
+    switch (builtin.os.tag) {
+        .macos, .ios, .tvos, .watchos => {},
+        else => @compileError("TODO implement ptrace"),
+    }
+    return switch (errno(system.ptrace(request, pid, addr, signal))) {
+        .SUCCESS => {},
+        .SRCH => error.ProcessNotFound,
+        .INVAL => unreachable,
+        .PERM => error.PermissionDenied,
+        .BUSY => error.DeviceBusy,
         else => |err| return unexpectedErrno(err),
     };
 }
