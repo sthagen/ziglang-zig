@@ -1230,23 +1230,6 @@ test "GetFinalPathNameByHandle" {
     _ = try GetFinalPathNameByHandle(handle, .{ .volume_name = .Dos }, buffer[0..required_len_in_u16]);
 }
 
-pub const QueryInformationFileError = error{Unexpected};
-
-pub fn QueryInformationFile(
-    handle: HANDLE,
-    info_class: FILE_INFORMATION_CLASS,
-    out_buffer: []u8,
-) QueryInformationFileError!void {
-    var io: IO_STATUS_BLOCK = undefined;
-    const len_bytes = std.math.cast(u32, out_buffer.len) orelse unreachable;
-    const rc = ntdll.NtQueryInformationFile(handle, &io, out_buffer.ptr, len_bytes, info_class);
-    switch (rc) {
-        .SUCCESS => {},
-        .INVALID_PARAMETER => unreachable,
-        else => return unexpectedStatus(rc),
-    }
-}
-
 pub const GetFileSizeError = error{Unexpected};
 
 pub fn GetFileSizeEx(hFile: HANDLE) GetFileSizeError!u64 {
@@ -1723,21 +1706,6 @@ pub fn HeapDestroy(hHeap: HANDLE) void {
 
 pub fn LocalFree(hMem: HLOCAL) void {
     assert(kernel32.LocalFree(hMem) == null);
-}
-
-pub const GetFileInformationByHandleError = error{Unexpected};
-
-pub fn GetFileInformationByHandle(
-    hFile: HANDLE,
-) GetFileInformationByHandleError!BY_HANDLE_FILE_INFORMATION {
-    var info: BY_HANDLE_FILE_INFORMATION = undefined;
-    const rc = ntdll.GetFileInformationByHandle(hFile, &info);
-    if (rc == 0) {
-        switch (kernel32.GetLastError()) {
-            else => |err| return unexpectedError(err),
-        }
-    }
-    return info;
 }
 
 pub const SetFileTimeError = error{Unexpected};
