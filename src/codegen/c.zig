@@ -1069,7 +1069,7 @@ pub const DeclGen = struct {
                     const extern_fn = val.castTag(.extern_fn).?.data;
                     try dg.renderDeclName(writer, extern_fn.owner_decl, 0);
                 },
-                .int_u64, .one => {
+                .int_u64, .one, .int_big_positive, .lazy_align, .lazy_size => {
                     try writer.writeAll("((");
                     try dg.renderType(writer, ty);
                     return writer.print("){x})", .{try dg.fmtIntLiteral(Type.usize, val, .Other)});
@@ -2995,6 +2995,11 @@ fn genBodyInner(f: *Function, body: []const Air.Inst.Index) error{ AnalysisFail,
             .c_va_arg => try airCVaArg(f, inst),
             .c_va_end => try airCVaEnd(f, inst),
             .c_va_copy => try airCVaCopy(f, inst),
+
+            .work_item_id,
+            .work_group_size,
+            .work_group_id,
+            => unreachable,
             // zig fmt: on
         };
         if (result_value == .new_local) {

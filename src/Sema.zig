@@ -1164,6 +1164,9 @@ fn analyzeBodyInner(
                     .c_va_start            => try sema.zirCVaStart(          block, extended),
                     .const_cast,           => try sema.zirConstCast(         block, extended),
                     .volatile_cast,        => try sema.zirVolatileCast(      block, extended),
+                    .work_item_id          => try sema.zirWorkItem(          block, extended, extended.opcode),
+                    .work_group_size       => try sema.zirWorkItem(          block, extended, extended.opcode),
+                    .work_group_id         => try sema.zirWorkItem(          block, extended, extended.opcode),
                     // zig fmt: on
 
                     .fence => {
@@ -22437,6 +22440,42 @@ fn zirBuiltinExtern(
     return sema.addConstant(ty, ref);
 }
 
+fn zirWorkItem(
+    sema: *Sema,
+    block: *Block,
+    extended: Zir.Inst.Extended.InstData,
+    zir_tag: Zir.Inst.Extended,
+) CompileError!Air.Inst.Ref {
+    const extra = sema.code.extraData(Zir.Inst.UnNode, extended.operand).data;
+    const dimension_src: LazySrcLoc = .{ .node_offset_builtin_call_arg0 = extra.node };
+    const builtin_src = LazySrcLoc.nodeOffset(extra.node);
+    const target = sema.mod.getTarget();
+
+    switch (target.cpu.arch) {
+        // TODO: Allow for other GPU targets.
+        .amdgcn => {},
+        else => {
+            return sema.fail(block, builtin_src, "builtin only available on GPU targets; targeted architecture is {s}", .{@tagName(target.cpu.arch)});
+        },
+    }
+
+    const dimension = @intCast(u32, try sema.resolveInt(block, dimension_src, extra.operand, Type.u32, "dimension must be comptime-known"));
+    try sema.requireRuntimeBlock(block, builtin_src, null);
+
+    return block.addInst(.{
+        .tag = switch (zir_tag) {
+            .work_item_id => .work_item_id,
+            .work_group_size => .work_group_size,
+            .work_group_id => .work_group_id,
+            else => unreachable,
+        },
+        .data = .{ .pl_op = .{
+            .operand = .none,
+            .payload = dimension,
+        } },
+    });
+}
+
 fn requireRuntimeBlock(sema: *Sema, block: *Block, src: LazySrcLoc, runtime_src: ?LazySrcLoc) !void {
     if (block.is_comptime) {
         const msg = msg: {
@@ -25152,7 +25191,7 @@ fn coerceExtra(
                             .ptr = if (dest_info.@"align" != 0)
                                 try Value.Tag.int_u64.create(sema.arena, dest_info.@"align")
                             else
-                                try inst_child_ty.lazyAbiAlignment(target, sema.arena),
+                                try dest_info.pointee_type.lazyAbiAlignment(target, sema.arena),
                             .len = Value.zero,
                         });
                         return sema.addConstant(dest_ty, slice_val);
@@ -30212,6 +30251,11 @@ fn resolveLazyValue(sema: *Sema, val: Value) CompileError!void {
             for (aggregate) |elem_val| {
                 try sema.resolveLazyValue(elem_val);
             }
+        },
+        .slice => {
+            const slice = val.castTag(.slice).?.data;
+            try sema.resolveLazyValue(slice.ptr);
+            return sema.resolveLazyValue(slice.len);
         },
         else => return,
     }

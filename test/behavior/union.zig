@@ -1408,7 +1408,6 @@ test "union field ptr - zero sized field" {
 }
 
 test "packed union in packed struct" {
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
@@ -1494,7 +1493,6 @@ test "union reassignment can use previous value" {
 }
 
 test "packed union with zero-bit field" {
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
@@ -1530,4 +1528,15 @@ test "reinterpreting enum value inside packed union" {
     };
     try U.doTest();
     comptime try U.doTest();
+}
+
+test "access the tag of a global tagged union" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+
+    const U = union(enum) {
+        a,
+        b: u8,
+        var u: @This() = .a;
+    };
+    try expect(U.u == .a);
 }
