@@ -186,8 +186,7 @@ pub const Options = struct {
 
     /// List of symbols forced as undefined in the symbol table
     /// thus forcing their resolution by the linker.
-    /// Corresponds to `-u <symbol>` for ELF and `/include:<symbol>` for COFF/PE.
-    /// TODO add handling for MachO.
+    /// Corresponds to `-u <symbol>` for ELF/MachO and `/include:<symbol>` for COFF/PE.
     force_undefined_symbols: std.StringArrayHashMapUnmanaged(void),
 
     version: ?std.builtin.Version,
@@ -688,6 +687,7 @@ pub const File = struct {
         FrameworkNotFound,
         FunctionSignatureMismatch,
         GlobalTypeMismatch,
+        HotSwapUnavailableOnHostOperatingSystem,
         InvalidCharacter,
         InvalidEntryKind,
         InvalidFeatureSet,
@@ -1103,6 +1103,26 @@ pub const File = struct {
     pub const ErrorFlags = struct {
         no_entry_point_found: bool = false,
         missing_libc: bool = false,
+    };
+
+    pub const LazySymbol = struct {
+        kind: enum { code, const_data },
+        ty: Type,
+
+        pub const Context = struct {
+            mod: *Module,
+
+            pub fn hash(ctx: @This(), sym: LazySymbol) u32 {
+                var hasher = std.hash.Wyhash.init(0);
+                std.hash.autoHash(&hasher, sym.kind);
+                sym.ty.hashWithHasher(&hasher, ctx.mod);
+                return @truncate(u32, hasher.final());
+            }
+
+            pub fn eql(ctx: @This(), lhs: LazySymbol, rhs: LazySymbol, _: usize) bool {
+                return lhs.kind == rhs.kind and lhs.ty.eql(rhs.ty, ctx.mod);
+            }
+        };
     };
 
     pub const C = @import("link/C.zig");
