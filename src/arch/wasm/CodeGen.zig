@@ -1929,10 +1929,11 @@ fn genInst(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
         .memcpy => func.airMemcpy(inst),
 
+        .ret_addr => func.airRetAddr(inst),
+
         .mul_sat,
         .mod,
         .assembly,
-        .ret_addr,
         .frame_addr,
         .bit_reverse,
         .is_err_ptr,
@@ -3041,6 +3042,7 @@ fn airLoop(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const ty_pl = func.air.instructions.items(.data)[inst].ty_pl;
     const loop = func.air.extraData(Air.Block, ty_pl.payload);
     const body = func.air.extra[loop.end..][0..loop.data.body_len];
+    const liveness_loop = func.liveness.getLoop(inst);
 
     // result type of loop is always 'noreturn', meaning we can always
     // emit the wasm type 'block_empty'.
@@ -3050,6 +3052,11 @@ fn airLoop(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     // breaking to the index of a loop block will continue the loop instead
     try func.addLabel(.br, 0);
     try func.endBlock();
+
+    try func.currentBranch().values.ensureUnusedCapacity(func.gpa, @intCast(u32, liveness_loop.deaths.len));
+    for (liveness_loop.deaths) |death| {
+        func.processDeath(Air.indexToRef(death));
+    }
 
     func.finishAir(inst, .none, &.{});
 }
@@ -4965,6 +4972,10 @@ fn airMemcpy(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     try func.memcpy(dst, src, len);
 
     func.finishAir(inst, .none, &.{ pl_op.operand, bin_op.lhs, bin_op.rhs });
+}
+
+fn airRetAddr(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
+    func.finishAir(inst, .{ .imm32 = 0 }, &.{});
 }
 
 fn airPopcount(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
