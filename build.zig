@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) !void {
         std.log.warn("-Dskip-install-lib-files is deprecated in favor of -Dno-lib", .{});
     }
     const skip_install_lib_files = b.option(bool, "no-lib", "skip copying of lib/ files and langref to installation prefix. Useful for development") orelse deprecated_skip_install_lib_files;
+    const skip_install_langref = b.option(bool, "no-langref", "skip copying of langref to the installation prefix") orelse skip_install_lib_files;
 
     const docgen_exe = b.addExecutable(.{
         .name = "docgen",
@@ -53,7 +54,7 @@ pub fn build(b: *std.Build) !void {
     docgen_cmd.addFileSourceArg(.{ .path = "doc/langref.html.in" });
     const langref_file = docgen_cmd.addOutputFileArg("langref.html");
     const install_langref = b.addInstallFileWithDir(langref_file, .prefix, "doc/langref.html");
-    if (!skip_install_lib_files) {
+    if (!skip_install_langref) {
         b.getInstallStep().dependOn(&install_langref.step);
     }
 
@@ -181,7 +182,7 @@ pub fn build(b: *std.Build) !void {
     exe.sanitize_thread = sanitize_thread;
     exe.build_id = b.option(bool, "build-id", "Include a build id note") orelse false;
     exe.entitlements = entitlements;
-    exe.install();
+    b.installArtifact(exe);
 
     const compile_step = b.step("compile", "Build the self-hosted compiler");
     compile_step.dependOn(&exe.step);
@@ -367,6 +368,7 @@ pub fn build(b: *std.Build) !void {
     test_cases_options.addOption(bool, "llvm_has_xtensa", llvm_has_xtensa);
     test_cases_options.addOption(bool, "force_gpa", force_gpa);
     test_cases_options.addOption(bool, "only_c", only_c);
+    test_cases_options.addOption(bool, "omit_pkg_fetching_code", true);
     test_cases_options.addOption(bool, "enable_qemu", b.enable_qemu);
     test_cases_options.addOption(bool, "enable_wine", b.enable_wine);
     test_cases_options.addOption(bool, "enable_wasmtime", b.enable_wasmtime);
