@@ -535,13 +535,6 @@ test "another, possibly redundant, @fabs test" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
-    if (builtin.os.tag == .windows and builtin.cpu.arch == .aarch64 and
-        builtin.zig_backend == .stage2_c)
-    {
-        // https://github.com/ziglang/zig/issues/13876
-        return error.SkipZigTest;
-    }
-
     try testFabsLegacy(f128, 12.0);
     comptime try testFabsLegacy(f128, 12.0);
     try testFabsLegacy(f64, 12.0);
@@ -578,13 +571,6 @@ test "a third @fabs test, surely there should not be three fabs tests" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-
-    if (builtin.os.tag == .windows and builtin.cpu.arch == .aarch64 and
-        builtin.zig_backend == .stage2_c)
-    {
-        // https://github.com/ziglang/zig/issues/13876
-        return error.SkipZigTest;
-    }
 
     inline for ([_]type{ f16, f32, f64, f80, f128, c_longdouble }) |T| {
         // normals
@@ -984,13 +970,6 @@ test "negation f128" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-
-    if (builtin.os.tag == .windows and builtin.cpu.arch == .aarch64 and
-        builtin.zig_backend == .stage2_c)
-    {
-        // https://github.com/ziglang/zig/issues/13876
-        return error.SkipZigTest;
-    }
 
     const S = struct {
         fn doTheTest() !void {

@@ -844,6 +844,7 @@ fn buildOutputType(
     var reference_trace: ?u32 = null;
     var error_tracing: ?bool = null;
     var pdb_out_path: ?[]const u8 = null;
+    var dwarf_format: ?std.dwarf.Format = null;
 
     // e.g. -m3dnow or -mno-outline-atomics. They correspond to std.Target llvm cpu feature names.
     // This array is populated by zig cc frontend and then has to be converted to zig-style
@@ -1161,6 +1162,7 @@ fn buildOutputType(
                     } else if (mem.eql(u8, arg, "--debug-log")) {
                         if (!build_options.enable_logging) {
                             std.log.warn("Zig was compiled without logging enabled (-Dlog). --debug-log has no effect.", .{});
+                            _ = args_iter.nextOrFatal();
                         } else {
                             try log_scopes.append(gpa, args_iter.nextOrFatal());
                         }
@@ -1354,6 +1356,10 @@ fn buildOutputType(
                         strip = true;
                     } else if (mem.eql(u8, arg, "-fno-strip")) {
                         strip = false;
+                    } else if (mem.eql(u8, arg, "-gdwarf32")) {
+                        dwarf_format = .@"32";
+                    } else if (mem.eql(u8, arg, "-gdwarf64")) {
+                        dwarf_format = .@"64";
                     } else if (mem.eql(u8, arg, "-fformatted-panics")) {
                         formatted_panics = true;
                     } else if (mem.eql(u8, arg, "-fno-formatted-panics")) {
@@ -1760,6 +1766,14 @@ fn buildOutputType(
                         } else {
                             try clang_argv.appendSlice(it.other_args);
                         }
+                    },
+                    .gdwarf32 => {
+                        strip = false;
+                        dwarf_format = .@"32";
+                    },
+                    .gdwarf64 => {
+                        strip = false;
+                        dwarf_format = .@"64";
                     },
                     .sanitize => {
                         if (mem.eql(u8, it.only_arg, "undefined")) {
@@ -3144,6 +3158,7 @@ fn buildOutputType(
         .test_runner_path = test_runner_path,
         .disable_lld_caching = !output_to_cache,
         .subsystem = subsystem,
+        .dwarf_format = dwarf_format,
         .wasi_exec_model = wasi_exec_model,
         .debug_compile_errors = debug_compile_errors,
         .enable_link_snapshots = enable_link_snapshots,
@@ -5101,6 +5116,8 @@ pub const ClangArgIterator = struct {
         asm_only,
         optimize,
         debug,
+        gdwarf32,
+        gdwarf64,
         sanitize,
         linker_script,
         dry_run,

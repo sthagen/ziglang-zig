@@ -5,12 +5,34 @@ const maxInt = std.math.maxInt;
 const iovec = std.os.iovec;
 const iovec_const = std.os.iovec_const;
 
+pub const CPU_SETSIZE = 256;
+pub const cpuset_t = extern struct {
+    __bits: [(CPU_SETSIZE + (@bitSizeOf(c_long) - 1)) / @bitSizeOf(c_long)]c_long,
+};
+pub const cpulevel_t = c_int;
+pub const cpuwhich_t = c_int;
+pub const id_t = i64;
+
+pub const CPU_LEVEL_ROOT: cpulevel_t = 1;
+pub const CPU_LEVEL_CPUSET: cpulevel_t = 2;
+pub const CPU_LEVEL_WHICH: cpulevel_t = 3;
+pub const CPU_WHICH_TID: cpuwhich_t = 1;
+pub const CPU_WHICH_PID: cpuwhich_t = 2;
+pub const CPU_WHICH_CPUSET: cpuwhich_t = 3;
+pub const CPU_WHICH_IRQ: cpuwhich_t = 4;
+pub const CPU_WHICH_JAIL: cpuwhich_t = 5;
+pub const CPU_WHICH_DOMAIN: cpuwhich_t = 6;
+pub const CPU_WHICH_INTRHANDLER: cpuwhich_t = 7;
+pub const CPU_WHICH_ITHREAD: cpuwhich_t = 8;
+pub const CPU_WHICH_TIDPID: cpuwhich_t = 8;
+
 extern "c" fn __error() *c_int;
 pub const _errno = __error;
 
 pub extern "c" fn getdents(fd: c_int, buf_ptr: [*]u8, nbytes: usize) usize;
 pub extern "c" fn sigaltstack(ss: ?*stack_t, old_ss: ?*stack_t) c_int;
 pub extern "c" fn getrandom(buf_ptr: [*]u8, buf_len: usize, flags: c_uint) isize;
+pub extern "c" fn getentropy(buf_ptr: [*]u8, buf_len: usize) c_int;
 
 pub extern "c" fn pthread_getthreadid_np() c_int;
 pub extern "c" fn pthread_set_name_np(thread: std.c.pthread_t, name: [*:0]const u8) void;
@@ -25,6 +47,9 @@ pub extern "c" fn getpid() pid_t;
 
 pub extern "c" fn kinfo_getfile(pid: pid_t, cntp: *c_int) ?[*]kinfo_file;
 pub extern "c" fn kinfo_getvmmap(pid: pid_t, cntp: *c_int) ?[*]kinfo_vmentry;
+
+pub extern "c" fn cpuset_getaffinity(level: cpulevel_t, which: cpuwhich_t, id: id_t, setsize: usize, mask: *cpuset_t) c_int;
+pub extern "c" fn cpuset_setaffinity(level: cpulevel_t, which: cpuwhich_t, id: id_t, setsize: usize, mask: *const cpuset_t) c_int;
 
 pub const sf_hdtr = extern struct {
     headers: [*]const iovec_const,
@@ -202,8 +227,6 @@ pub const clock_t = isize;
 
 pub const socklen_t = u32;
 pub const suseconds_t = c_long;
-
-pub const id_t = i64;
 
 /// Renamed from `kevent` to `Kevent` to avoid conflict with function name.
 pub const Kevent = extern struct {
@@ -1648,6 +1671,45 @@ pub const AT = struct {
     pub const REMOVEDIR = 0x0800;
     /// Fail if not under dirfd
     pub const BENEATH = 0x1000;
+    /// elf_common constants
+    pub const NULL = 0;
+    pub const IGNORE = 1;
+    pub const EXECFD = 2;
+    pub const PHDR = 3;
+    pub const PHENT = 4;
+    pub const PHNUM = 5;
+    pub const PAGESZ = 6;
+    pub const BASE = 7;
+    pub const FLAGS = 8;
+    pub const ENTRY = 9;
+    pub const NOTELF = 10;
+    pub const UID = 11;
+    pub const EUID = 12;
+    pub const GID = 13;
+    pub const EGID = 14;
+    pub const EXECPATH = 15;
+    pub const CANARY = 16;
+    pub const CANARYLEN = 17;
+    pub const OSRELDATE = 18;
+    pub const NCPUS = 19;
+    pub const PAGESIZES = 20;
+    pub const PAGESIZESLEN = 21;
+    pub const TIMEKEEP = 22;
+    pub const STACKPROT = 23;
+    pub const EHDRFLAGS = 24;
+    pub const HWCAP = 25;
+    pub const HWCAP2 = 26;
+    pub const BSDFLAGS = 27;
+    pub const ARGC = 28;
+    pub const ARGV = 29;
+    pub const ENVC = 30;
+    pub const ENVV = 31;
+    pub const PS_STRINGS = 32;
+    pub const FXRNG = 33;
+    pub const KPRLOAD = 34;
+    pub const USRSTACKBASE = 35;
+    pub const USRSTACKLIM = 36;
+    pub const COUNT = 37;
 };
 
 pub const addrinfo = extern struct {
@@ -2141,3 +2203,5 @@ pub const shm_largeconf = extern struct {
 };
 
 pub extern "c" fn shm_create_largepage(path: [*:0]const u8, flags: c_int, psind: c_int, alloc_policy: c_int, mode: mode_t) c_int;
+
+pub extern "c" fn elf_aux_info(aux: c_int, buf: ?*anyopaque, buflen: c_int) c_int;
