@@ -512,7 +512,18 @@ pub fn getrandom(buffer: []u8) GetRandomError!void {
         return;
     }
     switch (builtin.os.tag) {
-        .netbsd, .openbsd, .macos, .ios, .tvos, .watchos => {
+        .macos, .ios => {
+            const rc = darwin.CCRandomGenerateBytes(buffer.ptr, buffer.len);
+            if (rc != darwin.CCRNGStatus.kCCSuccess) {
+                if (rc == darwin.CCRNGStatus.kCCParamError or rc == darwin.CCRNGStatus.kCCBufferTooSmall) {
+                    return error.InvalidHandle;
+                } else {
+                    return error.SystemResources;
+                }
+            }
+            return;
+        },
+        .netbsd, .openbsd, .tvos, .watchos => {
             system.arc4random_buf(buffer.ptr, buffer.len);
             return;
         },
@@ -659,7 +670,7 @@ pub fn exit(status: u8) noreturn {
         linux.exit_group(status);
     }
     if (builtin.os.tag == .uefi) {
-        // exit() is only avaliable if exitBootServices() has not been called yet.
+        // exit() is only available if exitBootServices() has not been called yet.
         // This call to exit should not fail, so we don't care about its return value.
         if (uefi.system_table.boot_services) |bs| {
             _ = bs.exit(uefi.handle, @intToEnum(uefi.Status, status), 0, null);
@@ -991,7 +1002,7 @@ pub fn preadv(fd: fd_t, iov: []const iovec, offset: u64) PReadError!usize {
     if (have_pread_but_not_preadv) {
         // We could loop here; but proper usage of `preadv` must handle partial reads anyway.
         // So we simply read into the first vector only.
-        if (iov.len == 0) return @as(usize, 0);
+        if (iov.len == 0) return @intCast(usize, 0);
         const first = iov[0];
         return pread(fd, first.iov_base[0..first.iov_len], offset);
     }
@@ -2978,7 +2989,7 @@ pub fn chdirZ(dir_path: [*:0]const u8) ChangeCurDirError!void {
     }
 }
 
-/// Windows-only. Same as `chdir` except the paramter is WTF16 encoded.
+/// Windows-only. Same as `chdir` except the parameter is WTF16 encoded.
 pub fn chdirW(dir_path: []const u16) ChangeCurDirError!void {
     windows.SetCurrentDirectory(dir_path) catch |err| switch (err) {
         error.NoDevice => return error.FileSystem,
@@ -6925,7 +6936,7 @@ pub const PrctlError = error{
     /// Can only occur with PR_SET_SPECULATION_CTRL, PR_MPX_ENABLE_MANAGEMENT,
     /// or PR_MPX_DISABLE_MANAGEMENT
     UnsupportedFeature,
-    /// Can only occur wih PR_SET_FP_MODE
+    /// Can only occur with PR_SET_FP_MODE
     OperationNotSupported,
     PermissionDenied,
 } || UnexpectedError;

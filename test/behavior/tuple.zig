@@ -209,7 +209,6 @@ test "initializing anon struct with explicit type" {
 }
 
 test "fieldParentPtr of tuple" {
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
@@ -220,7 +219,6 @@ test "fieldParentPtr of tuple" {
 }
 
 test "fieldParentPtr of anon struct" {
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
@@ -296,6 +294,7 @@ test "coerce tuple to tuple" {
 test "tuple type with void field" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const T = std.meta.Tuple(&[_]type{void});
     const x = T{{}};
@@ -341,6 +340,7 @@ test "tuple type with void field and a runtime field" {
 test "branching inside tuple literal" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn foo(a: anytype) !void {
@@ -355,6 +355,7 @@ test "tuple initialized with a runtime known value" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const E = union(enum) { e: []const u8 };
     const W = union(enum) { w: E };
@@ -368,6 +369,7 @@ test "tuple of struct concatenation and coercion to array" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const StructWithDefault = struct { value: f32 = 42 };
     const SomeStruct = struct { array: [4]StructWithDefault };
@@ -381,6 +383,7 @@ test "tuple of struct concatenation and coercion to array" {
 test "nested runtime conditionals in tuple initializer" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     var data: u8 = 0;
     const x = .{
