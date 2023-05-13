@@ -1519,6 +1519,22 @@ pub fn sched_getaffinity(pid: pid_t, size: usize, set: *cpu_set_t) usize {
     return 0;
 }
 
+pub fn getcpu(cpu: *u32, node: *u32) usize {
+    return syscall3(.getcpu, cpu, node, null);
+}
+
+pub fn sched_getcpu() usize {
+    var cpu: u32 = undefined;
+    const rc = syscall3(.getcpu, &cpu, null, null);
+    if (@bitCast(isize, rc) < 0) return rc;
+    return @intCast(usize, cpu);
+}
+
+/// libc has no wrapper for this syscall
+pub fn mbind(addr: ?*anyopaque, len: u32, mode: i32, nodemask: *const u32, maxnode: u32, flags: u32) usize {
+    return syscall6(.mbind, addr, len, mode, nodemask, maxnode, flags);
+}
+
 pub fn epoll_create() usize {
     return epoll_create1(0);
 }
@@ -1629,6 +1645,14 @@ pub fn tcgetattr(fd: fd_t, termios_p: *termios) usize {
 
 pub fn tcsetattr(fd: fd_t, optional_action: TCSA, termios_p: *const termios) usize {
     return syscall3(.ioctl, @bitCast(usize, @as(isize, fd)), T.CSETS + @enumToInt(optional_action), @ptrToInt(termios_p));
+}
+
+pub fn tcgetpgrp(fd: fd_t, pgrp: *pid_t) usize {
+    return syscall3(.ioctl, @bitCast(usize, @as(isize, fd)), T.IOCGPGRP, @ptrToInt(pgrp));
+}
+
+pub fn tcsetpgrp(fd: fd_t, pgrp: *const pid_t) usize {
+    return syscall3(.ioctl, @bitCast(usize, @as(isize, fd)), T.IOCSPGRP, @ptrToInt(pgrp));
 }
 
 pub fn tcdrain(fd: fd_t) usize {

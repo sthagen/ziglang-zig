@@ -604,9 +604,11 @@ const DocData = struct {
             pubDecls: []usize = &.{}, // index into decls
             field_types: []Expr = &.{}, // (use src->fields to find names)
             field_defaults: []?Expr = &.{}, // default values is specified
+            backing_int: ?Expr = null, // backing integer if specified
             is_tuple: bool,
             line_number: usize,
             parent_container: ?usize, // index into `types`
+            layout: ?Expr, // if different than Auto
         },
         ComptimeExpr: struct { name: []const u8 },
         ComptimeFloat: struct { name: []const u8 },
@@ -644,6 +646,7 @@ const DocData = struct {
             tag: ?Expr, // tag type if specified
             auto_enum: bool, // tag is an auto enum
             parent_container: ?usize, // index into `types`
+            layout: ?Expr, // if different than Auto
         },
         Fn: struct {
             name: []const u8,
@@ -755,6 +758,7 @@ const DocData = struct {
         string: []const u8, // direct value
         sliceIndex: usize,
         slice: Slice,
+        sliceLength: SliceLength,
         cmpxchgIndex: usize,
         cmpxchg: Cmpxchg,
         builtin: Builtin,
@@ -790,6 +794,12 @@ const DocData = struct {
             start: usize,
             end: ?usize = null,
             sentinel: ?usize = null, // index in `exprs`
+        };
+        const SliceLength = struct {
+            lhs: usize,
+            start: usize,
+            len: usize,
+            sentinel: ?usize = null,
         };
         const Cmpxchg = struct {
             name: []const u8,
@@ -995,6 +1005,12 @@ fn walkInstruction(
                     .expr = .{ .type = result.value_ptr.* },
                 };
             }
+
+            const maybe_tldoc_comment = try self.getTLDocComment(new_file.file);
+            try self.ast_nodes.append(self.arena, .{
+                .name = path,
+                .docs = maybe_tldoc_comment,
+            });
 
             result.value_ptr.* = self.types.items.len;
 
@@ -1281,6 +1297,68 @@ fn walkInstruction(
             const sentinel_index = self.exprs.items.len;
             try self.exprs.append(self.arena, sentinel.expr);
             self.exprs.items[slice_index] = .{ .slice = .{ .lhs = lhs_index, .start = start_index, .end = end_index, .sentinel = sentinel_index } };
+
+            return DocData.WalkResult{
+                .typeRef = self.decls.items[lhs.expr.declRef.Analyzed].value.typeRef,
+                .expr = .{ .sliceIndex = slice_index },
+            };
+        },
+        .slice_length => {
+            const pl_node = data[inst_index].pl_node;
+            const extra = file.zir.extraData(Zir.Inst.SliceLength, pl_node.payload_index);
+
+            const slice_index = self.exprs.items.len;
+            try self.exprs.append(self.arena, .{ .slice = .{ .lhs = 0, .start = 0 } });
+
+            var lhs: DocData.WalkResult = try self.walkRef(
+                file,
+                parent_scope,
+                parent_src,
+                extra.data.lhs,
+                false,
+            );
+            var start: DocData.WalkResult = try self.walkRef(
+                file,
+                parent_scope,
+                parent_src,
+                extra.data.start,
+                false,
+            );
+            var len: DocData.WalkResult = try self.walkRef(
+                file,
+                parent_scope,
+                parent_src,
+                extra.data.len,
+                false,
+            );
+            var sentinel_opt: ?DocData.WalkResult = if (extra.data.sentinel != .none)
+                try self.walkRef(
+                    file,
+                    parent_scope,
+                    parent_src,
+                    extra.data.sentinel,
+                    false,
+                )
+            else
+                null;
+
+            const lhs_index = self.exprs.items.len;
+            try self.exprs.append(self.arena, lhs.expr);
+            const start_index = self.exprs.items.len;
+            try self.exprs.append(self.arena, start.expr);
+            const len_index = self.exprs.items.len;
+            try self.exprs.append(self.arena, len.expr);
+            const sentinel_index = if (sentinel_opt) |sentinel| sentinel_index: {
+                const index = self.exprs.items.len;
+                try self.exprs.append(self.arena, sentinel.expr);
+                break :sentinel_index index;
+            } else null;
+            self.exprs.items[slice_index] = .{ .sliceLength = .{
+                .lhs = lhs_index,
+                .start = start_index,
+                .len = len_index,
+                .sentinel = sentinel_index,
+            } };
 
             return DocData.WalkResult{
                 .typeRef = self.decls.items[lhs.expr.declRef.Analyzed].value.typeRef,
@@ -2389,7 +2467,19 @@ fn walkInstruction(
 
             return DocData.WalkResult{
                 .typeRef = if (callee.typeRef) |tr| switch (tr) {
-                    .type => |func_type_idx| self.types.items[func_type_idx].Fn.ret,
+                    .type => |func_type_idx| switch (self.types.items[func_type_idx]) {
+                        .Fn => |func| func.ret,
+                        else => blk: {
+                            printWithContext(
+                                file,
+                                inst_index,
+                                "unexpected callee type in walkInstruction.call: `{s}`\n",
+                                .{@tagName(self.types.items[func_type_idx])},
+                            );
+
+                            break :blk null;
+                        },
+                    },
                     else => null,
                 } else null,
                 .expr = .{ .call = call_slot_index },
@@ -2587,12 +2677,12 @@ fn walkInstruction(
 
                     // We delay analysis because union tags can refer to
                     // decls defined inside the union itself.
-                    const tag_type_ref: Ref = if (small.has_tag_type) blk: {
+                    const tag_type_ref: ?Ref = if (small.has_tag_type) blk: {
                         const tag_type = file.zir.extra[extra_index];
                         extra_index += 1;
                         const tag_ref = @intToEnum(Ref, tag_type);
                         break :blk tag_ref;
-                    } else .none;
+                    } else null;
 
                     const body_len = if (small.has_body_len) blk: {
                         const body_len = file.zir.extra[extra_index];
@@ -2605,6 +2695,11 @@ fn walkInstruction(
                         extra_index += 1;
                         break :blk fields_len;
                     } else 0;
+
+                    const layout_expr: ?DocData.Expr = switch (small.layout) {
+                        .Auto => null,
+                        else => .{ .enumLiteral = @tagName(small.layout) },
+                    };
 
                     var decl_indexes: std.ArrayListUnmanaged(usize) = .{};
                     var priv_decl_indexes: std.ArrayListUnmanaged(usize) = .{};
@@ -2619,13 +2714,13 @@ fn walkInstruction(
                     );
 
                     // Analyze the tag once all decls have been analyzed
-                    const tag_type = try self.walkRef(
+                    const tag_type = if (tag_type_ref) |tt_ref| (try self.walkRef(
                         file,
                         &scope,
                         parent_src,
-                        tag_type_ref,
+                        tt_ref,
                         false,
-                    );
+                    )).expr else null;
 
                     // Fields
                     extra_index += body_len;
@@ -2657,9 +2752,10 @@ fn walkInstruction(
                             .privDecls = priv_decl_indexes.items,
                             .pubDecls = decl_indexes.items,
                             .fields = field_type_refs.items,
-                            .tag = tag_type.expr,
+                            .tag = tag_type,
                             .auto_enum = small.auto_enum_tag,
                             .parent_container = parent_scope.enclosing_type,
+                            .layout = layout_expr,
                         },
                     };
 
@@ -2848,16 +2944,32 @@ fn walkInstruction(
                         break :blk fields_len;
                     } else 0;
 
-                    // TODO: Expose explicit backing integer types in some way.
+                    // We don't care about decls yet
+                    if (small.has_decls_len) extra_index += 1;
+
+                    var backing_int: ?DocData.Expr = null;
                     if (small.has_backing_int) {
                         const backing_int_body_len = file.zir.extra[extra_index];
                         extra_index += 1; // backing_int_body_len
                         if (backing_int_body_len == 0) {
+                            const backing_int_ref = @intToEnum(Ref, file.zir.extra[extra_index]);
+                            const backing_int_res = try self.walkRef(file, &scope, src_info, backing_int_ref, true);
+                            backing_int = backing_int_res.expr;
                             extra_index += 1; // backing_int_ref
                         } else {
+                            const backing_int_body = file.zir.extra[extra_index..][0..backing_int_body_len];
+                            const break_inst = backing_int_body[backing_int_body.len - 1];
+                            const operand = data[break_inst].@"break".operand;
+                            const backing_int_res = try self.walkRef(file, &scope, src_info, operand, true);
+                            backing_int = backing_int_res.expr;
                             extra_index += backing_int_body_len; // backing_int_body_inst
                         }
                     }
+
+                    const layout_expr: ?DocData.Expr = switch (small.layout) {
+                        .Auto => null,
+                        else => .{ .enumLiteral = @tagName(small.layout) },
+                    };
 
                     var decl_indexes: std.ArrayListUnmanaged(usize) = .{};
                     var priv_decl_indexes: std.ArrayListUnmanaged(usize) = .{};
@@ -2897,8 +3009,10 @@ fn walkInstruction(
                             .field_types = field_type_refs.items,
                             .field_defaults = field_default_refs.items,
                             .is_tuple = small.is_tuple,
+                            .backing_int = backing_int,
                             .line_number = self.ast_nodes.items[self_ast_node_index].line,
                             .parent_container = parent_scope.enclosing_type,
+                            .layout = layout_expr,
                         },
                     };
                     if (self.ref_paths_pending_on_types.get(type_slot_index)) |paths| {

@@ -10,7 +10,6 @@ pub const cpuset_t = extern struct {
     __bits: [(CPU_SETSIZE + (@bitSizeOf(c_long) - 1)) / @bitSizeOf(c_long)]c_long,
 };
 
-// TODO: can eventually serve for the domainset_t's type too.
 fn __BIT_COUNT(bits: []const c_long) c_long {
     var count: c_long = 0;
     for (bits) |b| {
@@ -64,6 +63,9 @@ pub extern "c" fn getpid() pid_t;
 
 pub extern "c" fn kinfo_getfile(pid: pid_t, cntp: *c_int) ?[*]kinfo_file;
 pub extern "c" fn kinfo_getvmmap(pid: pid_t, cntp: *c_int) ?[*]kinfo_vmentry;
+pub extern "c" fn kinfo_getproc(pid: pid_t) ?[*]kinfo_proc;
+pub extern "c" fn kinfo_getvmobject(cntp: *c_int) ?[*]kinfo_vmobject;
+pub extern "c" fn kinfo_getswapvmobject(cntp: *c_int) ?[*]kinfo_vmobject;
 
 pub extern "c" fn cpuset_getaffinity(level: cpulevel_t, which: cpuwhich_t, id: id_t, setsize: usize, mask: *cpuset_t) c_int;
 pub extern "c" fn cpuset_setaffinity(level: cpulevel_t, which: cpuwhich_t, id: id_t, setsize: usize, mask: *const cpuset_t) c_int;
@@ -675,6 +677,214 @@ pub const KINFO_VMENTRY_SIZE = 1160;
 comptime {
     std.debug.assert(@sizeOf(kinfo_vmentry) == KINFO_VMENTRY_SIZE);
 }
+
+pub const WMESGLEN = 8;
+pub const LOCKNAMELEN = 8;
+pub const TDNAMLEN = 16;
+pub const COMMLEN = 19;
+pub const MAXCOMLEN = 19;
+pub const KI_EMULNAMELEN = 16;
+pub const KI_NGROUPS = 16;
+pub const LOGNAMELEN = 17;
+pub const LOGINCLASSLEN = 17;
+
+pub const KI_NSPARE_INT = 2;
+pub const KI_NSPARE_LONG = 12;
+pub const KI_NSPARE_PTR = 5;
+
+pub const RUSAGE_SELF = 0;
+pub const RUSAGE_CHILDREN = -1;
+pub const RUSAGE_THREAD = 1;
+
+pub const proc = opaque {};
+pub const thread = opaque {};
+pub const vnode = opaque {};
+pub const filedesc = opaque {};
+pub const pwddesc = opaque {};
+pub const vmspace = opaque {};
+pub const pcb = opaque {};
+pub const lwpid_t = i32;
+pub const fixpt_t = u32;
+pub const vm_size_t = usize;
+pub const segsz_t = isize;
+
+pub const itimerval = extern struct {
+    interval: timeval,
+    value: timeval,
+};
+
+pub const pstats = extern struct {
+    cru: rusage,
+    timer: [3]itimerval,
+    prof: extern struct {
+        base: u8,
+        size: c_ulong,
+        off: c_ulong,
+        scale: c_ulong,
+    },
+    start: timeval,
+};
+
+pub const user = extern struct {
+    stats: pstats,
+    kproc: kinfo_proc,
+};
+
+pub const pargs = extern struct {
+    ref: c_uint,
+    length: c_uint,
+    args: [1]u8,
+};
+
+pub const priority = extern struct {
+    class: u8,
+    level: u8,
+    native: u8,
+    user: u8,
+};
+
+pub const rusage = extern struct {
+    utime: timeval,
+    stime: timeval,
+    maxrss: c_long,
+    ixrss: c_long,
+    idrss: c_long,
+    isrss: c_long,
+    minflt: c_long,
+    majflt: c_long,
+    nswap: c_long,
+    inblock: c_long,
+    oublock: c_long,
+    msgsnd: c_long,
+    msgrcv: c_long,
+    nsignals: c_long,
+    nvcsw: c_long,
+    nivcsw: c_long,
+};
+
+pub const kinfo_proc = extern struct {
+    structsize: c_int,
+    layout: c_int,
+    args: *pargs,
+    paddr: *proc,
+    addr: *user,
+    tracep: *vnode,
+    textvp: *vnode,
+    fd: *filedesc,
+    vmspace: *vmspace,
+    wchan: ?*const anyopaque,
+    pid: pid_t,
+    ppid: pid_t,
+    pgid: pid_t,
+    tpgid: pid_t,
+    sid: pid_t,
+    tsid: pid_t,
+    jobc: c_short,
+    spare_short1: c_short,
+    tdev_freebsd11: u32,
+    siglist: sigset_t,
+    sigmask: sigset_t,
+    sigignore: sigset_t,
+    sigcatch: sigset_t,
+    uid: uid_t,
+    ruid: uid_t,
+    svuid: uid_t,
+    rgid: gid_t,
+    svgid: gid_t,
+    ngroups: c_short,
+    spare_short2: c_short,
+    groups: [KI_NGROUPS]gid_t,
+    size: vm_size_t,
+    rssize: segsz_t,
+    swrss: segsz_t,
+    tsize: segsz_t,
+    dsize: segsz_t,
+    ssize: segsz_t,
+    xstat: c_ushort,
+    acflag: c_ushort,
+    pctcpu: fixpt_t,
+    estcpu: c_uint,
+    slptime: c_uint,
+    swtime: c_uint,
+    cow: c_uint,
+    runtime: u64,
+    start: timeval,
+    childtime: timeval,
+    flag: c_long,
+    kiflag: c_long,
+    traceflag: c_int,
+    stat: u8,
+    nice: i8,
+    lock: u8,
+    rqindex: u8,
+    oncpu_old: u8,
+    lastcpu_old: u8,
+    tdname: [TDNAMLEN + 1]u8,
+    wmesg: [WMESGLEN + 1]u8,
+    login: [LOGNAMELEN + 1]u8,
+    lockname: [LOCKNAMELEN + 1]u8,
+    comm: [COMMLEN + 1]u8,
+    emul: [KI_EMULNAMELEN + 1]u8,
+    loginclass: [LOGINCLASSLEN + 1]u8,
+    moretdname: [MAXCOMLEN - TDNAMLEN + 1]u8,
+    sparestrings: [46]u8,
+    spareints: [KI_NSPARE_INT]c_int,
+    tdev: u64,
+    oncpu: c_int,
+    lastcpu: c_int,
+    tracer: c_int,
+    flag2: c_int,
+    fibnum: c_int,
+    cr_flags: c_uint,
+    jid: c_int,
+    numthreads: c_int,
+    tid: lwpid_t,
+    pri: priority,
+    rusage: rusage,
+    rusage_ch: rusage,
+    pcb: *pcb,
+    stack: ?*anyopaque,
+    udata: ?*anyopaque,
+    tdaddr: *thread,
+    pd: *pwddesc,
+    spareptrs: [KI_NSPARE_PTR]?*anyopaque,
+    sparelongs: [KI_NSPARE_LONG]c_long,
+    sflag: c_long,
+    tdflag: c_long,
+};
+
+pub const KINFO_PROC_SIZE = switch (builtin.cpu.arch) {
+    .x86 => 768,
+    .arm => 816,
+    else => 1088,
+};
+
+comptime {
+    assert(@sizeOf(kinfo_proc) == KINFO_PROC_SIZE);
+}
+
+pub const kinfo_vmobject = extern struct {
+    structsize: c_int,
+    tpe: c_int,
+    size: u64,
+    vn_fileid: u64,
+    vn_fsid_freebsd11: u32,
+    ref_count: c_int,
+    shadow_count: c_int,
+    memattr: c_int,
+    resident: u64,
+    active: u64,
+    inactive: u64,
+    type_spec: extern union {
+        _vn_fsid: u64,
+        _backing_obj: u64,
+    },
+    me: u64,
+    _qspare: [6]u64,
+    swapped: u32,
+    _ispare: [7]u32,
+    path: [PATH_MAX]u8,
+};
 
 pub const CTL = struct {
     pub const KERN = 1;
@@ -2362,3 +2572,66 @@ pub extern "c" fn mincore(
     length: usize,
     vec: [*]u8,
 ) c_int;
+
+pub const MAXMEMDOM = 8;
+pub const domainid_t = u8;
+
+pub const LIST_ENTRY = opaque {};
+
+pub const DOMAINSET = struct {
+    pub const POLICY_INVALID = 0;
+    pub const POLICY_ROUNDROBIN = 1;
+    pub const POLICY_FIRSTOUCH = 2;
+    pub const POLICY_PREFER = 3;
+    pub const POLICY_INTERLEAVE = 4;
+    pub const POLICY_MAX = DOMAINSET.POLICY_INTERLEAVE;
+};
+
+pub const DOMAINSET_SIZE = 256;
+pub const domainset_t = extern struct {
+    __bits: [(DOMAINSET_SIZE + (@sizeOf(domainset) - 1)) / @bitSizeOf(domainset)]domainset,
+};
+
+pub fn DOMAINSET_COUNT(set: domainset_t) c_int {
+    return @intCast(c_int, __BIT_COUNT(set.__bits[0..]));
+}
+
+pub const domainset = extern struct {
+    link: LIST_ENTRY,
+    mask: domainset_t,
+    policy: u16,
+    prefer: domainid_t,
+    cnt: domainid_t,
+    order: [MAXMEMDOM]domainid_t,
+};
+
+pub extern "c" fn cpuset_getdomain(level: cpulevel_t, which: cpuwhich_t, id: id_t, len: usize, domain: *domainset_t, r: *c_int) c_int;
+pub extern "c" fn cpuset_setdomain(level: cpulevel_t, which: cpuwhich_t, id: id_t, len: usize, domain: *const domainset_t, r: c_int) c_int;
+
+const ioctl_cmd = enum(u32) {
+    VOID = 0x20000000,
+    OUT = 0x40000000,
+    IN = 0x80000000,
+    INOUT = ioctl_cmd.IN | ioctl_cmd.OUT,
+    DIRMASK = ioctl_cmd.VOID | ioctl_cmd.IN | ioctl_cmd.OUT,
+};
+
+fn ioImpl(cmd: ioctl_cmd, op: u8, nr: u8, comptime IT: type) u32 {
+    return @bitCast(u32, @enumToInt(cmd) | @intCast(u32, @truncate(u8, @sizeOf(IT))) << 16 | @intCast(u32, op) << 8 | nr);
+}
+
+pub fn IO(op: u8, nr: u8) u32 {
+    return ioImpl(ioctl_cmd.VOID, op, nr, 0);
+}
+
+pub fn IOR(op: u8, nr: u8, comptime IT: type) u32 {
+    return ioImpl(ioctl_cmd.OUT, op, nr, @sizeOf(IT));
+}
+
+pub fn IOW(op: u8, nr: u8, comptime IT: type) u32 {
+    return ioImpl(ioctl_cmd.IN, op, nr, @sizeOf(IT));
+}
+
+pub fn IOWR(op: u8, nr: u8, comptime IT: type) u32 {
+    return ioImpl(ioctl_cmd.INOUT, op, nr, @sizeOf(IT));
+}
