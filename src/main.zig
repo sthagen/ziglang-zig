@@ -1796,11 +1796,11 @@ fn buildOutputType(
                         try clang_argv.append("-v");
                     },
                     .dry_run => {
+                        // This flag means "dry run". Clang will not actually output anything
+                        // to the file system.
                         verbose_link = true;
+                        disable_c_depfile = true;
                         try clang_argv.append("-###");
-                        // This flag is supposed to mean "dry run" but currently this
-                        // will actually still execute. The tracking issue for this is
-                        // https://github.com/ziglang/zig/issues/7170
                     },
                     .for_linker => try linker_args.append(it.only_arg),
                     .linker_input_z => {
@@ -3019,6 +3019,32 @@ fn buildOutputType(
         // so we utilize the global one.
         break :l global_cache_directory;
     };
+
+    for (c_source_files.items) |*src| {
+        if (!mem.eql(u8, src.src_path, "-")) continue;
+
+        const ext = src.ext orelse
+            fatal("-E or -x is required when reading from a non-regular file", .{});
+
+        // "-" is stdin. Dump it to a real file.
+        const sep = fs.path.sep_str;
+        const sub_path = try std.fmt.allocPrint(arena, "tmp" ++ sep ++ "{x}-stdin{s}", .{
+            std.crypto.random.int(u64), ext.canonicalName(target_info.target),
+        });
+        try local_cache_directory.handle.makePath("tmp");
+        // Note that in one of the happy paths, execve() is used to switch
+        // to clang in which case any cleanup logic that exists for this
+        // temporary file will not run and this temp file will be leaked.
+        // Oh well. It's a minor punishment for using `-x c` which nobody
+        // should be doing. Therefore, we make no effort to clean up. Using
+        // `-` for stdin as a source file always leaks a temp file.
+        var f = try local_cache_directory.handle.createFile(sub_path, .{});
+        defer f.close();
+        try f.writeFileAll(io.getStdIn(), .{});
+
+        // Convert `sub_path` to be relative to current working directory.
+        src.src_path = try local_cache_directory.join(arena, &.{sub_path});
+    }
 
     if (build_options.have_llvm and emit_asm != .no) {
         // LLVM has no way to set this non-globally.
