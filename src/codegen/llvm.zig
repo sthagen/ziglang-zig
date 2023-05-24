@@ -2560,7 +2560,7 @@ pub const DeclGen = struct {
                 );
 
                 try dg.object.di_map.put(dg.gpa, dg.decl, di_global.getVariable().toNode());
-                if (!is_internal_linkage) global.attachMetaData(di_global);
+                if (!is_internal_linkage or decl.isExtern()) global.attachMetaData(di_global);
             }
         }
     }
@@ -5030,7 +5030,6 @@ pub const FuncGen = struct {
         }
 
         if (return_type.isNoReturn() and attr != .AlwaysTail) {
-            _ = self.builder.buildUnreachable();
             return null;
         }
 

@@ -6308,22 +6308,8 @@ fn zirCall(
     }
 
     const callee_ty = sema.typeOf(func);
-    const func_ty = func_ty: {
-        switch (callee_ty.zigTypeTag()) {
-            .Fn => break :func_ty callee_ty,
-            .Pointer => {
-                const ptr_info = callee_ty.ptrInfo().data;
-                if (ptr_info.size == .One and ptr_info.pointee_type.zigTypeTag() == .Fn) {
-                    break :func_ty ptr_info.pointee_type;
-                }
-            },
-            else => {},
-        }
-        return sema.fail(block, callee_src, "type '{}' not a function", .{callee_ty.fmt(sema.mod)});
-    };
-
     const total_args = args_len + @boolToInt(bound_arg_src != null);
-    try sema.checkCallArgumentCount(block, func, callee_src, func_ty, total_args, bound_arg_src != null);
+    const func_ty = try sema.checkCallArgumentCount(block, func, callee_src, callee_ty, total_args, bound_arg_src != null);
 
     const args_body = sema.code.extra[extra.end..];
 
@@ -6423,18 +6409,49 @@ fn checkCallArgumentCount(
     block: *Block,
     func: Air.Inst.Ref,
     func_src: LazySrcLoc,
-    func_ty: Type,
+    callee_ty: Type,
     total_args: usize,
     member_fn: bool,
-) !void {
+) !Type {
+    const func_ty = func_ty: {
+        switch (callee_ty.zigTypeTag()) {
+            .Fn => break :func_ty callee_ty,
+            .Pointer => {
+                const ptr_info = callee_ty.ptrInfo().data;
+                if (ptr_info.size == .One and ptr_info.pointee_type.zigTypeTag() == .Fn) {
+                    break :func_ty ptr_info.pointee_type;
+                }
+            },
+            .Optional => {
+                var buf: Type.Payload.ElemType = undefined;
+                const opt_child = callee_ty.optionalChild(&buf);
+                if (opt_child.zigTypeTag() == .Fn or (opt_child.isSinglePointer() and
+                    opt_child.childType().zigTypeTag() == .Fn))
+                {
+                    const msg = msg: {
+                        const msg = try sema.errMsg(block, func_src, "cannot call optional type '{}'", .{
+                            callee_ty.fmt(sema.mod),
+                        });
+                        errdefer msg.destroy(sema.gpa);
+                        try sema.errNote(block, func_src, msg, "consider using '.?', 'orelse' or 'if'", .{});
+                        break :msg msg;
+                    };
+                    return sema.failWithOwnedErrorMsg(msg);
+                }
+            },
+            else => {},
+        }
+        return sema.fail(block, func_src, "type '{}' not a function", .{callee_ty.fmt(sema.mod)});
+    };
+
     const func_ty_info = func_ty.fnInfo();
     const fn_params_len = func_ty_info.param_types.len;
     const args_len = total_args - @boolToInt(member_fn);
     if (func_ty_info.is_var_args) {
         assert(func_ty_info.cc == .C);
-        if (total_args >= fn_params_len) return;
+        if (total_args >= fn_params_len) return func_ty;
     } else if (fn_params_len == total_args) {
-        return;
+        return func_ty;
     }
 
     const maybe_decl = try sema.funcDeclSrc(func);
@@ -7063,14 +7080,37 @@ fn analyzeCall(
             } },
         });
         sema.appendRefsAssumeCapacity(args);
+
+        if (call_tag == .call_always_tail) {
+            if (ensure_result_used) {
+                try sema.ensureResultUsed(block, sema.typeOf(func_inst), call_src);
+            }
+            return sema.handleTailCall(block, call_src, func_ty, func_inst);
+        } else if (block.wantSafety() and func_ty_info.return_type.isNoReturn()) {
+            // Function pointers and extern functions aren't guaranteed to
+            // actually be noreturn so we add a safety check for them.
+            check: {
+                var func_val = (try sema.resolveMaybeUndefVal(func)) orelse break :check;
+                switch (func_val.tag()) {
+                    .function, .decl_ref => {
+                        _ = try block.addNoOp(.unreach);
+                        return Air.Inst.Ref.unreachable_value;
+                    },
+                    else => break :check,
+                }
+            }
+
+            try sema.safetyPanic(block, .noreturn_returned);
+            return Air.Inst.Ref.unreachable_value;
+        } else if (func_ty_info.return_type.isNoReturn()) {
+            _ = try block.addNoOp(.unreach);
+            return Air.Inst.Ref.unreachable_value;
+        }
         break :res func_inst;
     };
 
     if (ensure_result_used) {
         try sema.ensureResultUsed(block, sema.typeOf(result), call_src);
-    }
-    if (call_tag == .call_always_tail) {
-        return sema.handleTailCall(block, call_src, func_ty, result);
     }
     return result;
 }
@@ -7563,6 +7603,10 @@ fn instantiateGenericCall(
     }
     if (call_tag == .call_always_tail) {
         return sema.handleTailCall(block, call_src, func_ty, result);
+    }
+    if (new_fn_info.return_type.isNoReturn()) {
+        _ = try block.addNoOp(.unreach);
+        return Air.Inst.Ref.unreachable_value;
     }
     return result;
 }
@@ -18401,9 +18445,9 @@ fn zirBoolToInt(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
     const inst_data = sema.code.instructions.items(.data)[inst].un_node;
     const operand = try sema.resolveInst(inst_data.operand);
     if (try sema.resolveMaybeUndefVal(operand)) |val| {
-        if (val.isUndef()) return sema.addConstUndef(Type.initTag(.u1));
-        const bool_ints = [2]Air.Inst.Ref{ .zero, .one };
-        return bool_ints[@boolToInt(val.toBool())];
+        if (val.isUndef()) return sema.addConstUndef(Type.u1);
+        if (val.toBool()) return sema.addConstant(Type.u1, Value.one);
+        return sema.addConstant(Type.u1, Value.zero);
     }
     return block.addUnOp(.bool_to_int, operand);
 }
@@ -21666,20 +21710,7 @@ fn zirBuiltinCall(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError
     }
 
     const callee_ty = sema.typeOf(func);
-    const func_ty = func_ty: {
-        switch (callee_ty.zigTypeTag()) {
-            .Fn => break :func_ty callee_ty,
-            .Pointer => {
-                const ptr_info = callee_ty.ptrInfo().data;
-                if (ptr_info.size == .One and ptr_info.pointee_type.zigTypeTag() == .Fn) {
-                    break :func_ty ptr_info.pointee_type;
-                }
-            },
-            else => {},
-        }
-        return sema.fail(block, func_src, "type '{}' not a function", .{callee_ty.fmt(sema.mod)});
-    };
-    try sema.checkCallArgumentCount(block, func, func_src, func_ty, resolved_args.len, false);
+    const func_ty = try sema.checkCallArgumentCount(block, func, func_src, callee_ty, resolved_args.len, false);
 
     const ensure_result_used = extra.flags.ensure_result_used;
     return sema.analyzeCall(block, func, func_ty, func_src, call_src, modifier, ensure_result_used, resolved_args, null, null);
@@ -23436,6 +23467,7 @@ pub const PanicId = enum {
     for_len_mismatch,
     memcpy_len_mismatch,
     memcpy_alias,
+    noreturn_returned,
 };
 
 fn addSafetyCheck(
@@ -23603,7 +23635,7 @@ fn panicIndexOutOfBounds(
     try sema.safetyCheckFormatted(parent_block, ok, "panicOutOfBounds", &.{ index, len });
 }
 
-fn panicStartLargerThanEnd(
+fn panicStartGreaterThanEnd(
     sema: *Sema,
     parent_block: *Block,
     start: Air.Inst.Ref,
@@ -29460,8 +29492,10 @@ fn analyzeSlice(
     const slice_sentinel = if (sentinel_opt != .none) sentinel else null;
 
     // requirement: start <= end
+    var need_start_gt_end_check = true;
     if (try sema.resolveDefinedValue(block, end_src, end)) |end_val| {
         if (try sema.resolveDefinedValue(block, start_src, start)) |start_val| {
+            need_start_gt_end_check = false;
             if (!by_length and !(try sema.compareAll(start_val, .lte, end_val, Type.usize))) {
                 return sema.fail(
                     block,
@@ -29515,9 +29549,9 @@ fn analyzeSlice(
         }
     }
 
-    if (!by_length and block.wantSafety() and !block.is_comptime) {
+    if (!by_length and block.wantSafety() and !block.is_comptime and need_start_gt_end_check) {
         // requirement: start <= end
-        try sema.panicStartLargerThanEnd(block, start, end);
+        try sema.panicStartGreaterThanEnd(block, start, end);
     }
     const new_len = if (by_length)
         try sema.coerce(block, Type.usize, uncasted_end_opt, end_src)
@@ -30945,7 +30979,7 @@ fn resolveStructLayout(sema: *Sema, ty: Type) CompileError!void {
                         ctx.struct_obj.fields.values()[b].ty.abiAlignment(target);
                 }
             };
-            std.sort.sort(u32, optimized_order, AlignSortContext{
+            mem.sort(u32, optimized_order, AlignSortContext{
                 .struct_obj = struct_obj,
                 .sema = sema,
             }, AlignSortContext.lessThan);
