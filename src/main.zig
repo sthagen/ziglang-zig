@@ -4830,11 +4830,11 @@ fn fmtPathDir(
 
     var dir_it = iterable_dir.iterate();
     while (try dir_it.next()) |entry| {
-        const is_dir = entry.kind == .Directory;
+        const is_dir = entry.kind == .directory;
 
         if (is_dir and (mem.eql(u8, entry.name, "zig-cache") or mem.eql(u8, entry.name, "zig-out"))) continue;
 
-        if (is_dir or entry.kind == .File and (mem.endsWith(u8, entry.name, ".zig") or mem.endsWith(u8, entry.name, ".zon"))) {
+        if (is_dir or entry.kind == .file and (mem.endsWith(u8, entry.name, ".zig") or mem.endsWith(u8, entry.name, ".zon"))) {
             const full_path = try fs.path.join(fmt.gpa, &[_][]const u8{ file_path, entry.name });
             defer fmt.gpa.free(full_path);
 
@@ -4864,7 +4864,7 @@ fn fmtPathFile(
 
     const stat = try source_file.stat();
 
-    if (stat.kind == .Directory)
+    if (stat.kind == .directory)
         return error.IsDir;
 
     const gpa = fmt.gpa;
@@ -6044,9 +6044,9 @@ const ClangSearchSanitizer = struct {
     };
 };
 
-fn get_tty_conf(color: Color) std.debug.TTY.Config {
+fn get_tty_conf(color: Color) std.io.tty.Config {
     return switch (color) {
-        .auto => std.debug.detectTTYConfig(std.io.getStdErr()),
+        .auto => std.io.tty.detectConfig(std.io.getStdErr()),
         .on => .escape_codes,
         .off => .no_color,
     };
