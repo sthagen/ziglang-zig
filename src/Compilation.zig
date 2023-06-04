@@ -451,6 +451,11 @@ pub const CacheMode = link.CacheMode;
 pub const LinkObject = struct {
     path: []const u8,
     must_link: bool = false,
+    // When the library is passed via a positional argument, it will be
+    // added as a full path. If it's `-l<lib>`, then just the basename.
+    //
+    // Consistent with `withLOption` variable name in lld ELF driver.
+    loption: bool = false,
 };
 
 pub const InitOptions = struct {
@@ -2196,7 +2201,7 @@ fn prepareWholeEmitSubPath(arena: Allocator, opt_emit: ?EmitLoc) error{OutOfMemo
 /// to remind the programmer to update multiple related pieces of code that
 /// are in different locations. Bump this number when adding or deleting
 /// anything from the link cache manifest.
-pub const link_hash_implementation_version = 8;
+pub const link_hash_implementation_version = 9;
 
 fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifest) !void {
     const gpa = comp.gpa;
@@ -2206,7 +2211,7 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
-    comptime assert(link_hash_implementation_version == 8);
+    comptime assert(link_hash_implementation_version == 9);
 
     if (comp.bin_file.options.module) |mod| {
         const main_zig_file = try mod.main_pkg.root_src_directory.join(arena, &[_][]const u8{
@@ -2244,6 +2249,7 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
     for (comp.bin_file.options.objects) |obj| {
         _ = try man.addFile(obj.path, null);
         man.hash.add(obj.must_link);
+        man.hash.add(obj.loption);
     }
 
     for (comp.c_object_table.keys()) |key| {
@@ -3193,6 +3199,13 @@ fn processOneJob(comp: *Compilation, job: Job, prog_node: *std.Progress.Node) !v
                 error.OutOfMemory => return error.OutOfMemory,
                 error.AnalysisFail => return,
             };
+            const decl = module.declPtr(decl_index);
+            if (decl.kind == .@"test" and comp.bin_file.options.is_test) {
+                // Tests are always emitted in test binaries. The decl_refs are created by
+                // Module.populateTestFunctions, but this will not queue body analysis, so do
+                // that now.
+                try module.ensureFuncBodyAnalysisQueued(decl.val.castTag(.function).?.data);
+            }
         },
         .update_embed_file => |embed_file| {
             const named_frame = tracy.namedFrame("update_embed_file");
@@ -4658,7 +4671,7 @@ pub fn hasSharedLibraryExt(filename: []const u8) bool {
         return true;
     }
     // Look for .so.X, .so.X.Y, .so.X.Y.Z
-    var it = mem.split(u8, filename, ".");
+    var it = mem.splitScalar(u8, filename, '.');
     _ = it.first();
     var so_txt = it.next() orelse return false;
     while (!mem.eql(u8, so_txt, "so")) {
@@ -5038,14 +5051,14 @@ fn parseLldStderr(comp: *Compilation, comptime prefix: []const u8, stderr: []con
     defer context_lines.deinit();
 
     var current_err: ?*LldError = null;
-    var lines = mem.split(u8, stderr, std.cstr.line_sep);
+    var lines = mem.splitSequence(u8, stderr, std.cstr.line_sep);
     while (lines.next()) |line| {
         if (mem.startsWith(u8, line, prefix ++ ":")) {
             if (current_err) |err| {
                 err.context_lines = try context_lines.toOwnedSlice();
             }
 
-            var split = std.mem.split(u8, line, "error: ");
+            var split = std.mem.splitSequence(u8, line, "error: ");
             _ = split.first();
 
             const duped_msg = try std.fmt.allocPrint(comp.gpa, "{s}: {s}", .{ prefix, split.rest() });

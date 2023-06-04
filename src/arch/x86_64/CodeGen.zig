@@ -9232,9 +9232,9 @@ fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
     }
 
     const asm_source = mem.sliceAsBytes(self.air.extra[extra_i..])[0..extra.data.source_len];
-    var line_it = mem.tokenize(u8, asm_source, "\n\r;");
+    var line_it = mem.tokenizeAny(u8, asm_source, "\n\r;");
     while (line_it.next()) |line| {
-        var mnem_it = mem.tokenize(u8, line, " \t");
+        var mnem_it = mem.tokenizeAny(u8, line, " \t");
         const mnem_str = mnem_it.next() orelse continue;
         if (mem.startsWith(u8, mnem_str, "#")) continue;
 
@@ -9258,7 +9258,7 @@ fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
                 return self.fail("Invalid mnemonic: '{s}'", .{mnem_str});
         } };
 
-        var op_it = mem.tokenize(u8, mnem_it.rest(), ",");
+        var op_it = mem.tokenizeScalar(u8, mnem_it.rest(), ',');
         var ops = [1]encoder.Instruction.Operand{.none} ** 4;
         for (&ops) |*op| {
             const op_str = mem.trim(u8, op_it.next() orelse break, " \t");
@@ -10175,37 +10175,38 @@ fn airBitCast(self: *Self, inst: Air.Inst.Index) !void {
             if (dst_ty.isAbiInt()) dst_ty.intInfo(self.target.*).signedness else .unsigned;
         const src_signedness =
             if (src_ty.isAbiInt()) src_ty.intInfo(self.target.*).signedness else .unsigned;
+        if (dst_signedness == src_signedness) break :result dst_mcv;
+
         const abi_size = @intCast(u16, dst_ty.abiSize(self.target.*));
         const bit_size = @intCast(u16, dst_ty.bitSize(self.target.*));
-        const dst_limbs_len = math.divCeil(u16, bit_size, 64) catch unreachable;
-        if (dst_signedness != src_signedness and abi_size * 8 > bit_size) {
-            const high_reg = if (dst_mcv.isRegister())
-                dst_mcv.getReg().?
-            else
-                try self.copyToTmpRegister(
-                    Type.usize,
-                    dst_mcv.address().offset((dst_limbs_len - 1) * 8).deref(),
-                );
-            const high_lock = self.register_manager.lockReg(high_reg);
-            defer if (high_lock) |lock| self.register_manager.unlockReg(lock);
+        if (abi_size * 8 <= bit_size) break :result dst_mcv;
 
-            var high_pl = Type.Payload.Bits{
-                .base = .{ .tag = switch (dst_signedness) {
-                    .signed => .int_signed,
-                    .unsigned => .int_unsigned,
-                } },
-                .data = bit_size % 64,
-            };
-            const high_ty = Type.initPayload(&high_pl.base);
-
-            try self.truncateRegister(high_ty, high_reg);
-            if (!dst_mcv.isRegister()) try self.genCopy(
+        const dst_limbs_len = math.divCeil(i32, bit_size, 64) catch unreachable;
+        const high_reg = if (dst_mcv.isRegister())
+            dst_mcv.getReg().?
+        else
+            try self.copyToTmpRegister(
                 Type.usize,
                 dst_mcv.address().offset((dst_limbs_len - 1) * 8).deref(),
-                .{ .register = high_reg },
             );
-        }
+        const high_lock = self.register_manager.lockReg(high_reg);
+        defer if (high_lock) |lock| self.register_manager.unlockReg(lock);
 
+        var high_pl = Type.Payload.Bits{
+            .base = .{ .tag = switch (dst_signedness) {
+                .signed => .int_signed,
+                .unsigned => .int_unsigned,
+            } },
+            .data = bit_size % 64,
+        };
+        const high_ty = Type.initPayload(&high_pl.base);
+
+        try self.truncateRegister(high_ty, high_reg);
+        if (!dst_mcv.isRegister()) try self.genCopy(
+            Type.usize,
+            dst_mcv.address().offset((dst_limbs_len - 1) * 8).deref(),
+            .{ .register = high_reg },
+        );
         break :result dst_mcv;
     };
     return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });

@@ -123,7 +123,7 @@ fn findPrefixResolved(cache: *const Cache, resolved_path: []u8) !PrefixedPath {
     var i: u8 = 1; // Start at 1 to skip over checking the null prefix.
     while (i < prefixes_slice.len) : (i += 1) {
         const p = prefixes_slice[i].path.?;
-        if (mem.startsWith(u8, resolved_path, p)) {
+        if (p.len > 0 and mem.startsWith(u8, resolved_path, p)) {
             // +1 to skip over the path separator here
             const sub_path = try gpa.dupe(u8, resolved_path[p.len + 1 ..]);
             gpa.free(resolved_path);
@@ -438,7 +438,7 @@ pub const Manifest = struct {
 
             const input_file_count = self.files.items.len;
             var any_file_changed = false;
-            var line_iter = mem.tokenize(u8, file_contents, "\n");
+            var line_iter = mem.tokenizeScalar(u8, file_contents, '\n');
             var idx: usize = 0;
             if (if (line_iter.next()) |line| !std.mem.eql(u8, line, manifest_header) else true) {
                 if (try self.upgradeToExclusiveLock()) continue;
@@ -467,7 +467,7 @@ pub const Manifest = struct {
                     break :blk new;
                 };
 
-                var iter = mem.tokenize(u8, line, " ");
+                var iter = mem.tokenizeScalar(u8, line, ' ');
                 const size = iter.next() orelse return error.InvalidFormat;
                 const inode = iter.next() orelse return error.InvalidFormat;
                 const mtime_nsec_str = iter.next() orelse return error.InvalidFormat;

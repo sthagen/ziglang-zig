@@ -308,7 +308,7 @@ pub const Block = struct {
                         prefix ++ "the function returns a comptime-only type '{}'",
                         .{rt.return_ty.fmt(sema.mod)},
                     );
-                    try sema.explainWhyTypeIsComptime(rt.block, rt.func_src, parent, src_loc, rt.return_ty);
+                    try sema.explainWhyTypeIsComptime(parent, src_loc, rt.return_ty);
                 },
             }
         }
@@ -882,7 +882,7 @@ fn analyzeBodyInner(
 
     var dbg_block_begins: u32 = 0;
 
-    // We use a while(true) loop here to avoid a redundant way of breaking out of
+    // We use a while (true) loop here to avoid a redundant way of breaking out of
     // the loop. The only way to break out of the loop is with a `noreturn`
     // instruction.
     var i: usize = 0;
@@ -2452,6 +2452,7 @@ fn zirCoerceResultPtr(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileE
                         .@"align" = iac.data.alignment,
                         .@"addrspace" = addr_space,
                     });
+                    try sema.maybeQueueFuncBodyAnalysis(iac.data.decl_index);
                     return sema.addConstant(
                         ptr_ty,
                         try Value.Tag.decl_ref_mut.create(sema.arena, .{
@@ -3709,6 +3710,7 @@ fn zirResolveInferredAlloc(sema: *Sema, block: *Block, inst: Zir.Inst.Index) Com
             const final_ptr_ty_inst = try sema.addType(final_ptr_ty);
             sema.air_instructions.items(.data)[ptr_inst].ty_pl.ty = final_ptr_ty_inst;
 
+            try sema.maybeQueueFuncBodyAnalysis(decl_index);
             if (var_is_mut) {
                 sema.air_values.items[value_index] = try Value.Tag.decl_ref_mut.create(sema.arena, .{
                     .decl_index = decl_index,
@@ -3809,6 +3811,7 @@ fn zirResolveInferredAlloc(sema: *Sema, block: *Block, inst: Zir.Inst.Index) Com
                 // Even though we reuse the constant instruction, we still remove it from the
                 // block so that codegen does not see it.
                 block.instructions.shrinkRetainingCapacity(search_index);
+                try sema.maybeQueueFuncBodyAnalysis(new_decl_index);
                 sema.air_values.items[value_index] = try Value.Tag.decl_ref.create(sema.arena, new_decl_index);
                 // if bitcast ty ref needs to be made const, make_ptr_const
                 // ZIR handles it later, so we can just use the ty ref here.
@@ -4801,7 +4804,7 @@ fn zirValidateDeref(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileErr
             errdefer msg.destroy(sema.gpa);
 
             const src_decl = sema.mod.declPtr(block.src_decl);
-            try sema.explainWhyTypeIsComptime(block, src, msg, src.toSrcLoc(src_decl), elem_ty);
+            try sema.explainWhyTypeIsComptime(msg, src.toSrcLoc(src_decl), elem_ty);
             break :msg msg;
         };
         return sema.failWithOwnedErrorMsg(msg);
@@ -5575,7 +5578,7 @@ fn analyzeBlockBody(
             try sema.errNote(child_block, runtime_src, msg, "runtime control flow here", .{});
 
             const child_src_decl = mod.declPtr(child_block.src_decl);
-            try sema.explainWhyTypeIsComptime(child_block, type_src, msg, type_src.toSrcLoc(child_src_decl), resolved_ty);
+            try sema.explainWhyTypeIsComptime(msg, type_src.toSrcLoc(child_src_decl), resolved_ty);
 
             break :msg msg;
         };
@@ -5747,6 +5750,7 @@ pub fn analyzeExport(
 
     // This decl is alive no matter what, since it's being exported
     mod.markDeclAlive(exported_decl);
+    try sema.maybeQueueFuncBodyAnalysis(exported_decl_index);
 
     const gpa = mod.gpa;
 
@@ -7068,6 +7072,12 @@ fn analyzeCall(
             sema.owner_func.?.calls_or_awaits_errorable_fn = true;
         }
 
+        if (try sema.resolveMaybeUndefVal(func)) |func_val| {
+            if (func_val.castTag(.function)) |func_obj| {
+                try sema.mod.ensureFuncBodyAnalysisQueued(func_obj.data);
+            }
+        }
+
         try sema.air_extra.ensureUnusedCapacity(gpa, @typeInfo(Air.Call).Struct.fields.len +
             args.len);
         const func_inst = try block.addInst(.{
@@ -7584,6 +7594,8 @@ fn instantiateGenericCall(
     if (sema.owner_func != null and new_fn_info.return_type.isError()) {
         sema.owner_func.?.calls_or_awaits_errorable_fn = true;
     }
+
+    try sema.mod.ensureFuncBodyAnalysisQueued(callee);
 
     try sema.air_extra.ensureUnusedCapacity(sema.gpa, @typeInfo(Air.Call).Struct.fields.len +
         runtime_args_len);
@@ -9014,7 +9026,7 @@ fn funcCommon(
                 "function with comptime-only return type '{}' requires all parameters to be comptime",
                 .{return_type.fmt(sema.mod)},
             );
-            try sema.explainWhyTypeIsComptime(block, ret_ty_src, msg, ret_ty_src.toSrcLoc(sema.owner_decl), return_type);
+            try sema.explainWhyTypeIsComptime(msg, ret_ty_src.toSrcLoc(sema.owner_decl), return_type);
 
             const tags = sema.code.instructions.items(.tag);
             const data = sema.code.instructions.items(.data);
@@ -9143,7 +9155,7 @@ fn funcCommon(
     }
 
     const is_inline = fn_ty.fnCallingConvention() == .Inline;
-    const anal_state: Module.Fn.Analysis = if (is_inline) .inline_only else .queued;
+    const anal_state: Module.Fn.Analysis = if (is_inline) .inline_only else .none;
 
     const comptime_args: ?[*]TypedValue = if (sema.comptime_args_fn_inst == func_inst) blk: {
         break :blk if (sema.comptime_args.len == 0) null else sema.comptime_args.ptr;
@@ -9236,7 +9248,7 @@ fn analyzeParameter(
             errdefer msg.destroy(sema.gpa);
 
             const src_decl = sema.mod.declPtr(block.src_decl);
-            try sema.explainWhyTypeIsComptime(block, param_src, msg, param_src.toSrcLoc(src_decl), param.ty);
+            try sema.explainWhyTypeIsComptime(msg, param_src.toSrcLoc(src_decl), param.ty);
 
             try sema.addDeclaredHereNote(msg, param.ty);
             break :msg msg;
@@ -17949,20 +17961,21 @@ fn finishStructInit(
         return sema.failWithOwnedErrorMsg(msg);
     }
 
-    const is_comptime = for (field_inits) |field_init| {
+    // Find which field forces the expression to be runtime, if any.
+    const opt_runtime_index = for (field_inits, 0..) |field_init, i| {
         if (!(try sema.isComptimeKnown(field_init))) {
-            break false;
+            break i;
         }
-    } else true;
+    } else null;
 
-    if (is_comptime) {
+    const runtime_index = opt_runtime_index orelse {
         const values = try sema.arena.alloc(Value, field_inits.len);
         for (field_inits, 0..) |field_init, i| {
             values[i] = (sema.resolveMaybeUndefVal(field_init) catch unreachable).?;
         }
         const struct_val = try Value.Tag.aggregate.create(sema.arena, values);
         return sema.addConstantMaybeRef(block, struct_ty, struct_val, is_ref);
-    }
+    };
 
     if (is_ref) {
         try sema.resolveStructLayout(struct_ty);
@@ -17982,7 +17995,15 @@ fn finishStructInit(
         return sema.makePtrConst(block, alloc);
     }
 
-    try sema.requireRuntimeBlock(block, dest_src, null);
+    sema.requireRuntimeBlock(block, .unneeded, null) catch |err| switch (err) {
+        error.NeededSourceLocation => {
+            const decl = sema.mod.declPtr(block.src_decl);
+            const field_src = Module.initSrc(dest_src.node_offset.x, sema.gpa, decl, runtime_index);
+            try sema.requireRuntimeBlock(block, dest_src, field_src);
+            unreachable;
+        },
+        else => |e| return e,
+    };
     try sema.queueFullTypeResolution(struct_ty);
     return block.addAggregateInit(struct_ty, field_inits);
 }
@@ -18002,6 +18023,7 @@ fn zirStructInitAnon(
     defer fields.deinit(sema.gpa);
     try fields.ensureUnusedCapacity(sema.gpa, types.len);
 
+    // Find which field forces the expression to be runtime, if any.
     const opt_runtime_index = rs: {
         var runtime_index: ?usize = null;
         var extra_index = extra.end;
@@ -18061,7 +18083,7 @@ fn zirStructInitAnon(
         return sema.addConstantMaybeRef(block, tuple_ty, tuple_val, is_ref);
     };
 
-    sema.requireRuntimeBlock(block, src, .unneeded) catch |err| switch (err) {
+    sema.requireRuntimeBlock(block, .unneeded, null) catch |err| switch (err) {
         error.NeededSourceLocation => {
             const decl = sema.mod.declPtr(block.src_decl);
             const field_src = Module.initSrc(src.node_offset.x, sema.gpa, decl, runtime_index);
@@ -18167,7 +18189,7 @@ fn zirArrayInit(
         return sema.addConstantMaybeRef(block, array_ty, array_val, is_ref);
     };
 
-    sema.requireRuntimeBlock(block, src, .unneeded) catch |err| switch (err) {
+    sema.requireRuntimeBlock(block, .unneeded, null) catch |err| switch (err) {
         error.NeededSourceLocation => {
             const decl = sema.mod.declPtr(block.src_decl);
             const elem_src = Module.initSrc(src.node_offset.x, sema.gpa, decl, runtime_index);
@@ -21940,10 +21962,18 @@ fn analyzeMinMax(
         }
     }
 
+    const opt_runtime_idx = runtime_known.findFirstSet();
+
     const comptime_refined_ty: ?Type = if (cur_minmax) |ct_minmax_ref| refined: {
         // Refine the comptime-known result type based on the operation
         const val = (try sema.resolveMaybeUndefVal(ct_minmax_ref)).?;
         const orig_ty = sema.typeOf(ct_minmax_ref);
+
+        if (opt_runtime_idx == null and orig_ty.eql(Type.comptime_int, mod)) {
+            // If all arguments were `comptime_int`, and there are no runtime args, we'll preserve that type
+            break :refined orig_ty;
+        }
+
         const refined_ty = if (orig_ty.zigTypeTag() == .Vector) blk: {
             const elem_ty = orig_ty.childType();
             const len = orig_ty.vectorLen();
@@ -21982,7 +22012,7 @@ fn analyzeMinMax(
         break :refined refined_ty;
     } else null;
 
-    const runtime_idx = runtime_known.findFirstSet() orelse return cur_minmax.?;
+    const runtime_idx = opt_runtime_idx orelse return cur_minmax.?;
     const runtime_src = operand_srcs[runtime_idx];
     try sema.requireRuntimeBlock(block, src, runtime_src);
 
@@ -22885,6 +22915,17 @@ fn zirBuiltinExtern(
     if (!ty.isPtrAtRuntime()) {
         return sema.fail(block, ty_src, "expected (optional) pointer", .{});
     }
+    if (!try sema.validateExternType(ty.childType(), .other)) {
+        const msg = msg: {
+            const mod = sema.mod;
+            const msg = try sema.errMsg(block, ty_src, "extern symbol cannot have type '{}'", .{ty.fmt(mod)});
+            errdefer msg.destroy(sema.gpa);
+            const src_decl = sema.mod.declPtr(block.src_decl);
+            try sema.explainWhyTypeIsNotExtern(msg, ty_src.toSrcLoc(src_decl), ty, .other);
+            break :msg msg;
+        };
+        return sema.failWithOwnedErrorMsg(msg);
+    }
 
     const options = sema.resolveExternOptions(block, .unneeded, extra.rhs) catch |err| switch (err) {
         error.NeededSourceLocation => {
@@ -23035,7 +23076,7 @@ fn validateVarType(
         errdefer msg.destroy(sema.gpa);
 
         const src_decl = mod.declPtr(block.src_decl);
-        try sema.explainWhyTypeIsComptime(block, src, msg, src.toSrcLoc(src_decl), var_ty);
+        try sema.explainWhyTypeIsComptime(msg, src.toSrcLoc(src_decl), var_ty);
         if (var_ty.zigTypeTag() == .ComptimeInt or var_ty.zigTypeTag() == .ComptimeFloat) {
             try sema.errNote(block, src, msg, "to modify this variable at runtime, it must be given an explicit fixed-size number type", .{});
         }
@@ -23104,8 +23145,6 @@ const TypeSet = std.HashMapUnmanaged(Type, void, Type.HashContext64, std.hash_ma
 
 fn explainWhyTypeIsComptime(
     sema: *Sema,
-    block: *Block,
-    src: LazySrcLoc,
     msg: *Module.ErrorMsg,
     src_loc: Module.SrcLoc,
     ty: Type,
@@ -23114,13 +23153,11 @@ fn explainWhyTypeIsComptime(
     defer type_set.deinit(sema.gpa);
 
     try sema.resolveTypeFully(ty);
-    return sema.explainWhyTypeIsComptimeInner(block, src, msg, src_loc, ty, &type_set);
+    return sema.explainWhyTypeIsComptimeInner(msg, src_loc, ty, &type_set);
 }
 
 fn explainWhyTypeIsComptimeInner(
     sema: *Sema,
-    block: *Block,
-    src: LazySrcLoc,
     msg: *Module.ErrorMsg,
     src_loc: Module.SrcLoc,
     ty: Type,
@@ -23161,7 +23198,7 @@ fn explainWhyTypeIsComptimeInner(
         },
 
         .Array, .Vector => {
-            try sema.explainWhyTypeIsComptimeInner(block, src, msg, src_loc, ty.elemType(), type_set);
+            try sema.explainWhyTypeIsComptimeInner(msg, src_loc, ty.elemType(), type_set);
         },
         .Pointer => {
             const elem_ty = ty.elemType2();
@@ -23179,15 +23216,15 @@ fn explainWhyTypeIsComptimeInner(
                 }
                 return;
             }
-            try sema.explainWhyTypeIsComptimeInner(block, src, msg, src_loc, ty.elemType(), type_set);
+            try sema.explainWhyTypeIsComptimeInner(msg, src_loc, ty.elemType(), type_set);
         },
 
         .Optional => {
             var buf: Type.Payload.ElemType = undefined;
-            try sema.explainWhyTypeIsComptimeInner(block, src, msg, src_loc, ty.optionalChild(&buf), type_set);
+            try sema.explainWhyTypeIsComptimeInner(msg, src_loc, ty.optionalChild(&buf), type_set);
         },
         .ErrorUnion => {
-            try sema.explainWhyTypeIsComptimeInner(block, src, msg, src_loc, ty.errorUnionPayload(), type_set);
+            try sema.explainWhyTypeIsComptimeInner(msg, src_loc, ty.errorUnionPayload(), type_set);
         },
 
         .Struct => {
@@ -23203,7 +23240,7 @@ fn explainWhyTypeIsComptimeInner(
 
                     if (try sema.typeRequiresComptime(field.ty)) {
                         try mod.errNoteNonLazy(field_src_loc, msg, "struct requires comptime because of this field", .{});
-                        try sema.explainWhyTypeIsComptimeInner(block, src, msg, field_src_loc, field.ty, type_set);
+                        try sema.explainWhyTypeIsComptimeInner(msg, field_src_loc, field.ty, type_set);
                     }
                 }
             }
@@ -23223,7 +23260,7 @@ fn explainWhyTypeIsComptimeInner(
 
                     if (try sema.typeRequiresComptime(field.ty)) {
                         try mod.errNoteNonLazy(field_src_loc, msg, "union requires comptime because of this field", .{});
-                        try sema.explainWhyTypeIsComptimeInner(block, src, msg, field_src_loc, field.ty, type_set);
+                        try sema.explainWhyTypeIsComptimeInner(msg, field_src_loc, field.ty, type_set);
                     }
                 }
             }
@@ -23266,7 +23303,7 @@ fn validateExternType(
         .Float,
         .AnyFrame,
         => return true,
-        .Pointer => return !ty.isSlice(),
+        .Pointer => return !(ty.isSlice() or try sema.typeRequiresComptime(ty)),
         .Int => switch (ty.intInfo(sema.mod.getTarget()).bits) {
             8, 16, 32, 64, 128 => return true,
             else => return false,
@@ -23332,7 +23369,15 @@ fn explainWhyTypeIsNotExtern(
         .Frame,
         => return,
 
-        .Pointer => try mod.errNoteNonLazy(src_loc, msg, "slices have no guaranteed in-memory representation", .{}),
+        .Pointer => {
+            if (ty.isSlice()) {
+                try mod.errNoteNonLazy(src_loc, msg, "slices have no guaranteed in-memory representation", .{});
+            } else {
+                const pointee_ty = ty.childType();
+                try mod.errNoteNonLazy(src_loc, msg, "pointer to comptime-only type '{}'", .{pointee_ty.fmt(sema.mod)});
+                try sema.explainWhyTypeIsComptime(msg, src_loc, pointee_ty);
+            }
+        },
         .Void => try mod.errNoteNonLazy(src_loc, msg, "'void' is a zero bit type; for C 'void' use 'anyopaque'", .{}),
         .NoReturn => try mod.errNoteNonLazy(src_loc, msg, "'noreturn' is only allowed as a return type", .{}),
         .Int => if (!std.math.isPowerOfTwo(ty.intInfo(sema.mod.getTarget()).bits)) {
@@ -24271,9 +24316,7 @@ fn fieldCallBind(
             if (concrete_ty.getNamespace()) |namespace| {
                 if (try sema.namespaceLookup(block, src, namespace, field_name)) |decl_idx| {
                     try sema.addReferencedBy(block, src, decl_idx);
-                    const inst = try sema.analyzeDeclRef(decl_idx);
-
-                    const decl_val = try sema.analyzeLoad(block, src, inst, src);
+                    const decl_val = try sema.analyzeDeclVal(block, src, decl_idx);
                     const decl_type = sema.typeOf(decl_val);
                     if (decl_type.zigTypeTag() == .Fn and
                         decl_type.fnParamLen() >= 1)
@@ -25023,7 +25066,7 @@ fn validateRuntimeElemAccess(
             errdefer msg.destroy(sema.gpa);
 
             const src_decl = sema.mod.declPtr(block.src_decl);
-            try sema.explainWhyTypeIsComptime(block, elem_index_src, msg, parent_src.toSrcLoc(src_decl), parent_ty);
+            try sema.explainWhyTypeIsComptime(msg, parent_src.toSrcLoc(src_decl), parent_ty);
 
             break :msg msg;
         };
@@ -28903,7 +28946,7 @@ fn analyzeDeclVal(
     if (sema.decl_val_table.get(decl_index)) |result| {
         return result;
     }
-    const decl_ref = try sema.analyzeDeclRef(decl_index);
+    const decl_ref = try sema.analyzeDeclRefInner(decl_index, false);
     const result = try sema.analyzeLoad(block, src, decl_ref, src);
     if (Air.refToIndex(result)) |index| {
         if (sema.air_instructions.items(.tag)[index] == .constant and !block.is_typeof) {
@@ -28962,6 +29005,7 @@ fn refValue(sema: *Sema, block: *Block, ty: Type, val: Value) !Value {
         try val.copy(anon_decl.arena()),
         0, // default alignment
     );
+    try sema.maybeQueueFuncBodyAnalysis(decl);
     try sema.mod.declareDeclDependency(sema.owner_decl_index, decl);
     return try Value.Tag.decl_ref.create(sema.arena, decl);
 }
@@ -28974,6 +29018,14 @@ fn optRefValue(sema: *Sema, block: *Block, ty: Type, opt_val: ?Value) !Value {
 }
 
 fn analyzeDeclRef(sema: *Sema, decl_index: Decl.Index) CompileError!Air.Inst.Ref {
+    return sema.analyzeDeclRefInner(decl_index, true);
+}
+
+/// Analyze a reference to the decl at the given index. Ensures the underlying decl is analyzed, but
+/// only triggers analysis for function bodies if `analyze_fn_body` is true. If it's possible for a
+/// decl_ref to end up in runtime code, the function body must be analyzed: `analyzeDeclRef` wraps
+/// this function with `analyze_fn_body` set to true.
+fn analyzeDeclRefInner(sema: *Sema, decl_index: Decl.Index, analyze_fn_body: bool) CompileError!Air.Inst.Ref {
     try sema.mod.declareDeclDependency(sema.owner_decl_index, decl_index);
     try sema.ensureDeclAnalyzed(decl_index);
 
@@ -28989,6 +29041,9 @@ fn analyzeDeclRef(sema: *Sema, decl_index: Decl.Index) CompileError!Air.Inst.Ref
         });
         return sema.addConstant(ty, try Value.Tag.decl_ref.create(sema.arena, decl_index));
     }
+    if (analyze_fn_body) {
+        try sema.maybeQueueFuncBodyAnalysis(decl_index);
+    }
     return sema.addConstant(
         try Type.ptr(sema.arena, sema.mod, .{
             .pointee_type = decl_tv.ty,
@@ -28998,6 +29053,15 @@ fn analyzeDeclRef(sema: *Sema, decl_index: Decl.Index) CompileError!Air.Inst.Ref
         }),
         try Value.Tag.decl_ref.create(sema.arena, decl_index),
     );
+}
+
+fn maybeQueueFuncBodyAnalysis(sema: *Sema, decl_index: Decl.Index) !void {
+    const decl = sema.mod.declPtr(decl_index);
+    const tv = try decl.typedValue();
+    if (tv.ty.zigTypeTag() != .Fn) return;
+    if (!try sema.fnHasRuntimeBits(tv.ty)) return;
+    const func = tv.val.castTag(.function) orelse return; // undef or extern_fn
+    try sema.mod.ensureFuncBodyAnalysisQueued(func.data);
 }
 
 fn analyzeRef(

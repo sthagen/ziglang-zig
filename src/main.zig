@@ -889,14 +889,6 @@ fn buildOutputType(
     var link_objects = std.ArrayList(Compilation.LinkObject).init(gpa);
     defer link_objects.deinit();
 
-    // This map is a flag per link_objects item, used to represent the
-    // `-l :file.so` syntax from gcc/clang.
-    // This is only exposed from the `zig cc` interface. It means that the `path`
-    // field from the corresponding `link_objects` element is a suffix, and is
-    // to be tried against each library path as a prefix until an existing file is found.
-    // This map remains empty for the main CLI.
-    var link_objects_lib_search_paths: std.AutoHashMapUnmanaged(u32, void) = .{};
-
     var framework_dirs = std.ArrayList([]const u8).init(gpa);
     defer framework_dirs.deinit();
 
@@ -981,7 +973,7 @@ fn buildOutputType(
                         }
                     } else if (mem.eql(u8, arg, "--mod")) {
                         const info = args_iter.nextOrFatal();
-                        var info_it = mem.split(u8, info, ":");
+                        var info_it = mem.splitScalar(u8, info, ':');
                         const mod_name = info_it.next() orelse fatal("expected non-empty argument after {s}", .{arg});
                         const deps_str = info_it.next() orelse fatal("expected 'name:deps:path' after {s}", .{arg});
                         const root_src_orig = info_it.rest();
@@ -1181,7 +1173,7 @@ fn buildOutputType(
                         } else {
                             if (build_options.only_core_functionality) unreachable;
                             // example: --listen 127.0.0.1:9000
-                            var it = std.mem.split(u8, next_arg, ":");
+                            var it = std.mem.splitScalar(u8, next_arg, ':');
                             const host = it.next().?;
                             const port_text = it.next() orelse "14735";
                             const port = std.fmt.parseInt(u16, port_text, 10) catch |err|
@@ -1627,14 +1619,15 @@ fn buildOutputType(
                         // We don't know whether this library is part of libc or libc++ until
                         // we resolve the target, so we simply append to the list for now.
                         if (mem.startsWith(u8, it.only_arg, ":")) {
-                            // This "feature" of gcc/clang means to treat this as a positional
-                            // link object, but using the library search directories as a prefix.
+                            // -l :path/to/filename is used when callers need
+                            // more control over what's in the resulting
+                            // binary: no extra rpaths and DSO filename exactly
+                            // as provided. Hello, Go.
                             try link_objects.append(.{
-                                .path = it.only_arg[1..],
+                                .path = it.only_arg,
                                 .must_link = must_link,
+                                .loption = true,
                             });
-                            const index = @intCast(u32, link_objects.items.len - 1);
-                            try link_objects_lib_search_paths.put(arena, index, {});
                         } else if (force_static_libs) {
                             try static_libs.append(it.only_arg);
                         } else {
@@ -1683,7 +1676,7 @@ fn buildOutputType(
                     },
                     .rdynamic => rdynamic = true,
                     .wl => {
-                        var split_it = mem.split(u8, it.only_arg, ",");
+                        var split_it = mem.splitScalar(u8, it.only_arg, ',');
                         while (split_it.next()) |linker_arg| {
                             // Handle nested-joined args like `-Wl,-rpath=foo`.
                             // Must be prefixed with 1 or 2 dashes.
@@ -2198,17 +2191,17 @@ fn buildOutputType(
                     const next_arg = linker_args_it.nextOrFatal();
                     try symbol_wrap_set.put(arena, next_arg, {});
                 } else if (mem.startsWith(u8, arg, "/subsystem:")) {
-                    var split_it = mem.splitBackwards(u8, arg, ":");
+                    var split_it = mem.splitBackwardsScalar(u8, arg, ':');
                     subsystem = try parseSubSystem(split_it.first());
                 } else if (mem.startsWith(u8, arg, "/implib:")) {
-                    var split_it = mem.splitBackwards(u8, arg, ":");
+                    var split_it = mem.splitBackwardsScalar(u8, arg, ':');
                     emit_implib = .{ .yes = split_it.first() };
                     emit_implib_arg_provided = true;
                 } else if (mem.startsWith(u8, arg, "/pdb:")) {
-                    var split_it = mem.splitBackwards(u8, arg, ":");
+                    var split_it = mem.splitBackwardsScalar(u8, arg, ':');
                     pdb_out_path = split_it.first();
                 } else if (mem.startsWith(u8, arg, "/version:")) {
-                    var split_it = mem.splitBackwards(u8, arg, ":");
+                    var split_it = mem.splitBackwardsScalar(u8, arg, ':');
                     const version_arg = split_it.first();
                     version = std.builtin.Version.parse(version_arg) catch |err| {
                         fatal("unable to parse /version '{s}': {s}", .{ arg, @errorName(err) });
@@ -2636,30 +2629,6 @@ fn buildOutputType(
                 fatal("static library '{s}' not found. search paths: {s}", .{
                     static_lib, search_paths.items,
                 });
-            }
-        }
-    }
-
-    // Resolve `-l :file.so` syntax from `zig cc`. We use a separate map for this data
-    // since this is an uncommon case.
-    {
-        var it = link_objects_lib_search_paths.iterator();
-        while (it.next()) |item| {
-            const link_object_i = item.key_ptr.*;
-            const suffix = link_objects.items[link_object_i].path;
-
-            for (lib_dirs.items) |lib_dir_path| {
-                const test_path = try fs.path.join(arena, &.{ lib_dir_path, suffix });
-                fs.cwd().access(test_path, .{}) catch |err| switch (err) {
-                    error.FileNotFound => continue,
-                    else => |e| fatal("unable to search for library '{s}': {s}", .{
-                        test_path, @errorName(e),
-                    }),
-                };
-                link_objects.items[link_object_i].path = test_path;
-                break;
-            } else {
-                fatal("library '{s}' not found", .{suffix});
             }
         }
     }
@@ -3572,10 +3541,10 @@ fn serveUpdateResults(s: *Server, comp: *Compilation) !void {
 }
 
 const ModuleDepIterator = struct {
-    split: mem.SplitIterator(u8),
+    split: mem.SplitIterator(u8, .scalar),
 
     fn init(deps_str: []const u8) ModuleDepIterator {
-        return .{ .split = mem.split(u8, deps_str, ",") };
+        return .{ .split = mem.splitScalar(u8, deps_str, ',') };
     }
 
     const Dependency = struct {
@@ -5817,12 +5786,12 @@ pub fn cmdChangelist(
     try bw.flush();
 }
 
-fn eatIntPrefix(arg: []const u8, radix: u8) []const u8 {
+fn eatIntPrefix(arg: []const u8, base: u8) []const u8 {
     if (arg.len > 2 and arg[0] == '0') {
         switch (std.ascii.toLower(arg[1])) {
-            'b' => if (radix == 2) return arg[2..],
-            'o' => if (radix == 8) return arg[2..],
-            'x' => if (radix == 16) return arg[2..],
+            'b' => if (base == 2) return arg[2..],
+            'o' => if (base == 8) return arg[2..],
+            'x' => if (base == 16) return arg[2..],
             else => {},
         }
     }

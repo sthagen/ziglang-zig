@@ -89,12 +89,11 @@ pub const StreamInterface = struct {
 };
 
 pub fn InitError(comptime Stream: type) type {
-    return std.mem.Allocator.Error || Stream.WriteError || Stream.ReadError || error{
+    return std.mem.Allocator.Error || Stream.WriteError || Stream.ReadError || tls.AlertDescription.Error || error{
         InsufficientEntropy,
         DiskQuota,
         LockViolation,
         NotOpenForWriting,
-        TlsAlert,
         TlsUnexpectedMessage,
         TlsIllegalParameter,
         TlsDecryptFailure,
@@ -251,8 +250,11 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
                 const level = ptd.decode(tls.AlertLevel);
                 const desc = ptd.decode(tls.AlertDescription);
                 _ = level;
-                _ = desc;
-                return error.TlsAlert;
+
+                // if this isn't a error alert, then it's a closure alert, which makes no sense in a handshake
+                try desc.toError();
+                // TODO: handle server-side closures
+                return error.TlsUnexpectedMessage;
             },
             .handshake => {
                 try ptd.ensure(4);
@@ -424,7 +426,7 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
     var handshake_state: HandshakeState = .encrypted_extensions;
     var cleartext_bufs: [2][8000]u8 = undefined;
     var main_cert_pub_key_algo: Certificate.AlgorithmCategory = undefined;
-    var main_cert_pub_key_buf: [300]u8 = undefined;
+    var main_cert_pub_key_buf: [600]u8 = undefined;
     var main_cert_pub_key_len: u16 = undefined;
     const now_sec = std.time.timestamp();
 
@@ -602,14 +604,11 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
                                     const components = try rsa.PublicKey.parseDer(main_cert_pub_key);
                                     const exponent = components.exponent;
                                     const modulus = components.modulus;
-                                    var rsa_mem_buf: [512 * 32]u8 = undefined;
-                                    var fba = std.heap.FixedBufferAllocator.init(&rsa_mem_buf);
-                                    const ally = fba.allocator();
                                     switch (modulus.len) {
                                         inline 128, 256, 512 => |modulus_len| {
                                             const key = try rsa.PublicKey.fromBytes(exponent, modulus);
                                             const sig = rsa.PSSSignature.fromBytes(modulus_len, encoded_sig);
-                                            try rsa.PSSSignature.verify(modulus_len, sig, verify_bytes, key, Hash, ally);
+                                            try rsa.PSSSignature.verify(modulus_len, sig, verify_bytes, key, Hash);
                                         },
                                         else => {
                                             return error.TlsBadRsaSignatureBitCount;
@@ -1074,8 +1073,10 @@ pub fn readvAdvanced(c: *Client, stream: anytype, iovecs: []const std.os.iovec) 
                 const level = @intToEnum(tls.AlertLevel, frag[in]);
                 const desc = @intToEnum(tls.AlertDescription, frag[in + 1]);
                 _ = level;
-                _ = desc;
-                return error.TlsAlert;
+
+                try desc.toError();
+                // TODO: handle server-side closures
+                return error.TlsUnexpectedMessage;
             },
             .application_data => {
                 const cleartext = switch (c.application_cipher) {
@@ -1115,7 +1116,10 @@ pub fn readvAdvanced(c: *Client, stream: anytype, iovecs: []const std.os.iovec) 
                             return vp.total;
                         }
                         _ = level;
-                        return error.TlsAlert;
+
+                        try desc.toError();
+                        // TODO: handle server-side closures
+                        return error.TlsUnexpectedMessage;
                     },
                     .handshake => {
                         var ct_i: usize = 0;

@@ -3021,7 +3021,7 @@ pub fn selfExePath(out_buffer: []u8) SelfExePathError![]u8 {
             } else if (argv0.len != 0) {
                 // argv[0] is not empty (and not a path): search it inside PATH
                 const PATH = std.os.getenvZ("PATH") orelse return error.FileNotFound;
-                var path_it = mem.tokenize(u8, PATH, &[_]u8{path.delimiter});
+                var path_it = mem.tokenizeScalar(u8, PATH, path.delimiter);
                 while (path_it.next()) |a_path| {
                     var resolved_path_buf: [MAX_PATH_BYTES - 1:0]u8 = undefined;
                     const resolved_path = std.fmt.bufPrintZ(&resolved_path_buf, "{s}/{s}", .{
@@ -3150,12 +3150,12 @@ fn copy_file(fd_in: os.fd_t, fd_out: os.fd_t, maybe_size: ?u64) CopyFileRawError
 
 test {
     if (builtin.os.tag != .wasi) {
-        _ = makeDirAbsolute;
-        _ = makeDirAbsoluteZ;
-        _ = copyFileAbsolute;
-        _ = updateFileAbsolute;
+        _ = &makeDirAbsolute;
+        _ = &makeDirAbsoluteZ;
+        _ = &copyFileAbsolute;
+        _ = &updateFileAbsolute;
     }
-    _ = Dir.copyFile;
+    _ = &Dir.copyFile;
     _ = @import("fs/test.zig");
     _ = @import("fs/path.zig");
     _ = @import("fs/file.zig");
