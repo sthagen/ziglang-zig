@@ -569,6 +569,7 @@ const usage_build_generic =
     \\  --verbose-link               Display linker invocations
     \\  --verbose-cc                 Display C compiler invocations
     \\  --verbose-air                Enable compiler debug output for Zig AIR
+    \\  --verbose-intern-pool        Enable compiler debug output for InternPool
     \\  --verbose-llvm-ir[=path]     Enable compiler debug output for unoptimized LLVM IR
     \\  --verbose-llvm-bc=[path]     Enable compiler debug output for unoptimized LLVM BC
     \\  --verbose-cimport            Enable compiler debug output for C imports
@@ -735,6 +736,7 @@ fn buildOutputType(
     var verbose_link = (builtin.os.tag != .wasi or builtin.link_libc) and std.process.hasEnvVarConstant("ZIG_VERBOSE_LINK");
     var verbose_cc = (builtin.os.tag != .wasi or builtin.link_libc) and std.process.hasEnvVarConstant("ZIG_VERBOSE_CC");
     var verbose_air = false;
+    var verbose_intern_pool = false;
     var verbose_llvm_ir: ?[]const u8 = null;
     var verbose_llvm_bc: ?[]const u8 = null;
     var verbose_cimport = false;
@@ -1460,6 +1462,8 @@ fn buildOutputType(
                         verbose_cc = true;
                     } else if (mem.eql(u8, arg, "--verbose-air")) {
                         verbose_air = true;
+                    } else if (mem.eql(u8, arg, "--verbose-intern-pool")) {
+                        verbose_intern_pool = true;
                     } else if (mem.eql(u8, arg, "--verbose-llvm-ir")) {
                         verbose_llvm_ir = "-";
                     } else if (mem.startsWith(u8, arg, "--verbose-llvm-ir=")) {
@@ -3156,6 +3160,7 @@ fn buildOutputType(
         .verbose_cc = verbose_cc,
         .verbose_link = verbose_link,
         .verbose_air = verbose_air,
+        .verbose_intern_pool = verbose_intern_pool,
         .verbose_llvm_ir = verbose_llvm_ir,
         .verbose_llvm_bc = verbose_llvm_bc,
         .verbose_cimport = verbose_cimport,
@@ -3995,8 +4000,8 @@ pub const usage_libc =
     \\    Parse a libc installation text file and validate it.
     \\
     \\Options:
-    \\    -h, --help             Print this help and exit
-    \\    -target [name]         <arch><sub>-<os>-<abi> see the targets command
+    \\  -h, --help             Print this help and exit
+    \\  -target [name]         <arch><sub>-<os>-<abi> see the targets command
     \\
 ;
 
@@ -4063,7 +4068,7 @@ pub const usage_init =
     \\   directory.
     \\
     \\Options:
-    \\   -h, --help             Print this help and exit
+    \\  -h, --help             Print this help and exit
     \\
     \\
 ;
@@ -4161,16 +4166,18 @@ pub const usage_build =
     \\   Build a project from build.zig.
     \\
     \\Options:
-    \\   -freference-trace[=num]       How many lines of reference trace should be shown per compile error
-    \\   -fno-reference-trace          Disable reference trace
-    \\   -fsummary                     Print the build summary, even on success
-    \\   -fno-summary                  Omit the build summary, even on failure
-    \\   --build-file [file]           Override path to build.zig
-    \\   --cache-dir [path]            Override path to local Zig cache directory
-    \\   --global-cache-dir [path]     Override path to global Zig cache directory
-    \\   --zig-lib-dir [arg]           Override path to Zig lib directory
-    \\   --build-runner [file]         Override path to build runner
-    \\   -h, --help                    Print this help and exit
+    \\  -freference-trace[=num]       How many lines of reference trace should be shown per compile error
+    \\  -fno-reference-trace          Disable reference trace
+    \\  --summary [mode]              Control the printing of the build summary
+    \\    all                         Print the build summary in its entirety
+    \\    failures                    (Default) Only print failed steps
+    \\    none                        Do not print the build summary
+    \\  --build-file [file]           Override path to build.zig
+    \\  --cache-dir [path]            Override path to local Zig cache directory
+    \\  --global-cache-dir [path]     Override path to global Zig cache directory
+    \\  --zig-lib-dir [arg]           Override path to Zig lib directory
+    \\  --build-runner [file]         Override path to build runner
+    \\  -h, --help                    Print this help and exit
     \\
 ;
 
@@ -4571,13 +4578,13 @@ pub const usage_fmt =
     \\   recursively.
     \\
     \\Options:
-    \\   -h, --help             Print this help and exit
-    \\   --color [auto|off|on]  Enable or disable colored error messages
-    \\   --stdin                Format code from stdin; output to stdout
-    \\   --check                List non-conforming files and exit with an error
-    \\                          if the list is non-empty
-    \\   --ast-check            Run zig ast-check on every file
-    \\   --exclude [file]       Exclude file or directory from formatting
+    \\  -h, --help             Print this help and exit
+    \\  --color [auto|off|on]  Enable or disable colored error messages
+    \\  --stdin                Format code from stdin; output to stdout
+    \\  --check                List non-conforming files and exit with an error
+    \\                         if the list is non-empty
+    \\  --ast-check            Run zig ast-check on every file
+    \\  --exclude [file]       Exclude file or directory from formatting
     \\
     \\
 ;
@@ -5386,7 +5393,7 @@ fn gimmeMoreOfThoseSweetSweetFileDescriptors() void {
         //   setrlimit() now returns with errno set to EINVAL in places that historically succeeded.
         //   It no longer accepts "rlim_cur = RLIM.INFINITY" for RLIM.NOFILE.
         //   Use "rlim_cur = min(OPEN_MAX, rlim_max)".
-        lim.max = std.math.min(std.os.darwin.OPEN_MAX, lim.max);
+        lim.max = @min(std.os.darwin.OPEN_MAX, lim.max);
     }
     if (lim.cur == lim.max) return;
 

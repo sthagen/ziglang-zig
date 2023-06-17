@@ -81,8 +81,6 @@ const PdbOrDwarf = union(enum) {
 
 var stderr_mutex = std.Thread.Mutex{};
 
-pub const warn = @compileError("deprecated; use `std.log` functions for logging or `std.debug.print` for 'printf debugging'");
-
 /// Print to stderr, unbuffered, and silently returning on failure. Intended
 /// for use in "printf debugging." Use `std.log` functions for proper logging.
 pub fn print(comptime fmt: []const u8, args: anytype) void {
@@ -200,7 +198,7 @@ pub fn captureStackTrace(first_address: ?usize, stack_trace: *std.builtin.StackT
             stack_trace.index = 0;
             return;
         };
-        const end_index = math.min(first_index + addrs.len, n);
+        const end_index = @min(first_index + addrs.len, n);
         const slice = addr_buf[first_index..end_index];
         // We use a for loop here because slice and addrs may alias.
         for (slice, 0..) |addr, i| {
@@ -382,7 +380,7 @@ pub fn writeStackTrace(
     _ = allocator;
     if (builtin.strip_debug_info) return error.MissingDebugInfo;
     var frame_index: usize = 0;
-    var frames_left: usize = std.math.min(stack_trace.index, stack_trace.instruction_addresses.len);
+    var frames_left: usize = @min(stack_trace.index, stack_trace.instruction_addresses.len);
 
     while (frames_left != 0) : ({
         frames_left -= 1;

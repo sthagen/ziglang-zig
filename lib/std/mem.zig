@@ -96,10 +96,10 @@ pub fn ValidationAllocator(comptime T: type) type {
             log2_buf_align: u8,
             ret_addr: usize,
         ) void {
-            _ = ctx;
-            _ = log2_buf_align;
-            _ = ret_addr;
+            const self = @ptrCast(*Self, @alignCast(@alignOf(Self), ctx));
             assert(buf.len > 0);
+            const underlying = self.getUnderlyingAllocatorPtr();
+            underlying.rawFree(buf, log2_buf_align, ret_addr);
         }
 
         pub fn reset(self: *Self) void {
@@ -596,7 +596,7 @@ pub fn sortUnstableContext(a: usize, b: usize, context: anytype) void {
 
 /// Compares two slices of numbers lexicographically. O(n).
 pub fn order(comptime T: type, lhs: []const T, rhs: []const T) math.Order {
-    const n = math.min(lhs.len, rhs.len);
+    const n = @min(lhs.len, rhs.len);
     var i: usize = 0;
     while (i < n) : (i += 1) {
         switch (math.order(lhs[i], rhs[i])) {
@@ -642,7 +642,7 @@ pub fn eql(comptime T: type, a: []const T, b: []const T) bool {
 /// Compares two slices and returns the index of the first inequality.
 /// Returns null if the slices are equal.
 pub fn indexOfDiff(comptime T: type, a: []const T, b: []const T) ?usize {
-    const shortest = math.min(a.len, b.len);
+    const shortest = @min(a.len, b.len);
     if (a.ptr == b.ptr)
         return if (a.len == b.len) null else shortest;
     var index: usize = 0;
@@ -1638,7 +1638,7 @@ pub fn writeInt(comptime T: type, buffer: *[@divExact(@typeInfo(T).Int.bits, 8)]
     }
 }
 
-pub fn writePackedIntLittle(comptime T: type, bytes: []u8, bit_offset: usize, value: T) void {
+fn writePackedIntLittle(comptime T: type, bytes: []u8, bit_offset: usize, value: T) void {
     const uN = std.meta.Int(.unsigned, @bitSizeOf(T));
     const Log2N = std.math.Log2Int(T);
 
@@ -1671,7 +1671,7 @@ pub fn writePackedIntLittle(comptime T: type, bytes: []u8, bit_offset: usize, va
     writeIntLittle(StoreInt, write_bytes[0..store_size], write_value);
 }
 
-pub fn writePackedIntBig(comptime T: type, bytes: []u8, bit_offset: usize, value: T) void {
+fn writePackedIntBig(comptime T: type, bytes: []u8, bit_offset: usize, value: T) void {
     const uN = std.meta.Int(.unsigned, @bitSizeOf(T));
     const Log2N = std.math.Log2Int(T);
 
@@ -3101,7 +3101,7 @@ test "testStringEquality" {
 
 test "testReadInt" {
     try testReadIntImpl();
-    comptime try testReadIntImpl();
+    try comptime testReadIntImpl();
 }
 fn testReadIntImpl() !void {
     {
@@ -3152,7 +3152,7 @@ fn testReadIntImpl() !void {
 
 test writeIntSlice {
     try testWriteIntImpl();
-    comptime try testWriteIntImpl();
+    try comptime testWriteIntImpl();
 }
 fn testWriteIntImpl() !void {
     var bytes: [8]u8 = undefined;
@@ -3296,7 +3296,7 @@ pub fn min(comptime T: type, slice: []const T) T {
     assert(slice.len > 0);
     var best = slice[0];
     for (slice[1..]) |item| {
-        best = math.min(best, item);
+        best = @min(best, item);
     }
     return best;
 }
@@ -3313,7 +3313,7 @@ pub fn max(comptime T: type, slice: []const T) T {
     assert(slice.len > 0);
     var best = slice[0];
     for (slice[1..]) |item| {
-        best = math.max(best, item);
+        best = @max(best, item);
     }
     return best;
 }
@@ -3332,8 +3332,8 @@ pub fn minMax(comptime T: type, slice: []const T) struct { min: T, max: T } {
     var minVal = slice[0];
     var maxVal = slice[0];
     for (slice[1..]) |item| {
-        minVal = math.min(minVal, item);
-        maxVal = math.max(maxVal, item);
+        minVal = @min(minVal, item);
+        maxVal = @max(maxVal, item);
     }
     return .{ .min = minVal, .max = maxVal };
 }
@@ -4069,13 +4069,13 @@ test "bytesAsSlice keeps pointer alignment" {
     {
         var bytes = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
         const numbers = bytesAsSlice(u32, bytes[0..]);
-        comptime try testing.expect(@TypeOf(numbers) == []align(@alignOf(@TypeOf(bytes))) u32);
+        try comptime testing.expect(@TypeOf(numbers) == []align(@alignOf(@TypeOf(bytes))) u32);
     }
     {
         var bytes = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
         var runtime_zero: usize = 0;
         const numbers = bytesAsSlice(u32, bytes[runtime_zero..]);
-        comptime try testing.expect(@TypeOf(numbers) == []align(@alignOf(@TypeOf(bytes))) u32);
+        try comptime testing.expect(@TypeOf(numbers) == []align(@alignOf(@TypeOf(bytes))) u32);
     }
 }
 
@@ -4168,7 +4168,7 @@ test "sliceAsBytes packed struct at runtime and comptime" {
         }
     };
     try S.doTheTest();
-    comptime try S.doTheTest();
+    try comptime S.doTheTest();
 }
 
 test "sliceAsBytes and bytesAsSlice back" {
@@ -4226,7 +4226,8 @@ pub fn alignForwardLog2(addr: usize, log2_alignment: u8) usize {
 /// The alignment must be a power of 2 and greater than 0.
 /// Asserts that rounding up the address does not cause integer overflow.
 pub fn alignForwardGeneric(comptime T: type, addr: T, alignment: T) T {
-    assert(isValidAlignGeneric(T, alignment));
+    assert(alignment > 0);
+    assert(std.math.isPowerOfTwo(alignment));
     return alignBackwardGeneric(T, addr + (alignment - 1), alignment);
 }
 
@@ -4556,7 +4557,7 @@ test "read/write(Var)PackedInt" {
                         }
 
                         const signedness = @typeInfo(PackedType).Int.signedness;
-                        const NextPowerOfTwoInt = std.meta.Int(signedness, comptime try std.math.ceilPowerOfTwo(u16, @bitSizeOf(PackedType)));
+                        const NextPowerOfTwoInt = std.meta.Int(signedness, try comptime std.math.ceilPowerOfTwo(u16, @bitSizeOf(PackedType)));
                         const ui64 = std.meta.Int(signedness, 64);
                         inline for ([_]type{ PackedType, NextPowerOfTwoInt, ui64 }) |U| {
                             { // Variable-size Read/Write (Native-endian)

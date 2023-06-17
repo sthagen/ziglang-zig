@@ -67,6 +67,7 @@ else if (builtin.link_libc or is_windows)
     std.c
 else switch (builtin.os.tag) {
     .linux => linux,
+    .plan9 => plan9,
     .wasi => wasi,
     .uefi => uefi,
     else => struct {},
@@ -3999,6 +4000,7 @@ pub fn connect(sock: socket_t, sock_addr: *const sockaddr, len: socklen_t) Conne
             .PROTOTYPE => unreachable, // The socket type does not support the requested communications protocol.
             .TIMEDOUT => return error.ConnectionTimedOut,
             .NOENT => return error.FileNotFound, // Returned when socket is AF.UNIX and the given path does not exist.
+            .CONNABORTED => unreachable, // Tried to reuse socket that previously received error.ConnectionRefused.
             else => |err| return unexpectedErrno(err),
         }
     }
@@ -5978,7 +5980,7 @@ pub fn sendto(
     addrlen: socklen_t,
 ) SendToError!usize {
     if (builtin.os.tag == .windows) {
-        switch (windows.ws2_32.sendto(sockfd, buf.ptr, buf.len, flags, dest_addr, addrlen)) {
+        switch (windows.sendto(sockfd, buf.ptr, buf.len, flags, dest_addr, addrlen)) {
             windows.ws2_32.SOCKET_ERROR => switch (windows.ws2_32.WSAGetLastError()) {
                 .WSAEACCES => return error.AccessDenied,
                 .WSAEADDRNOTAVAIL => return error.AddressNotAvailable,
@@ -6868,6 +6870,7 @@ pub fn tcgetpgrp(handle: fd_t) TermioGetPgrpError!pid_t {
             .SUCCESS => return pgrp,
             .BADF => unreachable,
             .INVAL => unreachable,
+            .INTR => continue,
             .NOTTY => return error.NotATerminal,
             else => |err| return unexpectedErrno(err),
         }
@@ -6886,6 +6889,7 @@ pub fn tcsetpgrp(handle: fd_t, pgrp: pid_t) TermioSetPgrpError!void {
             .SUCCESS => return,
             .BADF => unreachable,
             .INVAL => unreachable,
+            .INTR => continue,
             .NOTTY => return error.NotATerminal,
             .PERM => return TermioSetPgrpError.NotAPgrpMember,
             else => |err| return unexpectedErrno(err),
