@@ -390,10 +390,10 @@ const Report = struct {
             .src_loc = try eb.addSourceLocation(.{
                 .src_path = try eb.addString(file_path),
                 .span_start = token_starts[msg.tok],
-                .span_end = @intCast(u32, token_starts[msg.tok] + ast.tokenSlice(msg.tok).len),
+                .span_end = @as(u32, @intCast(token_starts[msg.tok] + ast.tokenSlice(msg.tok).len)),
                 .span_main = token_starts[msg.tok] + msg.off,
-                .line = @intCast(u32, start_loc.line),
-                .column = @intCast(u32, start_loc.column),
+                .line = @as(u32, @intCast(start_loc.line)),
+                .column = @as(u32, @intCast(start_loc.column)),
                 .source_line = try eb.addString(ast.source[start_loc.line_start..start_loc.line_end]),
             }),
             .notes_len = notes_len,
@@ -502,7 +502,7 @@ fn fetchAndUnpack(
 
         if (req.response.status != .ok) {
             return report.fail(dep.url_tok, "Expected response status '200 OK' got '{} {s}'", .{
-                @enumToInt(req.response.status),
+                @intFromEnum(req.response.status),
                 req.response.status.phrase() orelse "",
             });
         }
@@ -568,7 +568,7 @@ fn fetchAndUnpack(
             .msg = "url field is missing corresponding hash field",
         });
         const notes_start = try eb.reserveNotes(notes_len);
-        eb.extra.items[notes_start] = @enumToInt(try eb.addErrorMessage(.{
+        eb.extra.items[notes_start] = @intFromEnum(try eb.addErrorMessage(.{
             .msg = try eb.printString("expected .hash = \"{s}\",", .{&actual_hex}),
         }));
         return error.PackageFetchFailed;
@@ -715,7 +715,7 @@ fn hashFileFallible(dir: fs.Dir, hashed_file: *HashedFile) HashedFile.Error!void
     defer file.close();
     var hasher = Manifest.Hash.init(.{});
     hasher.update(hashed_file.normalized_path);
-    hasher.update(&.{ 0, @boolToInt(try isExecutable(file)) });
+    hasher.update(&.{ 0, @intFromBool(try isExecutable(file)) });
     while (true) {
         const bytes_read = try file.read(&buf);
         if (bytes_read == 0) break;

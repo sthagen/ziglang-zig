@@ -998,7 +998,7 @@ fn evalZigTest(
             },
             .test_metadata => {
                 const TmHdr = std.zig.Server.Message.TestMetadata;
-                const tm_hdr = @ptrCast(*align(1) const TmHdr, body);
+                const tm_hdr = @as(*align(1) const TmHdr, @ptrCast(body));
                 test_count = tm_hdr.tests_len;
 
                 const names_bytes = body[@sizeOf(TmHdr)..][0 .. test_count * @sizeOf(u32)];
@@ -1034,10 +1034,10 @@ fn evalZigTest(
                 const md = metadata.?;
 
                 const TrHdr = std.zig.Server.Message.TestResults;
-                const tr_hdr = @ptrCast(*align(1) const TrHdr, body);
-                fail_count += @boolToInt(tr_hdr.flags.fail);
-                skip_count += @boolToInt(tr_hdr.flags.skip);
-                leak_count += @boolToInt(tr_hdr.flags.leak);
+                const tr_hdr = @as(*align(1) const TrHdr, @ptrCast(body));
+                fail_count += @intFromBool(tr_hdr.flags.fail);
+                skip_count += @intFromBool(tr_hdr.flags.skip);
+                leak_count += @intFromBool(tr_hdr.flags.leak);
 
                 if (tr_hdr.flags.fail or tr_hdr.flags.leak) {
                     const name = std.mem.sliceTo(md.string_bytes[md.names[tr_hdr.index]..], 0);

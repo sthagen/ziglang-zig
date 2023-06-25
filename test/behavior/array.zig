@@ -170,14 +170,14 @@ test "array with sentinels" {
             {
                 var zero_sized: [0:0xde]u8 = [_:0xde]u8{};
                 try expect(zero_sized[0] == 0xde);
-                var reinterpreted = @ptrCast(*[1]u8, &zero_sized);
+                var reinterpreted = @as(*[1]u8, @ptrCast(&zero_sized));
                 try expect(reinterpreted[0] == 0xde);
             }
             var arr: [3:0x55]u8 = undefined;
             // Make sure the sentinel pointer is pointing after the last element.
             if (!is_ct) {
-                const sentinel_ptr = @ptrToInt(&arr[3]);
-                const last_elem_ptr = @ptrToInt(&arr[2]);
+                const sentinel_ptr = @intFromPtr(&arr[3]);
+                const last_elem_ptr = @intFromPtr(&arr[2]);
                 try expect((sentinel_ptr - last_elem_ptr) == 1);
             }
             // Make sure the sentinel is writeable.
@@ -694,7 +694,7 @@ test "array init of container level array variable" {
 test "runtime initialized sentinel-terminated array literal" {
     var c: u16 = 300;
     const f = &[_:0x9999]u16{c};
-    const g = @ptrCast(*const [4]u8, f);
+    const g = @as(*const [4]u8, @ptrCast(f));
     try std.testing.expect(g[2] == 0x99);
     try std.testing.expect(g[3] == 0x99);
 }

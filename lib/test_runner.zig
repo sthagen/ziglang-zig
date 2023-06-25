@@ -70,12 +70,12 @@ fn mainServer() !void {
                 defer std.testing.allocator.free(expected_panic_msgs);
 
                 for (test_fns, names, async_frame_sizes, expected_panic_msgs) |test_fn, *name, *async_frame_size, *expected_panic_msg| {
-                    name.* = @intCast(u32, string_bytes.items.len);
+                    name.* = @as(u32, @intCast(string_bytes.items.len));
                     try string_bytes.ensureUnusedCapacity(std.testing.allocator, test_fn.name.len + 1);
                     string_bytes.appendSliceAssumeCapacity(test_fn.name);
                     string_bytes.appendAssumeCapacity(0);
 
-                    async_frame_size.* = @intCast(u32, test_fn.async_frame_size orelse 0);
+                    async_frame_size.* = @as(u32, @intCast(test_fn.async_frame_size orelse 0));
                     expected_panic_msg.* = 0;
                 }
 
@@ -117,7 +117,7 @@ fn mainServer() !void {
             },
 
             else => {
-                std.debug.print("unsupported message: {x}", .{@enumToInt(hdr.tag)});
+                std.debug.print("unsupported message: {x}", .{@intFromEnum(hdr.tag)});
                 std.process.exit(1);
             },
         }
@@ -163,7 +163,7 @@ fn mainTerminal() void {
                     std.heap.page_allocator.free(async_frame_buffer);
                     async_frame_buffer = std.heap.page_allocator.alignedAlloc(u8, std.Target.stack_align, size) catch @panic("out of memory");
                 }
-                const casted_fn = @ptrCast(fn () callconv(.Async) anyerror!void, test_fn.func);
+                const casted_fn = @as(fn () callconv(.Async) anyerror!void, @ptrCast(test_fn.func));
                 break :blk await @asyncCall(async_frame_buffer, {}, casted_fn, .{});
             },
             .blocking => {
@@ -216,10 +216,10 @@ pub fn log(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    if (@enumToInt(message_level) <= @enumToInt(std.log.Level.err)) {
+    if (@intFromEnum(message_level) <= @intFromEnum(std.log.Level.err)) {
         log_err_count += 1;
     }
-    if (@enumToInt(message_level) <= @enumToInt(std.testing.log_level)) {
+    if (@intFromEnum(message_level) <= @intFromEnum(std.testing.log_level)) {
         std.debug.print(
             "[" ++ @tagName(scope) ++ "] (" ++ @tagName(message_level) ++ "): " ++ format ++ "\n",
             args,

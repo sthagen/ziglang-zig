@@ -37,7 +37,7 @@ const MultiArch = union(enum) {
     specific: Arch,
 
     fn eql(a: MultiArch, b: MultiArch) bool {
-        if (@enumToInt(a) != @enumToInt(b))
+        if (@intFromEnum(a) != @intFromEnum(b))
             return false;
         if (a != .specific)
             return true;
@@ -112,7 +112,7 @@ const DestTarget = struct {
             _ = self;
             var hasher = std.hash.Wyhash.init(0);
             std.hash.autoHash(&hasher, a.arch);
-            return @truncate(u32, hasher.final());
+            return @as(u32, @truncate(hasher.final()));
         }
 
         pub fn eql(self: @This(), a: DestTarget, b: DestTarget, b_index: usize) bool {
