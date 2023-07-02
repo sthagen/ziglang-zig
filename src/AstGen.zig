@@ -1478,9 +1478,26 @@ fn arrayInitExpr(
 
     switch (ri.rl) {
         .discard => {
-            // TODO elements should still be coerced if type is provided
-            for (array_init.ast.elements) |elem_init| {
-                _ = try expr(gz, scope, .{ .rl = .discard }, elem_init);
+            if (types.elem != .none) {
+                const elem_ri: ResultInfo = .{ .rl = .{ .ty = types.elem } };
+                for (array_init.ast.elements) |elem_init| {
+                    _ = try expr(gz, scope, elem_ri, elem_init);
+                }
+            } else if (types.array != .none) {
+                for (array_init.ast.elements, 0..) |elem_init, i| {
+                    const elem_ty = try gz.add(.{
+                        .tag = .elem_type_index,
+                        .data = .{ .bin = .{
+                            .lhs = types.array,
+                            .rhs = @enumFromInt(i),
+                        } },
+                    });
+                    _ = try expr(gz, scope, .{ .rl = .{ .ty = elem_ty } }, elem_init);
+                }
+            } else {
+                for (array_init.ast.elements) |elem_init| {
+                    _ = try expr(gz, scope, .{ .rl = .discard }, elem_init);
+                }
             }
             return Zir.Inst.Ref.void_value;
         },
@@ -1569,7 +1586,7 @@ fn arrayInitExprInner(
     for (elements, 0..) |elem_init, i| {
         const ri = if (elem_ty != .none)
             ResultInfo{ .rl = .{ .coerced_ty = elem_ty } }
-        else if (array_ty_inst != .none and nodeMayNeedMemoryLocation(astgen.tree, elem_init, true)) ri: {
+        else if (array_ty_inst != .none) ri: {
             const ty_expr = try gz.add(.{
                 .tag = .elem_type_index,
                 .data = .{ .bin = .{
@@ -3209,7 +3226,10 @@ fn varDecl(
                 // In case the result location did not do the coercion
                 // for us so we must do it here.
                 const coerced_init = if (opt_type_inst != .none)
-                    try gz.addBin(.as, opt_type_inst, init_inst)
+                    try gz.addPlNode(.as_node, var_decl.ast.init_node, Zir.Inst.As{
+                        .dest_type = opt_type_inst,
+                        .operand = init_inst,
+                    })
                 else
                     init_inst;
 
@@ -6480,11 +6500,11 @@ fn forExpr(
                     return astgen.failTok(ident_tok, "cannot capture reference to range", .{});
                 }
                 const start_node = node_data[input].lhs;
-                const start_val = try expr(parent_gz, scope, .{ .rl = .none }, start_node);
+                const start_val = try expr(parent_gz, scope, .{ .rl = .{ .coerced_ty = .usize_type } }, start_node);
 
                 const end_node = node_data[input].rhs;
                 const end_val = if (end_node != 0)
-                    try expr(parent_gz, scope, .{ .rl = .none }, node_data[input].rhs)
+                    try expr(parent_gz, scope, .{ .rl = .{ .coerced_ty = .usize_type } }, node_data[input].rhs)
                 else
                     .none;
 
@@ -8050,17 +8070,9 @@ fn ptrCast(
     }
 
     // Full cast including result type
-    const need_result_type_builtin = if (flags.ptr_cast)
-        "@ptrCast"
-    else if (flags.align_cast)
-        "@alignCast"
-    else if (flags.addrspace_cast)
-        "@addrSpaceCast"
-    else
-        unreachable;
 
     const cursor = maybeAdvanceSourceCursorToMainToken(gz, root_node);
-    const result_type = try ri.rl.resultType(gz, root_node, need_result_type_builtin);
+    const result_type = try ri.rl.resultType(gz, root_node, flags.needResultTypeBuiltinName());
     const operand = try expr(gz, scope, .{ .rl = .none }, node);
     try emitDbgStmt(gz, cursor);
     const result = try gz.addExtendedPayloadSmall(.ptr_cast_full, flags_i, Zir.Inst.BinNode{
