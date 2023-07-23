@@ -81,6 +81,8 @@ message(STATUS "Configuring zig version ${RESOLVED_ZIG_VERSION}")
 set(ZIG_NO_LIB off CACHE BOOL
     "Disable copying lib/ files to install prefix during the build phase")
 
+# This used to do something and it may or may not do something in the future.
+# Right now it does nothing.
 set(ZIG_NO_LANGREF off CACHE BOOL
     "Disable copying of langref to the install prefix during the build phase")
 
@@ -205,6 +207,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/atomic/queue.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/atomic/stack.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/base64.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/BitStack.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/buf_map.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/Build.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/Build/Cache.zig"
@@ -260,7 +263,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/io/seekable_stream.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/io/writer.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/json.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/json/write_stream.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/json/stringify.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/leb128.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/linked_list.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/log.zig"
@@ -827,11 +830,6 @@ if(ZIG_NO_LIB)
 else()
   set(ZIG_NO_LIB_ARG "")
 endif()
-if(ZIG_NO_LANGREF)
-  set(ZIG_NO_LANGREF_ARG "-Dno-langref")
-else()
-  set(ZIG_NO_LANGREF_ARG "")
-endif()
 if(ZIG_SINGLE_THREADED)
   set(ZIG_SINGLE_THREADED_ARG "-Dsingle-threaded")
 else()
@@ -849,6 +847,10 @@ else()
   set(ZIG_PIE_ARG "")
 endif()
 
+# -Dno-langref is currently hardcoded because building the langref takes too damn long
+# -Dno-autodocs is currently hardcoded because the C backend generates a miscompilation
+#   that prevents it from working.
+# To obtain these two forms of documentation, run zig build against stage3 rather than stage2.
 set(ZIG_BUILD_ARGS
   --zig-lib-dir "${CMAKE_SOURCE_DIR}/lib"
   "-Dconfig_h=${ZIG_CONFIG_H_OUT}"
@@ -856,7 +858,8 @@ set(ZIG_BUILD_ARGS
   ${ZIG_RELEASE_ARG}
   ${ZIG_STATIC_ARG}
   ${ZIG_NO_LIB_ARG}
-  ${ZIG_NO_LANGREF_ARG}
+  "-Dno-langref"
+  "-Dno-autodocs"
   ${ZIG_SINGLE_THREADED_ARG}
   ${ZIG_PIE_ARG}
   "-Dtarget=${ZIG_TARGET_TRIPLE}"

@@ -49,7 +49,6 @@ verbose_cc: bool,
 emit_analysis: EmitOption = .default,
 emit_asm: EmitOption = .default,
 emit_bin: EmitOption = .default,
-emit_docs: EmitOption = .default,
 emit_implib: EmitOption = .default,
 emit_llvm_bc: EmitOption = .default,
 emit_llvm_ir: EmitOption = .default,
@@ -65,6 +64,7 @@ sanitize_thread: bool,
 rdynamic: bool,
 dwarf_format: ?std.dwarf.Format = null,
 import_memory: bool = false,
+export_memory: bool = false,
 /// For WebAssembly targets, this will allow for undefined symbols to
 /// be imported from the host environment.
 import_symbols: bool = false,
@@ -216,6 +216,7 @@ output_lib_path_source: GeneratedFile,
 output_h_path_source: GeneratedFile,
 output_pdb_path_source: GeneratedFile,
 output_dirname_source: GeneratedFile,
+generated_docs: ?*GeneratedFile,
 
 pub const CSourceFiles = struct {
     files: []const []const u8,
@@ -432,7 +433,7 @@ pub fn create(owner: *std.Build, options: Options) *Compile {
     }) catch @panic("OOM");
 
     const self = owner.allocator.create(Compile) catch @panic("OOM");
-    self.* = Compile{
+    self.* = .{
         .strip = null,
         .unwind_tables = null,
         .verbose_link = false,
@@ -485,6 +486,7 @@ pub fn create(owner: *std.Build, options: Options) *Compile {
         .output_h_path_source = GeneratedFile{ .step = &self.step },
         .output_pdb_path_source = GeneratedFile{ .step = &self.step },
         .output_dirname_source = GeneratedFile{ .step = &self.step },
+        .generated_docs = null,
 
         .target_info = target_info,
 
@@ -1003,6 +1005,15 @@ pub fn getOutputPdbSource(self: *Compile) FileSource {
     return .{ .generated = &self.output_pdb_path_source };
 }
 
+pub fn getOutputDocs(self: *Compile) FileSource {
+    assert(self.generated_docs == null); // This function may only be called once.
+    const arena = self.step.owner.allocator;
+    const generated_file = arena.create(GeneratedFile) catch @panic("OOM");
+    generated_file.* = .{ .step = &self.step };
+    self.generated_docs = generated_file;
+    return .{ .generated = generated_file };
+}
+
 pub fn addAssemblyFile(self: *Compile, path: []const u8) void {
     const b = self.step.owner;
     self.link_objects.append(.{
@@ -1508,7 +1519,7 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
     if (self.emit_analysis.getArg(b, "emit-analysis")) |arg| try zig_args.append(arg);
     if (self.emit_asm.getArg(b, "emit-asm")) |arg| try zig_args.append(arg);
     if (self.emit_bin.getArg(b, "emit-bin")) |arg| try zig_args.append(arg);
-    if (self.emit_docs.getArg(b, "emit-docs")) |arg| try zig_args.append(arg);
+    if (self.generated_docs != null) try zig_args.append("-femit-docs");
     if (self.emit_implib.getArg(b, "emit-implib")) |arg| try zig_args.append(arg);
     if (self.emit_llvm_bc.getArg(b, "emit-llvm-bc")) |arg| try zig_args.append(arg);
     if (self.emit_llvm_ir.getArg(b, "emit-llvm-ir")) |arg| try zig_args.append(arg);
@@ -1661,6 +1672,9 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
     }
     if (self.import_memory) {
         try zig_args.append("--import-memory");
+    }
+    if (self.export_memory) {
+        try zig_args.append("--export-memory");
     }
     if (self.import_symbols) {
         try zig_args.append("--import-symbols");
@@ -2017,6 +2031,10 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
             self.output_pdb_path_source.path = b.pathJoin(
                 &.{ output_dir, self.out_pdb_filename },
             );
+        }
+
+        if (self.generated_docs) |generated_docs| {
+            generated_docs.path = b.pathJoin(&.{ output_dir, "docs" });
         }
     }
 
