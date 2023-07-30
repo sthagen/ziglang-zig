@@ -1099,6 +1099,8 @@ pub const Dir = struct {
         InvalidUtf8,
         BadPathName,
         DeviceBusy,
+        /// On Windows, `\\server` or `\\server\share` was not found.
+        NetworkNotFound,
     } || os.UnexpectedError;
 
     pub fn close(self: *Dir) void {
@@ -1460,32 +1462,22 @@ pub const Dir = struct {
     /// This function is not atomic, and if it returns an error, the file system may
     /// have been modified regardless.
     pub fn makePath(self: Dir, sub_path: []const u8) !void {
-        var end_index: usize = sub_path.len;
+        var it = try path.componentIterator(sub_path);
+        var component = it.last() orelse return;
         while (true) {
-            self.makeDir(sub_path[0..end_index]) catch |err| switch (err) {
+            self.makeDir(component.path) catch |err| switch (err) {
                 error.PathAlreadyExists => {
                     // TODO stat the file and return an error if it's not a directory
                     // this is important because otherwise a dangling symlink
                     // could cause an infinite loop
-                    if (end_index == sub_path.len) return;
                 },
-                error.FileNotFound => {
-                    // march end_index backward until next path component
-                    while (true) {
-                        if (end_index == 0) return err;
-                        end_index -= 1;
-                        if (path.isSep(sub_path[end_index])) break;
-                    }
+                error.FileNotFound => |e| {
+                    component = it.previous() orelse return e;
                     continue;
                 },
-                else => return err,
+                else => |e| return e,
             };
-            if (end_index == sub_path.len) return;
-            // march end_index forward until next path component
-            while (true) {
-                end_index += 1;
-                if (end_index == sub_path.len or path.isSep(sub_path[end_index])) break;
-            }
+            component = it.next() orelse return;
         }
     }
 
@@ -1890,6 +1882,8 @@ pub const Dir = struct {
         ReadOnlyFileSystem,
         InvalidUtf8,
         BadPathName,
+        /// On Windows, `\\server` or `\\server\share` was not found.
+        NetworkNotFound,
         Unexpected,
     };
 
@@ -2112,6 +2106,9 @@ pub const Dir = struct {
         /// On Windows, file paths cannot contain these characters:
         /// '/', '*', '?', '"', '<', '>', '|'
         BadPathName,
+
+        /// On Windows, `\\server` or `\\server\share` was not found.
+        NetworkNotFound,
     } || os.UnexpectedError;
 
     /// Whether `full_path` describes a symlink, file, or directory, this function
@@ -2168,6 +2165,7 @@ pub const Dir = struct {
                                 error.Unexpected,
                                 error.InvalidUtf8,
                                 error.BadPathName,
+                                error.NetworkNotFound,
                                 error.DeviceBusy,
                                 => |e| return e,
                             };
@@ -2204,6 +2202,7 @@ pub const Dir = struct {
                             error.FileSystem,
                             error.FileBusy,
                             error.BadPathName,
+                            error.NetworkNotFound,
                             error.Unexpected,
                             => |e| return e,
                         }
@@ -2257,6 +2256,7 @@ pub const Dir = struct {
                                 error.Unexpected,
                                 error.InvalidUtf8,
                                 error.BadPathName,
+                                error.NetworkNotFound,
                                 error.DeviceBusy,
                                 => |e| return e,
                             };
@@ -2283,6 +2283,7 @@ pub const Dir = struct {
                                 error.FileSystem,
                                 error.FileBusy,
                                 error.BadPathName,
+                                error.NetworkNotFound,
                                 error.Unexpected,
                                 => |e| return e,
                             }
@@ -2353,6 +2354,7 @@ pub const Dir = struct {
                                 error.Unexpected,
                                 error.InvalidUtf8,
                                 error.BadPathName,
+                                error.NetworkNotFound,
                                 error.DeviceBusy,
                                 => |e| return e,
                             };
@@ -2386,6 +2388,7 @@ pub const Dir = struct {
                                 error.FileSystem,
                                 error.FileBusy,
                                 error.BadPathName,
+                                error.NetworkNotFound,
                                 error.Unexpected,
                                 => |e| return e,
                             }
@@ -2446,6 +2449,7 @@ pub const Dir = struct {
                         error.InvalidUtf8,
                         error.BadPathName,
                         error.DeviceBusy,
+                        error.NetworkNotFound,
                         => |e| return e,
                     };
                 } else {
@@ -2469,6 +2473,7 @@ pub const Dir = struct {
                         error.FileSystem,
                         error.FileBusy,
                         error.BadPathName,
+                        error.NetworkNotFound,
                         error.Unexpected,
                         => |e| return e,
                     }

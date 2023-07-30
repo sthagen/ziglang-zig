@@ -10791,6 +10791,13 @@ fn zirSwitchBlock(sema: *Sema, block: *Block, inst: Zir.Inst.Index, operand_is_r
                 "'_' prong here",
                 .{},
             );
+            try sema.errNote(
+                block,
+                src,
+                msg,
+                "consider using 'else'",
+                .{},
+            );
             break :msg msg;
         };
         return sema.failWithOwnedErrorMsg(msg);
@@ -17526,7 +17533,7 @@ fn typeInfoNamespaceDecls(
             try sema.typeInfoNamespaceDecls(block, new_ns, declaration_ty, decl_vals, seen_namespaces);
             continue;
         }
-        if (decl.kind != .named) continue;
+        if (decl.kind != .named or !decl.is_pub) continue;
         const name_val = v: {
             var anon_decl = try block.startAnonDecl();
             defer anon_decl.deinit();
@@ -17554,8 +17561,6 @@ fn typeInfoNamespaceDecls(
         const fields = .{
             //name: []const u8,
             name_val,
-            //is_pub: bool,
-            Value.makeBool(decl.is_pub).toIntern(),
         };
         try decl_vals.append(try mod.intern(.{ .aggregate = .{
             .ty = declaration_ty.toIntern(),
@@ -20392,6 +20397,12 @@ fn reifyStruct(
     const mod = sema.mod;
     const gpa = sema.gpa;
     const ip = &mod.intern_pool;
+
+    if (is_tuple) switch (layout) {
+        .Extern => return sema.fail(block, src, "extern tuples are not supported", .{}),
+        .Packed => return sema.fail(block, src, "packed tuples are not supported", .{}),
+        .Auto => {},
+    };
 
     // Because these three things each reference each other, `undefined`
     // placeholders are used before being set after the struct type gains an
@@ -24579,7 +24590,7 @@ fn validateExternType(
         .ErrorSet,
         .Frame,
         => return false,
-        .Void => return position == .union_field or position == .ret_ty,
+        .Void => return position == .union_field or position == .ret_ty or position == .struct_field or position == .element,
         .NoReturn => return position == .ret_ty,
         .Opaque,
         .Bool,
@@ -24588,7 +24599,7 @@ fn validateExternType(
         => return true,
         .Pointer => return !(ty.isSlice(mod) or try sema.typeRequiresComptime(ty)),
         .Int => switch (ty.intInfo(mod).bits) {
-            8, 16, 32, 64, 128 => return true,
+            0, 8, 16, 32, 64, 128 => return true,
             else => return false,
         },
         .Fn => {
@@ -24609,11 +24620,11 @@ fn validateExternType(
             .Packed => {
                 const bit_size = try ty.bitSizeAdvanced(mod, sema);
                 switch (bit_size) {
-                    8, 16, 32, 64, 128 => return true,
+                    0, 8, 16, 32, 64, 128 => return true,
                     else => return false,
                 }
             },
-            .Auto => return false,
+            .Auto => return !(try sema.typeHasRuntimeBits(ty)),
         },
         .Array => {
             if (position == .ret_ty or position == .param_ty) return false;
@@ -24662,9 +24673,9 @@ fn explainWhyTypeIsNotExtern(
         .Void => try mod.errNoteNonLazy(src_loc, msg, "'void' is a zero bit type; for C 'void' use 'anyopaque'", .{}),
         .NoReturn => try mod.errNoteNonLazy(src_loc, msg, "'noreturn' is only allowed as a return type", .{}),
         .Int => if (!std.math.isPowerOfTwo(ty.intInfo(mod).bits)) {
-            try mod.errNoteNonLazy(src_loc, msg, "only integers with power of two bits are extern compatible", .{});
+            try mod.errNoteNonLazy(src_loc, msg, "only integers with 0 or power of two bits are extern compatible", .{});
         } else {
-            try mod.errNoteNonLazy(src_loc, msg, "only integers with 8, 16, 32, 64 and 128 bits are extern compatible", .{});
+            try mod.errNoteNonLazy(src_loc, msg, "only integers with 0, 8, 16, 32, 64 and 128 bits are extern compatible", .{});
         },
         .Fn => {
             if (position != .other) {
@@ -30728,18 +30739,10 @@ fn analyzeIsNonErrComptimeOnly(
                     else => return .none,
                 },
             }
-            for (ies.inferred_error_sets.keys()) |other_ies_index| {
-                if (set_ty == other_ies_index) continue;
-                const other_resolved =
-                    try sema.resolveInferredErrorSet(block, src, other_ies_index);
-                if (other_resolved == .anyerror_type) {
-                    ies.resolved = .anyerror_type;
-                    return .none;
-                }
-                if (ip.indexToKey(other_resolved).error_set_type.names.len != 0)
-                    return .none;
-            }
-            return .bool_true;
+            // We do not have a comptime answer because this inferred error
+            // set is not resolved, and an instruction later in this function
+            // body may or may not cause an error to be added to this set.
+            return .none;
         },
         else => switch (ip.indexToKey(set_ty)) {
             .error_set_type => |error_set_type| {
@@ -30767,18 +30770,10 @@ fn analyzeIsNonErrComptimeOnly(
                                 else => return .none,
                             },
                         }
-                        for (ies.inferred_error_sets.keys()) |other_ies_index| {
-                            if (set_ty == other_ies_index) continue;
-                            const other_resolved =
-                                try sema.resolveInferredErrorSet(block, src, other_ies_index);
-                            if (other_resolved == .anyerror_type) {
-                                ies.resolved = .anyerror_type;
-                                return .none;
-                            }
-                            if (ip.indexToKey(other_resolved).error_set_type.names.len != 0)
-                                return .none;
-                        }
-                        return .bool_true;
+                        // We do not have a comptime answer because this inferred error
+                        // set is not resolved, and an instruction later in this function
+                        // body may or may not cause an error to be added to this set.
+                        return .none;
                     }
                 }
                 const resolved_ty = try sema.resolveInferredErrorSet(block, src, set_ty);
@@ -33503,7 +33498,9 @@ fn resolveStructLayout(sema: *Sema, ty: Type) CompileError!void {
             return sema.failWithOwnedErrorMsg(msg);
         }
 
-        if (struct_obj.layout == .Auto and mod.backendSupportsFeature(.field_reordering)) {
+        if (struct_obj.layout == .Auto and !struct_obj.is_tuple and
+            mod.backendSupportsFeature(.field_reordering))
+        {
             const optimized_order = try mod.tmp_hack_arena.allocator().alloc(u32, struct_obj.fields.count());
 
             for (struct_obj.fields.values(), 0..) |field, i| {

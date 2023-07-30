@@ -61,7 +61,7 @@ pub fn build(b: *std.Build) !void {
     autodoc_test.overrideZigLibDir("lib");
     autodoc_test.emit_bin = .no_emit; // https://github.com/ziglang/zig/issues/16351
     const install_std_docs = b.addInstallDirectory(.{
-        .source_dir = autodoc_test.getOutputDocs(),
+        .source_dir = autodoc_test.getEmittedDocs(),
         .install_dir = .prefix,
         .install_subdir = "doc/std",
     });
@@ -71,6 +71,7 @@ pub fn build(b: *std.Build) !void {
 
     if (flat) {
         b.installFile("LICENSE", "LICENSE");
+        b.installFile("README.md", "README.md");
     }
 
     const langref_step = b.step("langref", "Build and install the language reference");
@@ -926,8 +927,6 @@ const zig_cpp_sources = [_][]const u8{
     "src/zig_clang_driver.cpp",
     "src/zig_clang_cc1_main.cpp",
     "src/zig_clang_cc1as_main.cpp",
-    // https://github.com/ziglang/zig/issues/6363
-    "src/windows_sdk.cpp",
 };
 
 const clang_libs = [_][]const u8{

@@ -3,9 +3,6 @@ const builtin = @import("builtin");
 const mem = std.mem;
 const Version = std.SemanticVersion;
 
-/// TODO Nearly all the functions in this namespace would be
-/// better off if https://github.com/ziglang/zig/issues/425
-/// was solved.
 pub const Target = struct {
     cpu: Cpu,
     os: Os,
@@ -1912,7 +1909,7 @@ pub const Target = struct {
         return switch (target.cpu.arch) {
             .amdgcn => 4,
             .x86 => switch (target.os.tag) {
-                .windows => 4,
+                .windows, .uefi => 4,
                 else => 16,
             },
             .arm,
@@ -1931,8 +1928,6 @@ pub const Target = struct {
             .bpfel,
             .mips64,
             .mips64el,
-            .powerpc64,
-            .powerpc64le,
             .riscv32,
             .riscv64,
             .sparc64,
@@ -1941,6 +1936,12 @@ pub const Target = struct {
             .wasm32,
             .wasm64,
             => 16,
+            .powerpc64,
+            .powerpc64le,
+            => switch (target.os.tag) {
+                else => 8,
+                .linux => 16,
+            },
             else => @divExact(target.ptrBitWidth(), 8),
         };
     }

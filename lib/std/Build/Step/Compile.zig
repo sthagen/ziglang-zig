@@ -46,7 +46,6 @@ framework_dirs: ArrayList(FileSource),
 frameworks: StringHashMap(FrameworkLinkInfo),
 verbose_link: bool,
 verbose_cc: bool,
-emit_analysis: EmitOption = .default,
 emit_asm: EmitOption = .default,
 emit_bin: EmitOption = .default,
 emit_implib: EmitOption = .default,
@@ -1005,8 +1004,8 @@ pub fn getOutputPdbSource(self: *Compile) FileSource {
     return .{ .generated = &self.output_pdb_path_source };
 }
 
-pub fn getOutputDocs(self: *Compile) FileSource {
-    assert(self.generated_docs == null); // This function may only be called once.
+pub fn getEmittedDocs(self: *Compile) FileSource {
+    if (self.generated_docs) |g| return .{ .generated = g };
     const arena = self.step.owner.allocator;
     const generated_file = arena.create(GeneratedFile) catch @panic("OOM");
     generated_file.* = .{ .step = &self.step };
@@ -1516,7 +1515,6 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
     if (b.verbose_cc or self.verbose_cc) try zig_args.append("--verbose-cc");
     if (b.verbose_llvm_cpu_features) try zig_args.append("--verbose-llvm-cpu-features");
 
-    if (self.emit_analysis.getArg(b, "emit-analysis")) |arg| try zig_args.append(arg);
     if (self.emit_asm.getArg(b, "emit-asm")) |arg| try zig_args.append(arg);
     if (self.emit_bin.getArg(b, "emit-bin")) |arg| try zig_args.append(arg);
     if (self.generated_docs != null) try zig_args.append("-femit-docs");
@@ -1997,7 +1995,7 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
         try zig_args.append(resolved_args_file);
     }
 
-    const output_bin_path = step.evalZigProcess(zig_args.items, prog_node) catch |err| switch (err) {
+    const maybe_output_bin_path = step.evalZigProcess(zig_args.items, prog_node) catch |err| switch (err) {
         error.NeedCompileErrorCheck => {
             assert(self.expect_errors.len != 0);
             try checkCompileErrors(self);
@@ -2005,10 +2003,11 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
         },
         else => |e| return e,
     };
-    const output_dir = fs.path.dirname(output_bin_path).?;
 
     // Update generated files
-    {
+    if (maybe_output_bin_path) |output_bin_path| {
+        const output_dir = fs.path.dirname(output_bin_path).?;
+
         self.output_dirname_source.path = output_dir;
 
         self.output_path_source.path = b.pathJoin(

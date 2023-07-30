@@ -959,7 +959,7 @@ test "debug variable type resolved through indirect zero-bit types" {
 test "const local with comptime init through array init" {
     const E1 = enum {
         A,
-        fn a() void {}
+        pub fn a() void {}
     };
 
     const S = struct {
@@ -1702,4 +1702,14 @@ test "@inComptime" {
     try expectEqual(true, comptime @inComptime());
     try expectEqual(false, S.inComptime());
     try expectEqual(true, comptime S.inComptime());
+}
+
+// comptime partial array assign
+comptime {
+    var foo = [3]u8{ 0x55, 0x55, 0x55 };
+    var bar = [2]u8{ 1, 2 };
+    foo[0..2].* = bar;
+    assert(foo[0] == 1);
+    assert(foo[1] == 2);
+    assert(foo[2] == 0x55);
 }
