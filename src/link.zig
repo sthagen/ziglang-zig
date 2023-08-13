@@ -21,7 +21,20 @@ const Type = @import("type.zig").Type;
 const TypedValue = @import("TypedValue.zig");
 
 /// When adding a new field, remember to update `hashAddSystemLibs`.
+/// These are *always* dynamically linked. Static libraries will be
+/// provided as positional arguments.
 pub const SystemLib = struct {
+    needed: bool,
+    weak: bool,
+    /// This can be null in two cases right now:
+    /// 1. Windows DLLs that zig ships such as advapi32.
+    /// 2. extern "foo" fn declarations where we find out about libraries too late
+    /// TODO: make this non-optional and resolve those two cases somehow.
+    path: ?[]const u8,
+};
+
+/// When adding a new field, remember to update `hashAddFrameworks`.
+pub const Framework = struct {
     needed: bool = false,
     weak: bool = false,
 };
@@ -31,11 +44,23 @@ pub const SortSection = enum { name, alignment };
 pub const CacheMode = enum { incremental, whole };
 
 pub fn hashAddSystemLibs(
-    hh: *Cache.HashHelper,
+    man: *Cache.Manifest,
     hm: std.StringArrayHashMapUnmanaged(SystemLib),
+) !void {
+    const keys = hm.keys();
+    man.hash.addListOfBytes(keys);
+    for (hm.values()) |value| {
+        man.hash.add(value.needed);
+        man.hash.add(value.weak);
+        if (value.path) |p| _ = try man.addFile(p, null);
+    }
+}
+
+pub fn hashAddFrameworks(
+    hh: *Cache.HashHelper,
+    hm: std.StringArrayHashMapUnmanaged(Framework),
 ) void {
     const keys = hm.keys();
-    hh.add(keys.len);
     hh.addListOfBytes(keys);
     for (hm.values()) |value| {
         hh.add(value.needed);
@@ -77,7 +102,7 @@ pub const Options = struct {
     target: std.Target,
     output_mode: std.builtin.OutputMode,
     link_mode: std.builtin.LinkMode,
-    optimize_mode: std.builtin.Mode,
+    optimize_mode: std.builtin.OptimizeMode,
     machine_code_model: std.builtin.CodeModel,
     root_name: [:0]const u8,
     /// Not every Compilation compiles .zig code! For example you could do `zig build-exe foo.o`.
@@ -183,9 +208,12 @@ pub const Options = struct {
 
     objects: []Compilation.LinkObject,
     framework_dirs: []const []const u8,
-    frameworks: std.StringArrayHashMapUnmanaged(SystemLib),
+    frameworks: std.StringArrayHashMapUnmanaged(Framework),
+    /// These are *always* dynamically linked. Static libraries will be
+    /// provided as positional arguments.
     system_libs: std.StringArrayHashMapUnmanaged(SystemLib),
     wasi_emulated_libs: []const wasi_libc.CRTFile,
+    // TODO: remove this. libraries are resolved by the frontend.
     lib_dirs: []const []const u8,
     rpath_list: []const []const u8,
 
@@ -203,6 +231,7 @@ pub const Options = struct {
 
     version: ?std.SemanticVersion,
     compatibility_version: ?std.SemanticVersion,
+    darwin_sdk_version: ?std.SemanticVersion = null,
     libc_installation: ?*const LibCInstallation,
 
     dwarf_format: ?std.dwarf.Format,
@@ -213,9 +242,6 @@ pub const Options = struct {
     /// (Zig compiler development) Enable dumping of linker's state as JSON.
     enable_link_snapshots: bool = false,
 
-    /// (Darwin) Path and version of the native SDK if detected.
-    native_darwin_sdk: ?std.zig.system.darwin.DarwinSDK = null,
-
     /// (Darwin) Install name for the dylib
     install_name: ?[]const u8 = null,
 
@@ -224,9 +250,6 @@ pub const Options = struct {
 
     /// (Darwin) size of the __PAGEZERO segment
     pagezero_size: ?u64 = null,
-
-    /// (Darwin) search strategy for system libraries
-    search_strategy: ?File.MachO.SearchStrategy = null,
 
     /// (Darwin) set minimum space for future expansion of the load commands
     headerpad_size: ?u32 = null,
@@ -966,6 +989,8 @@ pub const File = struct {
     }
 
     pub fn linkAsArchive(base: *File, comp: *Compilation, prog_node: *std.Progress.Node) FlushError!void {
+        const emit = base.options.emit orelse return;
+
         const tracy = trace(@src());
         defer tracy.end();
 
@@ -973,8 +998,8 @@ pub const File = struct {
         defer arena_allocator.deinit();
         const arena = arena_allocator.allocator();
 
-        const directory = base.options.emit.?.directory; // Just an alias to make it shorter to type.
-        const full_out_path = try directory.join(arena, &[_][]const u8{base.options.emit.?.sub_path});
+        const directory = emit.directory; // Just an alias to make it shorter to type.
+        const full_out_path = try directory.join(arena, &[_][]const u8{emit.sub_path});
         const full_out_path_z = try arena.dupeZ(u8, full_out_path);
 
         // If there is no Zig code to compile, then we should skip flushing the output file

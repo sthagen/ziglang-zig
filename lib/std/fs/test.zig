@@ -101,6 +101,27 @@ test "openDir cwd parent .." {
     defer dir.close();
 }
 
+test "openDir non-cwd parent .." {
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    var subdir = try tmp.dir.makeOpenPath("subdir", .{});
+    defer subdir.close();
+
+    var dir = try subdir.openDir("..", .{});
+    defer dir.close();
+
+    const expected_path = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(expected_path);
+
+    const actual_path = try dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(actual_path);
+
+    try testing.expectEqualStrings(expected_path, actual_path);
+}
+
 test "readLinkAbsolute" {
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
 
@@ -341,6 +362,8 @@ test "Dir.realpath smoke test" {
     // with a sharing violation.
     file.close();
 
+    try tmp_dir.dir.makeDir("test_dir");
+
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -353,18 +376,25 @@ test "Dir.realpath smoke test" {
     // First, test non-alloc version
     {
         var buf1: [fs.MAX_PATH_BYTES]u8 = undefined;
-        const file_path = try tmp_dir.dir.realpath("test_file", buf1[0..]);
-        const expected_path = try fs.path.join(allocator, &[_][]const u8{ base_path, "test_file" });
 
-        try testing.expect(mem.eql(u8, file_path, expected_path));
+        const file_path = try tmp_dir.dir.realpath("test_file", buf1[0..]);
+        const expected_file_path = try fs.path.join(allocator, &[_][]const u8{ base_path, "test_file" });
+        try testing.expectEqualStrings(expected_file_path, file_path);
+
+        const dir_path = try tmp_dir.dir.realpath("test_dir", buf1[0..]);
+        const expected_dir_path = try fs.path.join(allocator, &[_][]const u8{ base_path, "test_dir" });
+        try testing.expectEqualStrings(expected_dir_path, dir_path);
     }
 
     // Next, test alloc version
     {
         const file_path = try tmp_dir.dir.realpathAlloc(allocator, "test_file");
-        const expected_path = try fs.path.join(allocator, &[_][]const u8{ base_path, "test_file" });
+        const expected_file_path = try fs.path.join(allocator, &[_][]const u8{ base_path, "test_file" });
+        try testing.expectEqualStrings(expected_file_path, file_path);
 
-        try testing.expect(mem.eql(u8, file_path, expected_path));
+        const dir_path = try tmp_dir.dir.realpathAlloc(allocator, "test_dir");
+        const expected_dir_path = try fs.path.join(allocator, &[_][]const u8{ base_path, "test_dir" });
+        try testing.expectEqualStrings(expected_dir_path, dir_path);
     }
 }
 
