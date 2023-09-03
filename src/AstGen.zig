@@ -2441,6 +2441,7 @@ fn addEnsureResult(gz: *GenZir, maybe_unused_result: Zir.Inst.Ref, statement: As
             .array_type_sentinel,
             .elem_type_index,
             .elem_type,
+            .indexable_ptr_elem_type,
             .vector_elem_type,
             .vector_type,
             .indexable_ptr_len,
@@ -8041,7 +8042,7 @@ fn builtinCall(
         .compile_error         => return simpleUnOp(gz, scope, ri, node, .{ .rl = .{ .ty = .slice_const_u8_type } }, params[0], .compile_error),
         .set_eval_branch_quota => return simpleUnOp(gz, scope, ri, node, .{ .rl = .{ .coerced_ty = .u32_type } },    params[0], .set_eval_branch_quota),
         .int_from_enum         => return simpleUnOp(gz, scope, ri, node, .{ .rl = .none },                           params[0], .int_from_enum),
-        .int_from_bool         => return simpleUnOp(gz, scope, ri, node, bool_ri,                                    params[0], .int_from_bool),
+        .int_from_bool         => return simpleUnOp(gz, scope, ri, node, .{ .rl = .none },                           params[0], .int_from_bool),
         .embed_file            => return simpleUnOp(gz, scope, ri, node, .{ .rl = .{ .ty = .slice_const_u8_type } }, params[0], .embed_file),
         .error_name            => return simpleUnOp(gz, scope, ri, node, .{ .rl = .{ .ty = .anyerror_type } },       params[0], .error_name),
         .set_runtime_safety    => return simpleUnOp(gz, scope, ri, node, bool_ri,                                    params[0], .set_runtime_safety),
@@ -8302,9 +8303,12 @@ fn builtinCall(
             return rvalue(gz, ri, .void_value, node);
         },
         .memset => {
+            const lhs = try expr(gz, scope, .{ .rl = .none }, params[0]);
+            const lhs_ty = try gz.addUnNode(.typeof, lhs, params[0]);
+            const elem_ty = try gz.addUnNode(.indexable_ptr_elem_type, lhs_ty, params[0]);
             _ = try gz.addPlNode(.memset, node, Zir.Inst.Bin{
-                .lhs = try expr(gz, scope, .{ .rl = .none }, params[0]),
-                .rhs = try expr(gz, scope, .{ .rl = .none }, params[1]),
+                .lhs = lhs,
+                .rhs = try expr(gz, scope, .{ .rl = .{ .coerced_ty = elem_ty } }, params[1]),
             });
             return rvalue(gz, ri, .void_value, node);
         },
