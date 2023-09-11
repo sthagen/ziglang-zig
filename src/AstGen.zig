@@ -1454,7 +1454,12 @@ fn arrayInitExpr(
         },
         .ty, .coerced_ty => |ty_inst| {
             const arr_ty = if (types.array != .none) types.array else blk: {
-                break :blk try gz.addUnNode(.opt_eu_base_ty, ty_inst, node);
+                const arr_ty = try gz.addUnNode(.opt_eu_base_ty, ty_inst, node);
+                _ = try gz.addPlNode(.validate_array_init_ty, node, Zir.Inst.ArrayInit{
+                    .ty = arr_ty,
+                    .init_count = @intCast(array_init.ast.elements.len),
+                });
+                break :blk arr_ty;
             };
             const result = try arrayInitExprInner(gz, scope, node, array_init.ast.elements, arr_ty, types.elem, .array_init);
             return rvalue(gz, ri, result, node);
@@ -12127,10 +12132,6 @@ fn scanDecls(astgen: *AstGen, namespace: *Scope.Namespace, members: []const Ast.
     var decl_count: u32 = 0;
     for (members) |member_node| {
         const name_token = switch (node_tags[member_node]) {
-            .fn_proto_simple,
-            .fn_proto_multi,
-            .fn_proto_one,
-            .fn_proto,
             .global_var_decl,
             .local_var_decl,
             .simple_var_decl,
@@ -12140,7 +12141,12 @@ fn scanDecls(astgen: *AstGen, namespace: *Scope.Namespace, members: []const Ast.
                 break :blk main_tokens[member_node] + 1;
             },
 
-            .fn_decl => blk: {
+            .fn_proto_simple,
+            .fn_proto_multi,
+            .fn_proto_one,
+            .fn_proto,
+            .fn_decl,
+            => blk: {
                 decl_count += 1;
                 const ident = main_tokens[member_node] + 1;
                 if (token_tags[ident] != .identifier) {
