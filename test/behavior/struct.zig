@@ -995,6 +995,24 @@ test "struct with union field" {
     try expect(True.kind.Bool);
 }
 
+test "struct with 0-length union array field" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+
+    const U = union {
+        a: u32,
+        b: u64,
+    };
+
+    const S = struct {
+        zero_length: [0]U,
+    };
+
+    var s: S = undefined;
+    try expectEqual(@as(usize, 0), s.zero_length.len);
+}
+
 test "type coercion of anon struct literal to struct" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
@@ -1759,4 +1777,19 @@ test "runtime side-effects in comptime-known struct init" {
     };
     try expectEqual(S{ .a = 1, .b = 2, .c = 4, .d = 8 }, init);
     try expectEqual(@as(u4, std.math.maxInt(u4)), side_effects);
+}
+
+test "pointer to struct initialized through reference to anonymous initializer provides result types" {
+    const S = struct { a: u8, b: u16, c: *const anyopaque };
+    var my_u16: u16 = 0xABCD;
+    const s: *const S = &.{
+        // intentionally out of order
+        .c = @ptrCast("hello"),
+        .b = my_u16,
+        .a = @truncate(my_u16),
+    };
+    try expect(s.a == 0xCD);
+    try expect(s.b == 0xABCD);
+    const str: *const [5]u8 = @ptrCast(s.c);
+    try std.testing.expectEqualSlices(u8, "hello", str);
 }

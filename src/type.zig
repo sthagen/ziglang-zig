@@ -1244,6 +1244,7 @@ pub const Type = struct {
 
                 .array_type => |array_type| {
                     const len = array_type.len + @intFromBool(array_type.sentinel != .none);
+                    if (len == 0) return .{ .scalar = 0 };
                     switch (try array_type.child.toType().abiSizeAdvanced(mod, strat)) {
                         .scalar => |elem_size| return .{ .scalar = len * elem_size },
                         .val => switch (strat) {
@@ -3021,27 +3022,24 @@ pub const Type = struct {
         };
     }
 
-    pub fn packedStructFieldByteOffset(ty: Type, field_index: usize, mod: *Module) u32 {
+    pub fn packedStructFieldBitOffset(ty: Type, field_index: usize, mod: *Module) u32 {
         const ip = &mod.intern_pool;
         const struct_type = ip.indexToKey(ty.toIntern()).struct_type;
         assert(struct_type.layout == .Packed);
         comptime assert(Type.packed_struct_layout_version == 2);
 
-        var bit_offset: u16 = undefined;
-        var elem_size_bits: u16 = undefined;
-        var running_bits: u16 = 0;
+        var running_bits: u32 = 0;
         for (struct_type.field_types.get(ip), 0..) |field_ty, i| {
+            if (i == field_index) break;
             if (!field_ty.toType().hasRuntimeBits(mod)) continue;
-
-            const field_bits: u16 = @intCast(field_ty.toType().bitSize(mod));
-            if (i == field_index) {
-                bit_offset = running_bits;
-                elem_size_bits = field_bits;
-            }
+            const field_bits: u32 = @intCast(field_ty.toType().bitSize(mod));
             running_bits += field_bits;
         }
-        const byte_offset = bit_offset / 8;
-        return byte_offset;
+        return running_bits;
+    }
+
+    pub fn packedStructFieldByteOffset(ty: Type, field_index: usize, mod: *Module) u32 {
+        return packedStructFieldBitOffset(ty, field_index, mod) / 8;
     }
 
     pub const FieldOffset = struct {
@@ -3179,6 +3177,17 @@ pub const Type = struct {
         return switch (mod.intern_pool.indexToKey(ty.toIntern())) {
             .anon_struct_type => true,
             else => false,
+        };
+    }
+
+    /// Traverses optional child types and error union payloads until the type
+    /// is not a pointer. For `E!?u32`, returns `u32`; for `*u8`, returns `*u8`.
+    pub fn optEuBaseType(ty: Type, mod: *Module) Type {
+        var cur = ty;
+        while (true) switch (cur.zigTypeTag(mod)) {
+            .Optional => cur = cur.optionalChild(mod),
+            .ErrorUnion => cur = cur.errorUnionPayload(mod),
+            else => return cur,
         };
     }
 
