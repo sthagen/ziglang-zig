@@ -149,6 +149,7 @@ pub const cpu_set_t = system.cpu_set_t;
 pub const dev_t = system.dev_t;
 pub const dl_phdr_info = system.dl_phdr_info;
 pub const empty_sigset = system.empty_sigset;
+pub const filled_sigset = system.filled_sigset;
 pub const fd_t = system.fd_t;
 pub const fdflags_t = system.fdflags_t;
 pub const fdstat_t = system.fdstat_t;
@@ -638,14 +639,14 @@ pub fn raise(sig: u8) RaiseError!void {
     @compileError("std.os.raise unimplemented for this target");
 }
 
-pub const KillError = error{PermissionDenied} || UnexpectedError;
+pub const KillError = error{ ProcessNotFound, PermissionDenied } || UnexpectedError;
 
 pub fn kill(pid: pid_t, sig: u8) KillError!void {
     switch (errno(system.kill(pid, sig))) {
         .SUCCESS => return,
         .INVAL => unreachable, // invalid signal
         .PERM => return error.PermissionDenied,
-        .SRCH => unreachable, // always a race condition
+        .SRCH => return error.ProcessNotFound,
         else => |err| return unexpectedErrno(err),
     }
 }
@@ -2354,7 +2355,10 @@ pub fn unlinkZ(file_path: [*:0]const u8) UnlinkError!void {
 
 /// Windows-only. Same as `unlink` except the parameter is null-terminated, WTF16 encoded.
 pub fn unlinkW(file_path_w: []const u16) UnlinkError!void {
-    return windows.DeleteFile(file_path_w, .{ .dir = std.fs.cwd().fd });
+    windows.DeleteFile(file_path_w, .{ .dir = std.fs.cwd().fd }) catch |err| switch (err) {
+        error.DirNotEmpty => unreachable, // we're not passing .remove_dir = true
+        else => |e| return e,
+    };
 }
 
 pub const UnlinkatError = UnlinkError || error{
@@ -3025,6 +3029,7 @@ pub const FchdirError = error{
 } || UnexpectedError;
 
 pub fn fchdir(dirfd: fd_t) FchdirError!void {
+    if (dirfd == AT.FDCWD) return;
     while (true) {
         switch (errno(system.fchdir(dirfd))) {
             .SUCCESS => return,

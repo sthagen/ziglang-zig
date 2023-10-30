@@ -617,7 +617,6 @@ test "enum with specified tag values" {
 test "non-exhaustive enum" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
 
     const S = struct {
         const E = enum(u8) { a, b, _ };
@@ -660,8 +659,6 @@ test "non-exhaustive enum" {
 }
 
 test "empty non-exhaustive enum" {
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
-
     const S = struct {
         const E = enum(u8) { _ };
 
@@ -683,7 +680,6 @@ test "empty non-exhaustive enum" {
 test "single field non-exhaustive enum" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
 
     const S = struct {
         const E = enum(u8) { a, _ };
@@ -856,8 +852,6 @@ fn doALoopThing(id: EnumWithOneMember) void {
 }
 
 test "comparison operator on enum with one member is comptime-known" {
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
-
     doALoopThing(EnumWithOneMember.Eof);
 }
 
@@ -1048,6 +1042,22 @@ test "@tagName on enum literals" {
     try comptime expect(mem.eql(u8, @tagName(.FooBar), "FooBar"));
 }
 
+test "tag name with signed enum values" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
+
+    const LocalFoo = enum(isize) {
+        alfa = 62,
+        bravo = 63,
+        charlie = 64,
+        delta = 65,
+    };
+    var b = LocalFoo.bravo;
+    try expect(mem.eql(u8, @tagName(b), "bravo"));
+}
+
 test "enum literal casting to optional" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
@@ -1195,8 +1205,6 @@ test "enum tag from a local variable" {
 }
 
 test "auto-numbered enum with signed tag type" {
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
-
     const E = enum(i32) { a, b };
 
     try std.testing.expectEqual(@as(i32, 0), @intFromEnum(E.a));

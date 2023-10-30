@@ -327,8 +327,8 @@ fn _start() callconv(.Naked) noreturn {
             // argc is stored after a register window (16 registers) plus stack bias
             \\ mov %%g0, %%i6
             \\ add %%o6, 2175, %%l0
-            \\ stx %%l0, %[argc_argv_ptr]
             \\ ba %[posixCallMainAndExit]
+            \\  stx %%l0, %[argc_argv_ptr]
             ,
             else => @compileError("unsupported arch"),
         }
@@ -609,7 +609,7 @@ pub fn call_wWinMain() std.os.windows.INT {
 
     // There's no (documented) way to get the nCmdShow parameter, so we're
     // using this fairly standard default.
-    const nCmdShow = std.os.windows.user32.SW_SHOW;
+    const nCmdShow = 5;
 
     // second parameter hPrevInstance, MSDN: "This parameter is always NULL"
     return root.wWinMain(hInstance, null, lpCmdLine, nCmdShow);

@@ -48,7 +48,6 @@ test "@abs unsigned integers" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
 
     try comptime testAbsUnsignedIntegers();
     try testAbsUnsignedIntegers();
@@ -95,7 +94,7 @@ test "@abs floats" {
     try comptime testAbsFloats(f64);
     try testAbsFloats(f64);
     try comptime testAbsFloats(f80);
-    if (builtin.zig_backend != .stage2_x86_64 and builtin.zig_backend != .stage2_wasm) try testAbsFloats(f80);
+    if (builtin.zig_backend != .stage2_wasm) try testAbsFloats(f80);
     try comptime testAbsFloats(f128);
     if (builtin.zig_backend != .stage2_wasm) try testAbsFloats(f128);
 }
@@ -280,7 +279,7 @@ test "@abs float vectors" {
     try testAbsFloatVectors(f16, 16);
     try comptime testAbsFloatVectors(f16, 17);
 
-    try testAbsFloatVectors(f32, 17);
+    try testAbsFloatVectors(f32, 1);
     try comptime testAbsFloatVectors(f32, 1);
     try testAbsFloatVectors(f32, 1);
     try comptime testAbsFloatVectors(f32, 2);

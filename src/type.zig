@@ -414,7 +414,6 @@ pub const Type = struct {
 
             // values, not types
             .undef,
-            .runtime_value,
             .simple_value,
             .variable,
             .extern_func,
@@ -474,8 +473,11 @@ pub const Type = struct {
                     // Pointers to zero-bit types still have a runtime address; however, pointers
                     // to comptime-only types do not, with the exception of function pointers.
                     if (ignore_comptime_only) return true;
-                    if (strat == .sema) return !(try strat.sema.typeRequiresComptime(ty));
-                    return !comptimeOnly(ty, mod);
+                    return switch (strat) {
+                        .sema => |sema| !(try sema.typeRequiresComptime(ty)),
+                        .eager => !comptimeOnly(ty, mod),
+                        .lazy => error.NeedLazy,
+                    };
                 },
                 .anyframe_type => true,
                 .array_type => |array_type| {
@@ -496,13 +498,12 @@ pub const Type = struct {
                         // Then the optional is comptime-known to be null.
                         return false;
                     }
-                    if (ignore_comptime_only) {
-                        return true;
-                    } else if (strat == .sema) {
-                        return !(try strat.sema.typeRequiresComptime(child_ty));
-                    } else {
-                        return !comptimeOnly(child_ty, mod);
-                    }
+                    if (ignore_comptime_only) return true;
+                    return switch (strat) {
+                        .sema => |sema| !(try sema.typeRequiresComptime(child_ty)),
+                        .eager => !comptimeOnly(child_ty, mod),
+                        .lazy => error.NeedLazy,
+                    };
                 },
                 .error_union_type,
                 .error_set_type,
@@ -633,7 +634,6 @@ pub const Type = struct {
 
                 // values, not types
                 .undef,
-                .runtime_value,
                 .simple_value,
                 .variable,
                 .extern_func,
@@ -741,7 +741,6 @@ pub const Type = struct {
 
             // values, not types
             .undef,
-            .runtime_value,
             .simple_value,
             .variable,
             .extern_func,
@@ -771,21 +770,25 @@ pub const Type = struct {
         return hasRuntimeBitsAdvanced(ty, mod, true, .eager) catch unreachable;
     }
 
+    pub fn fnHasRuntimeBits(ty: Type, mod: *Module) bool {
+        return ty.fnHasRuntimeBitsAdvanced(mod, null) catch unreachable;
+    }
+
+    /// Determines whether a function type has runtime bits, i.e. whether a
+    /// function with this type can exist at runtime.
+    /// Asserts that `ty` is a function type.
+    /// If `opt_sema` is not provided, asserts that the return type is sufficiently resolved.
+    pub fn fnHasRuntimeBitsAdvanced(ty: Type, mod: *Module, opt_sema: ?*Sema) Module.CompileError!bool {
+        const fn_info = mod.typeToFunc(ty).?;
+        if (fn_info.is_generic) return false;
+        if (fn_info.is_var_args) return true;
+        if (fn_info.cc == .Inline) return false;
+        return !try fn_info.return_type.toType().comptimeOnlyAdvanced(mod, opt_sema);
+    }
+
     pub fn isFnOrHasRuntimeBits(ty: Type, mod: *Module) bool {
         switch (ty.zigTypeTag(mod)) {
-            .Fn => {
-                const fn_info = mod.typeToFunc(ty).?;
-                if (fn_info.is_generic) return false;
-                if (fn_info.is_var_args) return true;
-                switch (fn_info.cc) {
-                    // If there was a comptime calling convention,
-                    // it should also return false here.
-                    .Inline => return false,
-                    else => {},
-                }
-                if (fn_info.return_type.toType().comptimeOnly(mod)) return false;
-                return true;
-            },
+            .Fn => return ty.fnHasRuntimeBits(mod),
             else => return ty.hasRuntimeBits(mod),
         }
     }
@@ -901,8 +904,11 @@ pub const Type = struct {
                 .opt_type => return abiAlignmentAdvancedOptional(ty, mod, strat),
                 .error_union_type => |info| return abiAlignmentAdvancedErrorUnion(ty, mod, strat, info.payload_type.toType()),
 
-                // TODO revisit this when we have the concept of the error tag type
-                .error_set_type, .inferred_error_set_type => return .{ .scalar = .@"2" },
+                .error_set_type, .inferred_error_set_type => {
+                    const bits = mod.errorSetBits();
+                    if (bits == 0) return AbiAlignmentAdvanced{ .scalar = .@"1" };
+                    return .{ .scalar = intAbiAlignment(bits, target) };
+                },
 
                 // represents machine code; not a pointer
                 .func_type => |func_type| return .{
@@ -963,10 +969,11 @@ pub const Type = struct {
                         else => return .{ .scalar = .@"16" },
                     },
 
-                    // TODO revisit this when we have the concept of the error tag type
-                    .anyerror,
-                    .adhoc_inferred_error_set,
-                    => return .{ .scalar = .@"2" },
+                    .anyerror, .adhoc_inferred_error_set => {
+                        const bits = mod.errorSetBits();
+                        if (bits == 0) return AbiAlignmentAdvanced{ .scalar = .@"1" };
+                        return .{ .scalar = intAbiAlignment(bits, target) };
+                    },
 
                     .void,
                     .type,
@@ -1095,7 +1102,6 @@ pub const Type = struct {
 
                 // values, not types
                 .undef,
-                .runtime_value,
                 .simple_value,
                 .variable,
                 .extern_func,
@@ -1280,8 +1286,11 @@ pub const Type = struct {
 
                 .opt_type => return ty.abiSizeAdvancedOptional(mod, strat),
 
-                // TODO revisit this when we have the concept of the error tag type
-                .error_set_type, .inferred_error_set_type => return AbiSizeAdvanced{ .scalar = 2 },
+                .error_set_type, .inferred_error_set_type => {
+                    const bits = mod.errorSetBits();
+                    if (bits == 0) return AbiSizeAdvanced{ .scalar = 0 };
+                    return AbiSizeAdvanced{ .scalar = intAbiSize(bits, target) };
+                },
 
                 .error_union_type => |error_union_type| {
                     const payload_ty = error_union_type.payload_type.toType();
@@ -1375,10 +1384,11 @@ pub const Type = struct {
                     .enum_literal,
                     => return AbiSizeAdvanced{ .scalar = 0 },
 
-                    // TODO revisit this when we have the concept of the error tag type
-                    .anyerror,
-                    .adhoc_inferred_error_set,
-                    => return AbiSizeAdvanced{ .scalar = 2 },
+                    .anyerror, .adhoc_inferred_error_set => {
+                        const bits = mod.errorSetBits();
+                        if (bits == 0) return AbiSizeAdvanced{ .scalar = 0 };
+                        return AbiSizeAdvanced{ .scalar = intAbiSize(bits, target) };
+                    },
 
                     .prefetch_options => unreachable, // missing call to resolveTypeFields
                     .export_options => unreachable, // missing call to resolveTypeFields
@@ -1449,7 +1459,6 @@ pub const Type = struct {
 
                 // values, not types
                 .undef,
-                .runtime_value,
                 .simple_value,
                 .variable,
                 .extern_func,
@@ -1572,8 +1581,7 @@ pub const Type = struct {
                 return (try abiSizeAdvanced(ty, mod, strat)).scalar * 8;
             },
 
-            // TODO revisit this when we have the concept of the error tag type
-            .error_set_type, .inferred_error_set_type => return 16,
+            .error_set_type, .inferred_error_set_type => return mod.errorSetBits(),
 
             .error_union_type => {
                 // Optionals and error unions are not packed so their bitsize
@@ -1606,10 +1614,9 @@ pub const Type = struct {
                 .bool => return 1,
                 .void => return 0,
 
-                // TODO revisit this when we have the concept of the error tag type
                 .anyerror,
                 .adhoc_inferred_error_set,
-                => return 16,
+                => return mod.errorSetBits(),
 
                 .anyopaque => unreachable,
                 .type => unreachable,
@@ -1671,7 +1678,6 @@ pub const Type = struct {
 
             // values, not types
             .undef,
-            .runtime_value,
             .simple_value,
             .variable,
             .extern_func,
@@ -2168,8 +2174,7 @@ pub const Type = struct {
 
         while (true) switch (ty.toIntern()) {
             .anyerror_type, .adhoc_inferred_error_set_type => {
-                // TODO revisit this when error sets support custom int types
-                return .{ .signedness = .unsigned, .bits = 16 };
+                return .{ .signedness = .unsigned, .bits = mod.errorSetBits() };
             },
             .usize_type => return .{ .signedness = .unsigned, .bits = target.ptrBitWidth() },
             .isize_type => return .{ .signedness = .signed, .bits = target.ptrBitWidth() },
@@ -2188,8 +2193,9 @@ pub const Type = struct {
                 .enum_type => |enum_type| ty = enum_type.tag_ty.toType(),
                 .vector_type => |vector_type| ty = vector_type.child.toType(),
 
-                // TODO revisit this when error sets support custom int types
-                .error_set_type, .inferred_error_set_type => return .{ .signedness = .unsigned, .bits = 16 },
+                .error_set_type, .inferred_error_set_type => {
+                    return .{ .signedness = .unsigned, .bits = mod.errorSetBits() };
+                },
 
                 .anon_struct_type => unreachable,
 
@@ -2207,7 +2213,6 @@ pub const Type = struct {
 
                 // values, not types
                 .undef,
-                .runtime_value,
                 .simple_value,
                 .variable,
                 .extern_func,
@@ -2550,7 +2555,6 @@ pub const Type = struct {
 
                 // values, not types
                 .undef,
-                .runtime_value,
                 .simple_value,
                 .variable,
                 .extern_func,
@@ -2575,9 +2579,14 @@ pub const Type = struct {
 
     /// During semantic analysis, instead call `Sema.typeRequiresComptime` which
     /// resolves field types rather than asserting they are already resolved.
-    /// TODO merge these implementations together with the "advanced" pattern seen
-    /// elsewhere in this file.
     pub fn comptimeOnly(ty: Type, mod: *Module) bool {
+        return ty.comptimeOnlyAdvanced(mod, null) catch unreachable;
+    }
+
+    /// `generic_poison` will return false.
+    /// May return false negatives when structs and unions are having their field types resolved.
+    /// If `opt_sema` is not provided, asserts that the type is sufficiently resolved.
+    pub fn comptimeOnlyAdvanced(ty: Type, mod: *Module, opt_sema: ?*Sema) Module.CompileError!bool {
         const ip = &mod.intern_pool;
         return switch (ty.toIntern()) {
             .empty_struct_type => false,
@@ -2587,19 +2596,19 @@ pub const Type = struct {
                 .ptr_type => |ptr_type| {
                     const child_ty = ptr_type.child.toType();
                     switch (child_ty.zigTypeTag(mod)) {
-                        .Fn => return !child_ty.isFnOrHasRuntimeBits(mod),
+                        .Fn => return !try child_ty.fnHasRuntimeBitsAdvanced(mod, opt_sema),
                         .Opaque => return false,
-                        else => return child_ty.comptimeOnly(mod),
+                        else => return child_ty.comptimeOnlyAdvanced(mod, opt_sema),
                     }
                 },
                 .anyframe_type => |child| {
                     if (child == .none) return false;
-                    return child.toType().comptimeOnly(mod);
+                    return child.toType().comptimeOnlyAdvanced(mod, opt_sema);
                 },
-                .array_type => |array_type| array_type.child.toType().comptimeOnly(mod),
-                .vector_type => |vector_type| vector_type.child.toType().comptimeOnly(mod),
-                .opt_type => |child| child.toType().comptimeOnly(mod),
-                .error_union_type => |error_union_type| error_union_type.payload_type.toType().comptimeOnly(mod),
+                .array_type => |array_type| return array_type.child.toType().comptimeOnlyAdvanced(mod, opt_sema),
+                .vector_type => |vector_type| return vector_type.child.toType().comptimeOnlyAdvanced(mod, opt_sema),
+                .opt_type => |child| return child.toType().comptimeOnlyAdvanced(mod, opt_sema),
+                .error_union_type => |error_union_type| return error_union_type.payload_type.toType().comptimeOnlyAdvanced(mod, opt_sema),
 
                 .error_set_type,
                 .inferred_error_set_type,
@@ -2662,43 +2671,83 @@ pub const Type = struct {
 
                     // A struct with no fields is not comptime-only.
                     return switch (struct_type.flagsPtr(ip).requires_comptime) {
-                        // Return false to avoid incorrect dependency loops.
-                        // This will be handled correctly once merged with
-                        // `Sema.typeRequiresComptime`.
-                        .wip, .unknown => false,
-                        .no => false,
+                        .no, .wip => false,
                         .yes => true,
+                        .unknown => {
+                            // The type is not resolved; assert that we have a Sema.
+                            const sema = opt_sema.?;
+
+                            if (struct_type.flagsPtr(ip).field_types_wip)
+                                return false;
+
+                            try sema.resolveTypeFieldsStruct(ty.toIntern(), struct_type);
+
+                            struct_type.flagsPtr(ip).requires_comptime = .wip;
+                            errdefer struct_type.flagsPtr(ip).requires_comptime = .unknown;
+
+                            for (0..struct_type.field_types.len) |i_usize| {
+                                const i: u32 = @intCast(i_usize);
+                                if (struct_type.fieldIsComptime(ip, i)) continue;
+                                const field_ty = struct_type.field_types.get(ip)[i];
+                                if (try field_ty.toType().comptimeOnlyAdvanced(mod, opt_sema)) {
+                                    // Note that this does not cause the layout to
+                                    // be considered resolved. Comptime-only types
+                                    // still maintain a layout of their
+                                    // runtime-known fields.
+                                    struct_type.flagsPtr(ip).requires_comptime = .yes;
+                                    return true;
+                                }
+                            }
+
+                            struct_type.flagsPtr(ip).requires_comptime = .no;
+                            return false;
+                        },
                     };
                 },
 
                 .anon_struct_type => |tuple| {
                     for (tuple.types.get(ip), tuple.values.get(ip)) |field_ty, val| {
                         const have_comptime_val = val != .none;
-                        if (!have_comptime_val and field_ty.toType().comptimeOnly(mod)) return true;
+                        if (!have_comptime_val and try field_ty.toType().comptimeOnlyAdvanced(mod, opt_sema)) return true;
                     }
                     return false;
                 },
 
-                .union_type => |union_type| {
-                    switch (union_type.flagsPtr(ip).requires_comptime) {
-                        .wip, .unknown => {
-                            // Return false to avoid incorrect dependency loops.
-                            // This will be handled correctly once merged with
-                            // `Sema.typeRequiresComptime`.
+                .union_type => |union_type| switch (union_type.flagsPtr(ip).requires_comptime) {
+                    .no, .wip => false,
+                    .yes => true,
+                    .unknown => {
+                        // The type is not resolved; assert that we have a Sema.
+                        const sema = opt_sema.?;
+
+                        if (union_type.flagsPtr(ip).status == .field_types_wip)
                             return false;
-                        },
-                        .no => return false,
-                        .yes => return true,
-                    }
+
+                        try sema.resolveTypeFieldsUnion(ty, union_type);
+                        const union_obj = ip.loadUnionType(union_type);
+
+                        union_obj.flagsPtr(ip).requires_comptime = .wip;
+                        errdefer union_obj.flagsPtr(ip).requires_comptime = .unknown;
+
+                        for (0..union_obj.field_types.len) |field_idx| {
+                            const field_ty = union_obj.field_types.get(ip)[field_idx];
+                            if (try field_ty.toType().comptimeOnlyAdvanced(mod, opt_sema)) {
+                                union_obj.flagsPtr(ip).requires_comptime = .yes;
+                                return true;
+                            }
+                        }
+
+                        union_obj.flagsPtr(ip).requires_comptime = .no;
+                        return false;
+                    },
                 },
 
                 .opaque_type => false,
 
-                .enum_type => |enum_type| enum_type.tag_ty.toType().comptimeOnly(mod),
+                .enum_type => |enum_type| return enum_type.tag_ty.toType().comptimeOnlyAdvanced(mod, opt_sema),
 
                 // values, not types
                 .undef,
-                .runtime_value,
                 .simple_value,
                 .variable,
                 .extern_func,
@@ -3252,8 +3301,6 @@ pub const Type = struct {
     pub const empty_struct_literal: Type = .{ .ip_index = .empty_struct_type };
 
     pub const generic_poison: Type = .{ .ip_index = .generic_poison_type };
-
-    pub const err_int = Type.u16;
 
     pub fn smallestUnsignedBits(max: u64) u16 {
         if (max == 0) return 0;

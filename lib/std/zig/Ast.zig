@@ -12,6 +12,7 @@ tokens: TokenList.Slice,
 /// references to the root node, this means 0 is available to indicate null.
 nodes: NodeList.Slice,
 extra_data: []Node.Index,
+mode: Mode = .zig,
 
 errors: []const Error,
 
@@ -96,6 +97,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!A
     // TODO experiment with compacting the MultiArrayList slices here
     return Ast{
         .source = source,
+        .mode = mode,
         .tokens = tokens.toOwnedSlice(),
         .nodes = parser.nodes.toOwnedSlice(),
         .extra_data = try parser.extra_data.toOwnedSlice(gpa),
@@ -432,7 +434,7 @@ pub fn renderError(tree: Ast, parse_error: Error, stream: anytype) !void {
             return stream.writeAll("use 'var' or 'const' to declare variable");
         },
         .extra_for_capture => {
-            return stream.writeAll("excess for captures");
+            return stream.writeAll("extra capture in for loop");
         },
         .for_input_not_captured => {
             return stream.writeAll("for input is not captured");
@@ -2541,18 +2543,6 @@ pub const full = struct {
             then_expr: Node.Index,
             else_expr: Node.Index,
         };
-
-        /// TODO: remove this after zig 0.11.0 is tagged.
-        pub fn isOldSyntax(f: For, token_tags: []const Token.Tag) bool {
-            if (f.ast.inputs.len != 1) return false;
-            if (token_tags[f.payload_token + 1] == .comma) return true;
-            if (token_tags[f.payload_token] == .asterisk and
-                token_tags[f.payload_token + 2] == .comma)
-            {
-                return true;
-            }
-            return false;
-        }
     };
 
     pub const ContainerField = struct {
@@ -2988,7 +2978,7 @@ pub const Node = struct {
         assign_mul,
         /// `lhs /= rhs`. main_token is op.
         assign_div,
-        /// `lhs *= rhs`. main_token is op.
+        /// `lhs %= rhs`. main_token is op.
         assign_mod,
         /// `lhs += rhs`. main_token is op.
         assign_add,
@@ -3130,7 +3120,7 @@ pub const Node = struct {
         /// `lhs[b..c]`. rhs is index into Slice
         /// main_token is the lbracket.
         slice,
-        /// `lhs[b..c :d]`. rhs is index into SliceSentinel
+        /// `lhs[b..c :d]`. rhs is index into SliceSentinel. Slice end "c" can be omitted.
         /// main_token is the lbracket.
         slice_sentinel,
         /// `lhs.*`. rhs is unused.
@@ -3230,12 +3220,13 @@ pub const Node = struct {
         /// `while (lhs) : (a) b else c`. `While[rhs]`.
         /// `while (lhs) |x| : (a) b else c`. `While[rhs]`.
         /// `while (lhs) |x| : (a) b else |y| c`. `While[rhs]`.
+        /// The cont expression part `: (a)` may be omitted.
         @"while",
         /// `for (lhs) rhs`.
         for_simple,
         /// `for (lhs[0..inputs]) lhs[inputs + 1] else lhs[inputs + 2]`. `For[rhs]`.
         @"for",
-        /// `lhs..rhs`.
+        /// `lhs..rhs`. rhs can be omitted.
         for_range,
         /// `if (lhs) rhs`.
         /// `if (lhs) |a| rhs`.
