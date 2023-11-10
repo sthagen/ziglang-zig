@@ -5620,6 +5620,8 @@ fn zirTrap(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Zir.In
     const src_node = sema.code.instructions.items(.data)[@intFromEnum(inst)].node;
     const src = LazySrcLoc.nodeOffset(src_node);
     sema.src = src;
+    if (block.is_comptime)
+        return sema.fail(block, src, "encountered @trap at comptime", .{});
     _ = try block.addNoOp(.trap);
     return always_noreturn;
 }
@@ -7764,21 +7766,6 @@ fn analyzeInlineCallArg(
     }
 
     return null;
-}
-
-fn analyzeCallArg(
-    sema: *Sema,
-    block: *Block,
-    arg_src: LazySrcLoc,
-    param_ty: Type,
-    uncasted_arg: Air.Inst.Ref,
-    opts: CoerceOpts,
-) !Air.Inst.Ref {
-    try sema.resolveTypeFully(param_ty);
-    return sema.coerceExtra(block, param_ty, uncasted_arg, arg_src, opts) catch |err| switch (err) {
-        error.NotCoercible => unreachable,
-        else => |e| return e,
-    };
 }
 
 fn instantiateGenericCall(
@@ -20938,7 +20925,7 @@ fn zirReify(
                         break :msg msg;
                     };
                     return sema.failWithOwnedErrorMsg(block, msg);
-                } else if (layout == .Packed and !(validatePackedType(field_ty, mod))) {
+                } else if (layout == .Packed and !try sema.validatePackedType(field_ty)) {
                     const msg = msg: {
                         const msg = try sema.errMsg(block, src, "packed unions cannot contain fields of type '{}'", .{field_ty.fmt(mod)});
                         errdefer msg.destroy(gpa);
@@ -21305,7 +21292,7 @@ fn reifyStruct(
                 break :msg msg;
             };
             return sema.failWithOwnedErrorMsg(block, msg);
-        } else if (layout == .Packed and !(validatePackedType(field_ty, mod))) {
+        } else if (layout == .Packed and !try sema.validatePackedType(field_ty)) {
             const msg = msg: {
                 const msg = try sema.errMsg(block, src, "packed structs cannot contain fields of type '{}'", .{field_ty.fmt(sema.mod)});
                 errdefer msg.destroy(gpa);
@@ -25678,8 +25665,9 @@ fn explainWhyTypeIsNotExtern(
 }
 
 /// Returns true if `ty` is allowed in packed types.
-/// Does *NOT* require `ty` to be resolved in any way.
-fn validatePackedType(ty: Type, mod: *Module) bool {
+/// Does not require `ty` to be resolved in any way, but may resolve whether it is comptime-only.
+fn validatePackedType(sema: *Sema, ty: Type) !bool {
+    const mod = sema.mod;
     switch (ty.zigTypeTag(mod)) {
         .Type,
         .ComptimeFloat,
@@ -25704,7 +25692,7 @@ fn validatePackedType(ty: Type, mod: *Module) bool {
         .Vector,
         .Enum,
         => return true,
-        .Pointer => return !ty.isSlice(mod),
+        .Pointer => return !ty.isSlice(mod) and !try sema.typeRequiresComptime(ty),
         .Struct, .Union => return ty.containerLayout(mod) == .Packed,
     }
 }
@@ -25739,7 +25727,12 @@ fn explainWhyTypeIsNotPacked(
         .Optional,
         .Array,
         => try mod.errNoteNonLazy(src_loc, msg, "type has no guaranteed in-memory representation", .{}),
-        .Pointer => try mod.errNoteNonLazy(src_loc, msg, "slices have no guaranteed in-memory representation", .{}),
+        .Pointer => if (ty.isSlice(mod)) {
+            try mod.errNoteNonLazy(src_loc, msg, "slices have no guaranteed in-memory representation", .{});
+        } else {
+            try mod.errNoteNonLazy(src_loc, msg, "comptime-only pointer has no guaranteed in-memory representation", .{});
+            try sema.explainWhyTypeIsComptime(msg, src_loc, ty);
+        },
         .Fn => {
             try mod.errNoteNonLazy(src_loc, msg, "type has no guaranteed in-memory representation", .{});
             try mod.errNoteNonLazy(src_loc, msg, "use '*const ' to make a function pointer type", .{});
@@ -35905,7 +35898,7 @@ fn semaStructFields(
                 };
                 return sema.failWithOwnedErrorMsg(&block_scope, msg);
             },
-            .Packed => if (!validatePackedType(field_ty, mod)) {
+            .Packed => if (!try sema.validatePackedType(field_ty)) {
                 const msg = msg: {
                     const ty_src = mod.fieldSrcLoc(decl_index, .{
                         .index = field_i,
@@ -36458,7 +36451,7 @@ fn semaUnionFields(mod: *Module, arena: Allocator, union_type: InternPool.Key.Un
                 break :msg msg;
             };
             return sema.failWithOwnedErrorMsg(&block_scope, msg);
-        } else if (layout == .Packed and !validatePackedType(field_ty, mod)) {
+        } else if (layout == .Packed and !try sema.validatePackedType(field_ty)) {
             const msg = msg: {
                 const ty_src = mod.fieldSrcLoc(union_type.decl, .{
                     .index = field_i,
