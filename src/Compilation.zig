@@ -758,10 +758,7 @@ pub const MiscTask = enum {
 
     @"mingw-w64 crt2.o",
     @"mingw-w64 dllcrt2.o",
-    @"mingw-w64 mingw32.lib",
-    @"mingw-w64 msvcrt-os.lib",
     @"mingw-w64 mingwex.lib",
-    @"mingw-w64 uuid.lib",
 };
 
 pub const MiscError = struct {
@@ -1172,7 +1169,7 @@ fn addModuleTableToCacheHash(
                 hash.addOptionalBytes(mod.root.root_dir.path);
                 hash.addBytes(mod.root.sub_path);
             },
-            .files => |man| {
+            .files => |man| if (mod.root_src_path.len != 0) {
                 const pkg_zig_file = try mod.root.joinString(arena, mod.root_src_path);
                 _ = try man.addFile(pkg_zig_file, null);
             },
@@ -1818,14 +1815,9 @@ pub fn create(gpa: Allocator, arena: Allocator, options: CreateOptions) !*Compil
         if (comp.wantBuildMinGWFromSource()) {
             if (!target_util.canBuildLibC(target)) return error.LibCUnavailable;
 
-            const static_lib_jobs = [_]Job{
-                .{ .mingw_crt_file = .mingw32_lib },
-                .{ .mingw_crt_file = .mingwex_lib },
-                .{ .mingw_crt_file = .uuid_lib },
-            };
             const crt_job: Job = .{ .mingw_crt_file = if (is_dyn_lib) .dllcrt2_o else .crt2_o };
-            try comp.work_queue.ensureUnusedCapacity(static_lib_jobs.len + 1);
-            comp.work_queue.writeAssumeCapacity(&static_lib_jobs);
+            try comp.work_queue.ensureUnusedCapacity(2);
+            comp.work_queue.writeItemAssumeCapacity(.{ .mingw_crt_file = .mingwex_lib });
             comp.work_queue.writeItemAssumeCapacity(crt_job);
 
             // When linking mingw-w64 there are some import libs we always need.
@@ -2469,8 +2461,6 @@ fn addNonIncrementalStuffToCacheManifest(
     comptime assert(link_hash_implementation_version == 11);
 
     if (comp.module) |mod| {
-        const main_zig_file = try mod.main_mod.root.joinString(arena, mod.main_mod.root_src_path);
-        _ = try man.addFile(main_zig_file, null);
         try addModuleTableToCacheHash(gpa, arena, &man.hash, mod.root_mod, mod.main_mod, .{ .files = man });
 
         // Synchronize with other matching comments: ZigOnlyHashStuff
