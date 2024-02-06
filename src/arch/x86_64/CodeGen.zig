@@ -33,7 +33,7 @@ const Alignment = InternPool.Alignment;
 const Target = std.Target;
 const Type = @import("../../type.zig").Type;
 const TypedValue = @import("../../TypedValue.zig");
-const Value = @import("../../value.zig").Value;
+const Value = @import("../../Value.zig");
 const Instruction = @import("encoder.zig").Instruction;
 
 const abi = @import("abi.zig");
@@ -12475,6 +12475,7 @@ fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
             break :mnem std.meta.stringToEnum(Instruction.Mnemonic, mnem_str);
         } orelse return self.fail("invalid mnemonic: '{s}'", .{mnem_str});
         if (@as(?Memory.Size, switch (mnem_tag) {
+            .clflush => .byte,
             .fldenv, .fnstenv, .fstenv => .none,
             .ldmxcsr, .stmxcsr, .vldmxcsr, .vstmxcsr => .dword,
             else => null,
