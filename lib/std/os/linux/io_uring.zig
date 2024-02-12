@@ -268,29 +268,34 @@ pub const IO_Uring = struct {
     /// See https://github.com/axboe/liburing/issues/103#issuecomment-686665007.
     /// Matches the implementation of io_uring_peek_batch_cqe() in liburing, but supports waiting.
     pub fn copy_cqes(self: *IO_Uring, cqes: []linux.io_uring_cqe, wait_nr: u32) !u32 {
-        const count = self.copy_cqes_ready(cqes, wait_nr);
+        const count = self.copy_cqes_ready(cqes);
         if (count > 0) return count;
         if (self.cq_ring_needs_flush() or wait_nr > 0) {
             _ = try self.enter(0, wait_nr, linux.IORING_ENTER_GETEVENTS);
-            return self.copy_cqes_ready(cqes, wait_nr);
+            return self.copy_cqes_ready(cqes);
         }
         return 0;
     }
 
-    fn copy_cqes_ready(self: *IO_Uring, cqes: []linux.io_uring_cqe, wait_nr: u32) u32 {
-        _ = wait_nr;
+    fn copy_cqes_ready(self: *IO_Uring, cqes: []linux.io_uring_cqe) u32 {
         const ready = self.cq_ready();
         const count = @min(cqes.len, ready);
-        var head = self.cq.head.*;
-        const tail = head +% count;
-        // TODO Optimize this by using 1 or 2 memcpy's (if the tail wraps) rather than a loop.
-        var i: usize = 0;
-        // Do not use "less-than" operator since head and tail may wrap:
-        while (head != tail) {
-            cqes[i] = self.cq.cqes[head & self.cq.mask]; // Copy struct by value.
-            head +%= 1;
-            i += 1;
+        const head = self.cq.head.* & self.cq.mask;
+        const tail = (self.cq.head.* +% count) & self.cq.mask;
+
+        if (head <= tail) {
+            // head behind tail -> no wrapping
+            @memcpy(cqes[0..count], self.cq.cqes[head..tail]);
+        } else {
+            // head in front of tail -> buffer wraps
+            const two_copies_required: bool = self.cq.cqes.len - head < count;
+            const amount_to_copy_in_first = if (two_copies_required) self.cq.cqes.len - head else count;
+            @memcpy(cqes[0..amount_to_copy_in_first], self.cq.cqes[head .. head + amount_to_copy_in_first]);
+            if (two_copies_required) {
+                @memcpy(cqes[amount_to_copy_in_first..count], self.cq.cqes[0..tail]);
+            }
         }
+
         self.cq_advance(count);
         return count;
     }
@@ -1110,6 +1115,23 @@ pub const IO_Uring = struct {
     ) !*linux.io_uring_sqe {
         const sqe = try self.get_sqe();
         io_uring_prep_remove_buffers(sqe, buffers_count, group_id);
+        sqe.user_data = user_data;
+        return sqe;
+    }
+
+    /// Queues (but does not submit) an SQE to perform a `waitid(2)`.
+    /// Returns a pointer to the SQE.
+    pub fn waitid(
+        self: *IO_Uring,
+        user_data: u64,
+        id_type: linux.P,
+        id: i32,
+        infop: *linux.siginfo_t,
+        options: u32,
+        flags: u32,
+    ) !*linux.io_uring_sqe {
+        const sqe = try self.get_sqe();
+        io_uring_prep_waitid(sqe, id_type, id, infop, options, flags);
         sqe.user_data = user_data;
         return sqe;
     }
@@ -1960,6 +1982,19 @@ pub fn io_uring_prep_socket_direct_alloc(
 ) void {
     io_uring_prep_socket(sqe, domain, socket_type, protocol, flags);
     __io_uring_set_target_fixed_file(sqe, linux.IORING_FILE_INDEX_ALLOC);
+}
+
+pub fn io_uring_prep_waitid(
+    sqe: *linux.io_uring_sqe,
+    id_type: linux.P,
+    id: i32,
+    infop: *linux.siginfo_t,
+    options: u32,
+    flags: u32,
+) void {
+    io_uring_prep_rw(.WAITID, sqe, id, 0, @intFromEnum(id_type), @intFromPtr(infop));
+    sqe.rw_flags = flags;
+    sqe.splice_fd_in = @bitCast(options);
 }
 
 test "structs/offsets/entries" {
@@ -4146,6 +4181,32 @@ test "openat_direct/close_direct" {
         try testing.expectEqual(os.E.SUCCESS, cqe_close.err());
     }
     try ring.unregister_files();
+}
+
+test "waitid" {
+    try skipKernelLessThan(.{ .major = 6, .minor = 7, .patch = 0 });
+
+    var ring = IO_Uring.init(16, 0) catch |err| switch (err) {
+        error.SystemOutdated => return error.SkipZigTest,
+        error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    defer ring.deinit();
+
+    const pid = try os.fork();
+    if (pid == 0) {
+        os.exit(7);
+    }
+
+    var siginfo: os.siginfo_t = undefined;
+    _ = try ring.waitid(0, .PID, pid, &siginfo, os.W.EXITED, 0);
+
+    try testing.expectEqual(1, try ring.submit());
+
+    const cqe_waitid = try ring.copy_cqe();
+    try testing.expectEqual(0, cqe_waitid.res);
+    try testing.expectEqual(pid, siginfo.fields.common.first.piduid.pid);
+    try testing.expectEqual(7, siginfo.fields.common.second.sigchld.status);
 }
 
 /// For use in tests. Returns SkipZigTest is kernel version is less than required.
