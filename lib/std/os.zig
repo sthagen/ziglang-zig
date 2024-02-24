@@ -752,7 +752,7 @@ pub fn abort() noreturn {
         exit(127); // Pid 1 might not be signalled in some containers.
     }
     switch (builtin.os.tag) {
-        .uefi, .wasi, .cuda, .amdhsa => @trap(),
+        .uefi, .wasi, .emscripten, .cuda, .amdhsa => @trap(),
         else => system.abort(),
     }
 }
@@ -3595,14 +3595,6 @@ pub fn shutdown(sock: socket_t, how: ShutdownHow) ShutdownError!void {
             .NOBUFS => return error.SystemResources,
             else => |err| return unexpectedErrno(err),
         }
-    }
-}
-
-pub fn closeSocket(sock: socket_t) void {
-    if (builtin.os.tag == .windows) {
-        windows.closesocket(sock) catch unreachable;
-    } else {
-        close(sock);
     }
 }
 
