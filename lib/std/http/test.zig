@@ -490,6 +490,12 @@ test "general client/server API coverage" {
                         .{ .name = "location", .value = location },
                     },
                 });
+            } else if (mem.eql(u8, request.head.target, "/empty")) {
+                try request.respond("", .{
+                    .extra_headers = &.{
+                        .{ .name = "empty", .value = "" },
+                    },
+                });
             } else {
                 try request.respond("", .{ .status = .not_found });
             }
@@ -502,7 +508,10 @@ test "general client/server API coverage" {
             return s.listen_address.in.getPort();
         }
     });
-    defer test_server.destroy();
+    defer {
+        global.handle_new_requests = false;
+        test_server.destroy();
+    }
 
     const log = std.log.scoped(.client);
 
@@ -664,6 +673,56 @@ test "general client/server API coverage" {
 
     // connection has been closed
     try expect(client.connection_pool.free_len == 0);
+
+    { // handle empty header field value
+        const location = try std.fmt.allocPrint(gpa, "http://127.0.0.1:{d}/empty", .{port});
+        defer gpa.free(location);
+        const uri = try std.Uri.parse(location);
+
+        log.info("{s}", .{location});
+        var server_header_buffer: [1024]u8 = undefined;
+        var req = try client.open(.GET, uri, .{
+            .server_header_buffer = &server_header_buffer,
+            .extra_headers = &.{
+                .{ .name = "empty", .value = "" },
+            },
+        });
+        defer req.deinit();
+
+        try req.send(.{});
+        try req.wait();
+
+        try std.testing.expectEqual(.ok, req.response.status);
+
+        const body = try req.reader().readAllAlloc(gpa, 8192);
+        defer gpa.free(body);
+
+        try expectEqualStrings("", body);
+
+        var it = req.response.iterateHeaders();
+        {
+            const header = it.next().?;
+            try expect(!it.is_trailer);
+            try expectEqualStrings("connection", header.name);
+            try expectEqualStrings("keep-alive", header.value);
+        }
+        {
+            const header = it.next().?;
+            try expect(!it.is_trailer);
+            try expectEqualStrings("content-length", header.name);
+            try expectEqualStrings("0", header.value);
+        }
+        {
+            const header = it.next().?;
+            try expect(!it.is_trailer);
+            try expectEqualStrings("empty", header.name);
+            try expectEqualStrings("", header.value);
+        }
+        try expectEqual(null, it.next());
+    }
+
+    // connection has been kept alive
+    try expect(client.http_proxy != null or client.connection_pool.free_len == 1);
 
     { // relative redirect
         const location = try std.fmt.allocPrint(gpa, "http://127.0.0.1:{d}/redirect/1", .{port});
@@ -1003,4 +1062,78 @@ fn createTestServer(S: type) !*TestServer {
     test_server.net_server = try address.listen(.{ .reuse_address = true });
     test_server.server_thread = try std.Thread.spawn(.{}, S.run, .{&test_server.net_server});
     return test_server;
+}
+
+test "redirect to different connection" {
+    const test_server_new = try createTestServer(struct {
+        fn run(net_server: *std.net.Server) anyerror!void {
+            var header_buffer: [888]u8 = undefined;
+
+            const conn = try net_server.accept();
+            defer conn.stream.close();
+
+            var server = http.Server.init(conn, &header_buffer);
+            var request = try server.receiveHead();
+            try expectEqualStrings(request.head.target, "/ok");
+            try request.respond("good job, you pass", .{});
+        }
+    });
+    defer test_server_new.destroy();
+
+    const global = struct {
+        var other_port: ?u16 = null;
+    };
+    global.other_port = test_server_new.port();
+
+    const test_server_orig = try createTestServer(struct {
+        fn run(net_server: *std.net.Server) anyerror!void {
+            var header_buffer: [999]u8 = undefined;
+            var send_buffer: [100]u8 = undefined;
+
+            const conn = try net_server.accept();
+            defer conn.stream.close();
+
+            const new_loc = try std.fmt.bufPrint(&send_buffer, "http://127.0.0.1:{d}/ok", .{
+                global.other_port.?,
+            });
+
+            var server = http.Server.init(conn, &header_buffer);
+            var request = try server.receiveHead();
+            try expectEqualStrings(request.head.target, "/help");
+            try request.respond("", .{
+                .status = .found,
+                .extra_headers = &.{
+                    .{ .name = "location", .value = new_loc },
+                },
+            });
+        }
+    });
+    defer test_server_orig.destroy();
+
+    const gpa = std.testing.allocator;
+
+    var client: http.Client = .{ .allocator = gpa };
+    defer client.deinit();
+
+    var loc_buf: [100]u8 = undefined;
+    const location = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/help", .{
+        test_server_orig.port(),
+    });
+    const uri = try std.Uri.parse(location);
+
+    {
+        var server_header_buffer: [666]u8 = undefined;
+        var req = try client.open(.GET, uri, .{
+            .server_header_buffer = &server_header_buffer,
+        });
+        defer req.deinit();
+
+        try req.send(.{});
+        try req.wait();
+
+        const body = try req.reader().readAllAlloc(gpa, 8192);
+        defer gpa.free(body);
+
+        try expectEqualStrings("good job, you pass", body);
+    }
 }

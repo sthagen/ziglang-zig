@@ -837,11 +837,10 @@ pub const Object = struct {
         const gpa = comp.gpa;
         const target = comp.root_mod.resolved_target.result;
         const llvm_target_triple = try targetTriple(arena, target);
-        const strip = comp.root_mod.strip;
 
         var builder = try Builder.init(.{
             .allocator = gpa,
-            .strip = strip,
+            .strip = comp.config.debug_format == .strip,
             .name = comp.root_name,
             .target = target,
             .triple = llvm_target_triple,
@@ -1052,7 +1051,10 @@ pub const Object = struct {
         const mod = o.module;
         const errors_len = mod.global_error_set.count();
 
-        var wip = try Builder.WipFunction.init(&o.builder, llvm_fn.ptrConst(&o.builder).kind.function);
+        var wip = try Builder.WipFunction.init(&o.builder, .{
+            .function = llvm_fn.ptrConst(&o.builder).kind.function,
+            .strip = true,
+        });
         defer wip.deinit();
         wip.cursor = .{ .block = try wip.block(0, "Entry") };
 
@@ -1163,7 +1165,7 @@ pub const Object = struct {
                         const fwd_ref = self.debug_unresolved_namespace_scopes.values()[i];
 
                         const namespace = self.module.namespacePtr(namespace_index);
-                        const debug_type = try self.lowerDebugType(namespace.ty);
+                        const debug_type = try self.lowerDebugType(namespace.getType(self.module));
 
                         self.builder.debugForwardReferenceSetType(fwd_ref, debug_type);
                     }
@@ -1180,6 +1182,10 @@ pub const Object = struct {
                 );
             }
         }
+
+        const target_triple_sentinel =
+            try self.gpa.dupeZ(u8, self.builder.target_triple.slice(&self.builder).?);
+        defer self.gpa.free(target_triple_sentinel);
 
         const emit_asm_msg = options.asm_path orelse "(none)";
         const emit_bin_msg = options.bin_path orelse "(none)";
@@ -1200,6 +1206,7 @@ pub const Object = struct {
 
             const bitcode = try self.builder.toBitcode(self.gpa);
             defer self.gpa.free(bitcode);
+            self.builder.clearAndFree();
 
             if (options.pre_bc_path) |path| {
                 var file = try std.fs.cwd().createFile(path, .{});
@@ -1247,16 +1254,13 @@ pub const Object = struct {
         };
         defer context.dispose();
 
-        const target_triple_sentinel =
-            try self.gpa.dupeZ(u8, self.builder.target_triple.slice(&self.builder).?);
-        defer self.gpa.free(target_triple_sentinel);
         var target: *llvm.Target = undefined;
         var error_message: [*:0]const u8 = undefined;
         if (llvm.Target.getFromTriple(target_triple_sentinel, &target, &error_message).toBool()) {
             defer llvm.disposeMessage(error_message);
 
             log.err("LLVM failed to parse '{s}': {s}", .{
-                self.builder.target_triple.slice(&self.builder).?,
+                target_triple_sentinel,
                 error_message,
             });
             @panic("Invalid LLVM triple");
@@ -1372,6 +1376,7 @@ pub const Object = struct {
         air: Air,
         liveness: Liveness,
     ) !void {
+        const comp = zcu.comp;
         const func = zcu.funcInfo(func_index);
         const decl_index = func.owner_decl;
         const decl = zcu.declPtr(decl_index);
@@ -1440,7 +1445,10 @@ pub const Object = struct {
             function_index.setSection(try o.builder.string(section), &o.builder);
 
         var deinit_wip = true;
-        var wip = try Builder.WipFunction.init(&o.builder, function_index);
+        var wip = try Builder.WipFunction.init(&o.builder, .{
+            .function = function_index,
+            .strip = owner_mod.strip,
+        });
         defer if (deinit_wip) wip.deinit();
         wip.cursor = .{ .block = try wip.block(0, "Entry") };
 
@@ -1458,8 +1466,6 @@ pub const Object = struct {
             .signed => try attributes.addRetAttr(.signext, &o.builder),
             .unsigned => try attributes.addRetAttr(.zeroext, &o.builder),
         };
-
-        const comp = zcu.comp;
 
         const err_return_tracing = Type.fromInterned(fn_info.return_type).isError(zcu) and
             comp.config.any_error_tracing;
@@ -1645,7 +1651,7 @@ pub const Object = struct {
 
         function_index.setAttributes(try attributes.finish(&o.builder), &o.builder);
 
-        const file, const subprogram = if (!o.builder.strip) debug_info: {
+        const file, const subprogram = if (!wip.strip) debug_info: {
             const file = try o.getDebugFile(namespace.file_scope);
 
             const line_number = decl.src_line + 1;
@@ -1797,7 +1803,7 @@ pub const Object = struct {
             return updateExportedGlobal(self, mod, global_index, exports);
         } else {
             const fqn = try self.builder.string(
-                mod.intern_pool.stringToSlice(try decl.getFullyQualifiedName(mod)),
+                mod.intern_pool.stringToSlice(try decl.fullyQualifiedName(mod)),
             );
             try global_index.rename(fqn, &self.builder);
             global_index.setLinkage(.internal, &self.builder);
@@ -2835,15 +2841,13 @@ pub const Object = struct {
 
         const builtin_str = try mod.intern_pool.getOrPutString(mod.gpa, "builtin");
         const std_namespace = mod.namespacePtr(mod.declPtr(std_file.root_decl.unwrap().?).src_namespace);
-        const builtin_decl = std_namespace.decls
-            .getKeyAdapted(builtin_str, Module.DeclAdapter{ .mod = mod }).?;
+        const builtin_decl = std_namespace.decls.getKeyAdapted(builtin_str, Module.DeclAdapter{ .zcu = mod }).?;
 
         const stack_trace_str = try mod.intern_pool.getOrPutString(mod.gpa, "StackTrace");
         // buffer is only used for int_type, `builtin` is a struct.
         const builtin_ty = mod.declPtr(builtin_decl).val.toType();
         const builtin_namespace = builtin_ty.getNamespace(mod).?;
-        const stack_trace_decl_index = builtin_namespace.decls
-            .getKeyAdapted(stack_trace_str, Module.DeclAdapter{ .mod = mod }).?;
+        const stack_trace_decl_index = builtin_namespace.decls.getKeyAdapted(stack_trace_str, Module.DeclAdapter{ .zcu = mod }).?;
         const stack_trace_decl = mod.declPtr(stack_trace_decl_index);
 
         // Sema should have ensured that StackTrace was analyzed.
@@ -2886,7 +2890,7 @@ pub const Object = struct {
             try o.builder.string(ip.stringToSlice(if (is_extern)
                 decl.name
             else
-                try decl.getFullyQualifiedName(zcu))),
+                try decl.fullyQualifiedName(zcu))),
             toLlvmAddressSpace(decl.@"addrspace", target),
         );
         gop.value_ptr.* = function_index.ptrConst(&o.builder).global;
@@ -3100,7 +3104,7 @@ pub const Object = struct {
 
         const variable_index = try o.builder.addVariable(
             try o.builder.string(mod.intern_pool.stringToSlice(
-                if (is_extern) decl.name else try decl.getFullyQualifiedName(mod),
+                if (is_extern) decl.name else try decl.fullyQualifiedName(mod),
             )),
             try o.lowerType(decl.ty),
             toLlvmGlobalAddressSpace(decl.@"addrspace", mod.getTarget()),
@@ -3325,7 +3329,7 @@ pub const Object = struct {
                     }
 
                     const name = try o.builder.string(ip.stringToSlice(
-                        try mod.declPtr(struct_type.decl.unwrap().?).getFullyQualifiedName(mod),
+                        try mod.declPtr(struct_type.decl.unwrap().?).fullyQualifiedName(mod),
                     ));
 
                     var llvm_field_types = std.ArrayListUnmanaged(Builder.Type){};
@@ -3481,7 +3485,7 @@ pub const Object = struct {
                     }
 
                     const name = try o.builder.string(ip.stringToSlice(
-                        try mod.declPtr(union_obj.decl).getFullyQualifiedName(mod),
+                        try mod.declPtr(union_obj.decl).fullyQualifiedName(mod),
                     ));
 
                     const aligned_field_ty = Type.fromInterned(union_obj.field_types.get(ip)[layout.most_aligned_field]);
@@ -4599,7 +4603,7 @@ pub const Object = struct {
 
         const usize_ty = try o.lowerType(Type.usize);
         const ret_ty = try o.lowerType(Type.slice_const_u8_sentinel_0);
-        const fqn = try zcu.declPtr(enum_type.decl).getFullyQualifiedName(zcu);
+        const fqn = try zcu.declPtr(enum_type.decl).fullyQualifiedName(zcu);
         const target = zcu.root_mod.resolved_target.result;
         const function_index = try o.builder.addFunction(
             try o.builder.fnType(ret_ty, &.{try o.lowerType(Type.fromInterned(enum_type.tag_ty))}, .normal),
@@ -4616,7 +4620,10 @@ pub const Object = struct {
         function_index.setAttributes(try attributes.finish(&o.builder), &o.builder);
         gop.value_ptr.* = function_index.ptrConst(&o.builder).global;
 
-        var wip = try Builder.WipFunction.init(&o.builder, function_index);
+        var wip = try Builder.WipFunction.init(&o.builder, .{
+            .function = function_index,
+            .strip = true,
+        });
         defer wip.deinit();
         wip.cursor = .{ .block = try wip.block(0, "Entry") };
 
@@ -4686,23 +4693,23 @@ pub const DeclGen = struct {
 
     fn genDecl(dg: *DeclGen) !void {
         const o = dg.object;
-        const mod = o.module;
+        const zcu = o.module;
         const decl = dg.decl;
         const decl_index = dg.decl_index;
         assert(decl.has_tv);
 
-        if (decl.val.getExternFunc(mod)) |extern_func| {
+        if (decl.val.getExternFunc(zcu)) |extern_func| {
             _ = try o.resolveLlvmFunction(extern_func.decl);
         } else {
             const variable_index = try o.resolveGlobalDecl(decl_index);
             variable_index.setAlignment(
-                decl.getAlignment(mod).toLlvm(),
+                decl.getAlignment(zcu).toLlvm(),
                 &o.builder,
             );
-            if (mod.intern_pool.stringToSliceUnwrap(decl.@"linksection")) |section|
+            if (zcu.intern_pool.stringToSliceUnwrap(decl.@"linksection")) |section|
                 variable_index.setSection(try o.builder.string(section), &o.builder);
             assert(decl.has_tv);
-            const init_val = if (decl.val.getVariable(mod)) |decl_var| decl_var.init else init_val: {
+            const init_val = if (decl.val.getVariable(zcu)) |decl_var| decl_var.init else init_val: {
                 variable_index.setMutability(.constant, &o.builder);
                 break :init_val decl.val.toIntern();
             };
@@ -4714,12 +4721,15 @@ pub const DeclGen = struct {
             const line_number = decl.src_line + 1;
             const is_internal_linkage = !o.module.decl_exports.contains(decl_index);
 
-            if (dg.object.builder.strip) return;
+            const namespace = zcu.namespacePtr(decl.src_namespace);
+            const owner_mod = namespace.file_scope.mod;
 
-            const debug_file = try o.getDebugFile(mod.namespacePtr(decl.src_namespace).file_scope);
+            if (owner_mod.strip) return;
+
+            const debug_file = try o.getDebugFile(namespace.file_scope);
 
             const debug_global_var = try o.builder.debugGlobalVar(
-                try o.builder.metadataString(mod.intern_pool.stringToSlice(decl.name)), // Name
+                try o.builder.metadataString(zcu.intern_pool.stringToSlice(decl.name)), // Name
                 try o.builder.metadataStringFromString(variable_index.name(&o.builder)), // Linkage name
                 debug_file, // File
                 debug_file, // Scope
@@ -4735,7 +4745,7 @@ pub const DeclGen = struct {
                 debug_global_var,
                 debug_expression,
             );
-            if (!is_internal_linkage or decl.isExtern(mod))
+            if (!is_internal_linkage or decl.isExtern(zcu))
                 variable_index.setGlobalVariableExpression(debug_global_var_expression, &o.builder);
             try o.debug_globals.append(o.gpa, debug_global_var_expression);
         }
@@ -6570,7 +6580,6 @@ pub const FuncGen = struct {
     }
 
     fn airDbgStmt(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-        if (self.wip.builder.strip) return .none;
         const dbg_stmt = self.air.instructions.items(.data)[@intFromEnum(inst)].dbg_stmt;
         self.prev_dbg_line = @intCast(self.base_line + dbg_stmt.line + 1);
         self.prev_dbg_column = @intCast(dbg_stmt.column + 1);
@@ -6593,7 +6602,6 @@ pub const FuncGen = struct {
     }
 
     fn airDbgInlineBegin(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-        if (self.wip.builder.strip) return .none;
         const o = self.dg.object;
         const zcu = o.module;
 
@@ -6613,7 +6621,7 @@ pub const FuncGen = struct {
             .base_line = self.base_line,
         });
 
-        const fqn = try decl.getFullyQualifiedName(zcu);
+        const fqn = try decl.fullyQualifiedName(zcu);
 
         const is_internal_linkage = !zcu.decl_exports.contains(decl_index);
         const fn_ty = try zcu.funcType(.{
@@ -6660,7 +6668,6 @@ pub const FuncGen = struct {
     }
 
     fn airDbgInlineEnd(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
-        if (self.wip.builder.strip) return .none;
         const o = self.dg.object;
 
         const ty_fn = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_fn;
@@ -6677,7 +6684,6 @@ pub const FuncGen = struct {
     }
 
     fn airDbgBlockBegin(self: *FuncGen) Allocator.Error!Builder.Value {
-        if (self.wip.builder.strip) return .none;
         const o = self.dg.object;
 
         try self.scope_stack.append(self.gpa, self.scope);
@@ -6693,13 +6699,11 @@ pub const FuncGen = struct {
     }
 
     fn airDbgBlockEnd(self: *FuncGen) !Builder.Value {
-        if (self.wip.builder.strip) return .none;
         self.scope = self.scope_stack.pop();
         return .none;
     }
 
     fn airDbgVarPtr(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-        if (self.wip.builder.strip) return .none;
         const o = self.dg.object;
         const mod = o.module;
         const pl_op = self.air.instructions.items(.data)[@intFromEnum(inst)].pl_op;
@@ -6732,7 +6736,6 @@ pub const FuncGen = struct {
     }
 
     fn airDbgVarVal(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-        if (self.wip.builder.strip) return .none;
         const o = self.dg.object;
         const pl_op = self.air.instructions.items(.data)[@intFromEnum(inst)].pl_op;
         const operand = try self.resolveInst(pl_op.operand);
@@ -8648,8 +8651,6 @@ pub const FuncGen = struct {
         const operand_ty = self.typeOf(ty_op.operand);
         const dest_ty = self.typeOfIndex(inst);
         const target = mod.getTarget();
-        const dest_bits = dest_ty.floatBits(target);
-        const src_bits = operand_ty.floatBits(target);
 
         if (intrinsicsAllowed(dest_ty, target) and intrinsicsAllowed(operand_ty, target)) {
             return self.wip.cast(.fpext, operand, try o.lowerType(dest_ty), "");
@@ -8657,11 +8658,19 @@ pub const FuncGen = struct {
             const operand_llvm_ty = try o.lowerType(operand_ty);
             const dest_llvm_ty = try o.lowerType(dest_ty);
 
+            const dest_bits = dest_ty.scalarType(mod).floatBits(target);
+            const src_bits = operand_ty.scalarType(mod).floatBits(target);
             const fn_name = try o.builder.fmt("__extend{s}f{s}f2", .{
                 compilerRtFloatAbbrev(src_bits), compilerRtFloatAbbrev(dest_bits),
             });
 
             const libc_fn = try self.getLibcFunction(fn_name, &.{operand_llvm_ty}, dest_llvm_ty);
+            if (dest_ty.isVector(mod)) return self.buildElementwiseCall(
+                libc_fn,
+                &.{operand},
+                try o.builder.poisonValue(dest_llvm_ty),
+                dest_ty.vectorLen(mod),
+            );
             return self.wip.call(
                 .normal,
                 .ccc,
@@ -8813,7 +8822,7 @@ pub const FuncGen = struct {
         const arg_val = self.args[self.arg_index];
         self.arg_index += 1;
 
-        if (self.wip.builder.strip) return arg_val;
+        if (self.wip.strip) return arg_val;
 
         const inst_ty = self.typeOfIndex(inst);
         if (needDbgVarWorkaround(o)) return arg_val;
@@ -9643,7 +9652,7 @@ pub const FuncGen = struct {
         if (gop.found_existing) return gop.value_ptr.*;
         errdefer assert(o.named_enum_map.remove(enum_type.decl));
 
-        const fqn = try zcu.declPtr(enum_type.decl).getFullyQualifiedName(zcu);
+        const fqn = try zcu.declPtr(enum_type.decl).fullyQualifiedName(zcu);
         const target = zcu.root_mod.resolved_target.result;
         const function_index = try o.builder.addFunction(
             try o.builder.fnType(.i1, &.{try o.lowerType(Type.fromInterned(enum_type.tag_ty))}, .normal),
@@ -9660,7 +9669,10 @@ pub const FuncGen = struct {
         function_index.setAttributes(try attributes.finish(&o.builder), &o.builder);
         gop.value_ptr.* = function_index;
 
-        var wip = try Builder.WipFunction.init(&o.builder, function_index);
+        var wip = try Builder.WipFunction.init(&o.builder, .{
+            .function = function_index,
+            .strip = true,
+        });
         defer wip.deinit();
         wip.cursor = .{ .block = try wip.block(0, "Entry") };
 
