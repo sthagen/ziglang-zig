@@ -1018,7 +1018,7 @@ fn typeToValtype(ty: Type, mod: *Module) wasm.Valtype {
             .unrolled => wasm.Valtype.i32,
         },
         .Union => switch (ty.containerLayout(mod)) {
-            .Packed => {
+            .@"packed" => {
                 const int_ty = mod.intType(.unsigned, @as(u16, @intCast(ty.bitSize(mod)))) catch @panic("out of memory");
                 return typeToValtype(int_ty, mod);
             },
@@ -1737,7 +1737,7 @@ fn isByRef(ty: Type, mod: *Module) bool {
         => return ty.hasRuntimeBitsIgnoreComptime(mod),
         .Union => {
             if (mod.typeToUnion(ty)) |union_obj| {
-                if (union_obj.getLayout(ip) == .Packed) {
+                if (union_obj.getLayout(ip) == .@"packed") {
                     return ty.abiSize(mod) > 8;
                 }
             }
@@ -2658,19 +2658,19 @@ fn binOpBigInt(func: *CodeGen, lhs: WValue, rhs: WValue, ty: Type, op: Op) Inner
         .rem => return func.callIntrinsic("__umodti3", &.{ ty.toIntern(), ty.toIntern() }, ty, &.{ lhs, rhs }),
         .shr => return func.callIntrinsic("__lshrti3", &.{ ty.toIntern(), .i32_type }, ty, &.{ lhs, rhs }),
         .shl => return func.callIntrinsic("__ashlti3", &.{ ty.toIntern(), .i32_type }, ty, &.{ lhs, rhs }),
-        .xor => {
+        .@"and", .@"or", .xor => {
             const result = try func.allocStack(ty);
             try func.emitWValue(result);
             const lhs_high_bit = try func.load(lhs, Type.u64, 0);
             const rhs_high_bit = try func.load(rhs, Type.u64, 0);
-            const xor_high_bit = try func.binOp(lhs_high_bit, rhs_high_bit, Type.u64, .xor);
-            try func.store(.stack, xor_high_bit, Type.u64, result.offset());
+            const op_high_bit = try func.binOp(lhs_high_bit, rhs_high_bit, Type.u64, op);
+            try func.store(.stack, op_high_bit, Type.u64, result.offset());
 
             try func.emitWValue(result);
             const lhs_low_bit = try func.load(lhs, Type.u64, 8);
             const rhs_low_bit = try func.load(rhs, Type.u64, 8);
-            const xor_low_bit = try func.binOp(lhs_low_bit, rhs_low_bit, Type.u64, .xor);
-            try func.store(.stack, xor_low_bit, Type.u64, result.offset() + 8);
+            const op_low_bit = try func.binOp(lhs_low_bit, rhs_low_bit, Type.u64, op);
+            try func.store(.stack, op_low_bit, Type.u64, result.offset() + 8);
             return result;
         },
         .add, .sub => {
@@ -3097,7 +3097,7 @@ fn lowerParentPtr(func: *CodeGen, ptr_val: Value, offset: u32) InnerError!WValue
                     break :blk parent_ty.structFieldOffset(field_index, mod);
                 },
                 .Union => switch (parent_ty.containerLayout(mod)) {
-                    .Packed => 0,
+                    .@"packed" => 0,
                     else => blk: {
                         const layout: Module.UnionLayout = parent_ty.unionGetLayout(mod);
                         if (layout.payload_size == 0) break :blk 0;
@@ -3358,7 +3358,7 @@ fn lowerConstant(func: *CodeGen, val: Value, ty: Type) InnerError!WValue {
                 const struct_type = ip.loadStructType(ty.toIntern());
                 // non-packed structs are not handled in this function because they
                 // are by-ref types.
-                assert(struct_type.layout == .Packed);
+                assert(struct_type.layout == .@"packed");
                 var buf: [8]u8 = .{0} ** 8; // zero the buffer so we do not read 0xaa as integer
                 val.writeToPackedMemory(ty, mod, &buf, 0) catch unreachable;
                 const backing_int_ty = Type.fromInterned(struct_type.backingIntType(ip).*);
@@ -3890,7 +3890,7 @@ fn structFieldPtr(
     const struct_ptr_ty_info = struct_ptr_ty.ptrInfo(mod);
 
     const offset = switch (struct_ty.containerLayout(mod)) {
-        .Packed => switch (struct_ty.zigTypeTag(mod)) {
+        .@"packed" => switch (struct_ty.zigTypeTag(mod)) {
             .Struct => offset: {
                 if (result_ty.ptrInfo(mod).packed_offset.host_size != 0) {
                     break :offset @as(u32, 0);
@@ -3928,7 +3928,7 @@ fn airStructFieldVal(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     if (!field_ty.hasRuntimeBitsIgnoreComptime(mod)) return func.finishAir(inst, .none, &.{struct_field.struct_operand});
 
     const result = switch (struct_ty.containerLayout(mod)) {
-        .Packed => switch (struct_ty.zigTypeTag(mod)) {
+        .@"packed" => switch (struct_ty.zigTypeTag(mod)) {
             .Struct => result: {
                 const packed_struct = mod.typeToPackedStruct(struct_ty).?;
                 const offset = mod.structPackedFieldBitOffset(packed_struct, field_index);
@@ -5321,7 +5321,7 @@ fn airAggregateInit(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                 break :result_value result;
             },
             .Struct => switch (result_ty.containerLayout(mod)) {
-                .Packed => {
+                .@"packed" => {
                     if (isByRef(result_ty, mod)) {
                         return func.fail("TODO: airAggregateInit for packed structs larger than 64 bits", .{});
                     }
