@@ -814,7 +814,7 @@ pub noinline fn walkStackWindows(addresses: []usize, existing_context: ?*const w
         return windows.ntdll.RtlCaptureStackBackTrace(0, addresses.len, @as(**anyopaque, @ptrCast(addresses.ptr)), null);
     }
 
-    const tib = @as(*const windows.NT_TIB, @ptrCast(&windows.teb().Reserved1));
+    const tib = &windows.teb().NtTib;
 
     var context: windows.CONTEXT = undefined;
     if (existing_context) |context_ptr| {
@@ -2837,6 +2837,29 @@ pub fn ConfigurableTrace(comptime size: usize, comptime stack_frame_count: usize
         }
     };
 }
+
+pub const SafetyLock = struct {
+    state: State = .unlocked,
+
+    pub const State = if (runtime_safety) enum { unlocked, locked } else enum { unlocked };
+
+    pub fn lock(l: *SafetyLock) void {
+        if (!runtime_safety) return;
+        assert(l.state == .unlocked);
+        l.state = .locked;
+    }
+
+    pub fn unlock(l: *SafetyLock) void {
+        if (!runtime_safety) return;
+        assert(l.state == .locked);
+        l.state = .unlocked;
+    }
+
+    pub fn assertUnlocked(l: SafetyLock) void {
+        if (!runtime_safety) return;
+        assert(l.state == .unlocked);
+    }
+};
 
 test {
     _ = &dump_hex;
