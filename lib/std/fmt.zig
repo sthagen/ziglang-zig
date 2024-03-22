@@ -9,7 +9,6 @@ const assert = std.debug.assert;
 const mem = std.mem;
 const unicode = std.unicode;
 const meta = std.meta;
-const ryu128 = @import("fmt/ryu128.zig");
 const lossyCast = std.math.lossyCast;
 const expectFmt = std.testing.expectFmt;
 
@@ -757,21 +756,25 @@ pub fn formatIntValue(
     return formatInt(int_value, base, case, options, writer);
 }
 
+pub const format_float = @import("fmt/format_float.zig");
+pub const formatFloat = format_float.formatFloat;
+pub const FormatFloatError = format_float.FormatError;
+
 fn formatFloatValue(
     value: anytype,
     comptime fmt: []const u8,
     options: FormatOptions,
     writer: anytype,
 ) !void {
-    var buf: [ryu128.bufferSize(.decimal, f64)]u8 = undefined;
+    var buf: [format_float.bufferSize(.decimal, f64)]u8 = undefined;
 
     if (fmt.len == 0 or comptime std.mem.eql(u8, fmt, "e")) {
-        const s = ryu128.format(&buf, value, .{ .mode = .scientific, .precision = options.precision }) catch |err| switch (err) {
+        const s = formatFloat(&buf, value, .{ .mode = .scientific, .precision = options.precision }) catch |err| switch (err) {
             error.BufferTooSmall => "(float)",
         };
         return formatBuf(s, options, writer);
     } else if (comptime std.mem.eql(u8, fmt, "d")) {
-        const s = ryu128.format(&buf, value, .{ .mode = .decimal, .precision = options.precision }) catch |err| switch (err) {
+        const s = formatFloat(&buf, value, .{ .mode = .decimal, .precision = options.precision }) catch |err| switch (err) {
             error.BufferTooSmall => "(float)",
         };
         return formatBuf(s, options, writer);
@@ -787,7 +790,7 @@ fn formatFloatValue(
 }
 
 test {
-    _ = &ryu128;
+    _ = &format_float;
 }
 
 pub const Case = enum { lower, upper };
@@ -890,7 +893,7 @@ fn formatSizeImpl(comptime base: comptime_int) type {
                 return formatBuf("0B", options, writer);
             }
             // The worst case in terms of space needed is 32 bytes + 3 for the suffix.
-            var buf: [ryu128.min_buffer_size + 3]u8 = undefined;
+            var buf: [format_float.min_buffer_size + 3]u8 = undefined;
 
             const mags_si = " kMGTPEZY";
             const mags_iec = " KMGTPEZY";
@@ -908,7 +911,7 @@ fn formatSizeImpl(comptime base: comptime_int) type {
                 else => unreachable,
             };
 
-            const s = ryu128.format(&buf, new_value, .{ .mode = .decimal, .precision = options.precision }) catch |err| switch (err) {
+            const s = formatFloat(&buf, new_value, .{ .mode = .decimal, .precision = options.precision }) catch |err| switch (err) {
                 error.BufferTooSmall => unreachable,
             };
 
@@ -1300,7 +1303,7 @@ pub fn fmtDuration(ns: u64) Formatter(formatDuration) {
     return .{ .data = data };
 }
 
-test "fmtDuration" {
+test fmtDuration {
     var buf: [24]u8 = undefined;
     inline for (.{
         .{ .s = "0ns", .d = 0 },
@@ -1364,7 +1367,7 @@ pub fn fmtDurationSigned(ns: i64) Formatter(formatDurationSigned) {
     return .{ .data = ns };
 }
 
-test "fmtDurationSigned" {
+test fmtDurationSigned {
     var buf: [24]u8 = undefined;
     inline for (.{
         .{ .s = "0ns", .d = 0 },
@@ -1494,7 +1497,7 @@ pub fn parseInt(comptime T: type, buf: []const u8, base: u8) ParseIntError!T {
     return parseWithSign(T, buf, base, .pos);
 }
 
-test "parseInt" {
+test parseInt {
     try std.testing.expect((try parseInt(i32, "-10", 10)) == -10);
     try std.testing.expect((try parseInt(i32, "+10", 10)) == 10);
     try std.testing.expect((try parseInt(u32, "+10", 10)) == 10);
@@ -1636,7 +1639,7 @@ pub fn parseUnsigned(comptime T: type, buf: []const u8, base: u8) ParseIntError!
     return parseWithSign(T, buf, base, .pos);
 }
 
-test "parseUnsigned" {
+test parseUnsigned {
     try std.testing.expect((try parseUnsigned(u16, "050124", 10)) == 50124);
     try std.testing.expect((try parseUnsigned(u16, "65535", 10)) == 65535);
     try std.testing.expect((try parseUnsigned(u16, "65_535", 10)) == 65535);
@@ -1710,7 +1713,7 @@ pub fn parseIntSizeSuffix(buf: []const u8, digit_base: u8) ParseIntError!usize {
     return math.mul(usize, number, multiplier);
 }
 
-test "parseIntSizeSuffix" {
+test parseIntSizeSuffix {
     try std.testing.expect(try parseIntSizeSuffix("2", 10) == 2);
     try std.testing.expect(try parseIntSizeSuffix("2B", 10) == 2);
     try std.testing.expect(try parseIntSizeSuffix("2kB", 10) == 2000);
@@ -1793,7 +1796,7 @@ pub fn allocPrintZ(allocator: mem.Allocator, comptime fmt: []const u8, args: any
     return result[0 .. result.len - 1 :0];
 }
 
-test "bufPrintInt" {
+test bufPrintIntToSlice {
     var buffer: [100]u8 = undefined;
     const buf = buffer[0..];
 
@@ -1827,7 +1830,7 @@ pub inline fn comptimePrint(comptime fmt: []const u8, args: anytype) *const [cou
     }
 }
 
-test "comptimePrint" {
+test comptimePrint {
     @setEvalBranchQuota(2000);
     try std.testing.expectEqual(*const [3:0]u8, @TypeOf(comptimePrint("{}", .{100})));
     try std.testing.expectEqualSlices(u8, "100", comptimePrint("{}", .{100}));
@@ -2442,14 +2445,14 @@ pub fn hexToBytes(out: []u8, input: []const u8) ![]u8 {
     return out[0 .. in_i / 2];
 }
 
-test "bytesToHex" {
+test bytesToHex {
     const input = "input slice";
     const encoded = bytesToHex(input, .lower);
     var decoded: [input.len]u8 = undefined;
     try std.testing.expectEqualSlices(u8, input, try hexToBytes(&decoded, &encoded));
 }
 
-test "hexToBytes" {
+test hexToBytes {
     var buf: [32]u8 = undefined;
     try expectFmt("90" ** 32, "{s}", .{fmtSliceHexUpper(try hexToBytes(&buf, "90" ** 32))});
     try expectFmt("ABCD", "{s}", .{fmtSliceHexUpper(try hexToBytes(&buf, "ABCD"))});
