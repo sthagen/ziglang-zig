@@ -16,7 +16,6 @@ const Decl = Module.Decl;
 const Type = @import("../../type.zig").Type;
 const Value = @import("../../Value.zig");
 const Compilation = @import("../../Compilation.zig");
-const LazySrcLoc = std.zig.LazySrcLoc;
 const link = @import("../../link.zig");
 const Air = @import("../../Air.zig");
 const Liveness = @import("../../Liveness.zig");
@@ -766,7 +765,7 @@ pub fn deinit(func: *CodeGen) void {
 /// Sets `err_msg` on `CodeGen` and returns `error.CodegenFail` which is caught in link/Wasm.zig
 fn fail(func: *CodeGen, comptime fmt: []const u8, args: anytype) InnerError {
     const mod = func.bin_file.base.comp.module.?;
-    const src_loc = func.decl.srcLoc(mod);
+    const src_loc = func.decl.navSrcLoc(mod).upgrade(mod);
     func.err_msg = try Module.ErrorMsg.create(func.gpa, src_loc, fmt, args);
     return error.CodegenFail;
 }
@@ -1842,7 +1841,7 @@ fn genInst(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .bit_or => func.airBinOp(inst, .@"or"),
         .bool_and => func.airBinOp(inst, .@"and"),
         .bool_or => func.airBinOp(inst, .@"or"),
-        .rem => func.airBinOp(inst, .rem),
+        .rem => func.airRem(inst),
         .mod => func.airMod(inst),
         .shl => func.airWrapBinOp(inst, .shl),
         .shl_exact => func.airBinOp(inst, .shl),
@@ -3123,7 +3122,7 @@ fn lowerAnonDeclRef(
     }
 
     const decl_align = mod.intern_pool.indexToKey(anon_decl.orig_ty).ptr_type.flags.alignment;
-    const res = try func.bin_file.lowerAnonDecl(decl_val, decl_align, func.decl.srcLoc(mod));
+    const res = try func.bin_file.lowerAnonDecl(decl_val, decl_align, func.decl.navSrcLoc(mod).upgrade(mod));
     switch (res) {
         .ok => {},
         .fail => |em| {
@@ -6918,11 +6917,52 @@ fn divSigned(func: *CodeGen, lhs: WValue, rhs: WValue, ty: Type) InnerError!WVal
         try func.emitWValue(lhs);
         try func.emitWValue(rhs);
     }
-    try func.addTag(.i32_div_s);
+    switch (wasm_bits) {
+        32 => try func.addTag(.i32_div_s),
+        64 => try func.addTag(.i64_div_s),
+        else => unreachable,
+    }
+    _ = try func.wrapOperand(.stack, ty);
 
     const result = try func.allocLocal(ty);
     try func.addLabel(.local_set, result.local.value);
     return result;
+}
+
+fn airRem(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
+    const bin_op = func.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
+
+    const mod = func.bin_file.base.comp.module.?;
+    const ty = func.typeOfIndex(inst);
+    const lhs = try func.resolveInst(bin_op.lhs);
+    const rhs = try func.resolveInst(bin_op.rhs);
+
+    const result = if (ty.isSignedInt(mod)) result: {
+        const int_bits = ty.intInfo(mod).bits;
+        const wasm_bits = toWasmBits(int_bits) orelse {
+            return func.fail("TODO: `@rem` for signed integers larger than 128 bits ({d} bits requested)", .{int_bits});
+        };
+
+        if (wasm_bits > 64) {
+            return func.fail("TODO: `@rem` for signed integers larger than 64 bits ({d} bits requested)", .{int_bits});
+        }
+
+        const lhs_wasm = if (wasm_bits != int_bits)
+            try (try func.signExtendInt(lhs, ty)).toLocal(func, ty)
+        else
+            lhs;
+
+        const rhs_wasm = if (wasm_bits != int_bits)
+            try (try func.signExtendInt(rhs, ty)).toLocal(func, ty)
+        else
+            rhs;
+
+        _ = try func.binOp(lhs_wasm, rhs_wasm, ty, .rem);
+        break :result try func.wrapOperand(.stack, ty);
+    } else try func.binOp(lhs, rhs, ty, .rem);
+
+    const return_local = try result.toLocal(func, ty);
+    func.finishAir(inst, return_local, &.{ bin_op.lhs, bin_op.rhs });
 }
 
 /// Remainder after floor division, defined by:
