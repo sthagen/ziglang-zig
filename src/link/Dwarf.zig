@@ -1204,7 +1204,7 @@ pub fn commitDeclState(
     const decl = zcu.declPtr(decl_index);
     const ip = &zcu.intern_pool;
     const namespace = zcu.namespacePtr(decl.src_namespace);
-    const target = namespace.file_scope.mod.resolved_target.result;
+    const target = namespace.fileScope(zcu).mod.resolved_target.result;
     const target_endian = target.cpu.arch.endian();
 
     var dbg_line_buffer = &decl_state.dbg_line;
@@ -2969,5 +2969,5 @@ const Zcu = @import("../Zcu.zig");
 const Module = Zcu;
 const InternPool = @import("../InternPool.zig");
 const StringTable = @import("StringTable.zig");
-const Type = @import("../type.zig").Type;
+const Type = @import("../Type.zig");
 const Value = @import("../Value.zig");

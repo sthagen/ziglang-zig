@@ -32,7 +32,7 @@ const Module = Zcu;
 const InternPool = @import("../../InternPool.zig");
 const Alignment = InternPool.Alignment;
 const Target = std.Target;
-const Type = @import("../../type.zig").Type;
+const Type = @import("../../Type.zig");
 const Value = @import("../../Value.zig");
 const Instruction = @import("encoder.zig").Instruction;
 
@@ -74,7 +74,7 @@ va_info: union {
 ret_mcv: InstTracking,
 fn_type: Type,
 arg_index: u32,
-src_loc: Module.SrcLoc,
+src_loc: Module.LazySrcLoc,
 
 eflags_inst: ?Air.Inst.Index = null,
 
@@ -795,7 +795,7 @@ const Self = @This();
 
 pub fn generate(
     bin_file: *link.File,
-    src_loc: Module.SrcLoc,
+    src_loc: Module.LazySrcLoc,
     func_index: InternPool.Index,
     air: Air,
     liveness: Liveness,
@@ -810,7 +810,7 @@ pub fn generate(
     assert(fn_owner_decl.has_tv);
     const fn_type = fn_owner_decl.typeOf(zcu);
     const namespace = zcu.namespacePtr(fn_owner_decl.src_namespace);
-    const mod = namespace.file_scope.mod;
+    const mod = namespace.fileScope(zcu).mod;
 
     var function = Self{
         .gpa = gpa,
@@ -971,7 +971,7 @@ pub fn generate(
 
 pub fn generateLazy(
     bin_file: *link.File,
-    src_loc: Module.SrcLoc,
+    src_loc: Module.LazySrcLoc,
     lazy_sym: link.File.LazySymbol,
     code: *std.ArrayList(u8),
     debug_output: DebugInfoOutput,

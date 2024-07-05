@@ -81,7 +81,7 @@ namespace_name_deps: std.AutoArrayHashMapUnmanaged(NamespaceNameKey, DepEntry.In
 /// Given a `Depender`, points to an entry in `dep_entries` whose `depender`
 /// matches. The `next_dependee` field can be used to iterate all such entries
 /// and remove them from the corresponding lists.
-first_dependency: std.AutoArrayHashMapUnmanaged(AnalSubject, DepEntry.Index) = .{},
+first_dependency: std.AutoArrayHashMapUnmanaged(AnalUnit, DepEntry.Index) = .{},
 
 /// Stores dependency information. The hashmaps declared above are used to look
 /// up entries in this list as required. This is not stored in `extra` so that
@@ -92,12 +92,27 @@ dep_entries: std.ArrayListUnmanaged(DepEntry) = .{},
 /// garbage collection pass.
 free_dep_entries: std.ArrayListUnmanaged(DepEntry.Index) = .{},
 
+/// Elements are ordered identically to the `import_table` field of `Zcu`.
+///
+/// Unlike `import_table`, this data is serialized as part of incremental
+/// compilation state.
+///
+/// Key is the hash of the path to this file, used to store
+/// `InternPool.TrackedInst`.
+///
+/// Value is the `Decl` of the struct that represents this `File`.
+files: std.AutoArrayHashMapUnmanaged(Cache.BinDigest, OptionalDeclIndex) = .{},
+
+pub const FileIndex = enum(u32) {
+    _,
+};
+
 pub const TrackedInst = extern struct {
-    path_digest: Cache.BinDigest,
+    file: FileIndex,
     inst: Zir.Inst.Index,
     comptime {
         // The fields should be tightly packed. See also serialiation logic in `Compilation.saveState`.
-        assert(@sizeOf(@This()) == Cache.bin_digest_len + @sizeOf(Zir.Inst.Index));
+        assert(@sizeOf(@This()) == @sizeOf(FileIndex) + @sizeOf(Zir.Inst.Index));
     }
     pub const Index = enum(u32) {
         _,
@@ -123,45 +138,50 @@ pub const TrackedInst = extern struct {
     };
 };
 
-pub fn trackZir(ip: *InternPool, gpa: Allocator, file: *Module.File, inst: Zir.Inst.Index) Allocator.Error!TrackedInst.Index {
+pub fn trackZir(
+    ip: *InternPool,
+    gpa: Allocator,
+    file: FileIndex,
+    inst: Zir.Inst.Index,
+) Allocator.Error!TrackedInst.Index {
     const key: TrackedInst = .{
-        .path_digest = file.path_digest,
+        .file = file,
         .inst = inst,
     };
     const gop = try ip.tracked_insts.getOrPut(gpa, key);
     return @enumFromInt(gop.index);
 }
 
-/// Analysis Subject. Represents a single entity which undergoes semantic analysis.
+/// Analysis Unit. Represents a single entity which undergoes semantic analysis.
 /// This is either a `Decl` (in future `Cau`) or a runtime function.
 /// The LSB is used as a tag bit.
 /// This is the "source" of an incremental dependency edge.
-pub const AnalSubject = packed struct(u32) {
+pub const AnalUnit = packed struct(u32) {
     kind: enum(u1) { decl, func },
     index: u31,
     pub const Unwrapped = union(enum) {
         decl: DeclIndex,
         func: InternPool.Index,
     };
-    pub fn unwrap(as: AnalSubject) Unwrapped {
+    pub fn unwrap(as: AnalUnit) Unwrapped {
         return switch (as.kind) {
             .decl => .{ .decl = @enumFromInt(as.index) },
             .func => .{ .func = @enumFromInt(as.index) },
         };
     }
-    pub fn wrap(raw: Unwrapped) AnalSubject {
+    pub fn wrap(raw: Unwrapped) AnalUnit {
         return switch (raw) {
             .decl => |decl| .{ .kind = .decl, .index = @intCast(@intFromEnum(decl)) },
             .func => |func| .{ .kind = .func, .index = @intCast(@intFromEnum(func)) },
         };
     }
-    pub fn toOptional(as: AnalSubject) Optional {
+    pub fn toOptional(as: AnalUnit) Optional {
         return @enumFromInt(@as(u32, @bitCast(as)));
     }
     pub const Optional = enum(u32) {
         none = std.math.maxInt(u32),
         _,
-        pub fn unwrap(opt: Optional) ?AnalSubject {
+        pub fn unwrap(opt: Optional) ?AnalUnit {
             return switch (opt) {
                 .none => null,
                 _ => @bitCast(@intFromEnum(opt)),
@@ -178,7 +198,7 @@ pub const Dependee = union(enum) {
     namespace_name: NamespaceNameKey,
 };
 
-pub fn removeDependenciesForDepender(ip: *InternPool, gpa: Allocator, depender: AnalSubject) void {
+pub fn removeDependenciesForDepender(ip: *InternPool, gpa: Allocator, depender: AnalUnit) void {
     var opt_idx = (ip.first_dependency.fetchSwapRemove(depender) orelse return).value.toOptional();
 
     while (opt_idx.unwrap()) |idx| {
@@ -207,7 +227,7 @@ pub fn removeDependenciesForDepender(ip: *InternPool, gpa: Allocator, depender: 
 pub const DependencyIterator = struct {
     ip: *const InternPool,
     next_entry: DepEntry.Index.Optional,
-    pub fn next(it: *DependencyIterator) ?AnalSubject {
+    pub fn next(it: *DependencyIterator) ?AnalUnit {
         const idx = it.next_entry.unwrap() orelse return null;
         const entry = it.ip.dep_entries.items[@intFromEnum(idx)];
         it.next_entry = entry.next;
@@ -236,7 +256,7 @@ pub fn dependencyIterator(ip: *const InternPool, dependee: Dependee) DependencyI
     };
 }
 
-pub fn addDependency(ip: *InternPool, gpa: Allocator, depender: AnalSubject, dependee: Dependee) Allocator.Error!void {
+pub fn addDependency(ip: *InternPool, gpa: Allocator, depender: AnalUnit, dependee: Dependee) Allocator.Error!void {
     const first_depender_dep: DepEntry.Index.Optional = if (ip.first_dependency.get(depender)) |idx| dep: {
         // The entry already exists, so there is capacity to overwrite it later.
         break :dep idx.toOptional();
@@ -300,7 +320,7 @@ pub const DepEntry = extern struct {
     /// the first and only entry in one of `intern_pool.*_deps`, and does not
     /// appear in any list by `first_dependency`, but is not in
     /// `free_dep_entries` since `*_deps` stores a reference to it.
-    depender: AnalSubject.Optional,
+    depender: AnalUnit.Optional,
     /// Index into `dep_entries` forming a doubly linked list of all dependencies on this dependee.
     /// Used to iterate all dependers for a given dependee during an update.
     /// null if this is the end of the list.
@@ -4591,6 +4611,8 @@ pub fn deinit(ip: *InternPool, gpa: Allocator) void {
 
     ip.dep_entries.deinit(gpa);
     ip.free_dep_entries.deinit(gpa);
+
+    ip.files.deinit(gpa);
 
     ip.* = undefined;
 }

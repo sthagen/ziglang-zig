@@ -13,7 +13,7 @@ const codegen = @import("../../codegen.zig");
 const Zcu = @import("../../Zcu.zig");
 const InternPool = @import("../../InternPool.zig");
 const Decl = Zcu.Decl;
-const Type = @import("../../type.zig").Type;
+const Type = @import("../../Type.zig");
 const Value = @import("../../Value.zig");
 const Compilation = @import("../../Compilation.zig");
 const link = @import("../../link.zig");
@@ -765,7 +765,7 @@ pub fn deinit(func: *CodeGen) void {
 /// Sets `err_msg` on `CodeGen` and returns `error.CodegenFail` which is caught in link/Wasm.zig
 fn fail(func: *CodeGen, comptime fmt: []const u8, args: anytype) InnerError {
     const mod = func.bin_file.base.comp.module.?;
-    const src_loc = func.decl.navSrcLoc(mod).upgrade(mod);
+    const src_loc = func.decl.navSrcLoc(mod);
     func.err_msg = try Zcu.ErrorMsg.create(func.gpa, src_loc, fmt, args);
     return error.CodegenFail;
 }
@@ -1202,7 +1202,7 @@ fn genFunctype(
 
 pub fn generate(
     bin_file: *link.File,
-    src_loc: Zcu.SrcLoc,
+    src_loc: Zcu.LazySrcLoc,
     func_index: InternPool.Index,
     air: Air,
     liveness: Liveness,
@@ -1212,11 +1212,11 @@ pub fn generate(
     _ = src_loc;
     const comp = bin_file.comp;
     const gpa = comp.gpa;
-    const mod = comp.module.?;
-    const func = mod.funcInfo(func_index);
-    const decl = mod.declPtr(func.owner_decl);
-    const namespace = mod.namespacePtr(decl.src_namespace);
-    const target = namespace.file_scope.mod.resolved_target.result;
+    const zcu = comp.module.?;
+    const func = zcu.funcInfo(func_index);
+    const decl = zcu.declPtr(func.owner_decl);
+    const namespace = zcu.namespacePtr(decl.src_namespace);
+    const target = namespace.fileScope(zcu).mod.resolved_target.result;
     var code_gen: CodeGen = .{
         .gpa = gpa,
         .air = air,
@@ -3162,7 +3162,7 @@ fn lowerAnonDeclRef(
     }
 
     const decl_align = mod.intern_pool.indexToKey(anon_decl.orig_ty).ptr_type.flags.alignment;
-    const res = try func.bin_file.lowerAnonDecl(decl_val, decl_align, func.decl.navSrcLoc(mod).upgrade(mod));
+    const res = try func.bin_file.lowerAnonDecl(decl_val, decl_align, func.decl.navSrcLoc(mod));
     switch (res) {
         .ok => {},
         .fail => |em| {
@@ -7706,7 +7706,7 @@ fn airFence(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     // for a single-threaded build, can we emit the `fence` instruction.
     // In all other cases, we emit no instructions for a fence.
     const func_namespace = zcu.namespacePtr(func.decl.src_namespace);
-    const single_threaded = func_namespace.file_scope.mod.single_threaded;
+    const single_threaded = func_namespace.fileScope(zcu).mod.single_threaded;
     if (func.useAtomicFeature() and !single_threaded) {
         try func.addAtomicTag(.atomic_fence);
     }
