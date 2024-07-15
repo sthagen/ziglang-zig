@@ -2710,7 +2710,7 @@ fn buildOutputType(
             break :d getWasiPreopen("/lib");
         } else if (self_exe_path) |p| {
             break :d introspect.findZigLibDirFromSelfExe(arena, p) catch |err| {
-                fatal("unable to find zig installation directory: {s}", .{@errorName(err)});
+                fatal("unable to find zig installation directory '{s}': {s}", .{ p, @errorName(err) });
             };
         } else {
             unreachable;
@@ -6921,7 +6921,7 @@ fn cmdFetch(
                 } else if (mem.eql(u8, arg, "--save-exact")) {
                     save = .{ .exact = null };
                 } else if (mem.startsWith(u8, arg, "--save-exact=")) {
-                    save = .{ .exact = arg["--save=".len..] };
+                    save = .{ .exact = arg["--save-exact=".len..] };
                 } else {
                     fatal("unrecognized parameter: '{s}'", .{arg});
                 }
@@ -7403,7 +7403,7 @@ fn findTemplates(gpa: Allocator, arena: Allocator) Templates {
         fatal("unable to find self exe path: {s}", .{@errorName(err)});
     };
     var zig_lib_directory = introspect.findZigLibDirFromSelfExe(arena, self_exe_path) catch |err| {
-        fatal("unable to find zig installation directory: {s}", .{@errorName(err)});
+        fatal("unable to find zig installation directory '{s}': {s}", .{ self_exe_path, @errorName(err) });
     };
 
     const s = fs.path.sep_str;
