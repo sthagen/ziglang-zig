@@ -404,7 +404,6 @@ set(ZIG_STAGE2_SOURCES
     lib/std/buf_map.zig
     lib/std/builtin.zig
     lib/std/c.zig
-    lib/std/c/linux.zig
     lib/std/coff.zig
     lib/std/crypto.zig
     lib/std/crypto/blake3.zig
@@ -579,6 +578,7 @@ set(ZIG_STAGE2_SOURCES
     src/codegen/spirv/Section.zig
     src/codegen/spirv/spec.zig
     src/crash_report.zig
+    src/dev.zig
     src/glibc.zig
     src/introspect.zig
     src/libcxx.zig
