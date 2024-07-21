@@ -26,6 +26,7 @@ const wasm_c_abi = @import("../arch/wasm/abi.zig");
 const aarch64_c_abi = @import("../arch/aarch64/abi.zig");
 const arm_c_abi = @import("../arch/arm/abi.zig");
 const riscv_c_abi = @import("../arch/riscv64/abi.zig");
+const dev = @import("../dev.zig");
 
 const target_util = @import("../target.zig");
 const libcFloatPrefix = target_util.libcFloatPrefix;
@@ -82,8 +83,6 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
         .xtensa => "xtensa",
         .nvptx => "nvptx",
         .nvptx64 => "nvptx64",
-        .le32 => "le32",
-        .le64 => "le64",
         .amdil => "amdil",
         .amdil64 => "amdil64",
         .hsail => "hsail",
@@ -111,7 +110,6 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
         .dragonfly => "dragonfly",
         .freebsd => "freebsd",
         .fuchsia => "fuchsia",
-        .kfreebsd => "kfreebsd",
         .linux => "linux",
         .lv2 => "lv2",
         .netbsd => "netbsd",
@@ -121,7 +119,6 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
         .zos => "zos",
         .haiku => "haiku",
         .rtems => "rtems",
-        .nacl => "nacl",
         .aix => "aix",
         .cuda => "cuda",
         .nvcl => "nvcl",
@@ -177,7 +174,6 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
         .gnueabi => "gnueabi",
         .gnueabihf => "gnueabihf",
         .gnuf32 => "gnuf32",
-        .gnuf64 => "gnuf64",
         .gnusf => "gnusf",
         .gnux32 => "gnux32",
         .gnuilp32 => "gnuilp32",
@@ -192,7 +188,6 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
         .msvc => "msvc",
         .itanium => "itanium",
         .cygnus => "cygnus",
-        .coreclr => "coreclr",
         .simulator => "simulator",
         .macabi => "macabi",
         .pixel => "pixel",
@@ -235,7 +230,6 @@ pub fn targetOs(os_tag: std.Target.Os.Tag) llvm.OSType {
         .freebsd => .FreeBSD,
         .fuchsia => .Fuchsia,
         .ios => .IOS,
-        .kfreebsd => .KFreeBSD,
         .linux => .Linux,
         .lv2 => .Lv2,
         .macos => .MacOSX,
@@ -245,7 +239,6 @@ pub fn targetOs(os_tag: std.Target.Os.Tag) llvm.OSType {
         .zos => .ZOS,
         .haiku => .Haiku,
         .rtems => .RTEMS,
-        .nacl => .NaCl,
         .aix => .AIX,
         .cuda => .CUDA,
         .nvcl => .NVCL,
@@ -314,8 +307,6 @@ pub fn targetArch(arch_tag: std.Target.Cpu.Arch) llvm.ArchType {
         .xtensa => .xtensa,
         .nvptx => .nvptx,
         .nvptx64 => .nvptx64,
-        .le32 => .le32,
-        .le64 => .le64,
         .amdil => .amdil,
         .amdil64 => .amdil64,
         .hsail => .hsail,
@@ -854,7 +845,7 @@ pub const Object = struct {
     /// table for every zig source field of the struct that has a corresponding
     /// LLVM struct field. comptime fields are not included. Zero-bit fields are
     /// mapped to a field at the correct byte, which may be a padding field, or
-    /// are not mapped, in which case they are sematically at the end of the
+    /// are not mapped, in which case they are semantically at the end of the
     /// struct.
     /// The value is the LLVM struct field index.
     /// This is denormalized data.
@@ -865,9 +856,12 @@ pub const Object = struct {
         field_index: u32,
     };
 
+    pub const Ptr = if (dev.env.supports(.llvm_backend)) *Object else noreturn;
+
     pub const TypeMap = std.AutoHashMapUnmanaged(InternPool.Index, Builder.Type);
 
-    pub fn create(arena: Allocator, comp: *Compilation) !*Object {
+    pub fn create(arena: Allocator, comp: *Compilation) !Ptr {
+        dev.check(.llvm_backend);
         const gpa = comp.gpa;
         const target = comp.root_mod.resolved_target.result;
         const llvm_target_triple = try targetTriple(arena, target);
@@ -12100,8 +12094,6 @@ pub fn initializeLLVMTarget(arch: std.Target.Cpu.Arch) void {
         .tce,
         .tcele,
         .r600,
-        .le32,
-        .le64,
         .amdil,
         .amdil64,
         .hsail,

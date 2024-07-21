@@ -1729,7 +1729,6 @@ pub fn create(gpa: Allocator, arena: Allocator, options: CreateOptions) !*Compil
             comp.emit_llvm_ir != null or
             comp.emit_llvm_bc != null))
         {
-            dev.check(.llvm_backend);
             if (opt_zcu) |zcu| zcu.llvm_object = try LlvmObject.create(arena, comp);
         }
 
@@ -2106,7 +2105,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) !void {
             const tmp_artifact_directory = d: {
                 const s = std.fs.path.sep_str;
                 tmp_dir_rand_int = std.crypto.random.int(u64);
-                const tmp_dir_sub_path = "tmp" ++ s ++ Package.Manifest.hex64(tmp_dir_rand_int);
+                const tmp_dir_sub_path = "tmp" ++ s ++ std.fmt.hex(tmp_dir_rand_int);
 
                 const path = try comp.local_cache_directory.join(gpa, &.{tmp_dir_sub_path});
                 errdefer gpa.free(path);
@@ -2298,7 +2297,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) !void {
             } else unreachable;
 
             const s = std.fs.path.sep_str;
-            const tmp_dir_sub_path = "tmp" ++ s ++ Package.Manifest.hex64(tmp_dir_rand_int);
+            const tmp_dir_sub_path = "tmp" ++ s ++ std.fmt.hex(tmp_dir_rand_int);
             const o_sub_path = "o" ++ s ++ digest;
 
             // Work around windows `AccessDenied` if any files within this
@@ -2704,7 +2703,7 @@ pub fn emitLlvmObject(
     arena: Allocator,
     default_emit: Emit,
     bin_emit_loc: ?EmitLoc,
-    llvm_object: *LlvmObject,
+    llvm_object: LlvmObject.Ptr,
     prog_node: std.Progress.Node,
 ) !void {
     const sub_prog_node = prog_node.start("LLVM Emit Object", 0);

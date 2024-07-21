@@ -968,7 +968,7 @@ pub const File = struct {
     pub fn emitLlvmObject(
         base: File,
         arena: Allocator,
-        llvm_object: *LlvmObject,
+        llvm_object: LlvmObject.Ptr,
         prog_node: std.Progress.Node,
     ) !void {
         return base.comp.emitLlvmObject(arena, base.emit, .{
@@ -1031,7 +1031,7 @@ pub fn spawnLld(
             error.NameTooLong => err: {
                 const s = fs.path.sep_str;
                 const rand_int = std.crypto.random.int(u64);
-                const rsp_path = "tmp" ++ s ++ Package.Manifest.hex64(rand_int) ++ ".rsp";
+                const rsp_path = "tmp" ++ s ++ std.fmt.hex(rand_int) ++ ".rsp";
 
                 const rsp_file = try comp.local_cache_directory.handle.createFileZ(rsp_path, .{});
                 defer comp.local_cache_directory.handle.deleteFileZ(rsp_path) catch |err|
