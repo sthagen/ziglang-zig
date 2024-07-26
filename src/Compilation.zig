@@ -1421,6 +1421,7 @@ pub fn create(gpa: Allocator, arena: Allocator, options: CreateOptions) !*Compil
         cache.hash.addBytes(options.root_name);
         cache.hash.add(options.config.wasi_exec_model);
         cache.hash.add(options.config.san_cov_trace_pc_guard);
+        cache.hash.add(options.debug_compiler_runtime_libs);
         // TODO audit this and make sure everything is in it
 
         const main_mod = options.main_mod orelse options.root_mod;
@@ -2180,7 +2181,9 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) !void {
                 comp.bin_file = try link.File.createEmpty(arena, comp, emit, whole.lf_open_opts);
             }
         },
-        .incremental => {},
+        .incremental => {
+            log.debug("Compilation.update for {s}, CacheMode.incremental", .{comp.root_name});
+        },
     }
 
     // From this point we add a preliminary set of file system inputs that
