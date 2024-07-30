@@ -1717,6 +1717,8 @@ pub const DynamicLinker = struct {
                     else => "",
                 }}) catch unreachable,
 
+                .loongarch64 => init("/lib64/ld-linux-loongarch-lp64d.so.1"),
+
                 .mips,
                 .mipsel,
                 .mips64,
@@ -1776,7 +1778,6 @@ pub const DynamicLinker = struct {
                 .ve,
                 .dxil,
                 .loongarch32,
-                .loongarch64,
                 .xtensa,
                 => none,
             },
@@ -2088,6 +2089,8 @@ pub fn c_type_bit_size(target: Target, c_type: CType) u16 {
                     .sparcel,
                     .wasm32,
                     .wasm64,
+                    .loongarch32,
+                    .loongarch64,
                     => return 128,
 
                     else => return 64,
@@ -2193,6 +2196,8 @@ pub fn c_type_bit_size(target: Target, c_type: CType) u16 {
                     .sparcel,
                     .wasm32,
                     .wasm64,
+                    .loongarch32,
+                    .loongarch64,
                     => return 128,
 
                     else => return 64,
