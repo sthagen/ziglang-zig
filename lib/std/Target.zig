@@ -198,6 +198,7 @@ pub const Os = struct {
                 .linux => switch (arch) {
                     .arm, .armeb, .thumb, .thumbeb => "arm",
                     .aarch64, .aarch64_be => "aarch64",
+                    .loongarch32, .loongarch64 => "loongarch",
                     .mips, .mipsel, .mips64, .mips64el => "mips",
                     .powerpc, .powerpcle, .powerpc64, .powerpc64le => "powerpc",
                     .riscv32, .riscv64 => "riscv",
@@ -1512,6 +1513,7 @@ pub const Cpu = struct {
         pub fn baseline(arch: Arch) *const Model {
             return switch (arch) {
                 .arm, .armeb, .thumb, .thumbeb => &arm.cpu.baseline,
+                .hexagon => &hexagon.cpu.hexagonv60,
                 .riscv32 => &riscv.cpu.baseline_rv32,
                 .riscv64 => &riscv.cpu.baseline_rv64,
                 .x86 => &x86.cpu.pentium4,
