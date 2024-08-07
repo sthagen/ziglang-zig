@@ -176,7 +176,7 @@ fn _DllMainCRTStartup(
     lpReserved: std.os.windows.LPVOID,
 ) callconv(std.os.windows.WINAPI) std.os.windows.BOOL {
     if (!builtin.single_threaded and !builtin.link_libc) {
-        _ = @import("start_windows_tls.zig");
+        _ = @import("os/windows/tls.zig");
     }
 
     if (@hasDecl(root, "DllMain")) {
@@ -406,6 +406,13 @@ fn _start() callconv(.Naked) noreturn {
             \\ stg  %%r0, 0(%%r15)
             \\ jg %[posixCallMainAndExit]
             ,
+            .sparc =>
+            // argc is stored after a register window (16 registers * 4 bytes).
+            \\ mov %%g0, %%fp
+            \\ add %%sp, 64, %%o0
+            \\ and %%sp, -8, %%sp
+            \\ ba,a %[posixCallMainAndExit]
+            ,
             .sparc64 =>
             // argc is stored after a register window (16 registers * 8 bytes) plus the stack bias
             // (2047 bytes).
@@ -427,7 +434,7 @@ fn _start() callconv(.Naked) noreturn {
 fn WinStartup() callconv(std.os.windows.WINAPI) noreturn {
     @setAlignStack(16);
     if (!builtin.single_threaded and !builtin.link_libc) {
-        _ = @import("start_windows_tls.zig");
+        _ = @import("os/windows/tls.zig");
     }
 
     std.debug.maybeEnableSegfaultHandler();
@@ -438,7 +445,7 @@ fn WinStartup() callconv(std.os.windows.WINAPI) noreturn {
 fn wWinMainCRTStartup() callconv(std.os.windows.WINAPI) noreturn {
     @setAlignStack(16);
     if (!builtin.single_threaded and !builtin.link_libc) {
-        _ = @import("start_windows_tls.zig");
+        _ = @import("os/windows/tls.zig");
     }
 
     std.debug.maybeEnableSegfaultHandler();
@@ -495,7 +502,7 @@ fn posixCallMainAndExit(argc_argv_ptr: [*]usize) callconv(.C) noreturn {
             // ARMv6 targets (and earlier) have no support for TLS in hardware.
             // FIXME: Elide the check for targets >= ARMv7 when the target feature API
             // becomes less verbose (and more usable).
-            if (comptime native_arch.isARM()) {
+            if (comptime native_arch.isArmOrThumb()) {
                 if (at_hwcap & std.os.linux.HWCAP.TLS == 0) {
                     // FIXME: Make __aeabi_read_tp call the kernel helper kuser_get_tls
                     // For the time being use a simple trap instead of a @panic call to

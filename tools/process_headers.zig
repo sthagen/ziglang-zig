@@ -85,6 +85,11 @@ const glibc_targets = [_]LibCTarget{
         .abi = MultiAbi{ .specific = Abi.gnueabihf },
     },
     LibCTarget{
+        .name = "arc-linux-gnu",
+        .arch = MultiArch{ .specific = Arch.arc },
+        .abi = MultiAbi{ .specific = Abi.gnu },
+    },
+    LibCTarget{
         .name = "csky-linux-gnuabiv2",
         .arch = MultiArch{ .specific = Arch.csky },
         .abi = MultiAbi{ .specific = Abi.gnueabihf },
@@ -160,12 +165,12 @@ const glibc_targets = [_]LibCTarget{
         .abi = MultiAbi{ .specific = Abi.gnueabi },
     },
     LibCTarget{
-        .name = "riscv32-linux-gnu-rv32imac-ilp32",
+        .name = "riscv32-linux-gnu-rv32imafdc-ilp32d",
         .arch = MultiArch{ .specific = Arch.riscv32 },
-        .abi = MultiAbi{ .specific = Abi.gnuilp32 },
+        .abi = MultiAbi{ .specific = Abi.gnu },
     },
     LibCTarget{
-        .name = "riscv64-linux-gnu-rv64imac-lp64",
+        .name = "riscv64-linux-gnu-rv64imafdc-lp64d",
         .arch = MultiArch{ .specific = Arch.riscv64 },
         .abi = MultiAbi{ .specific = Abi.gnu },
     },
