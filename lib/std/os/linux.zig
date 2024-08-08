@@ -132,6 +132,7 @@ pub const SYS = switch (@import("builtin").cpu.arch) {
     .riscv64 => syscalls.RiscV64,
     .sparc => syscalls.Sparc,
     .sparc64 => syscalls.Sparc64,
+    .loongarch64 => syscalls.LoongArch64,
     .m68k => syscalls.M68k,
     .mips, .mipsel => syscalls.MipsO32,
     .mips64, .mips64el => if (builtin.abi == .gnuabin32)
@@ -1339,13 +1340,12 @@ pub fn tgkill(tgid: pid_t, tid: pid_t, sig: i32) usize {
     return syscall3(.tgkill, @as(usize, @bitCast(@as(isize, tgid))), @as(usize, @bitCast(@as(isize, tid))), @as(usize, @bitCast(@as(isize, sig))));
 }
 
-pub fn link(oldpath: [*:0]const u8, newpath: [*:0]const u8, flags: i32) usize {
+pub fn link(oldpath: [*:0]const u8, newpath: [*:0]const u8) usize {
     if (@hasField(SYS, "link")) {
-        return syscall3(
+        return syscall2(
             .link,
             @intFromPtr(oldpath),
             @intFromPtr(newpath),
-            @as(usize, @bitCast(@as(isize, flags))),
         );
     } else {
         return syscall5(
@@ -1354,7 +1354,7 @@ pub fn link(oldpath: [*:0]const u8, newpath: [*:0]const u8, flags: i32) usize {
             @intFromPtr(oldpath),
             @as(usize, @bitCast(@as(isize, AT.FDCWD))),
             @intFromPtr(newpath),
-            @as(usize, @bitCast(@as(isize, flags))),
+            0,
         );
     }
 }
@@ -1612,6 +1612,10 @@ pub fn setsid() pid_t {
 
 pub fn getpid() pid_t {
     return @bitCast(@as(u32, @truncate(syscall0(.getpid))));
+}
+
+pub fn getppid() pid_t {
+    return @bitCast(@as(u32, @truncate(syscall0(.getppid))));
 }
 
 pub fn gettid() pid_t {
