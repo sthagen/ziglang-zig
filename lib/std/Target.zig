@@ -760,52 +760,59 @@ pub const Abi = enum {
 };
 
 pub const ObjectFormat = enum {
-    /// Common Object File Format (Windows)
-    coff,
-    /// DirectX Container
-    dxcontainer,
-    /// Executable and Linking Format
-    elf,
-    /// macOS relocatables
-    macho,
-    /// Standard, Portable Intermediate Representation V
-    spirv,
-    /// WebAssembly
-    wasm,
-    /// C source code
+    /// C source code.
     c,
-    /// Intel IHEX
+    /// The Common Object File Format used by Windows and UEFI.
+    coff,
+    /// The DirectX Container format containing either DXIL or DXBC.
+    dxcontainer,
+    /// The Executable and Linkable Format used by many Unixes.
+    elf,
+    /// The Generalized Object File Format used by z/OS.
+    goff,
+    /// The Intel HEX format for storing binary code in ASCII text.
     hex,
+    /// The Mach object format used by macOS and other Apple platforms.
+    macho,
+    /// Nvidia's PTX (Parallel Thread Execution) assembly language.
+    nvptx,
+    /// The a.out format used by Plan 9 from Bell Labs.
+    plan9,
     /// Machine code with no metadata.
     raw,
-    /// Plan 9 from Bell Labs
-    plan9,
-    /// Nvidia PTX format
-    nvptx,
+    /// The Khronos Group's Standard Portable Intermediate Representation V.
+    spirv,
+    /// The WebAssembly binary format.
+    wasm,
+    /// The eXtended Common Object File Format used by AIX.
+    xcoff,
 
     pub fn fileExt(of: ObjectFormat, arch: Cpu.Arch) [:0]const u8 {
         return switch (of) {
-            .coff => ".obj",
-            .elf, .macho, .wasm => ".o",
             .c => ".c",
-            .spirv => ".spv",
-            .hex => ".ihex",
-            .raw => ".bin",
-            .plan9 => arch.plan9Ext(),
-            .nvptx => ".ptx",
+            .coff => ".obj",
             .dxcontainer => ".dxil",
+            .elf, .goff, .macho, .wasm, .xcoff => ".o",
+            .hex => ".ihex",
+            .nvptx => ".ptx",
+            .plan9 => arch.plan9Ext(),
+            .raw => ".bin",
+            .spirv => ".spv",
         };
     }
 
     pub fn default(os_tag: Os.Tag, arch: Cpu.Arch) ObjectFormat {
         return switch (os_tag) {
-            .windows, .uefi => .coff,
-            .ios, .macos, .watchos, .tvos, .visionos => .macho,
+            .aix => .xcoff,
+            .driverkit, .ios, .macos, .tvos, .visionos, .watchos => .macho,
             .plan9 => .plan9,
+            .uefi, .windows => .coff,
+            .zos => .goff,
             else => switch (arch) {
-                .wasm32, .wasm64 => .wasm,
-                .spirv32, .spirv64 => .spirv,
+                .dxil => .dxcontainer,
                 .nvptx, .nvptx64 => .nvptx,
+                .spirv, .spirv32, .spirv64 => .spirv,
+                .wasm32, .wasm64 => .wasm,
                 else => .elf,
             },
         };
@@ -1891,12 +1898,12 @@ pub fn ptrBitWidth_cpu_abi(cpu: Cpu, abi: Abi) u16 {
         .sparc,
         .spirv32,
         .loongarch32,
+        .dxil,
         .xtensa,
         => 32,
 
         .aarch64,
         .aarch64_be,
-        .dxil,
         .mips64,
         .mips64el,
         .powerpc64,
@@ -1923,45 +1930,53 @@ pub fn ptrBitWidth(target: Target) u16 {
 }
 
 pub fn stackAlignment(target: Target) u16 {
-    return switch (target.cpu.arch) {
-        .m68k => 2,
-        .amdgcn => 4,
-        .x86 => switch (target.os.tag) {
-            .windows, .uefi => 4,
-            else => 16,
-        },
-        .arm,
-        .armeb,
-        .thumb,
-        .thumbeb,
+    // Overrides for when the stack alignment is not equal to the pointer width.
+    switch (target.cpu.arch) {
+        .m68k,
+        => return 2,
+        .amdgcn,
+        => return 4,
+        .lanai,
         .mips,
         .mipsel,
         .sparc,
-        => 8,
+        => return 8,
         .aarch64,
         .aarch64_be,
         .bpfeb,
         .bpfel,
+        .loongarch32,
+        .loongarch64,
         .mips64,
         .mips64el,
-        .riscv64,
         .sparc64,
-        .x86_64,
         .ve,
         .wasm32,
         .wasm64,
-        .loongarch64,
-        => 16,
-        .riscv32,
-        => if (Target.riscv.featureSetHas(target.cpu.features, .e)) 4 else 16,
+        => return 16,
+        // Some of the following prongs should really be testing the ABI (e.g. for Arm, it's APCS vs
+        // AAPCS16 vs AAPCS). But our current Abi enum is not able to handle that level of nuance.
+        .arm,
+        .armeb,
+        .thumb,
+        .thumbeb,
+        => switch (target.os.tag) {
+            .netbsd => {},
+            .watchos => return 16,
+            else => return 8,
+        },
         .powerpc64,
         .powerpc64le,
-        => switch (target.os.tag) {
-            else => 8,
-            .linux => 16,
-        },
-        else => @divExact(target.ptrBitWidth(), 8),
-    };
+        => if (target.os.tag == .linux or target.os.tag == .aix) return 16,
+        .riscv32,
+        .riscv64,
+        => if (!Target.riscv.featureSetHas(target.cpu.features, .e)) return 16,
+        .x86 => if (target.os.tag != .windows and target.os.tag != .uefi) return 16,
+        .x86_64 => return if (target.os.tag == .elfiamcu) 4 else 16,
+        else => {},
+    }
+
+    return @divExact(target.ptrBitWidth(), 8);
 }
 
 /// Default signedness of `char` for the native C compiler for this target
@@ -2295,15 +2310,18 @@ pub fn c_type_bit_size(target: Target, c_type: CType) u16 {
             .short, .ushort => return 16,
             .int, .uint, .float => return 32,
             .long, .ulong, .longlong, .ulonglong, .double => return 64,
-            .longdouble => return 64,
+            .longdouble => return 128,
         },
 
         .opencl, .vulkan => switch (c_type) {
             .char => return 8,
             .short, .ushort => return 16,
             .int, .uint, .float => return 32,
-            .long, .ulong, .longlong, .ulonglong, .double => return 64,
-            .longdouble => return 64,
+            .long, .ulong, .double => return 64,
+            .longlong, .ulonglong => return 128,
+            // Note: The OpenCL specification does not guarantee a particular size for long double,
+            // but clang uses 128 bits.
+            .longdouble => return 128,
         },
 
         .ps4, .ps5 => switch (c_type) {
@@ -2378,6 +2396,7 @@ pub fn c_type_alignment(target: Target, c_type: CType) u16 {
             .csky,
             .x86,
             .xcore,
+            .dxil,
             .loongarch32,
             .kalimba,
             .spu_2,
@@ -2387,7 +2406,6 @@ pub fn c_type_alignment(target: Target, c_type: CType) u16 {
             .amdgcn,
             .bpfel,
             .bpfeb,
-            .dxil,
             .hexagon,
             .m68k,
             .mips,
@@ -2397,9 +2415,6 @@ pub fn c_type_alignment(target: Target, c_type: CType) u16 {
             .nvptx,
             .nvptx64,
             .s390x,
-            .spirv,
-            .spirv32,
-            .spirv64,
             => 8,
 
             .aarch64,
@@ -2414,6 +2429,9 @@ pub fn c_type_alignment(target: Target, c_type: CType) u16 {
             .riscv32,
             .riscv64,
             .sparc64,
+            .spirv,
+            .spirv32,
+            .spirv64,
             .x86_64,
             .ve,
             .wasm32,
@@ -2482,6 +2500,7 @@ pub fn c_type_preferred_alignment(target: Target, c_type: CType) u16 {
 
             .csky,
             .xcore,
+            .dxil,
             .loongarch32,
             .kalimba,
             .spu_2,
@@ -2497,7 +2516,6 @@ pub fn c_type_preferred_alignment(target: Target, c_type: CType) u16 {
             .amdgcn,
             .bpfel,
             .bpfeb,
-            .dxil,
             .hexagon,
             .x86,
             .m68k,
@@ -2508,9 +2526,6 @@ pub fn c_type_preferred_alignment(target: Target, c_type: CType) u16 {
             .nvptx,
             .nvptx64,
             .s390x,
-            .spirv,
-            .spirv32,
-            .spirv64,
             => 8,
 
             .aarch64,
@@ -2525,6 +2540,9 @@ pub fn c_type_preferred_alignment(target: Target, c_type: CType) u16 {
             .riscv32,
             .riscv64,
             .sparc64,
+            .spirv,
+            .spirv32,
+            .spirv64,
             .x86_64,
             .ve,
             .wasm32,
