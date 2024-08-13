@@ -110,7 +110,7 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
         .netbsd => "netbsd",
         .openbsd => "openbsd",
         .solaris, .illumos => "solaris",
-        .windows => "windows",
+        .windows, .uefi => "windows",
         .zos => "zos",
         .haiku => "haiku",
         .rtems => "rtems",
@@ -128,21 +128,18 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
         .hurd => "hurd",
         .wasi => "wasi",
         .emscripten => "emscripten",
-        .uefi => "windows",
         .macos => "macosx",
         .ios => "ios",
         .tvos => "tvos",
         .watchos => "watchos",
         .driverkit => "driverkit",
         .shadermodel => "shadermodel",
-        .liteos => "liteos",
         .visionos => "xros",
         .serenity => "serenity",
         .vulkan => "vulkan",
 
-        .glsl450,
+        .opengl,
         .plan9,
-        .minix,
         .contiki,
         .other,
         => "unknown",
@@ -207,15 +204,7 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
 
 pub fn targetOs(os_tag: std.Target.Os.Tag) llvm.OSType {
     return switch (os_tag) {
-        .freestanding,
-        .other,
-        .opencl,
-        .glsl450,
-        .plan9,
-        .minix,
-        .contiki,
-        => .UnknownOS,
-
+        .freestanding => .UnknownOS,
         .windows, .uefi => .Win32,
         .dragonfly => .DragonFly,
         .freebsd => .FreeBSD,
@@ -234,6 +223,7 @@ pub fn targetOs(os_tag: std.Target.Os.Tag) llvm.OSType {
         .cuda => .CUDA,
         .nvcl => .NVCL,
         .amdhsa => .AMDHSA,
+        .opencl => .UnknownOS, // https://llvm.org/docs/SPIRVUsage.html#target-triples
         .ps4 => .PS4,
         .ps5 => .PS5,
         .elfiamcu => .ELFIAMCU,
@@ -248,9 +238,14 @@ pub fn targetOs(os_tag: std.Target.Os.Tag) llvm.OSType {
         .emscripten => .Emscripten,
         .driverkit => .DriverKit,
         .shadermodel => .ShaderModel,
-        .liteos => .LiteOS,
         .vulkan => .Vulkan,
         .serenity => .Serenity,
+
+        .opengl,
+        .plan9,
+        .contiki,
+        .other,
+        => .UnknownOS,
     };
 }
 
@@ -11763,6 +11758,7 @@ fn backendSupportsF16(target: std.Target) bool {
         .mipsel,
         .mips64,
         .mips64el,
+        .s390x,
         => false,
         .aarch64 => std.Target.aarch64.featureSetHas(target.cpu.features, .fp_armv8),
         else => true,
@@ -11774,7 +11770,9 @@ fn backendSupportsF16(target: std.Target) bool {
 /// or if it produces miscompilations.
 fn backendSupportsF128(target: std.Target) bool {
     return switch (target.cpu.arch) {
-        .amdgcn => false,
+        .amdgcn,
+        .sparc,
+        => false,
         .aarch64 => std.Target.aarch64.featureSetHas(target.cpu.features, .fp_armv8),
         else => true,
     };
