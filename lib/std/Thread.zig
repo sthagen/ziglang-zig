@@ -1149,11 +1149,11 @@ const LinuxThreadImpl = struct {
                     : "memory"
                 ),
                 .mips64, .mips64el => asm volatile (
-                    \\  li $2, 4091 # SYS_munmap
+                    \\  li $2, 5011 # SYS_munmap
                     \\  move $4, %[ptr]
                     \\  move $5, %[len]
                     \\  syscall
-                    \\  li $2, 4001 # SYS_exit
+                    \\  li $2, 5058 # SYS_exit
                     \\  li $4, 0
                     \\  syscall
                     :
@@ -1163,8 +1163,8 @@ const LinuxThreadImpl = struct {
                 ),
                 .powerpc, .powerpcle, .powerpc64, .powerpc64le => asm volatile (
                     \\  li 0, 91 # SYS_munmap
-                    \\  mr %[ptr], 3
-                    \\  mr %[len], 4
+                    \\  mr 3, %[ptr]
+                    \\  mr 4, %[len]
                     \\  sc
                     \\  li 0, 1 # SYS_exit
                     \\  li 3, 0
