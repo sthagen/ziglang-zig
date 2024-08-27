@@ -2121,6 +2121,17 @@ pub const Key = union(enum) {
             @atomicStore(FuncAnalysis, analysis_ptr, analysis, .release);
         }
 
+        pub fn setBranchHint(func: Func, ip: *InternPool, hint: std.builtin.BranchHint) void {
+            const extra_mutex = &ip.getLocal(func.tid).mutate.extra.mutex;
+            extra_mutex.lock();
+            defer extra_mutex.unlock();
+
+            const analysis_ptr = func.analysisPtr(ip);
+            var analysis = analysis_ptr.*;
+            analysis.branch_hint = hint;
+            @atomicStore(FuncAnalysis, analysis_ptr, analysis, .release);
+        }
+
         /// Returns a pointer that becomes invalid after any additions to the `InternPool`.
         fn zirBodyInstPtr(func: Func, ip: *InternPool) *TrackedInst.Index {
             const extra = ip.getLocalShared(func.tid).extra.acquire();
@@ -3483,7 +3494,7 @@ pub const LoadedStructType = struct {
         return s.field_aligns.get(ip)[i];
     }
 
-    pub fn fieldInit(s: LoadedStructType, ip: *InternPool, i: usize) Index {
+    pub fn fieldInit(s: LoadedStructType, ip: *const InternPool, i: usize) Index {
         if (s.field_inits.len == 0) return .none;
         assert(s.haveFieldInits(ip));
         return s.field_inits.get(ip)[i];
@@ -5575,7 +5586,7 @@ pub const Tag = enum(u8) {
 /// to be part of the type of the function.
 pub const FuncAnalysis = packed struct(u32) {
     state: State,
-    is_cold: bool,
+    branch_hint: std.builtin.BranchHint,
     is_noinline: bool,
     calls_or_awaits_errorable_fn: bool,
     stack_alignment: Alignment,
@@ -5583,7 +5594,7 @@ pub const FuncAnalysis = packed struct(u32) {
     inferred_error_set: bool,
     disable_instrumentation: bool,
 
-    _: u19 = 0,
+    _: u17 = 0,
 
     pub const State = enum(u2) {
         /// The runtime function has never been referenced.
@@ -8636,7 +8647,7 @@ pub fn getFuncDecl(
     const func_decl_extra_index = addExtraAssumeCapacity(extra, Tag.FuncDecl{
         .analysis = .{
             .state = .unreferenced,
-            .is_cold = false,
+            .branch_hint = .none,
             .is_noinline = key.is_noinline,
             .calls_or_awaits_errorable_fn = false,
             .stack_alignment = .none,
@@ -8740,7 +8751,7 @@ pub fn getFuncDeclIes(
     const func_decl_extra_index = addExtraAssumeCapacity(extra, Tag.FuncDecl{
         .analysis = .{
             .state = .unreferenced,
-            .is_cold = false,
+            .branch_hint = .none,
             .is_noinline = key.is_noinline,
             .calls_or_awaits_errorable_fn = false,
             .stack_alignment = .none,
@@ -8932,7 +8943,7 @@ pub fn getFuncInstance(
     const func_extra_index = addExtraAssumeCapacity(extra, Tag.FuncInstance{
         .analysis = .{
             .state = .unreferenced,
-            .is_cold = false,
+            .branch_hint = .none,
             .is_noinline = arg.is_noinline,
             .calls_or_awaits_errorable_fn = false,
             .stack_alignment = .none,
@@ -9032,7 +9043,7 @@ pub fn getFuncInstanceIes(
     const func_extra_index = addExtraAssumeCapacity(extra, Tag.FuncInstance{
         .analysis = .{
             .state = .unreferenced,
-            .is_cold = false,
+            .branch_hint = .none,
             .is_noinline = arg.is_noinline,
             .calls_or_awaits_errorable_fn = false,
             .stack_alignment = .none,
@@ -11066,7 +11077,7 @@ pub fn destroyNamespace(
     local.mutate.namespaces.free_list = @intFromEnum(namespace_index);
 }
 
-pub fn filePtr(ip: *InternPool, file_index: FileIndex) *Zcu.File {
+pub fn filePtr(ip: *const InternPool, file_index: FileIndex) *Zcu.File {
     const file_index_unwrapped = file_index.unwrap(ip);
     const files = ip.getLocalShared(file_index_unwrapped.tid).files.acquire();
     return files.view().items(.file)[file_index_unwrapped.index];
@@ -11850,18 +11861,6 @@ pub fn funcSetDisableInstrumentation(ip: *InternPool, func: Index) void {
     const analysis_ptr = ip.funcAnalysisPtr(func);
     var analysis = analysis_ptr.*;
     analysis.disable_instrumentation = true;
-    @atomicStore(FuncAnalysis, analysis_ptr, analysis, .release);
-}
-
-pub fn funcSetCold(ip: *InternPool, func: Index, is_cold: bool) void {
-    const unwrapped_func = func.unwrap(ip);
-    const extra_mutex = &ip.getLocal(unwrapped_func.tid).mutate.extra.mutex;
-    extra_mutex.lock();
-    defer extra_mutex.unlock();
-
-    const analysis_ptr = ip.funcAnalysisPtr(func);
-    var analysis = analysis_ptr.*;
-    analysis.is_cold = is_cold;
     @atomicStore(FuncAnalysis, analysis_ptr, analysis, .release);
 }
 
