@@ -1361,6 +1361,7 @@ fn analyzeBodyInner(
                     .value_placeholder => unreachable, // never appears in a body
                     .field_parent_ptr => try sema.zirFieldParentPtr(block, extended),
                     .builtin_value => try sema.zirBuiltinValue(extended),
+                    .inplace_arith_result_ty => try sema.zirInplaceArithResultTy(extended),
                 };
             },
 
@@ -4487,7 +4488,7 @@ fn zirTryOperandTy(sema: *Sema, block: *Block, inst: Zir.Inst.Index, is_ref: boo
         break :ty operand_ty.childType(zcu);
     } else operand_ty;
 
-    const err_set_ty = err_set: {
+    const err_set_ty: Type = err_set: {
         // There are awkward cases, like `?E`. Our strategy is to repeatedly unwrap optionals
         // until we hit an error union or set.
         var cur_ty = sema.fn_ret_ty;
@@ -4496,16 +4497,12 @@ fn zirTryOperandTy(sema: *Sema, block: *Block, inst: Zir.Inst.Index, is_ref: boo
                 .error_set => break :err_set cur_ty,
                 .error_union => break :err_set cur_ty.errorUnionSet(zcu),
                 .optional => cur_ty = cur_ty.optionalChild(zcu),
-                else => return sema.failWithOwnedErrorMsg(block, msg: {
-                    const msg = try sema.errMsg(src, "expected '{}', found error set", .{sema.fn_ret_ty.fmt(pt)});
-                    errdefer msg.destroy(sema.gpa);
-                    const ret_ty_src: LazySrcLoc = .{
-                        .base_node_inst = sema.getOwnerFuncDeclInst(),
-                        .offset = .{ .node_offset_fn_type_ret_ty = 0 },
-                    };
-                    try sema.errNote(ret_ty_src, msg, "function cannot return an error", .{});
-                    break :msg msg;
-                }),
+                else => {
+                    // This function cannot return an error.
+                    // `try` is still valid if the error case is impossible, i.e. no error is returned.
+                    // So, the result type has an error set of `error{}`.
+                    break :err_set .fromInterned(try zcu.intern_pool.getErrorSetType(zcu.gpa, pt.tid, &.{}));
+                },
             }
         }
     };
@@ -26205,6 +26202,10 @@ fn analyzeMinMax(
         .child = refined_scalar_ty.toIntern(),
     }) else refined_scalar_ty;
 
+    if (try sema.typeHasOnePossibleValue(refined_ty)) |opv| {
+        return Air.internedToRef(opv.toIntern());
+    }
+
     if (!refined_ty.eql(unrefined_ty, zcu)) {
         // We've reduced the type - cast the result down
         return block.addTyOp(.intcast, refined_ty, cur_minmax.?);
@@ -27339,6 +27340,33 @@ fn zirBuiltinValue(sema: *Sema, extended: Zir.Inst.Extended.InstData) CompileErr
         },
     };
     const ty = try pt.getBuiltinType(type_name);
+    return Air.internedToRef(ty.toIntern());
+}
+
+fn zirInplaceArithResultTy(sema: *Sema, extended: Zir.Inst.Extended.InstData) CompileError!Air.Inst.Ref {
+    const pt = sema.pt;
+    const zcu = pt.zcu;
+
+    const lhs = try sema.resolveInst(@enumFromInt(extended.operand));
+    const lhs_ty = sema.typeOf(lhs);
+
+    const op: Zir.Inst.InplaceOp = @enumFromInt(extended.small);
+    const ty: Type = switch (op) {
+        .add_eq => ty: {
+            const ptr_size = lhs_ty.ptrSizeOrNull(zcu) orelse break :ty lhs_ty;
+            switch (ptr_size) {
+                .One, .Slice => break :ty lhs_ty, // invalid, let it error
+                .Many, .C => break :ty .usize, // `[*]T + usize`
+            }
+        },
+        .sub_eq => ty: {
+            const ptr_size = lhs_ty.ptrSizeOrNull(zcu) orelse break :ty lhs_ty;
+            switch (ptr_size) {
+                .One, .Slice => break :ty lhs_ty, // invalid, let it error
+                .Many, .C => break :ty .generic_poison, // could be `[*]T - [*]T` or `[*]T - usize`
+            }
+        },
+    };
     return Air.internedToRef(ty.toIntern());
 }
 
@@ -36337,6 +36365,7 @@ pub fn resolveUnionLayout(sema: *Sema, ty: Type) SemaError!void {
 /// be resolved.
 pub fn resolveStructFully(sema: *Sema, ty: Type) SemaError!void {
     try sema.resolveStructLayout(ty);
+    try sema.resolveStructFieldInits(ty);
 
     const pt = sema.pt;
     const zcu = pt.zcu;
