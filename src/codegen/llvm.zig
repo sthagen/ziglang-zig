@@ -88,7 +88,10 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
 
         .kalimba,
         .spu_2,
+        .propeller1,
+        .propeller2,
         => unreachable, // Gated by hasLlvmSupport().
+
     };
     try llvm_triple.appendSlice(llvm_arch);
 
@@ -134,7 +137,6 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
         .tvos => "tvos",
         .watchos => "watchos",
         .driverkit => "driverkit",
-        .shadermodel => "shadermodel",
         .visionos => "xros",
         .serenity => "serenity",
         .vulkan => "vulkan",
@@ -224,7 +226,6 @@ pub fn targetOs(os_tag: std.Target.Os.Tag) llvm.OSType {
         .wasi => .WASI,
         .emscripten => .Emscripten,
         .driverkit => .DriverKit,
-        .shadermodel => .ShaderModel,
         .vulkan => .Vulkan,
         .serenity => .Serenity,
         .bridgeos => .BridgeOS,
@@ -283,7 +284,7 @@ pub fn targetArch(arch_tag: std.Target.Cpu.Arch) llvm.ArchType {
         .wasm32 => .wasm32,
         .wasm64 => .wasm64,
         .ve => .ve,
-        .spu_2 => .UnknownArch,
+        .propeller1, .propeller2, .spu_2 => .UnknownArch,
     };
 }
 
@@ -5138,7 +5139,6 @@ pub const FuncGen = struct {
                 .float_from_int => try self.airFloatFromInt(inst),
                 .cmpxchg_weak   => try self.airCmpxchg(inst, .weak),
                 .cmpxchg_strong => try self.airCmpxchg(inst, .strong),
-                .fence          => try self.airFence(inst),
                 .atomic_rmw     => try self.airAtomicRmw(inst),
                 .atomic_load    => try self.airAtomicLoad(inst),
                 .memset         => try self.airMemset(inst, false),
@@ -9665,13 +9665,6 @@ pub const FuncGen = struct {
         return self.wip.cast(.ptrtoint, result, try o.lowerType(Type.usize), "");
     }
 
-    fn airFence(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-        const atomic_order = self.air.instructions.items(.data)[@intFromEnum(inst)].fence;
-        const ordering = toLlvmAtomicOrdering(atomic_order);
-        _ = try self.wip.fence(self.sync_scope, ordering);
-        return .none;
-    }
-
     fn airCmpxchg(
         self: *FuncGen,
         inst: Air.Inst.Index,
@@ -12241,6 +12234,7 @@ fn ccAbiPromoteInt(
             .sparc64,
             .powerpc64,
             .powerpc64le,
+            .s390x,
             => switch (int_info.bits) {
                 0...63 => int_info.signedness,
                 else => null,
@@ -12715,6 +12709,8 @@ pub fn initializeLLVMTarget(arch: std.Target.Cpu.Arch) void {
         // LLVM does does not have a backend for these.
         .kalimba,
         .spu_2,
+        .propeller1,
+        .propeller2,
         => unreachable,
     }
 }
