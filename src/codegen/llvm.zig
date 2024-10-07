@@ -255,6 +255,7 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
         .simulator => "simulator",
         .macabi => "macabi",
         .ohos => "ohos",
+        .ohoseabi => "ohoseabi",
     };
     try llvm_triple.appendSlice(llvm_abi);
 
@@ -12444,6 +12445,7 @@ fn backendSupportsF80(target: std.Target) bool {
 /// if it produces miscompilations.
 fn backendSupportsF16(target: std.Target) bool {
     return switch (target.cpu.arch) {
+        .hexagon,
         .powerpc,
         .powerpcle,
         .powerpc64,
