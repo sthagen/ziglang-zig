@@ -26619,6 +26619,7 @@ fn zirFuncFancy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
 
     const pt = sema.pt;
     const zcu = pt.zcu;
+    const ip = &zcu.intern_pool;
     const inst_data = sema.code.instructions.items(.data)[@intFromEnum(inst)].pl_node;
     const extra = sema.code.extraData(Zir.Inst.FuncFancy, inst_data.payload_index);
     const target = zcu.getTarget();
@@ -26658,9 +26659,7 @@ fn zirFuncFancy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
         if (val.isGenericPoison()) {
             break :blk null;
         }
-        const alignment = try sema.validateAlignAllowZero(block, align_src, try val.toUnsignedIntSema(pt));
-        const default = target_util.defaultFunctionAlignment(target);
-        break :blk if (alignment == default) .none else alignment;
+        break :blk try sema.validateAlignAllowZero(block, align_src, try val.toUnsignedIntSema(pt));
     } else if (extra.data.bits.has_align_ref) blk: {
         const align_ref: Zir.Inst.Ref = @enumFromInt(sema.code.extra[extra_index]);
         extra_index += 1;
@@ -26678,9 +26677,7 @@ fn zirFuncFancy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
             error.GenericPoison => break :blk null,
             else => |e| return e,
         };
-        const alignment = try sema.validateAlignAllowZero(block, align_src, try align_val.toUnsignedIntSema(pt));
-        const default = target_util.defaultFunctionAlignment(target);
-        break :blk if (alignment == default) .none else alignment;
+        break :blk try sema.validateAlignAllowZero(block, align_src, try align_val.toUnsignedIntSema(pt));
     } else .none;
 
     const @"addrspace": ?std.builtin.AddressSpace = if (extra.data.bits.has_addrspace_body) blk: {
@@ -26793,7 +26790,21 @@ fn zirFuncFancy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
 
             const zir_decl = sema.code.getDeclaration(decl_inst.resolve(&zcu.intern_pool) orelse return error.AnalysisFail)[0];
             if (zir_decl.flags.is_export) {
-                break :cc .C;
+                break :cc target.cCallingConvention() orelse {
+                    // This target has no default C calling convention. We sometimes trigger a similar
+                    // error by trying to evaluate `std.builtin.CallingConvention.c`, so for consistency,
+                    // let's eval that now and just get the transitive error. (It's guaranteed to error
+                    // because it does the exact `cCallingConvention` call we just did.)
+                    const cc_type = try sema.getBuiltinType("CallingConvention");
+                    _ = try sema.namespaceLookupVal(
+                        block,
+                        LazySrcLoc.unneeded,
+                        cc_type.getNamespaceIndex(zcu),
+                        try ip.getOrPutString(sema.gpa, pt.tid, "c", .no_embedded_nulls),
+                    );
+                    // The above should have errored.
+                    @panic("std.builtin is corrupt");
+                };
             }
         }
         break :cc .auto;
