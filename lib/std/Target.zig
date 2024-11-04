@@ -719,7 +719,7 @@ pub const Os = struct {
 
 pub const aarch64 = @import("Target/aarch64.zig");
 pub const arc = @import("Target/arc.zig");
-pub const amdgpu = @import("Target/amdgpu.zig");
+pub const amdgcn = @import("Target/amdgcn.zig");
 pub const arm = @import("Target/arm.zig");
 pub const avr = @import("Target/avr.zig");
 pub const bpf = @import("Target/bpf.zig");
@@ -1383,17 +1383,11 @@ pub const Cpu = struct {
             };
         }
 
-        pub inline fn isARM(arch: Arch) bool {
+        /// Note that this includes Thumb.
+        pub inline fn isArm(arch: Arch) bool {
             return switch (arch) {
                 .arm, .armeb => true,
-                else => false,
-            };
-        }
-
-        pub inline fn isAARCH64(arch: Arch) bool {
-            return switch (arch) {
-                .aarch64, .aarch64_be => true,
-                else => false,
+                else => arch.isThumb(),
             };
         }
 
@@ -1404,8 +1398,11 @@ pub const Cpu = struct {
             };
         }
 
-        pub inline fn isArmOrThumb(arch: Arch) bool {
-            return arch.isARM() or arch.isThumb();
+        pub inline fn isAARCH64(arch: Arch) bool {
+            return switch (arch) {
+                .aarch64, .aarch64_be => true,
+                else => false,
+            };
         }
 
         pub inline fn isWasm(arch: Arch) bool {
@@ -1595,7 +1592,6 @@ pub const Cpu = struct {
                 .loongarch32, .loongarch64 => "loongarch",
                 .mips, .mipsel, .mips64, .mips64el => "mips",
                 .powerpc, .powerpcle, .powerpc64, .powerpc64le => "powerpc",
-                .amdgcn => "amdgpu",
                 .riscv32, .riscv64 => "riscv",
                 .sparc, .sparc64 => "sparc",
                 .s390x => "s390x",
@@ -1624,7 +1620,7 @@ pub const Cpu = struct {
                 .mips, .mipsel, .mips64, .mips64el => &mips.all_features,
                 .msp430 => &msp430.all_features,
                 .powerpc, .powerpcle, .powerpc64, .powerpc64le => &powerpc.all_features,
-                .amdgcn => &amdgpu.all_features,
+                .amdgcn => &amdgcn.all_features,
                 .riscv32, .riscv64 => &riscv.all_features,
                 .sparc, .sparc64 => &sparc.all_features,
                 .spirv, .spirv32, .spirv64 => &spirv.all_features,
@@ -1656,7 +1652,7 @@ pub const Cpu = struct {
                 .mips, .mipsel, .mips64, .mips64el => comptime allCpusFromDecls(mips.cpu),
                 .msp430 => comptime allCpusFromDecls(msp430.cpu),
                 .powerpc, .powerpcle, .powerpc64, .powerpc64le => comptime allCpusFromDecls(powerpc.cpu),
-                .amdgcn => comptime allCpusFromDecls(amdgpu.cpu),
+                .amdgcn => comptime allCpusFromDecls(amdgcn.cpu),
                 .riscv32, .riscv64 => comptime allCpusFromDecls(riscv.cpu),
                 .sparc, .sparc64 => comptime allCpusFromDecls(sparc.cpu),
                 .spirv, .spirv32, .spirv64 => comptime allCpusFromDecls(spirv.cpu),
@@ -1894,7 +1890,7 @@ pub const Cpu = struct {
                 };
             };
             return switch (arch) {
-                .amdgcn => &amdgpu.cpu.gfx600,
+                .amdgcn => &amdgcn.cpu.gfx600,
                 .arc => &arc.cpu.generic,
                 .arm, .armeb, .thumb, .thumbeb => &arm.cpu.generic,
                 .aarch64, .aarch64_be => &aarch64.cpu.generic,
@@ -1943,7 +1939,7 @@ pub const Cpu = struct {
         /// `Os.Tag.freestanding`.
         pub fn baseline(arch: Arch, os: Os) *const Model {
             return switch (arch) {
-                .amdgcn => &amdgpu.cpu.gfx906,
+                .amdgcn => &amdgcn.cpu.gfx906,
                 .arm, .armeb, .thumb, .thumbeb => &arm.cpu.baseline,
                 .aarch64 => switch (os.tag) {
                     .bridgeos, .driverkit, .macos => &aarch64.cpu.apple_m1,
@@ -3311,6 +3307,7 @@ pub fn cCallingConvention(target: Target) ?std.builtin.CallingConvention {
         },
         .arm, .armeb, .thumb, .thumbeb => switch (target.os.tag) {
             .netbsd => .{ .arm_apcs = .{} },
+            .watchos => .{ .arm_aapcs16_vfp = .{} },
             else => switch (target.abi.floatAbi()) {
                 .soft => .{ .arm_aapcs = .{} },
                 .hard => .{ .arm_aapcs_vfp = .{} },

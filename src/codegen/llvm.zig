@@ -496,7 +496,7 @@ const DataLayoutBuilder = struct {
                 if (idx != size) try writer.print(":{d}", .{idx});
             }
         }
-        if (self.target.cpu.arch.isArmOrThumb())
+        if (self.target.cpu.arch.isArm())
             try writer.writeAll("-Fi8") // for thumb interwork
         else if (self.target.cpu.arch == .powerpc64 and
             self.target.os.tag != .freebsd and
@@ -763,7 +763,7 @@ const DataLayoutBuilder = struct {
                     else => {},
                 }
             },
-            .vector => if (self.target.cpu.arch.isArmOrThumb()) {
+            .vector => if (self.target.cpu.arch.isArm()) {
                 switch (size) {
                     128 => abi = 64,
                     else => {},
@@ -829,7 +829,7 @@ const DataLayoutBuilder = struct {
                 else => {},
             },
             .aggregate => if (self.target.os.tag == .uefi or self.target.os.tag == .windows or
-                self.target.cpu.arch.isArmOrThumb())
+                self.target.cpu.arch.isArm())
             {
                 pref = @min(pref, self.target.ptrBitWidth());
             } else switch (self.target.cpu.arch) {
@@ -11749,7 +11749,14 @@ fn toLlvmCallConvTag(cc_tag: std.builtin.CallingConvention.Tag, target: std.Targ
         .aarch64_vfabi_sve => .aarch64_sve_vector_pcs,
         .arm_apcs => .arm_apcscc,
         .arm_aapcs => .arm_aapcscc,
-        .arm_aapcs_vfp => .arm_aapcs_vfpcc,
+        .arm_aapcs_vfp => if (target.os.tag != .watchos)
+            .arm_aapcs_vfpcc
+        else
+            null,
+        .arm_aapcs16_vfp => if (target.os.tag == .watchos)
+            .arm_aapcs_vfpcc
+        else
+            null,
         .riscv64_lp64_v => .riscv_vectorcallcc,
         .riscv32_ilp32_v => .riscv_vectorcallcc,
         .avr_builtin => .avr_builtincc,
@@ -11779,7 +11786,6 @@ fn toLlvmCallConvTag(cc_tag: std.builtin.CallingConvention.Tag, target: std.Targ
         .aarch64_aapcs,
         .aarch64_aapcs_darwin,
         .aarch64_aapcs_win,
-        .arm_aapcs16_vfp,
         .mips64_n64,
         .mips64_n32,
         .mips_o32,
@@ -11853,7 +11859,7 @@ fn llvmAddrSpaceInfo(target: std.Target) []const AddrSpaceInfo {
             .{ .zig = null, .llvm = Builder.AddrSpace.x86.ptr64, .size = 64, .abi = 64, .force_in_data_layout = true },
         },
         .nvptx, .nvptx64 => &.{
-            .{ .zig = .generic, .llvm = .default },
+            .{ .zig = .generic, .llvm = Builder.AddrSpace.nvptx.generic },
             .{ .zig = .global, .llvm = Builder.AddrSpace.nvptx.global },
             .{ .zig = .constant, .llvm = Builder.AddrSpace.nvptx.constant },
             .{ .zig = .param, .llvm = Builder.AddrSpace.nvptx.param },
@@ -11870,9 +11876,27 @@ fn llvmAddrSpaceInfo(target: std.Target) []const AddrSpaceInfo {
             .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_32bit, .size = 32, .abi = 32 },
             .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.buffer_fat_pointer, .non_integral = true, .size = 160, .abi = 256, .idx = 32 },
             .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.buffer_resource, .non_integral = true, .size = 128, .abi = 128 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.buffer_strided_pointer, .non_integral = true, .size = 192, .abi = 256, .idx = 32 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_buffer_0 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_buffer_1 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_buffer_2 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_buffer_3 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_buffer_4 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_buffer_5 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_buffer_6 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_buffer_7 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_buffer_8 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_buffer_9 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_buffer_10 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_buffer_11 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_buffer_12 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_buffer_13 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_buffer_14 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.constant_buffer_15 },
+            .{ .zig = null, .llvm = Builder.AddrSpace.amdgpu.streamout_register },
         },
         .avr => &.{
-            .{ .zig = .generic, .llvm = .default, .abi = 8 },
+            .{ .zig = .generic, .llvm = Builder.AddrSpace.avr.data, .abi = 8 },
             .{ .zig = .flash, .llvm = Builder.AddrSpace.avr.program, .abi = 8 },
             .{ .zig = .flash1, .llvm = Builder.AddrSpace.avr.program1, .abi = 8 },
             .{ .zig = .flash2, .llvm = Builder.AddrSpace.avr.program2, .abi = 8 },
@@ -11881,7 +11905,7 @@ fn llvmAddrSpaceInfo(target: std.Target) []const AddrSpaceInfo {
             .{ .zig = .flash5, .llvm = Builder.AddrSpace.avr.program5, .abi = 8 },
         },
         .wasm32, .wasm64 => &.{
-            .{ .zig = .generic, .llvm = .default, .force_in_data_layout = true },
+            .{ .zig = .generic, .llvm = Builder.AddrSpace.wasm.default, .force_in_data_layout = true },
             .{ .zig = null, .llvm = Builder.AddrSpace.wasm.variable, .non_integral = true },
             .{ .zig = null, .llvm = Builder.AddrSpace.wasm.externref, .non_integral = true, .size = 8, .abi = 8 },
             .{ .zig = null, .llvm = Builder.AddrSpace.wasm.funcref, .non_integral = true, .size = 8, .abi = 8 },
@@ -11959,7 +11983,7 @@ fn firstParamSRet(fn_info: InternPool.Key.FuncType, zcu: *Zcu, target: std.Targe
         .aarch64_aapcs_darwin,
         .aarch64_aapcs_win,
         => aarch64_c_abi.classifyType(return_type, zcu) == .memory,
-        .arm_aapcs, .arm_aapcs_vfp => switch (arm_c_abi.classifyType(return_type, zcu, .ret)) {
+        .arm_aapcs, .arm_aapcs_vfp, .arm_aapcs16_vfp => switch (arm_c_abi.classifyType(return_type, zcu, .ret)) {
             .memory, .i64_array => true,
             .i32_array => |size| size != 1,
             .byval => false,
@@ -12009,7 +12033,7 @@ fn lowerFnRetTy(o: *Object, fn_info: InternPool.Key.FuncType) Allocator.Error!Bu
             .integer => return o.builder.intType(@intCast(return_type.bitSize(zcu))),
             .double_integer => return o.builder.arrayType(2, .i64),
         },
-        .arm_aapcs, .arm_aapcs_vfp => switch (arm_c_abi.classifyType(return_type, zcu, .ret)) {
+        .arm_aapcs, .arm_aapcs_vfp, .arm_aapcs16_vfp => switch (arm_c_abi.classifyType(return_type, zcu, .ret)) {
             .memory, .i64_array => return .void,
             .i32_array => |len| return if (len == 1) .i32 else .void,
             .byval => return o.lowerType(return_type),
@@ -12258,7 +12282,7 @@ const ParamTypeIterator = struct {
                     .double_integer => return Lowering{ .i64_array = 2 },
                 }
             },
-            .arm_aapcs, .arm_aapcs_vfp => {
+            .arm_aapcs, .arm_aapcs_vfp, .arm_aapcs16_vfp => {
                 it.zig_index += 1;
                 it.llvm_index += 1;
                 switch (arm_c_abi.classifyType(ty, zcu, .arg)) {
