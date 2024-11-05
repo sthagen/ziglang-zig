@@ -3242,19 +3242,22 @@ pub const Object = struct {
         if (owner_mod.unwind_tables) {
             try attributes.addFnAttr(.{ .uwtable = Builder.Attribute.UwTable.default }, &o.builder);
         }
-        if (comp.skip_linker_dependencies or comp.no_builtin) {
+        const target = owner_mod.resolved_target.result;
+        if (comp.skip_linker_dependencies or comp.no_builtin or target.cpu.arch.isBpf()) {
             // The intent here is for compiler-rt and libc functions to not generate
             // infinite recursion. For example, if we are compiling the memcpy function,
             // and llvm detects that the body is equivalent to memcpy, it may replace the
             // body of memcpy with a call to memcpy, which would then cause a stack
             // overflow instead of performing memcpy.
-            try attributes.addFnAttr(.nobuiltin, &o.builder);
+            try attributes.addFnAttr(.{ .string = .{
+                .kind = try o.builder.string("no-builtins"),
+                .value = .empty,
+            } }, &o.builder);
         }
         if (owner_mod.optimize_mode == .ReleaseSmall) {
             try attributes.addFnAttr(.minsize, &o.builder);
             try attributes.addFnAttr(.optsize, &o.builder);
         }
-        const target = owner_mod.resolved_target.result;
         if (target.cpu.model.llvm_name) |s| {
             try attributes.addFnAttr(.{ .string = .{
                 .kind = try o.builder.string("target-cpu"),
@@ -3265,12 +3268,6 @@ pub const Object = struct {
             try attributes.addFnAttr(.{ .string = .{
                 .kind = try o.builder.string("target-features"),
                 .value = try o.builder.string(std.mem.span(s)),
-            } }, &o.builder);
-        }
-        if (target.cpu.arch.isBpf()) {
-            try attributes.addFnAttr(.{ .string = .{
-                .kind = try o.builder.string("no-builtins"),
-                .value = .empty,
             } }, &o.builder);
         }
         if (target.floatAbi() == .soft) {
@@ -11595,29 +11592,81 @@ pub const FuncGen = struct {
             template: [:0]const u8,
             constraints: [:0]const u8,
         } = switch (target.cpu.arch) {
-            .x86 => .{
+            .arm, .armeb, .thumb, .thumbeb => .{
                 .template =
-                \\roll $$3,  %edi ; roll $$13, %edi
-                \\roll $$61, %edi ; roll $$51, %edi
-                \\xchgl %ebx,%ebx
+                \\ mov r12, r12, ror #3  ; mov r12, r12, ror #13
+                \\ mov r12, r12, ror #29 ; mov r12, r12, ror #19
+                \\ orr r10, r10, r10
                 ,
-                .constraints = "={edx},{eax},0,~{cc},~{memory}",
-            },
-            .x86_64 => .{
-                .template =
-                \\rolq $$3,  %rdi ; rolq $$13, %rdi
-                \\rolq $$61, %rdi ; rolq $$51, %rdi
-                \\xchgq %rbx,%rbx
-                ,
-                .constraints = "={rdx},{rax},0,~{cc},~{memory}",
+                .constraints = "={r3},{r4},{r3},~{cc},~{memory}",
             },
             .aarch64, .aarch64_be => .{
                 .template =
-                \\ror x12, x12, #3  ;  ror x12, x12, #13
-                \\ror x12, x12, #51 ;  ror x12, x12, #61
-                \\orr x10, x10, x10
+                \\ ror x12, x12, #3  ; ror x12, x12, #13
+                \\ ror x12, x12, #51 ; ror x12, x12, #61
+                \\ orr x10, x10, x10
                 ,
-                .constraints = "={x3},{x4},0,~{cc},~{memory}",
+                .constraints = "={x3},{x4},{x3},~{cc},~{memory}",
+            },
+            .mips, .mipsel => .{
+                .template =
+                \\ srl $$0,  $$0,  13
+                \\ srl $$0,  $$0,  29
+                \\ srl $$0,  $$0,  3
+                \\ srl $$0,  $$0,  19
+                \\ or  $$13, $$13, $$13
+                ,
+                .constraints = "={$11},{$12},{$11},~{memory}",
+            },
+            .mips64, .mips64el => .{
+                .template =
+                \\ dsll $$0,  $$0,  3    ; dsll $$0, $$0, 13
+                \\ dsll $$0,  $$0,  29   ; dsll $$0, $$0, 19
+                \\ or   $$13, $$13, $$13
+                ,
+                .constraints = "={$11},{$12},{$11},~{memory}",
+            },
+            .powerpc, .powerpcle => .{
+                .template =
+                \\ rlwinm 0, 0, 3,  0, 31 ; rlwinm 0, 0, 13, 0, 31
+                \\ rlwinm 0, 0, 29, 0, 31 ; rlwinm 0, 0, 19, 0, 31
+                \\ or     1, 1, 1
+                ,
+                .constraints = "={r3},{r4},{r3},~{cc},~{memory}",
+            },
+            .powerpc64, .powerpc64le => .{
+                .template =
+                \\ rotldi 0, 0, 3  ; rotldi 0, 0, 13
+                \\ rotldi 0, 0, 61 ; rotldi 0, 0, 51
+                \\ or     1, 1, 1
+                ,
+                .constraints = "={r3},{r4},{r3},~{cc},~{memory}",
+            },
+            .s390x => .{
+                .template =
+                \\ lr %r15, %r15
+                \\ lr %r1,  %r1
+                \\ lr %r2,  %r2
+                \\ lr %r3,  %r3
+                \\ lr %r2,  %r2
+                ,
+                .constraints = "={r3},{r2},{r3},~{cc},~{memory}",
+            },
+            .x86 => .{
+                .template =
+                \\ roll  $$3,  %edi ; roll $$13, %edi
+                \\ roll  $$61, %edi ; roll $$51, %edi
+                \\ xchgl %ebx, %ebx
+                ,
+                .constraints = "={edx},{eax},{edx},~{cc},~{memory}",
+            },
+            .x86_64 => .{
+                .template =
+                \\ rolq  $$3,  %rdi ; rolq $$13, %rdi
+                \\ rolq  $$61, %rdi ; rolq $$51, %rdi
+                \\ xchgq %rbx, %rbx
+                ,
+                .constraints = "={rdx},{rax},{edx},~{cc},~{memory}",
             },
             else => unreachable,
         };
