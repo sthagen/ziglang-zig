@@ -5754,10 +5754,10 @@ pub const FuncGen = struct {
         const o = fg.ng.object;
         const zcu = o.pt.zcu;
         const ip = &zcu.intern_pool;
-        const msg_nav_index = zcu.panic_messages[@intFromEnum(panic_id)].unwrap().?;
-        const msg_nav = ip.getNav(msg_nav_index);
-        const msg_len = Type.fromInterned(msg_nav.typeOf(ip)).childType(zcu).arrayLen(zcu);
-        const msg_ptr = try o.lowerValue(msg_nav.status.fully_resolved.val);
+        const panic_msg_val = zcu.builtin_decl_values.get(panic_id.toBuiltin());
+        assert(panic_msg_val != .none);
+        const msg_len = Value.fromInterned(panic_msg_val).typeOf(zcu).childType(zcu).arrayLen(zcu);
+        const msg_ptr = try o.lowerValue(panic_msg_val);
         const null_opt_addr_global = try fg.resolveNullOptUsize();
         const target = zcu.getTarget();
         const llvm_usize = try o.lowerType(Type.usize);
@@ -5768,7 +5768,7 @@ pub const FuncGen = struct {
         //   ptr null,                                               ; stack trace
         //   ptr @2,                                                 ; addr (null ?usize)
         // )
-        const panic_func = zcu.funcInfo(zcu.panic_func_index);
+        const panic_func = zcu.funcInfo(zcu.builtin_decl_values.get(.@"Panic.call"));
         const panic_nav = ip.getNav(panic_func.owner_nav);
         const fn_info = zcu.typeToFunc(Type.fromInterned(panic_nav.typeOf(ip))).?;
         const panic_global = try o.resolveLlvmFunction(panic_func.owner_nav);
