@@ -82,6 +82,8 @@ scope_generation: u32,
 /// which is a relative jump, based on the address following the reloc.
 exitlude_jump_relocs: std.ArrayListUnmanaged(usize) = .empty,
 
+reused_operands: std.StaticBitSet(Liveness.bpi - 1) = undefined,
+
 /// Whenever there is a runtime branch, we push a Branch onto this stack,
 /// and pop it off when the runtime branch joins. This provides an "overlay"
 /// of the table of mappings from instructions to `MCValue` from within the branch.
@@ -1443,8 +1445,11 @@ fn genBody(func: *Func, body: []const Air.Inst.Index) InnerError!void {
         verbose_tracking_log.debug("{}", .{func.fmtTracking()});
 
         const old_air_bookkeeping = func.air_bookkeeping;
+        try func.ensureProcessDeathCapacity(Liveness.bpi);
+
+        func.reused_operands = @TypeOf(func.reused_operands).initEmpty();
         try func.inst_tracking.ensureUnusedCapacity(func.gpa, 1);
-        const tag: Air.Inst.Tag = air_tags[@intFromEnum(inst)];
+        const tag = air_tags[@intFromEnum(inst)];
         switch (tag) {
             // zig fmt: off
             .add,
@@ -1783,11 +1788,10 @@ fn finishAir(
     result: MCValue,
     operands: [Liveness.bpi - 1]Air.Inst.Ref,
 ) !void {
-    var tomb_bits = func.liveness.getTombBits(inst);
-    for (operands) |op| {
-        const dies = @as(u1, @truncate(tomb_bits)) != 0;
-        tomb_bits >>= 1;
-        if (!dies) continue;
+    const tomb_bits = func.liveness.getTombBits(inst);
+    for (0.., operands) |op_index, op| {
+        if (tomb_bits & @as(Liveness.Bpi, 1) << @intCast(op_index) == 0) continue;
+        if (func.reused_operands.isSet(op_index)) continue;
         try func.processDeath(op.toIndexAllowNone() orelse continue);
     }
     func.finishAirResult(inst, result);
@@ -4424,7 +4428,7 @@ fn reuseOperandAdvanced(
     }
 
     // Prevent the operand deaths processing code from deallocating it.
-    func.liveness.clearOperandDeath(inst, op_index);
+    func.reused_operands.set(op_index);
     const op_inst = operand.toIndex().?;
     func.getResolvedInstValue(op_inst).reuse(func, maybe_tracked_inst, op_inst);
 
@@ -7843,15 +7847,15 @@ fn airMemset(func: *Func, inst: Air.Inst.Index, safety: bool) !void {
         if (elem_abi_size == 1) {
             const ptr: MCValue = switch (dst_ptr_ty.ptrSize(zcu)) {
                 // TODO: this only handles slices stored in the stack
-                .Slice => dst_ptr,
-                .One => dst_ptr,
-                .C, .Many => unreachable,
+                .slice => dst_ptr,
+                .one => dst_ptr,
+                .c, .many => unreachable,
             };
             const len: MCValue = switch (dst_ptr_ty.ptrSize(zcu)) {
                 // TODO: this only handles slices stored in the stack
-                .Slice => dst_ptr.address().offset(8).deref(),
-                .One => .{ .immediate = dst_ptr_ty.childType(zcu).arrayLen(zcu) },
-                .C, .Many => unreachable,
+                .slice => dst_ptr.address().offset(8).deref(),
+                .one => .{ .immediate = dst_ptr_ty.childType(zcu).arrayLen(zcu) },
+                .c, .many => unreachable,
             };
             const len_lock: ?RegisterLock = switch (len) {
                 .register => |reg| func.register_manager.lockRegAssumeUnused(reg),
@@ -7867,8 +7871,8 @@ fn airMemset(func: *Func, inst: Air.Inst.Index, safety: bool) !void {
         // Length zero requires a runtime check - so we handle arrays specially
         // here to elide it.
         switch (dst_ptr_ty.ptrSize(zcu)) {
-            .Slice => return func.fail("TODO: airMemset Slices", .{}),
-            .One => {
+            .slice => return func.fail("TODO: airMemset Slices", .{}),
+            .one => {
                 const elem_ptr_ty = try pt.singleMutPtrType(elem_ty);
 
                 const len = dst_ptr_ty.childType(zcu).arrayLen(zcu);
@@ -7889,7 +7893,7 @@ fn airMemset(func: *Func, inst: Air.Inst.Index, safety: bool) !void {
                 const bytes_to_copy: MCValue = .{ .immediate = elem_abi_size * (len - 1) };
                 try func.genInlineMemcpy(second_elem_ptr_mcv, dst_ptr, bytes_to_copy);
             },
-            .C, .Many => unreachable,
+            .c, .many => unreachable,
         }
     }
     return func.finishAir(inst, .unreach, .{ bin_op.lhs, bin_op.rhs, .none });
@@ -7906,7 +7910,7 @@ fn airMemcpy(func: *Func, inst: Air.Inst.Index) !void {
     const dst_ty = func.typeOf(bin_op.lhs);
 
     const len_mcv: MCValue = switch (dst_ty.ptrSize(zcu)) {
-        .Slice => len: {
+        .slice => len: {
             const len_reg, const len_lock = try func.allocReg(.int);
             defer func.register_manager.unlockReg(len_lock);
 
@@ -7921,7 +7925,7 @@ fn airMemcpy(func: *Func, inst: Air.Inst.Index) !void {
             );
             break :len .{ .register = len_reg };
         },
-        .One => len: {
+        .one => len: {
             const array_ty = dst_ty.childType(zcu);
             break :len .{ .immediate = array_ty.arrayLen(zcu) * array_ty.childType(zcu).abiSize(zcu) };
         },
