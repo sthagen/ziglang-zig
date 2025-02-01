@@ -1257,8 +1257,6 @@ fn analyzeBodyInner(
             .validate_array_init_ref_ty   => try sema.zirValidateArrayInitRefTy(block, inst),
             .opt_eu_base_ptr_init         => try sema.zirOptEuBasePtrInit(block, inst),
             .coerce_ptr_elem_ty           => try sema.zirCoercePtrElemTy(block, inst),
-            .try_operand_ty               => try sema.zirTryOperandTy(block, inst, false),
-            .try_ref_operand_ty           => try sema.zirTryOperandTy(block, inst, true),
 
             .clz       => try sema.zirBitCount(block, inst, .clz,      Value.clz),
             .ctz       => try sema.zirBitCount(block, inst, .ctz,      Value.ctz),
@@ -2084,20 +2082,6 @@ fn genericPoisonReason(sema: *Sema, block: *Block, ref: Zir.Inst.Ref) GenericPoi
             .indexable_ptr_elem_type, .vec_arr_elem_type => {
                 const un_node = sema.code.instructions.items(.data)[@intFromEnum(inst)].un_node;
                 cur = un_node.operand;
-            },
-            .try_operand_ty => {
-                // Either the input type was itself poison, or it was a slice, which we cannot translate
-                // to an overall result type.
-                const un_node = sema.code.instructions.items(.data)[@intFromEnum(inst)].un_node;
-                const operand_ref = try sema.resolveInst(un_node.operand);
-                if (operand_ref == .generic_poison_type) {
-                    // The input was poison -- keep looking.
-                    cur = un_node.operand;
-                    continue;
-                }
-                // We got a poison because the result type was a slice. This is a tricky case -- let's just
-                // not bother explaining it to the user for now...
-                return .unknown;
             },
             .struct_init_field_type => {
                 const pl_node = sema.code.instructions.items(.data)[@intFromEnum(inst)].pl_node;
@@ -24581,8 +24565,12 @@ fn zirSplat(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.I
 
     const len = try sema.usizeCast(block, src, dest_ty.arrayLen(zcu));
 
-    // `len == 0` because `[0:s]T` always has a comptime-known splat.
-    if (!dest_ty.hasRuntimeBits(zcu) or len == 0) {
+    if (try sema.typeHasOnePossibleValue(dest_ty)) |val| {
+        return Air.internedToRef(val.toIntern());
+    }
+
+    // We also need this case because `[0:s]T` is not OPV.
+    if (len == 0) {
         const empty_aggregate = try pt.intern(.{ .aggregate = .{
             .ty = dest_ty.toIntern(),
             .storage = .{ .elems = &.{} },
@@ -25922,6 +25910,22 @@ fn zirMemcpy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!void
         if (try sema.resolveDefinedValue(block, src_src, src_len)) |src_len_val| {
             len_val = src_len_val;
         }
+    }
+
+    zero_bit: {
+        const src_comptime = try src_elem_ty.comptimeOnlySema(pt);
+        const dest_comptime = try dest_elem_ty.comptimeOnlySema(pt);
+        assert(src_comptime == dest_comptime); // IMC
+        if (src_comptime) break :zero_bit;
+
+        const src_has_bits = try src_elem_ty.hasRuntimeBitsIgnoreComptimeSema(pt);
+        const dest_has_bits = try dest_elem_ty.hasRuntimeBitsIgnoreComptimeSema(pt);
+        assert(src_has_bits == dest_has_bits); // IMC
+        if (src_has_bits) break :zero_bit;
+
+        // The element type is zero-bit. We've done all validation (aside from the aliasing check,
+        // which we must skip) so we're done.
+        return;
     }
 
     const runtime_src = rs: {
