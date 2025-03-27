@@ -3505,6 +3505,14 @@ pub fn setpgid(pid: pid_t, pgid: pid_t) SetPgidError!void {
     }
 }
 
+pub fn getuid() uid_t {
+    return system.getuid();
+}
+
+pub fn geteuid() uid_t {
+    return system.geteuid();
+}
+
 /// Test whether a file descriptor refers to a terminal.
 pub fn isatty(handle: fd_t) bool {
     if (native_os == .windows) {
@@ -7489,7 +7497,7 @@ pub fn ioctl_SIOCGIFINDEX(fd: fd_t, ifr: *ifreq) IoCtl_SIOCGIFINDEX_Error!void {
     }
 }
 
-const lfs64_abi = native_os == .linux and builtin.link_libc and builtin.abi.isGnu();
+const lfs64_abi = native_os == .linux and builtin.link_libc and (builtin.abi.isGnu() or builtin.abi.isAndroid());
 
 /// Whether or not `error.Unexpected` will print its value and a stack trace.
 ///
