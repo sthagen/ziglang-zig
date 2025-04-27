@@ -470,7 +470,28 @@ pub const Os = struct {
                             .max = .{ .major = 6, .minor = 13, .patch = 4 },
                         },
                         .glibc = blk: {
-                            const default_min: std.SemanticVersion = .{ .major = 2, .minor = 31, .patch = 0 };
+                            // For 32-bit targets that traditionally used 32-bit time, we require
+                            // glibc 2.34 for full 64-bit time support. For everything else, we only
+                            // require glibc 2.31.
+                            const default_min: std.SemanticVersion = switch (arch) {
+                                .arm,
+                                .armeb,
+                                .csky,
+                                .m68k,
+                                .mips,
+                                .mipsel,
+                                .powerpc,
+                                .sparc,
+                                .x86,
+                                => .{ .major = 2, .minor = 34, .patch = 0 },
+                                .mips64,
+                                .mips64el,
+                                => if (abi == .gnuabin32)
+                                    .{ .major = 2, .minor = 34, .patch = 0 }
+                                else
+                                    .{ .major = 2, .minor = 31, .patch = 0 },
+                                else => .{ .major = 2, .minor = 31, .patch = 0 },
+                            };
 
                             for (std.zig.target.available_libcs) |libc| {
                                 if (libc.os != tag or libc.arch != arch or libc.abi != abi) continue;
@@ -763,7 +784,6 @@ pub const Abi = enum {
     gnuf32,
     gnusf,
     gnux32,
-    gnuilp32,
     code16,
     eabi,
     eabihf,
@@ -938,7 +958,6 @@ pub const Abi = enum {
             .gnuf32,
             .gnusf,
             .gnux32,
-            .gnuilp32,
             => true,
             else => false,
         };
@@ -2205,14 +2224,7 @@ pub const DynamicLinker = struct {
             .hurd => switch (cpu.arch) {
                 .aarch64,
                 .aarch64_be,
-                => |arch| initFmt("/lib/ld-{s}{s}.so.1", .{
-                    @tagName(arch),
-                    switch (abi) {
-                        .gnu => "",
-                        .gnuilp32 => "_ilp32",
-                        else => return none,
-                    },
-                }),
+                => |arch| if (abi == .gnu) initFmt("/lib/ld-{s}.so.1", .{@tagName(arch)}) else none,
 
                 .x86 => if (abi == .gnu) init("/lib/ld.so.1") else none,
                 .x86_64 => initFmt("/lib/ld-{s}.so.1", .{switch (abi) {
@@ -2344,14 +2356,7 @@ pub const DynamicLinker = struct {
 
                     .aarch64,
                     .aarch64_be,
-                    => |arch| initFmt("/lib/ld-linux-{s}{s}.so.1", .{
-                        @tagName(arch),
-                        switch (abi) {
-                            .gnu => "",
-                            .gnuilp32 => "_ilp32",
-                            else => return none,
-                        },
-                    }),
+                    => |arch| if (abi == .gnu) initFmt("/lib/ld-linux-{s}.so.1", .{@tagName(arch)}) else none,
 
                     // TODO: `-be` architecture support.
                     .csky => initFmt("/lib/ld-linux-cskyv2{s}.so.1", .{switch (abi) {
@@ -2585,7 +2590,7 @@ pub fn standardDynamicLinkerPath(target: Target) DynamicLinker {
 
 pub fn ptrBitWidth_cpu_abi(cpu: Cpu, abi: Abi) u16 {
     switch (abi) {
-        .gnux32, .muslx32, .gnuabin32, .muslabin32, .gnuilp32, .ilp32 => return 32,
+        .gnux32, .muslx32, .gnuabin32, .muslabin32, .ilp32 => return 32,
         .gnuabi64, .muslabi64 => return 64,
         else => {},
     }
@@ -2979,7 +2984,7 @@ pub fn cTypeBitSize(target: Target, c_type: CType) u16 {
                 .long, .ulong => return 32,
                 .longlong, .ulonglong, .double => return 64,
                 .longdouble => switch (target.abi) {
-                    .gnu, .gnuilp32, .ilp32, .cygnus => return 80,
+                    .gnu, .ilp32, .cygnus => return 80,
                     else => return 64,
                 },
             },
@@ -2993,7 +2998,7 @@ pub fn cTypeBitSize(target: Target, c_type: CType) u16 {
                 },
                 .longlong, .ulonglong, .double => return 64,
                 .longdouble => switch (target.abi) {
-                    .gnu, .gnuilp32, .ilp32, .cygnus => return 80,
+                    .gnu, .ilp32, .cygnus => return 80,
                     else => return 64,
                 },
             },
@@ -3091,7 +3096,7 @@ pub fn cTypeAlignment(target: Target, c_type: CType) u16 {
             .windows, .uefi => switch (c_type) {
                 .longlong, .ulonglong, .double => return 8,
                 .longdouble => switch (target.abi) {
-                    .gnu, .gnuilp32, .ilp32, .cygnus => return 4,
+                    .gnu, .ilp32, .cygnus => return 4,
                     else => return 8,
                 },
                 else => {},
@@ -3192,7 +3197,7 @@ pub fn cTypePreferredAlignment(target: Target, c_type: CType) u16 {
             },
             .windows, .uefi => switch (c_type) {
                 .longdouble => switch (target.abi) {
-                    .gnu, .gnuilp32, .ilp32, .cygnus => return 4,
+                    .gnu, .ilp32, .cygnus => return 4,
                     else => return 8,
                 },
                 else => {},
