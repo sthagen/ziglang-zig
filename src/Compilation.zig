@@ -352,12 +352,17 @@ pub const Path = struct {
         gpa.free(p.sub_path);
     }
 
-    /// The returned digest is relocatable across any compiler process using the same lib and cache
+    /// The added data is relocatable across any compiler process using the same lib and cache
     /// directories; it does not depend on cwd.
-    pub fn digest(p: Path) Cache.BinDigest {
-        var h = Cache.hasher_init;
+    pub fn addToHasher(p: Path, h: *Cache.Hasher) void {
         h.update(&.{@intFromEnum(p.root)});
         h.update(p.sub_path);
+    }
+
+    /// Small convenience wrapper around `addToHasher`.
+    pub fn digest(p: Path) Cache.BinDigest {
+        var h = Cache.hasher_init;
+        p.addToHasher(&h);
         return h.finalResult();
     }
 
@@ -1351,6 +1356,7 @@ pub const cache_helpers = struct {
         hh.add(target.ofmt);
         hh.add(resolved_target.is_native_os);
         hh.add(resolved_target.is_native_abi);
+        hh.add(resolved_target.is_explicit_dynamic_linker);
     }
 
     pub fn addEmitLoc(hh: *Cache.HashHelper, emit_loc: EmitLoc) void {
@@ -4748,6 +4754,7 @@ fn workerDocsWasmFallible(comp: *Compilation, prog_node: std.Progress.Node) anye
 
         .is_native_os = false,
         .is_native_abi = false,
+        .is_explicit_dynamic_linker = false,
     };
 
     const config = try Config.resolve(.{
