@@ -2352,12 +2352,8 @@ pub fn create(gpa: Allocator, arena: Allocator, options: CreateOptions) !*Compil
                     comp.remaining_prelink_tasks += 2;
 
                     // When linking mingw-w64 there are some import libs we always need.
-                    const always_link_libs: []const []const u8 = switch (comp.root_mod.optimize_mode) {
-                        .Debug => &mingw.always_link_libs_debug,
-                        .ReleaseSafe, .ReleaseFast, .ReleaseSmall => &mingw.always_link_libs_release,
-                    };
-                    try comp.windows_libs.ensureUnusedCapacity(gpa, always_link_libs.len);
-                    for (always_link_libs) |name| comp.windows_libs.putAssumeCapacity(name, {});
+                    try comp.windows_libs.ensureUnusedCapacity(gpa, mingw.always_link_libs.len);
+                    for (mingw.always_link_libs) |name| comp.windows_libs.putAssumeCapacity(name, {});
                 } else {
                     return error.LibCUnavailable;
                 }
@@ -2529,6 +2525,7 @@ pub fn destroy(comp: *Compilation) void {
 
 pub fn clearMiscFailures(comp: *Compilation) void {
     comp.alloc_failure_occurred = false;
+    comp.link_diags.flags = .{};
     for (comp.misc_failures.values()) |*value| {
         value.deinit(comp.gpa);
     }
@@ -2795,7 +2792,6 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) !void {
 
     if (anyErrors(comp)) {
         // Skip flushing and keep source files loaded for error reporting.
-        comp.link_diags.flags = .{};
         return;
     }
 
