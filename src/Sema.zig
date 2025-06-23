@@ -11786,7 +11786,7 @@ fn zirSwitchBlock(sema: *Sema, block: *Block, inst: Zir.Inst.Index, operand_is_r
                 return sema.failWithOwnedErrorMsg(block, msg: {
                     const msg = try sema.errMsg(operand_src, "operand of switch loop has comptime-only type '{}'", .{operand_ty.fmt(pt)});
                     errdefer msg.destroy(gpa);
-                    try sema.errNote(operand_src, msg, "switch loops are evalauted at runtime outside of comptime scopes", .{});
+                    try sema.errNote(operand_src, msg, "switch loops are evaluated at runtime outside of comptime scopes", .{});
                     break :msg msg;
                 });
             }
@@ -26289,7 +26289,7 @@ fn zirWorkItem(
 
     switch (target.cpu.arch) {
         // TODO: Allow for other GPU targets.
-        .amdgcn, .spirv, .spirv64, .spirv32, .nvptx, .nvptx64 => {},
+        .amdgcn, .spirv64, .spirv32, .nvptx, .nvptx64 => {},
         else => {
             return sema.fail(block, builtin_src, "builtin only available on GPU targets; targeted architecture is {s}", .{@tagName(target.cpu.arch)});
         },
