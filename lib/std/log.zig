@@ -47,7 +47,7 @@
 //!     // Print the message to stderr, silently ignoring any errors
 //!     std.debug.lockStdErr();
 //!     defer std.debug.unlockStdErr();
-//!     const stderr = std.io.getStdErr().writer();
+//!     const stderr = std.fs.File.stderr().deprecatedWriter();
 //!     nosuspend stderr.print(prefix ++ format ++ "\n", args) catch return;
 //! }
 //!
@@ -101,8 +101,7 @@ pub const Level = enum {
 /// The default log level is based on build mode.
 pub const default_level: Level = switch (builtin.mode) {
     .Debug => .debug,
-    .ReleaseSafe => .info,
-    .ReleaseFast, .ReleaseSmall => .err,
+    .ReleaseSafe, .ReleaseFast, .ReleaseSmall => .info,
 };
 
 const level = std.options.log_level;
@@ -148,7 +147,7 @@ pub fn defaultLog(
 ) void {
     const level_txt = comptime message_level.asText();
     const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
-    const stderr = std.io.getStdErr().writer();
+    const stderr = std.fs.File.stderr().deprecatedWriter();
     var bw = std.io.bufferedWriter(stderr);
     const writer = bw.writer();
 
