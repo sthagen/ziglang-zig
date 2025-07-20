@@ -860,7 +860,15 @@ pub inline fn writeSliceEndian(
     if (native_endian == endian) {
         return writeAll(w, @ptrCast(slice));
     } else {
-        return w.writeArraySwap(w, Elem, slice);
+        return writeSliceSwap(w, Elem, slice);
+    }
+}
+
+pub fn writeSliceSwap(w: *Writer, Elem: type, slice: []const Elem) Error!void {
+    for (slice) |elem| {
+        var tmp = elem;
+        std.mem.byteSwapAllFields(Elem, &tmp);
+        try w.writeAll(@ptrCast(&tmp));
     }
 }
 
@@ -1123,8 +1131,8 @@ pub fn printValue(
                 else => invalidFmtError(fmt, value),
             },
             't' => switch (@typeInfo(T)) {
-                .error_set => return w.writeAll(@errorName(value)),
-                .@"enum", .@"union" => return w.writeAll(@tagName(value)),
+                .error_set => return w.alignBufferOptions(@errorName(value), options),
+                .@"enum", .@"union" => return w.alignBufferOptions(@tagName(value), options),
                 else => invalidFmtError(fmt, value),
             },
             else => {},
@@ -2134,6 +2142,14 @@ test "bytes.hex" {
     try testing.expectFmt("lowercase: 000ebabe\n", "lowercase: {x}\n", .{bytes_with_zeros});
 }
 
+test "padding" {
+    const foo: enum { foo } = .foo;
+    try testing.expectFmt("tag: |foo |\n", "tag: |{t:<4}|\n", .{foo});
+
+    const bar: error{bar} = error.bar;
+    try testing.expectFmt("error: |bar |\n", "error: |{t:<4}|\n", .{bar});
+}
+
 test fixed {
     {
         var buf: [255]u8 = undefined;
@@ -2629,4 +2645,13 @@ test writeStruct {
             0, 0, 0, 3, //
         }, &buffer);
     }
+}
+
+test writeSliceEndian {
+    var buffer: [5]u8 align(2) = undefined;
+    var w: Writer = .fixed(&buffer);
+    try w.writeByte('x');
+    const array: [2]u16 = .{ 0x1234, 0x5678 };
+    try writeSliceEndian(&w, u16, &array, .big);
+    try testing.expectEqualSlices(u8, &.{ 'x', 0x12, 0x34, 0x56, 0x78 }, &buffer);
 }
