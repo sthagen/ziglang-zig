@@ -8,7 +8,6 @@ const minInt = std.math.minInt;
 const maxInt = std.math.maxInt;
 
 test "switch with numbers" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
 
@@ -300,7 +299,6 @@ fn switchProngWithVarFn(a: SwitchProngWithVarEnum) !void {
 }
 
 test "switch on enum using pointer capture" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
@@ -361,7 +359,6 @@ fn testSwitchHandleAllCasesRange(x: u8) u8 {
 }
 
 test "switch on union with some prongs capturing" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
@@ -976,8 +973,6 @@ test "switch prong captures range" {
 }
 
 test "prong with inline call to unreachable" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-
     const U = union(enum) {
         void: void,
         bool: bool,
@@ -1070,5 +1065,15 @@ test "switch on a signed value smaller than the smallest prong value" {
     switch (v) {
         inline 0...10 => return error.TestFailed,
         else => {},
+    }
+}
+
+test "switch on 8-bit mod result" {
+    var x: u8 = undefined;
+    x = 16;
+    switch (x % 4) {
+        0 => {},
+        1, 2, 3 => return error.TestFailed,
+        else => unreachable,
     }
 }
