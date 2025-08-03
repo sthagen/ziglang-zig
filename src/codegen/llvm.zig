@@ -764,7 +764,7 @@ pub const Object = struct {
 
         is_debug: bool,
         is_small: bool,
-        time_report: bool,
+        time_report: ?*Compilation.TimeReport,
         sanitize_thread: bool,
         fuzz: bool,
         lto: std.zig.LtoMode,
@@ -1063,7 +1063,7 @@ pub const Object = struct {
         var lowered_options: llvm.TargetMachine.EmitOptions = .{
             .is_debug = options.is_debug,
             .is_small = options.is_small,
-            .time_report = options.time_report,
+            .time_report_out = null, // set below to make sure it's only set for a single `emitToFile`
             .tsan = options.sanitize_thread,
             .lto = switch (options.lto) {
                 .none => .None,
@@ -1118,12 +1118,23 @@ pub const Object = struct {
             lowered_options.llvm_ir_filename = null;
         }
 
+        var time_report_c_str: [*:0]u8 = undefined;
+        if (options.time_report != null) {
+            lowered_options.time_report_out = &time_report_c_str;
+        }
+
         lowered_options.asm_filename = options.asm_path;
         if (target_machine.emitToFile(module, &error_message, &lowered_options)) {
             defer llvm.disposeMessage(error_message);
             return diags.fail("LLVM failed to emit asm={s} bin={s} ir={s} bc={s}: {s}", .{
                 emit_asm_msg, emit_bin_msg, post_llvm_ir_msg, post_llvm_bc_msg, error_message,
             });
+        }
+        if (options.time_report) |tr| {
+            defer std.c.free(time_report_c_str);
+            const time_report_data = std.mem.span(time_report_c_str);
+            assert(tr.llvm_pass_timings.len == 0);
+            tr.llvm_pass_timings = try comp.gpa.dupe(u8, time_report_data);
         }
     }
 
@@ -4339,9 +4350,11 @@ pub const Object = struct {
     /// types to work around a LLVM deficiency when targeting ARM/AArch64.
     fn getAtomicAbiType(o: *Object, pt: Zcu.PerThread, ty: Type, is_rmw_xchg: bool) Allocator.Error!Builder.Type {
         const zcu = pt.zcu;
+        const ip = &zcu.intern_pool;
         const int_ty = switch (ty.zigTypeTag(zcu)) {
             .int => ty,
             .@"enum" => ty.intTagType(zcu),
+            .@"struct" => Type.fromInterned(ip.loadStructType(ty.toIntern()).backingIntTypeUnordered(ip)),
             .float => {
                 if (!is_rmw_xchg) return .none;
                 return o.builder.intType(@intCast(ty.abiSize(zcu) * 8));
@@ -11424,7 +11437,7 @@ pub const FuncGen = struct {
 
         if (workaround_disable_truncate) {
             // see https://github.com/llvm/llvm-project/issues/64222
-            // disable the truncation codepath for larger that 32bits value - with this heuristic, the backend passes the test suite.
+            // disable the truncation codepath for larger than 32bits value - with this heuristic, the backend passes the test suite.
             return try fg.wip.load(access_kind, payload_llvm_ty, payload_ptr, payload_alignment, "");
         }
 
@@ -12197,11 +12210,14 @@ fn lowerFnRetTy(o: *Object, pt: Zcu.PerThread, fn_info: InternPool.Key.FuncType)
         },
         .riscv64_lp64, .riscv32_ilp32 => switch (riscv_c_abi.classifyType(return_type, zcu)) {
             .memory => return .void,
-            .integer => {
-                return o.builder.intType(@intCast(return_type.bitSize(zcu)));
-            },
+            .integer => return o.builder.intType(@intCast(return_type.bitSize(zcu))),
             .double_integer => {
-                return o.builder.structType(.normal, &.{ .i64, .i64 });
+                const integer: Builder.Type = switch (zcu.getTarget().cpu.arch) {
+                    .riscv64 => .i64,
+                    .riscv32 => .i32,
+                    else => unreachable,
+                };
+                return o.builder.structType(.normal, &.{ integer, integer });
             },
             .byval => return o.lowerType(pt, return_type),
             .fields => {

@@ -88,6 +88,8 @@ pub fn init(input: *Reader, buffer: []u8, options: Options) Decompress {
             .vtable = &.{
                 .stream = stream,
                 .rebase = rebase,
+                .discard = discard,
+                .readVec = readVec,
             },
             .buffer = buffer,
             .seek = 0,
@@ -100,11 +102,54 @@ fn rebase(r: *Reader, capacity: usize) Reader.RebaseError!void {
     const d: *Decompress = @alignCast(@fieldParentPtr("reader", r));
     assert(capacity <= r.buffer.len - d.window_len);
     assert(r.end + capacity > r.buffer.len);
-    const discard = r.end - d.window_len;
-    const keep = r.buffer[discard..r.end];
+    const discard_n = r.end - d.window_len;
+    const keep = r.buffer[discard_n..r.end];
     @memmove(r.buffer[0..keep.len], keep);
     r.end = keep.len;
-    r.seek -= discard;
+    r.seek -= discard_n;
+}
+
+/// This could be improved so that when an amount is discarded that includes an
+/// entire frame, skip decoding that frame.
+fn discard(r: *Reader, limit: std.Io.Limit) Reader.Error!usize {
+    const d: *Decompress = @alignCast(@fieldParentPtr("reader", r));
+    r.rebase(d.window_len) catch unreachable;
+    var writer: Writer = .{
+        .vtable = &.{
+            .drain = std.Io.Writer.Discarding.drain,
+            .sendFile = std.Io.Writer.Discarding.sendFile,
+        },
+        .buffer = r.buffer,
+        .end = r.end,
+    };
+    defer {
+        r.end = writer.end;
+        r.seek = r.end;
+    }
+    const n = r.stream(&writer, limit) catch |err| switch (err) {
+        error.WriteFailed => unreachable,
+        error.ReadFailed => return error.ReadFailed,
+        error.EndOfStream => return error.EndOfStream,
+    };
+    assert(n <= @intFromEnum(limit));
+    return n;
+}
+
+fn readVec(r: *Reader, data: [][]u8) Reader.Error!usize {
+    _ = data;
+    const d: *Decompress = @alignCast(@fieldParentPtr("reader", r));
+    assert(r.seek == r.end);
+    r.rebase(d.window_len) catch unreachable;
+    var writer: Writer = .{
+        .buffer = r.buffer,
+        .end = r.end,
+        .vtable = &.{ .drain = Writer.fixedDrain },
+    };
+    r.end += r.vtable.stream(r, &writer, .limited(writer.buffer.len - writer.end)) catch |err| switch (err) {
+        error.WriteFailed => unreachable,
+        else => |e| return e,
+    };
+    return 0;
 }
 
 fn stream(r: *Reader, w: *Writer, limit: Limit) Reader.StreamError!usize {
