@@ -1351,8 +1351,7 @@ pub const Reader = struct {
                 }
                 r.pos += n;
                 if (n > data_size) {
-                    io_reader.seek = 0;
-                    io_reader.end = n - data_size;
+                    io_reader.end += n - data_size;
                     return data_size;
                 }
                 return n;
@@ -1386,8 +1385,7 @@ pub const Reader = struct {
                 }
                 r.pos += n;
                 if (n > data_size) {
-                    io_reader.seek = 0;
-                    io_reader.end = n - data_size;
+                    io_reader.end += n - data_size;
                     return data_size;
                 }
                 return n;
@@ -1940,7 +1938,7 @@ pub const Writer = struct {
 
         const copy_file_range = switch (native_os) {
             .freebsd => std.os.freebsd.copy_file_range,
-            .linux => if (std.c.versionCheck(.{ .major = 2, .minor = 27, .patch = 0 })) std.os.linux.wrapped.copy_file_range else {},
+            .linux => if (std.c.versionCheck(if (builtin.abi.isAndroid()) .{ .major = 34, .minor = 0, .patch = 0 } else .{ .major = 2, .minor = 27, .patch = 0 })) std.os.linux.wrapped.copy_file_range else {},
             else => {},
         };
         if (@TypeOf(copy_file_range) != void) cfr: {

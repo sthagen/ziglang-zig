@@ -31,6 +31,7 @@ const BlockType = enum(u2) {
     stored = 0,
     fixed = 1,
     dynamic = 2,
+    invalid = 3,
 };
 
 const State = union(enum) {
@@ -49,6 +50,7 @@ pub const Error = Container.Error || error{
     InvalidCode,
     InvalidMatch,
     WrongStoredBlockNlen,
+    InvalidBlockType,
     InvalidDynamicBlockHeader,
     ReadFailed,
     OversubscribedHuffmanTree,
@@ -360,6 +362,7 @@ fn streamInner(d: *Decompress, w: *Writer, limit: std.Io.Limit) (Error || Reader
 
                     continue :sw .dynamic_block;
                 },
+                .invalid => return error.InvalidBlockType,
             }
         },
         .stored_block => |remaining_len| {
@@ -1141,6 +1144,10 @@ test "puff09" {
     try testDecompress(.raw, @embedFile("testdata/fuzz/puff09.input"), "P");
 }
 
+test "invalid block type" {
+    try testFailure(.raw, &[_]u8{0b110}, error.InvalidBlockType);
+}
+
 test "bug 18966" {
     try testDecompress(
         .gzip,
@@ -1239,7 +1246,7 @@ test "zlib should not overshoot" {
 fn testFailure(container: Container, in: []const u8, expected_err: anyerror) !void {
     var reader: Reader = .fixed(in);
     var aw: Writer.Allocating = .init(testing.allocator);
-    try aw.ensureUnusedCapacity(flate.history_len);
+    try aw.ensureUnusedCapacity(flate.max_window_len);
     defer aw.deinit();
 
     var decompress: Decompress = .init(&reader, container, &.{});
@@ -1250,7 +1257,7 @@ fn testFailure(container: Container, in: []const u8, expected_err: anyerror) !vo
 fn testDecompress(container: Container, compressed: []const u8, expected_plain: []const u8) !void {
     var in: std.Io.Reader = .fixed(compressed);
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
-    try aw.ensureUnusedCapacity(flate.history_len);
+    try aw.ensureUnusedCapacity(flate.max_window_len);
     defer aw.deinit();
 
     var decompress: Decompress = .init(&in, container, &.{});

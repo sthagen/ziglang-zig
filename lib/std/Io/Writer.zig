@@ -191,29 +191,87 @@ pub fn writeSplatHeader(
     data: []const []const u8,
     splat: usize,
 ) Error!usize {
-    const new_end = w.end + header.len;
-    if (new_end <= w.buffer.len) {
-        @memcpy(w.buffer[w.end..][0..header.len], header);
-        w.end = new_end;
-        return header.len + try writeSplat(w, data, splat);
+    return writeSplatHeaderLimit(w, header, data, splat, .unlimited);
+}
+
+/// Equivalent to `writeSplatHeader` but writes at most `limit` bytes.
+pub fn writeSplatHeaderLimit(
+    w: *Writer,
+    header: []const u8,
+    data: []const []const u8,
+    splat: usize,
+    limit: Limit,
+) Error!usize {
+    var remaining = @intFromEnum(limit);
+    {
+        const copy_len = @min(header.len, w.buffer.len - w.end, remaining);
+        if (header.len - copy_len != 0) return writeSplatHeaderLimitFinish(w, header, data, splat, remaining);
+        @memcpy(w.buffer[w.end..][0..copy_len], header[0..copy_len]);
+        w.end += copy_len;
+        remaining -= copy_len;
     }
-    var vecs: [8][]const u8 = undefined; // Arbitrarily chosen size.
-    var i: usize = 1;
-    vecs[0] = header;
-    for (data[0 .. data.len - 1]) |buf| {
-        if (buf.len == 0) continue;
-        vecs[i] = buf;
-        i += 1;
-        if (vecs.len - i == 0) break;
+    for (data[0 .. data.len - 1], 0..) |buf, i| {
+        const copy_len = @min(buf.len, w.buffer.len - w.end, remaining);
+        if (buf.len - copy_len != 0) return @intFromEnum(limit) - remaining +
+            try writeSplatHeaderLimitFinish(w, &.{}, data[i..], splat, remaining);
+        @memcpy(w.buffer[w.end..][0..copy_len], buf[0..copy_len]);
+        w.end += copy_len;
+        remaining -= copy_len;
     }
     const pattern = data[data.len - 1];
-    const new_splat = s: {
-        if (pattern.len == 0 or vecs.len - i == 0) break :s 1;
+    const splat_n = pattern.len * splat;
+    if (splat_n > @min(w.buffer.len - w.end, remaining)) {
+        const buffered_n = @intFromEnum(limit) - remaining;
+        const written = try writeSplatHeaderLimitFinish(w, &.{}, data[data.len - 1 ..][0..1], splat, remaining);
+        return buffered_n + written;
+    }
+
+    for (0..splat) |_| {
+        @memcpy(w.buffer[w.end..][0..pattern.len], pattern);
+        w.end += pattern.len;
+    }
+
+    remaining -= splat_n;
+    return @intFromEnum(limit) - remaining;
+}
+
+fn writeSplatHeaderLimitFinish(
+    w: *Writer,
+    header: []const u8,
+    data: []const []const u8,
+    splat: usize,
+    limit: usize,
+) Error!usize {
+    var remaining = limit;
+    var vecs: [8][]const u8 = undefined;
+    var i: usize = 0;
+    v: {
+        if (header.len != 0) {
+            const copy_len = @min(header.len, remaining);
+            vecs[i] = header[0..copy_len];
+            i += 1;
+            remaining -= copy_len;
+            if (remaining == 0) break :v;
+        }
+        for (data[0 .. data.len - 1]) |buf| if (buf.len != 0) {
+            const copy_len = @min(header.len, remaining);
+            vecs[i] = buf;
+            i += 1;
+            remaining -= copy_len;
+            if (remaining == 0) break :v;
+            if (vecs.len - i == 0) break :v;
+        };
+        const pattern = data[data.len - 1];
+        if (splat == 1) {
+            vecs[i] = pattern[0..@min(remaining, pattern.len)];
+            i += 1;
+            break :v;
+        }
         vecs[i] = pattern;
         i += 1;
-        break :s splat;
-    };
-    return w.vtable.drain(w, vecs[0..i], new_splat);
+        return w.vtable.drain(w, (&vecs)[0..i], @min(remaining / pattern.len, splat));
+    }
+    return w.vtable.drain(w, (&vecs)[0..i], 1);
 }
 
 test "writeSplatHeader splatting avoids buffer aliasing temptation" {
@@ -259,13 +317,14 @@ test "fixed buffer flush" {
 /// Calls `VTable.drain` but hides the last `preserve_len` bytes from the
 /// implementation, keeping them buffered.
 pub fn drainPreserve(w: *Writer, preserve_len: usize) Error!void {
-    const temp_end = w.end -| preserve_len;
-    const preserved = w.buffer[temp_end..w.end];
-    w.end = temp_end;
-    defer w.end += preserved.len;
+    const preserved_head = w.end -| preserve_len;
+    const preserved_tail = w.end;
+    const preserved_len = preserved_tail - preserved_head;
+    w.end = preserved_head;
+    defer w.end += preserved_len;
     assert(0 == try w.vtable.drain(w, &.{""}, 1));
-    assert(w.end <= temp_end + preserved.len);
-    @memmove(w.buffer[w.end..][0..preserved.len], preserved);
+    assert(w.end <= preserved_head + preserved_len);
+    @memmove(w.buffer[w.end..][0..preserved_len], w.buffer[preserved_head..preserved_tail]);
 }
 
 pub fn unusedCapacitySlice(w: *const Writer) []u8 {
@@ -2181,6 +2240,11 @@ pub const Discarding = struct {
         };
     }
 
+    /// Includes buffered data (no need to flush).
+    pub fn fullCount(d: *const Discarding) u64 {
+        return d.count + d.writer.end;
+    }
+
     pub fn drain(w: *Writer, data: []const []const u8, splat: usize) Error!usize {
         const d: *Discarding = @alignCast(@fieldParentPtr("writer", w));
         const slice = data[0 .. data.len - 1];
@@ -2570,7 +2634,7 @@ pub const Allocating = struct {
         const gpa = a.allocator;
         var list = a.toArrayList();
         defer setArrayList(a, list);
-        const pos = file_reader.pos;
+        const pos = file_reader.logicalPos();
         const additional = if (file_reader.getSize()) |size| size - pos else |_| std.atomic.cache_line;
         if (additional == 0) return error.EndOfStream;
         list.ensureUnusedCapacity(gpa, limit.minInt64(additional)) catch return error.WriteFailed;
