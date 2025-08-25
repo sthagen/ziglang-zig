@@ -2048,7 +2048,14 @@ pub fn create(gpa: Allocator, arena: Allocator, diag: *CreateDiagnostic, options
                     break :s .none; // only LLD can handle ubsan-rt for this target
                 } else true,
             };
-            if (have_zcu and (!need_llvm or use_llvm)) break :s .zcu;
+            if (have_zcu and (!need_llvm or use_llvm)) {
+                // ubsan-rt's exports use hidden visibility. If we're building a Windows DLL and
+                // exported functions are going to be dllexported, LLVM will complain that
+                // dllexported functions must use default or protected visibility. So we can't use
+                // the ZCU strategy in this case.
+                if (options.config.dll_export_fns) break :s .lib;
+                break :s .zcu;
+            }
             if (need_llvm and !build_options.have_llvm) break :s .none; // impossible to build without llvm
             if (is_exe_or_dyn_lib) break :s .lib;
             break :s .obj;
@@ -6831,10 +6838,6 @@ pub fn addCCArgs(
         try argv.append("-municode");
     }
 
-    if (mod.code_model != .default) {
-        try argv.append(try std.fmt.allocPrint(arena, "-mcmodel={s}", .{@tagName(mod.code_model)}));
-    }
-
     try argv.ensureUnusedCapacity(2);
     switch (comp.config.debug_format) {
         .strip => {},
@@ -7051,7 +7054,7 @@ pub fn addCCArgs(
             // compiler frontend does. Therefore we must hard-code the -m flags for
             // all CPU features here.
             switch (target.cpu.arch) {
-                .riscv32, .riscv64 => {
+                .riscv32, .riscv32be, .riscv64, .riscv64be => {
                     const RvArchFeat = struct { char: u8, feat: std.Target.riscv.Feature };
                     const letters = [_]RvArchFeat{
                         .{ .char = 'm', .feat = .m },
@@ -7129,6 +7132,10 @@ pub fn addCCArgs(
         .ll,
         .bc,
         => {
+            if (mod.code_model != .default) {
+                try argv.append(try std.fmt.allocPrint(arena, "-mcmodel={s}", .{@tagName(mod.code_model)}));
+            }
+
             if (target_util.clangSupportsTargetCpuArg(target)) {
                 if (target.cpu.model.llvm_name) |llvm_name| {
                     try argv.appendSlice(&[_][]const u8{
