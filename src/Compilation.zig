@@ -12,7 +12,7 @@ const ThreadPool = std.Thread.Pool;
 const WaitGroup = std.Thread.WaitGroup;
 const ErrorBundle = std.zig.ErrorBundle;
 const fatal = std.process.fatal;
-const Writer = std.io.Writer;
+const Writer = std.Io.Writer;
 
 const Value = @import("Value.zig");
 const Type = @import("Type.zig");
@@ -468,7 +468,7 @@ pub const Path = struct {
     const Formatter = struct {
         p: Path,
         comp: *Compilation,
-        pub fn format(f: Formatter, w: *std.io.Writer) std.io.Writer.Error!void {
+        pub fn format(f: Formatter, w: *Writer) Writer.Error!void {
             const root_path: []const u8 = switch (f.p.root) {
                 .zig_lib => f.comp.dirs.zig_lib.path orelse ".",
                 .global_cache => f.comp.dirs.global_cache.path orelse ".",
@@ -1883,7 +1883,7 @@ pub const CreateDiagnostic = union(enum) {
         sub: []const u8,
         err: (fs.Dir.MakeError || fs.Dir.OpenError || fs.Dir.StatFileError),
     };
-    pub fn format(diag: CreateDiagnostic, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    pub fn format(diag: CreateDiagnostic, w: *Writer) Writer.Error!void {
         switch (diag) {
             .export_table_import_table_conflict => try w.writeAll("'--import-table' and '--export-table' cannot be used together"),
             .emit_h_without_zcu => try w.writeAll("cannot emit C header with no Zig source files"),
@@ -6457,7 +6457,7 @@ fn updateWin32Resource(comp: *Compilation, win32_resource: *Win32Resource, win32
 
             // In .rc files, a " within a quoted string is escaped as ""
             const fmtRcEscape = struct {
-                fn formatRcEscape(bytes: []const u8, writer: *std.io.Writer) std.io.Writer.Error!void {
+                fn formatRcEscape(bytes: []const u8, writer: *Writer) Writer.Error!void {
                     for (bytes) |byte| switch (byte) {
                         '"' => try writer.writeAll("\"\""),
                         '\\' => try writer.writeAll("\\\\"),
@@ -6576,7 +6576,7 @@ fn updateWin32Resource(comp: *Compilation, win32_resource: *Win32Resource, win32
         // Read depfile and update cache manifest
         {
             const dep_basename = fs.path.basename(out_dep_path);
-            const dep_file_contents = try zig_cache_tmp_dir.readFileAlloc(arena, dep_basename, 50 * 1024 * 1024);
+            const dep_file_contents = try zig_cache_tmp_dir.readFileAlloc(dep_basename, arena, .limited(50 * 1024 * 1024));
             defer arena.free(dep_file_contents);
 
             const value = try std.json.parseFromSliceLeaky(std.json.Value, arena, dep_file_contents, .{});
@@ -6798,8 +6798,48 @@ pub fn addCCArgs(
         else => {},
     }
 
-    if (target.cpu.arch.isArm()) {
-        try argv.append(if (target.cpu.arch.isThumb()) "-mthumb" else "-mno-thumb");
+    const xclang_flag = switch (ext) {
+        .assembly, .assembly_with_cpp => "-Xclangas",
+        else => "-Xclang",
+    };
+
+    if (target_util.clangSupportsTargetCpuArg(target)) {
+        if (target.cpu.model.llvm_name) |llvm_name| {
+            try argv.appendSlice(&[_][]const u8{
+                xclang_flag, "-target-cpu", xclang_flag, llvm_name,
+            });
+        }
+    }
+
+    // It would be really nice if there was a more compact way to communicate this info to Clang.
+    const all_features_list = target.cpu.arch.allFeaturesList();
+    try argv.ensureUnusedCapacity(all_features_list.len * 4);
+    for (all_features_list, 0..) |feature, index_usize| {
+        const index = @as(std.Target.Cpu.Feature.Set.Index, @intCast(index_usize));
+        const is_enabled = target.cpu.features.isEnabled(index);
+
+        if (feature.llvm_name) |llvm_name| {
+            // We communicate float ABI to Clang through the dedicated options.
+            if (std.mem.startsWith(u8, llvm_name, "soft-float") or
+                std.mem.startsWith(u8, llvm_name, "hard-float"))
+                continue;
+
+            // Ignore these until we figure out how to handle the concept of omitting features.
+            // See https://github.com/ziglang/zig/issues/23539
+            if (target_util.isDynamicAMDGCNFeature(target, feature)) continue;
+
+            argv.appendSliceAssumeCapacity(&[_][]const u8{ xclang_flag, "-target-feature", xclang_flag });
+            const plus_or_minus = "-+"[@intFromBool(is_enabled)];
+            const arg = try std.fmt.allocPrint(arena, "{c}{s}", .{ plus_or_minus, llvm_name });
+            argv.appendAssumeCapacity(arg);
+        }
+    }
+
+    if (target.cpu.arch.isThumb()) {
+        try argv.append(switch (ext) {
+            .assembly, .assembly_with_cpp => "-Wa,-mthumb",
+            else => "-mthumb",
+        });
     }
 
     if (target_util.llvmMachineAbi(target)) |mabi| {
@@ -7132,38 +7172,6 @@ pub fn addCCArgs(
         => {
             if (mod.code_model != .default) {
                 try argv.append(try std.fmt.allocPrint(arena, "-mcmodel={s}", .{@tagName(mod.code_model)}));
-            }
-
-            if (target_util.clangSupportsTargetCpuArg(target)) {
-                if (target.cpu.model.llvm_name) |llvm_name| {
-                    try argv.appendSlice(&[_][]const u8{
-                        "-Xclang", "-target-cpu", "-Xclang", llvm_name,
-                    });
-                }
-            }
-
-            // It would be really nice if there was a more compact way to communicate this info to Clang.
-            const all_features_list = target.cpu.arch.allFeaturesList();
-            try argv.ensureUnusedCapacity(all_features_list.len * 4);
-            for (all_features_list, 0..) |feature, index_usize| {
-                const index = @as(std.Target.Cpu.Feature.Set.Index, @intCast(index_usize));
-                const is_enabled = target.cpu.features.isEnabled(index);
-
-                if (feature.llvm_name) |llvm_name| {
-                    // We communicate float ABI to Clang through the dedicated options.
-                    if (std.mem.startsWith(u8, llvm_name, "soft-float") or
-                        std.mem.startsWith(u8, llvm_name, "hard-float"))
-                        continue;
-
-                    // Ignore these until we figure out how to handle the concept of omitting features.
-                    // See https://github.com/ziglang/zig/issues/23539
-                    if (target_util.isDynamicAMDGCNFeature(target, feature)) continue;
-
-                    argv.appendSliceAssumeCapacity(&[_][]const u8{ "-Xclang", "-target-feature", "-Xclang" });
-                    const plus_or_minus = "-+"[@intFromBool(is_enabled)];
-                    const arg = try std.fmt.allocPrint(arena, "{c}{s}", .{ plus_or_minus, llvm_name });
-                    argv.appendAssumeCapacity(arg);
-                }
             }
 
             {
