@@ -15,6 +15,7 @@ const Config = struct {
 
     const PerMode = struct {
         expect: []const u8,
+        exclude_arch: []const std.Target.Cpu.Arch = &.{},
         exclude_os: []const std.Target.Os.Tag = &.{},
         error_tracing: ?bool = null,
     };
@@ -59,6 +60,7 @@ fn addExpect(
     use_llvm: bool,
     mode_config: Config.PerMode,
 ) void {
+    for (mode_config.exclude_arch) |tag| if (tag == builtin.cpu.arch) return;
     for (mode_config.exclude_os) |tag| if (tag == builtin.os.tag) return;
 
     const b = self.b;
@@ -91,7 +93,7 @@ fn addExpect(
 
     const check_run = b.addRunArtifact(self.check_exe);
     check_run.setName(annotated_case_name);
-    check_run.addFileArg(run.captureStdErr());
+    check_run.addFileArg(run.captureStdErr(.{}));
     check_run.addArgs(&.{
         @tagName(optimize_mode),
     });
