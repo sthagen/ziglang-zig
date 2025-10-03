@@ -61,28 +61,12 @@ pub const cpu_context = @import("debug/cpu_context.zig");
 /// ```
 pub const SelfInfo = if (@hasDecl(root, "debug") and @hasDecl(root.debug, "SelfInfo"))
     root.debug.SelfInfo
-else switch (native_os) {
-    .linux,
-    .netbsd,
-    .freebsd,
-    .dragonfly,
-    .openbsd,
-    .solaris,
-    .illumos,
-    => @import("debug/SelfInfo/Elf.zig"),
-
-    .macos,
-    .ios,
-    .watchos,
-    .tvos,
-    .visionos,
-    => @import("debug/SelfInfo/Darwin.zig"),
-
-    .uefi,
-    .windows,
-    => @import("debug/SelfInfo/Windows.zig"),
-
-    else => void,
+else switch (std.Target.ObjectFormat.default(native_os, native_arch)) {
+    .coff => if (native_os == .windows) @import("debug/SelfInfo/Windows.zig") else void,
+    .elf => @import("debug/SelfInfo/Elf.zig"),
+    .macho => @import("debug/SelfInfo/MachO.zig"),
+    .goff, .plan9, .spirv, .wasm, .xcoff => void,
+    .c, .hex, .raw => unreachable,
 };
 
 pub const SelfInfoError = error{
@@ -968,6 +952,9 @@ const StackIterator = union(enum) {
     /// Offset of the saved return address wrt the frame pointer.
     const ra_offset = off: {
         if (native_arch == .powerpc64le) break :off 2 * @sizeOf(usize);
+        // On s390x, r14 is the link register and we need to grab it from its customary slot in the
+        // register save area (ELF ABI s390x Supplement §1.2.2.2).
+        if (native_arch == .s390x) break :off 14 * @sizeOf(usize);
         break :off @sizeOf(usize);
     };
 
