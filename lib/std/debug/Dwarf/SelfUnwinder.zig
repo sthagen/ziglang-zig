@@ -15,14 +15,14 @@ cfi_vm: Dwarf.Unwind.VirtualMachine,
 expr_vm: Dwarf.expression.StackMachine(.{ .call_frame_context = true }),
 
 pub const CacheEntry = struct {
-    const max_regs = 32;
+    const max_rules = 32;
 
     pc: usize,
     cie: *const Dwarf.Unwind.CommonInformationEntry,
     cfa_rule: Dwarf.Unwind.VirtualMachine.CfaRule,
     num_rules: u8,
-    rules_regs: [max_regs]u16,
-    rules: [max_regs]Dwarf.Unwind.VirtualMachine.RegisterRule,
+    rules_regs: [max_rules]u16,
+    rules: [max_rules]Dwarf.Unwind.VirtualMachine.RegisterRule,
 
     pub fn find(entries: []const CacheEntry, pc: usize) ?*const CacheEntry {
         assert(pc != 0);
@@ -108,22 +108,30 @@ pub fn computeRules(
 
     unwinder.cfi_vm.reset();
     const row = try unwinder.cfi_vm.runTo(gpa, pc_vaddr, cie, &fde, @sizeOf(usize), native_endian);
-    const cols = unwinder.cfi_vm.rowColumns(&row);
-
-    if (cols.len > CacheEntry.max_regs) return error.UnsupportedDebugInfo;
 
     var entry: CacheEntry = .{
         .pc = unwinder.pc,
         .cie = cie,
         .cfa_rule = row.cfa,
-        .num_rules = @intCast(cols.len),
+        .num_rules = undefined,
         .rules_regs = undefined,
         .rules = undefined,
     };
-    for (cols, 0..) |col, i| {
+    var i: usize = 0;
+    for (unwinder.cfi_vm.rowColumns(&row)) |col| {
+        if (i == CacheEntry.max_rules) return error.UnsupportedDebugInfo;
+
+        _ = unwinder.cpu_state.dwarfRegisterBytes(col.register) catch |err| switch (err) {
+            // Reading an unsupported register during unwinding will result in an error, so there is
+            // no point wasting a rule slot in the cache entry for it.
+            error.UnsupportedRegister => continue,
+            error.InvalidRegister => return error.InvalidDebugInfo,
+        };
         entry.rules_regs[i] = col.register;
         entry.rules[i] = col.rule;
+        i += 1;
     }
+    entry.num_rules = @intCast(i);
     return entry;
 }
 
@@ -221,8 +229,10 @@ fn nextInner(unwinder: *SelfUnwinder, gpa: Allocator, cache_entry: *const CacheE
         } = switch (rule) {
             .default => val: {
                 // The default rule is typically equivalent to `.undefined`, but ABIs may override it.
-                if (builtin.cpu.arch.isAARCH64() and register >= 19 and register <= 28) {
-                    break :val .same;
+                switch (builtin.target.cpu.arch) {
+                    .aarch64, .aarch64_be => if (register >= 19 and register <= 28) break :val .same,
+                    .s390x => if (register >= 6 and register <= 15) break :val .same,
+                    else => {},
                 }
                 break :val .undefined;
             },

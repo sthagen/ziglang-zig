@@ -2824,9 +2824,6 @@ fn zirTupleDecl(
                 }
                 break :init field_init_val.toIntern();
             }
-            if (try sema.typeHasOnePossibleValue(field_type)) |opv| {
-                break :init opv.toIntern();
-            }
             break :init .none;
         };
     }
@@ -20048,10 +20045,14 @@ fn arrayInitAnon(
     const types = try sema.arena.alloc(InternPool.Index, operands.len);
     const values = try sema.arena.alloc(InternPool.Index, operands.len);
 
+    var any_comptime = false;
     const opt_runtime_src = rs: {
         var runtime_src: ?LazySrcLoc = null;
         for (operands, 0..) |operand, i| {
-            const operand_src = src; // TODO better source location
+            const operand_src = block.src(.{ .init_elem = .{
+                .init_node_offset = src.offset.node_offset.x,
+                .elem_index = @intCast(i),
+            } });
             const elem = try sema.resolveInst(operand);
             types[i] = sema.typeOf(elem).toIntern();
             if (Type.fromInterned(types[i]).zigTypeTag(zcu) == .@"opaque") {
@@ -20066,6 +20067,7 @@ fn arrayInitAnon(
             }
             if (try sema.resolveValue(elem)) |val| {
                 values[i] = val.toIntern();
+                any_comptime = true;
             } else {
                 values[i] = .none;
                 runtime_src = operand_src;
@@ -20074,9 +20076,21 @@ fn arrayInitAnon(
         break :rs runtime_src;
     };
 
+    // A field can't be `comptime` if it references a `comptime var` but the aggregate can still be comptime-known.
+    // Replace these fields with `.none` only for generating the type.
+    const values_no_comptime = if (!any_comptime) values else blk: {
+        const new_values = try sema.arena.alloc(InternPool.Index, operands.len);
+        for (values, new_values) |val, *new_val| {
+            if (val != .none and Value.fromInterned(val).canMutateComptimeVarState(zcu)) {
+                new_val.* = .none;
+            } else new_val.* = val;
+        }
+        break :blk new_values;
+    };
+
     const tuple_ty: Type = .fromInterned(try ip.getTupleType(gpa, pt.tid, .{
         .types = types,
-        .values = values,
+        .values = values_no_comptime,
     }));
 
     const runtime_src = opt_runtime_src orelse {
@@ -20085,6 +20099,14 @@ fn arrayInitAnon(
     };
 
     try sema.requireRuntimeBlock(block, src, runtime_src);
+
+    for (operands, 0..) |operand, i| {
+        const operand_src = block.src(.{ .init_elem = .{
+            .init_node_offset = src.offset.node_offset.x,
+            .elem_index = @intCast(i),
+        } });
+        try sema.validateRuntimeValue(block, operand_src, try sema.resolveInst(operand));
+    }
 
     if (is_ref) {
         const target = sema.pt.zcu.getTarget();
@@ -21454,18 +21476,8 @@ fn reifyTuple(
             return sema.fail(block, src, "non-comptime tuple fields cannot specify default initialization value", .{});
         }
 
-        const default_or_opv: InternPool.Index = default: {
-            if (field_default_value != .none) {
-                break :default field_default_value;
-            }
-            if (try sema.typeHasOnePossibleValue(field_type)) |opv| {
-                break :default opv.toIntern();
-            }
-            break :default .none;
-        };
-
         field_ty.* = field_type.toIntern();
-        field_init.* = default_or_opv;
+        field_init.* = field_default_value;
     }
 
     return Air.internedToRef(try zcu.intern_pool.getTupleType(gpa, pt.tid, .{
@@ -36257,13 +36269,31 @@ pub fn typeHasOnePossibleValue(sema: *Sema, ty: Type) CompileError!?Value {
                 },
 
                 .tuple_type => |tuple| {
-                    for (tuple.values.get(ip)) |val| {
-                        if (val == .none) return null;
+                    try ty.resolveLayout(pt);
+
+                    if (tuple.types.len == 0) {
+                        return try pt.aggregateValue(ty, &.{});
                     }
-                    // In this case the struct has all comptime-known fields and
-                    // therefore has one possible value.
-                    // TODO: write something like getCoercedInts to avoid needing to dupe
-                    return try pt.aggregateValue(ty, try sema.arena.dupe(InternPool.Index, tuple.values.get(ip)));
+
+                    const field_vals = try sema.arena.alloc(
+                        InternPool.Index,
+                        tuple.types.len,
+                    );
+                    for (
+                        field_vals,
+                        tuple.types.get(ip),
+                        tuple.values.get(ip),
+                    ) |*field_val, field_ty, field_comptime_val| {
+                        if (field_comptime_val != .none) {
+                            field_val.* = field_comptime_val;
+                            continue;
+                        }
+                        if (try sema.typeHasOnePossibleValue(.fromInterned(field_ty))) |opv| {
+                            field_val.* = opv.toIntern();
+                        } else return null;
+                    }
+
+                    return try pt.aggregateValue(ty, field_vals);
                 },
 
                 .union_type => {
