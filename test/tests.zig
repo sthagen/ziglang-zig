@@ -176,6 +176,7 @@ const test_targets = blk: {
             },
             .linkage = .dynamic,
             .link_libc = true,
+            .extra_target = true,
         },
         .{
             .target = .{
@@ -388,8 +389,6 @@ const test_targets = blk: {
                 .arch_os_abi = "hexagon-linux-none",
                 .cpu_features = "baseline+long_calls",
             }) catch unreachable,
-            // https://github.com/llvm/llvm-project/pull/111217
-            .skip_modules = &.{"std"},
         },
         .{
             .target = std.Target.Query.parse(.{
@@ -397,8 +396,6 @@ const test_targets = blk: {
                 .cpu_features = "baseline+long_calls",
             }) catch unreachable,
             .link_libc = true,
-            // https://github.com/llvm/llvm-project/pull/111217
-            .skip_modules = &.{"std"},
         },
         // Currently crashes in qemu-hexagon.
         // .{
@@ -408,8 +405,6 @@ const test_targets = blk: {
         //     }) catch unreachable,
         //     .linkage = .dynamic,
         //     .link_libc = true,
-        //     // https://github.com/llvm/llvm-project/pull/111217
-        //     .skip_modules = &.{"std"},
         //     .extra_target = true,
         // },
 
@@ -613,6 +608,7 @@ const test_targets = blk: {
                 .abi = .muslabin32,
             },
             .link_libc = true,
+            .extra_target = true,
         },
         .{
             .target = .{
@@ -639,6 +635,7 @@ const test_targets = blk: {
                 .abi = .gnuabin32,
             },
             .link_libc = true,
+            .extra_target = true,
         },
 
         .{
@@ -673,6 +670,7 @@ const test_targets = blk: {
                 .abi = .muslabin32,
             },
             .link_libc = true,
+            .extra_target = true,
         },
         .{
             .target = .{
@@ -699,6 +697,7 @@ const test_targets = blk: {
                 .abi = .gnuabin32,
             },
             .link_libc = true,
+            .extra_target = true,
         },
 
         .{
@@ -707,6 +706,7 @@ const test_targets = blk: {
                 .os_tag = .linux,
                 .abi = .eabi,
             },
+            .extra_target = true,
         },
         .{
             .target = .{
@@ -722,6 +722,7 @@ const test_targets = blk: {
                 .abi = .musleabi,
             },
             .link_libc = true,
+            .extra_target = true,
         },
         .{
             .target = .{
@@ -764,6 +765,7 @@ const test_targets = blk: {
             .link_libc = true,
             // https://github.com/ziglang/zig/issues/2256
             .skip_modules = &.{"std"},
+            .extra_target = true,
         },
         .{
             .target = .{
@@ -1135,6 +1137,7 @@ const test_targets = blk: {
                 .abi = .gnux32,
             },
             .link_libc = true,
+            .extra_target = true,
         },
         .{
             .target = .{
@@ -1152,6 +1155,7 @@ const test_targets = blk: {
             },
             .linkage = .dynamic,
             .link_libc = true,
+            .extra_target = true,
         },
         .{
             .target = .{
@@ -1160,6 +1164,7 @@ const test_targets = blk: {
                 .abi = .muslx32,
             },
             .link_libc = true,
+            .extra_target = true,
         },
         .{
             .target = .{
@@ -1315,6 +1320,7 @@ const test_targets = blk: {
                 .abi = .eabi,
             },
             .link_libc = true,
+            .extra_target = true,
         },
         .{
             .target = .{
@@ -1827,7 +1833,6 @@ const c_abi_targets = blk: {
                 .os_tag = .linux,
                 .abi = .muslx32,
             },
-            .use_llvm = true,
         },
 
         // WASI Targets

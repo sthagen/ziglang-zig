@@ -481,7 +481,7 @@ pub fn defaultPanic(
     if (use_trap_panic) @trap();
 
     switch (builtin.os.tag) {
-        .freestanding, .other => {
+        .freestanding, .other, .@"3ds", .vita => {
             @trap();
         },
         .uefi => {
@@ -872,10 +872,14 @@ const StackIterator = union(enum) {
     };
 
     const fp_usability: FpUsability = switch (builtin.target.cpu.arch) {
+        .avr,
+        .csky,
         .mips,
         .mipsel,
         .mips64,
         .mips64el,
+        .msp430,
+        .xcore,
         => .useless,
         .hexagon,
         // The PowerPC ABIs don't actually strictly require a backchain pointer; they allow omitting
@@ -984,6 +988,8 @@ const StackIterator = union(enum) {
         // On LoongArch and RISC-V, the frame pointer points to the top of the saved register area,
         // in which the base pointer is the first word.
         if (native_arch.isLoongArch() or native_arch.isRISCV()) break :off -2 * @sizeOf(usize);
+        // On OpenRISC, the frame pointer is stored below the return address.
+        if (native_arch == .or1k) break :off -2 * @sizeOf(usize);
         // On SPARC, the frame pointer points to the save area which holds 16 slots for the local
         // and incoming registers. The base pointer (i6) is stored in its customary save slot.
         if (native_arch.isSPARC()) break :off 14 * @sizeOf(usize);
@@ -995,7 +1001,9 @@ const StackIterator = union(enum) {
     const fp_to_ra_offset = off: {
         // On LoongArch and RISC-V, the frame pointer points to the top of the saved register area,
         // in which the return address is the second word.
-        if (native_arch.isRISCV() or native_arch.isLoongArch()) break :off -1 * @sizeOf(usize);
+        if (native_arch.isLoongArch() or native_arch.isRISCV()) break :off -1 * @sizeOf(usize);
+        // On OpenRISC, the return address is stored below the stack parameter area.
+        if (native_arch == .or1k) break :off -1 * @sizeOf(usize);
         if (native_arch.isPowerPC64()) break :off 2 * @sizeOf(usize);
         // On s390x, r14 is the link register and we need to grab it from its customary slot in the
         // register save area (ELF ABI s390x Supplement §1.2.2.2).
