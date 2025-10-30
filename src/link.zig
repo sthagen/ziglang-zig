@@ -1,19 +1,22 @@
-const std = @import("std");
-const build_options = @import("build_options");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
+
+const std = @import("std");
+const Io = std.Io;
 const assert = std.debug.assert;
 const fs = std.fs;
 const mem = std.mem;
 const log = std.log.scoped(.link);
-const trace = @import("tracy.zig").trace;
-const wasi_libc = @import("libs/wasi_libc.zig");
-
 const Allocator = std.mem.Allocator;
 const Cache = std.Build.Cache;
 const Path = std.Build.Cache.Path;
 const Directory = std.Build.Cache.Directory;
 const Compilation = @import("Compilation.zig");
 const LibCInstallation = std.zig.LibCInstallation;
+
+const trace = @import("tracy.zig").trace;
+const wasi_libc = @import("libs/wasi_libc.zig");
+
 const Zcu = @import("Zcu.zig");
 const InternPool = @import("InternPool.zig");
 const Type = @import("Type.zig");
@@ -568,10 +571,31 @@ pub const File = struct {
         return if (dev.env.supports(tag.devFeature()) and base.tag == tag) @fieldParentPtr("base", base) else null;
     }
 
+    pub fn startProgress(base: *File, prog_node: std.Progress.Node) void {
+        switch (base.tag) {
+            else => {},
+            inline .elf2, .coff2 => |tag| {
+                dev.check(tag.devFeature());
+                return @as(*tag.Type(), @fieldParentPtr("base", base)).startProgress(prog_node);
+            },
+        }
+    }
+
+    pub fn endProgress(base: *File) void {
+        switch (base.tag) {
+            else => {},
+            inline .elf2, .coff2 => |tag| {
+                dev.check(tag.devFeature());
+                return @as(*tag.Type(), @fieldParentPtr("base", base)).endProgress();
+            },
+        }
+    }
+
     pub fn makeWritable(base: *File) !void {
         dev.check(.make_writable);
         const comp = base.comp;
         const gpa = comp.gpa;
+        const io = comp.io;
         switch (base.tag) {
             .lld => assert(base.file == null),
             .elf, .macho, .wasm => {
@@ -616,23 +640,10 @@ pub const File = struct {
                     &coff.mf
                 else
                     unreachable;
-                var attempt: u5 = 0;
-                mf.file = while (true) break base.emit.root_dir.handle.openFile(base.emit.sub_path, .{
+                mf.file = try base.emit.root_dir.handle.adaptToNewApi().openFile(io, base.emit.sub_path, .{
                     .mode = .read_write,
-                }) catch |err| switch (err) {
-                    error.AccessDenied => switch (builtin.os.tag) {
-                        .windows => {
-                            if (attempt == 13) return error.AccessDenied;
-                            // give the kernel a chance to finish closing the executable handle
-                            std.os.windows.kernel32.Sleep(@as(u32, 1) << attempt >> 1);
-                            attempt += 1;
-                            continue;
-                        },
-                        else => return error.AccessDenied,
-                    },
-                    else => |e| return e,
-                };
-                base.file = mf.file;
+                });
+                base.file = .adaptFromNewApi(mf.file);
                 try mf.ensureTotalCapacity(@intCast(mf.nodes.items[0].location().resolve(mf)[1]));
             },
             .c, .spirv => dev.checkAny(&.{ .c_linker, .spirv_linker }),
@@ -657,6 +668,7 @@ pub const File = struct {
     pub fn makeExecutable(base: *File) !void {
         dev.check(.make_executable);
         const comp = base.comp;
+        const io = comp.io;
         switch (comp.config.output_mode) {
             .Obj => return,
             .Lib => switch (comp.config.link_mode) {
@@ -707,8 +719,8 @@ pub const File = struct {
                     unreachable;
                 mf.unmap();
                 assert(mf.file.handle == f.handle);
+                mf.file.close(io);
                 mf.file = undefined;
-                f.close();
                 base.file = null;
             },
             .c, .spirv => dev.checkAny(&.{ .c_linker, .spirv_linker }),
@@ -1129,7 +1141,7 @@ pub const File = struct {
     pub fn loadInput(base: *File, input: Input) anyerror!void {
         if (base.tag == .lld) return;
         switch (base.tag) {
-            inline .elf, .wasm => |tag| {
+            inline .elf, .elf2, .wasm => |tag| {
                 dev.check(tag.devFeature());
                 return @as(*tag.Type(), @fieldParentPtr("base", base)).loadInput(input);
             },
@@ -1290,9 +1302,6 @@ pub const PrelinkTask = union(enum) {
     /// Tells the linker to load a shared library, possibly one that is a
     /// GNU ld script.
     load_dso: Path,
-    /// Tells the linker to load an input which could be an object file,
-    /// archive, or shared library.
-    load_input: Input,
 };
 pub const ZcuTask = union(enum) {
     /// Write the constant value for a Decl to the output file.
@@ -1468,20 +1477,6 @@ pub fn doPrelinkTask(comp: *Compilation, task: PrelinkTask) void {
             }) catch |err| switch (err) {
                 error.LinkFailure => return, // error reported via link_diags
                 else => |e| diags.addParseError(path, "failed to parse shared library: {s}", .{@errorName(e)}),
-            };
-        },
-        .load_input => |input| {
-            const prog_node = comp.link_prog_node.start("Parse Input", 0);
-            defer prog_node.end();
-            base.loadInput(input) catch |err| switch (err) {
-                error.LinkFailure => return, // error reported via link_diags
-                else => |e| {
-                    if (input.path()) |path| {
-                        diags.addParseError(path, "failed to parse linker input: {s}", .{@errorName(e)});
-                    } else {
-                        diags.addError("failed to {s}: {s}", .{ input.taskName(), @errorName(e) });
-                    }
-                },
             };
         },
     }
@@ -2224,7 +2219,7 @@ fn resolvePathInputLib(
             var error_bundle = try wip_errors.toOwnedBundle("");
             defer error_bundle.deinit(gpa);
 
-            error_bundle.renderToStdErr(color.renderOptions());
+            error_bundle.renderToStdErr(.{}, color);
 
             std.process.exit(1);
         }

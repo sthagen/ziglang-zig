@@ -1563,6 +1563,13 @@ const targets = [_]ArchTarget{
                 .deps = &.{},
             },
         },
+        .extra_cpus = &.{
+            .{
+                .llvm_name = null,
+                .zig_name = "i86",
+                .features = &.{"16bit_mode"},
+            },
+        },
         .omit_cpus = &.{
             // LLVM defines a bunch of dumb aliases with foreach loops in X86.td.
             "pentium_mmx",
@@ -2160,7 +2167,7 @@ fn processOneTarget(job: Job) void {
 }
 
 fn usageAndExit(arg0: []const u8, code: u8) noreturn {
-    const stderr = std.debug.lockStderrWriter(&.{});
+    const stderr, _ = std.debug.lockStderrWriter(&.{});
     stderr.print(
         \\Usage: {s} /path/to/llvm-tblgen /path/git/llvm-project /path/git/zig [zig_name filter]
         \\
