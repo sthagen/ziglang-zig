@@ -850,7 +850,7 @@ fn buildOutputType(
     var disable_c_depfile = false;
     var linker_sort_section: ?link.File.Lld.Elf.SortSection = null;
     var linker_gc_sections: ?bool = null;
-    var linker_compress_debug_sections: ?link.File.Lld.Elf.CompressDebugSections = null;
+    var linker_compress_debug_sections: ?std.zig.CompressDebugSections = null;
     var linker_allow_shlib_undefined: ?bool = null;
     var allow_so_scripts: bool = false;
     var linker_bind_global_refs_locally: ?bool = null;
@@ -893,7 +893,7 @@ fn buildOutputType(
     var override_global_cache_dir: ?[]const u8 = try EnvVar.ZIG_GLOBAL_CACHE_DIR.get(arena);
     var override_lib_dir: ?[]const u8 = try EnvVar.ZIG_LIB_DIR.get(arena);
     var clang_preprocessor_mode: Compilation.ClangPreprocessorMode = .no;
-    var subsystem: ?std.Target.SubSystem = null;
+    var subsystem: ?std.zig.Subsystem = null;
     var major_subsystem_version: ?u16 = null;
     var minor_subsystem_version: ?u16 = null;
     var mingw_unicode_entry_point: bool = false;
@@ -918,7 +918,7 @@ fn buildOutputType(
     var extra_cflags: std.ArrayListUnmanaged([]const u8) = .empty;
     var extra_rcflags: std.ArrayListUnmanaged([]const u8) = .empty;
     var symbol_wrap_set: std.StringArrayHashMapUnmanaged(void) = .empty;
-    var rc_includes: Compilation.RcIncludes = .any;
+    var rc_includes: std.zig.RcIncludes = .any;
     var manifest_file: ?[]const u8 = null;
     var linker_export_symbol_names: std.ArrayListUnmanaged([]const u8) = .empty;
 
@@ -1135,7 +1135,7 @@ fn buildOutputType(
                         }
                         n_jobs = num;
                     } else if (mem.eql(u8, arg, "--subsystem")) {
-                        subsystem = try parseSubSystem(args_iter.nextOrFatal());
+                        subsystem = try parseSubsystem(args_iter.nextOrFatal());
                     } else if (mem.eql(u8, arg, "-O")) {
                         mod_opts.optimize_mode = parseOptimizeMode(args_iter.nextOrFatal());
                     } else if (mem.cutPrefix(u8, arg, "-fentry=")) |rest| {
@@ -1167,11 +1167,11 @@ fn buildOutputType(
                     } else if (mem.eql(u8, arg, "-install_name")) {
                         install_name = args_iter.nextOrFatal();
                     } else if (mem.cutPrefix(u8, arg, "--compress-debug-sections=")) |param| {
-                        linker_compress_debug_sections = std.meta.stringToEnum(link.File.Lld.Elf.CompressDebugSections, param) orelse {
+                        linker_compress_debug_sections = std.meta.stringToEnum(std.zig.CompressDebugSections, param) orelse {
                             fatal("expected --compress-debug-sections=[none|zlib|zstd], found '{s}'", .{param});
                         };
                     } else if (mem.eql(u8, arg, "--compress-debug-sections")) {
-                        linker_compress_debug_sections = link.File.Lld.Elf.CompressDebugSections.zlib;
+                        linker_compress_debug_sections = .zlib;
                     } else if (mem.eql(u8, arg, "-pagezero_size")) {
                         const next_arg = args_iter.nextOrFatal();
                         pagezero_size = std.fmt.parseUnsigned(u64, eatIntPrefix(next_arg, 16), 16) catch |err| {
@@ -2335,7 +2335,7 @@ fn buildOutputType(
                         if (it.only_arg.len == 0) {
                             linker_compress_debug_sections = .zlib;
                         } else {
-                            linker_compress_debug_sections = std.meta.stringToEnum(link.File.Lld.Elf.CompressDebugSections, it.only_arg) orelse {
+                            linker_compress_debug_sections = std.meta.stringToEnum(std.zig.CompressDebugSections, it.only_arg) orelse {
                                 fatal("expected [none|zlib|zstd] after --compress-debug-sections, found '{s}'", .{it.only_arg});
                             };
                         }
@@ -2415,7 +2415,7 @@ fn buildOutputType(
                 } else if (mem.eql(u8, arg, "-rpath") or mem.eql(u8, arg, "--rpath") or mem.eql(u8, arg, "-R")) {
                     try create_module.rpath_list.append(arena, linker_args_it.nextOrFatal());
                 } else if (mem.eql(u8, arg, "--subsystem")) {
-                    subsystem = try parseSubSystem(linker_args_it.nextOrFatal());
+                    subsystem = try parseSubsystem(linker_args_it.nextOrFatal());
                 } else if (mem.eql(u8, arg, "-I") or
                     mem.eql(u8, arg, "--dynamic-linker") or
                     mem.eql(u8, arg, "-dynamic-linker"))
@@ -2523,7 +2523,7 @@ fn buildOutputType(
                     try linker_export_symbol_names.append(arena, linker_args_it.nextOrFatal());
                 } else if (mem.eql(u8, arg, "--compress-debug-sections")) {
                     const arg1 = linker_args_it.nextOrFatal();
-                    linker_compress_debug_sections = std.meta.stringToEnum(link.File.Lld.Elf.CompressDebugSections, arg1) orelse {
+                    linker_compress_debug_sections = std.meta.stringToEnum(std.zig.CompressDebugSections, arg1) orelse {
                         fatal("expected [none|zlib|zstd] after --compress-debug-sections, found '{s}'", .{arg1});
                     };
                 } else if (mem.cutPrefix(u8, arg, "-z")) |z_rest| {
@@ -2743,7 +2743,7 @@ fn buildOutputType(
                     try symbol_wrap_set.put(arena, next_arg, {});
                 } else if (mem.startsWith(u8, arg, "/subsystem:")) {
                     var split_it = mem.splitBackwardsScalar(u8, arg, ':');
-                    subsystem = try parseSubSystem(split_it.first());
+                    subsystem = try parseSubsystem(split_it.first());
                 } else if (mem.startsWith(u8, arg, "/implib:")) {
                     var split_it = mem.splitBackwardsScalar(u8, arg, ':');
                     emit_implib = .{ .yes = split_it.first() };
@@ -6657,26 +6657,10 @@ fn warnAboutForeignBinaries(
     }
 }
 
-fn parseSubSystem(next_arg: []const u8) !std.Target.SubSystem {
-    if (mem.eql(u8, next_arg, "console")) {
-        return .Console;
-    } else if (mem.eql(u8, next_arg, "windows")) {
-        return .Windows;
-    } else if (mem.eql(u8, next_arg, "posix")) {
-        return .Posix;
-    } else if (mem.eql(u8, next_arg, "native")) {
-        return .Native;
-    } else if (mem.eql(u8, next_arg, "efi_application")) {
-        return .EfiApplication;
-    } else if (mem.eql(u8, next_arg, "efi_boot_service_driver")) {
-        return .EfiBootServiceDriver;
-    } else if (mem.eql(u8, next_arg, "efi_rom")) {
-        return .EfiRom;
-    } else if (mem.eql(u8, next_arg, "efi_runtime_driver")) {
-        return .EfiRuntimeDriver;
-    } else {
+fn parseSubsystem(arg: []const u8) !std.zig.Subsystem {
+    return std.meta.stringToEnum(std.zig.Subsystem, arg) orelse
         fatal("invalid: --subsystem: '{s}'. Options are:\n{s}", .{
-            next_arg,
+            arg,
             \\  console
             \\  windows
             \\  posix
@@ -6687,7 +6671,6 @@ fn parseSubSystem(next_arg: []const u8) !std.Target.SubSystem {
             \\  efi_runtime_driver
             \\
         });
-    }
 }
 
 /// Model a header searchlist as a group.
@@ -6804,8 +6787,8 @@ fn accessFrameworkPath(
     return false;
 }
 
-fn parseRcIncludes(arg: []const u8) Compilation.RcIncludes {
-    return std.meta.stringToEnum(Compilation.RcIncludes, arg) orelse
+fn parseRcIncludes(arg: []const u8) std.zig.RcIncludes {
+    return std.meta.stringToEnum(std.zig.RcIncludes, arg) orelse
         fatal("unsupported rc includes type: '{s}'", .{arg});
 }
 
