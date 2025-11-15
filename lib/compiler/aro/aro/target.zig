@@ -375,7 +375,7 @@ pub fn isWindowsMSVCEnvironment(target: std.Target) bool {
 }
 
 pub fn isCygwinMinGW(target: std.Target) bool {
-    return target.os.tag == .windows and (target.abi == .gnu or target.abi == .cygnus);
+    return target.os.tag == .windows and (target.abi == .gnu);
 }
 
 pub fn isPS(target: std.Target) bool {
@@ -674,7 +674,7 @@ pub fn toLLVMTriple(target: std.Target, buf: []u8) []const u8 {
         .emscripten => "emscripten",
         .uefi => "windows",
         .macos => "macosx",
-        .ios => "ios",
+        .ios, .maccatalyst => "ios",
         .tvos => "tvos",
         .watchos => "watchos",
         .driverkit => "driverkit",
@@ -703,7 +703,8 @@ pub fn toLLVMTriple(target: std.Target, buf: []u8) []const u8 {
     writer.writeByte('-') catch unreachable;
 
     const llvm_abi = switch (target.abi) {
-        .none, .ilp32 => "unknown",
+        .none => if (target.os.tag == .maccatalyst) "macabi" else "unknown",
+        .ilp32 => "unknown",
         .gnu => "gnu",
         .gnuabin32 => "gnuabin32",
         .gnuabi64 => "gnuabi64",
@@ -727,9 +728,7 @@ pub fn toLLVMTriple(target: std.Target, buf: []u8) []const u8 {
         .muslx32 => "muslx32",
         .msvc => "msvc",
         .itanium => "itanium",
-        .cygnus => "cygnus",
         .simulator => "simulator",
-        .macabi => "macabi",
         .ohos => "ohos",
         .ohoseabi => "ohoseabi",
     };
@@ -743,6 +742,7 @@ pub fn isPIEDefault(target: std.Target) DefaultPIStatus {
     return switch (target.os.tag) {
         .haiku,
 
+        .maccatalyst,
         .macos,
         .ios,
         .tvos,
@@ -810,6 +810,7 @@ pub fn isPICdefault(target: std.Target) DefaultPIStatus {
     return switch (target.os.tag) {
         .haiku,
 
+        .maccatalyst,
         .macos,
         .ios,
         .tvos,
@@ -918,6 +919,7 @@ pub fn isPICDefaultForced(target: std.Target) DefaultPIStatus {
             return if (target.cpu.arch == .x86_64) .yes else .no;
         },
 
+        .maccatalyst,
         .macos,
         .ios,
         .tvos,
