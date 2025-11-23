@@ -2956,7 +2956,22 @@ fn nowWindows(userdata: ?*anyopaque, clock: Io.Clock) Io.Clock.Error!Io.Timestam
         },
         .awake, .boot => {
             // QPC on windows doesn't fail on >= XP/2000 and includes time suspended.
-            return .{ .nanoseconds = windows.QueryPerformanceCounter() };
+            const qpc = windows.QueryPerformanceCounter();
+            // We don't need to cache QPF as it's internally just a memory read to KUSER_SHARED_DATA
+            // (a read-only page of info updated and mapped by the kernel to all processes):
+            // https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-kuser_shared_data
+            // https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/api/ntexapi_x/kuser_shared_data/index.htm
+            const qpf = windows.QueryPerformanceFrequency();
+
+            // 10Mhz (1 qpc tick every 100ns) is a common enough QPF value that we can optimize on it.
+            // https://github.com/microsoft/STL/blob/785143a0c73f030238ef618890fd4d6ae2b3a3a0/stl/inc/chrono#L694-L701
+            const common_qpf = 10_000_000;
+            if (qpf == common_qpf) return .{ .nanoseconds = qpc * (std.time.ns_per_s / common_qpf) };
+
+            // Convert to ns using fixed point.
+            const scale = @as(u64, std.time.ns_per_s << 32) / @as(u32, @intCast(qpf));
+            const result = (@as(u96, qpc) * scale) >> 32;
+            return .{ .nanoseconds = @intCast(result) };
         },
         .cpu_process,
         .cpu_thread,
