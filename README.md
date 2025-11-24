@@ -20,7 +20,7 @@ running `zig std`, which will open a browser tab.
 ## Installation
 
  * [download a pre-built binary](https://ziglang.org/download/)
- * [install from a package manager](https://github.com/ziglang/zig/wiki/Install-Zig-from-a-Package-Manager)
+ * [install from a package manager](https://ziglang.org/learn/getting-started/#managers)
  * [bootstrap zig for any target](https://github.com/ziglang/zig-bootstrap)
 
 A Zig installation is composed of two things:
@@ -204,10 +204,14 @@ You now have the `zig.exe` binary at `stage3\bin\zig.exe`.
 This one has the benefit that changes to the language or build system won't
 break your dev kit. This option can be used to upgrade a dev kit.
 
-First, [build LLVM, LLD, and Clang from source using CMake and Microsoft Visual Studio](https://github.com/ziglang/zig/wiki/How-to-build-LLVM,-libclang,-and-liblld-from-source#windows). Or, skip this step using a pre-built binary tarball, which unfortunately is not provided here.
+First, build LLVM, LLD, and Clang from source using CMake and Microsoft Visual
+Studio (see below for detailed instructions).
 
-Install [Build Tools for Visual Studio 2019](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2019). Be sure to select "Desktop development with C++" when prompted.
- * You must additionally check the optional component labeled **C++ ATL for v142 build tools**.
+Install [Build Tools for Visual Studio
+2019](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2019).
+Be sure to select "Desktop development with C++" when prompted.
+ * You must additionally check the optional component labeled **C++ ATL for
+   v142 build tools**.
 
 Install [CMake](http://cmake.org).
 
@@ -238,7 +242,7 @@ Note: In case you get the error "llvm-config not found" (or similar), make sure 
 
 Install [CMake](https://cmake.org/), version 3.20.0 or newer.
 
-[Download LLVM, Clang, and LLD sources](http://releases.llvm.org/download.html#21.0.0)
+[Download LLVM, Clang, and LLD sources](https://releases.llvm.org/download.html#21.0.0)
 The downloads from llvm lead to the github release pages, where the source's
 will be listed as : `llvm-21.X.X.src.tar.xz`, `clang-21.X.X.src.tar.xz`,
 `lld-21.X.X.src.tar.xz`. Unzip each to their own directory. Ensure no
