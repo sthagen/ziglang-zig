@@ -306,22 +306,6 @@ pub fn CreatePipe(rd: *HANDLE, wr: *HANDLE, sattr: *const SECURITY_ATTRIBUTES) C
     wr.* = write;
 }
 
-pub fn CreateEventEx(attributes: ?*SECURITY_ATTRIBUTES, name: []const u8, flags: DWORD, desired_access: DWORD) !HANDLE {
-    const nameW = try sliceToPrefixedFileW(null, name);
-    return CreateEventExW(attributes, nameW.span().ptr, flags, desired_access);
-}
-
-pub fn CreateEventExW(attributes: ?*SECURITY_ATTRIBUTES, nameW: ?LPCWSTR, flags: DWORD, desired_access: DWORD) !HANDLE {
-    const handle = kernel32.CreateEventExW(attributes, nameW, flags, desired_access);
-    if (handle) |h| {
-        return h;
-    } else {
-        switch (GetLastError()) {
-            else => |err| return unexpectedError(err),
-        }
-    }
-}
-
 pub const DeviceIoControlError = error{
     AccessDenied,
     /// The volume does not contain a recognized file system. File system
@@ -596,10 +580,6 @@ pub fn GetQueuedCompletionStatusEx(
 
 pub fn CloseHandle(hObject: HANDLE) void {
     assert(ntdll.NtClose(hObject) == .SUCCESS);
-}
-
-pub fn FindClose(hFindFile: HANDLE) void {
-    assert(kernel32.FindClose(hFindFile) != 0);
 }
 
 pub const ReadFileError = error{
@@ -1515,30 +1495,6 @@ pub fn GetFileSizeEx(hFile: HANDLE) GetFileSizeError!u64 {
     return @as(u64, @bitCast(file_size));
 }
 
-pub const GetFileAttributesError = error{
-    FileNotFound,
-    AccessDenied,
-    Unexpected,
-};
-
-pub fn GetFileAttributes(filename: []const u8) (GetFileAttributesError || Wtf8ToPrefixedFileWError)!DWORD {
-    const filename_w = try sliceToPrefixedFileW(null, filename);
-    return GetFileAttributesW(filename_w.span().ptr);
-}
-
-pub fn GetFileAttributesW(lpFileName: [*:0]const u16) GetFileAttributesError!DWORD {
-    const rc = kernel32.GetFileAttributesW(lpFileName);
-    if (rc == INVALID_FILE_ATTRIBUTES) {
-        switch (GetLastError()) {
-            .FILE_NOT_FOUND => return error.FileNotFound,
-            .PATH_NOT_FOUND => return error.FileNotFound,
-            .ACCESS_DENIED => return error.AccessDenied,
-            else => |err| return unexpectedError(err),
-        }
-    }
-    return rc;
-}
-
 pub fn getpeername(s: ws2_32.SOCKET, name: *ws2_32.sockaddr, namelen: *ws2_32.socklen_t) i32 {
     return ws2_32.getpeername(s, name, @as(*i32, @ptrCast(namelen)));
 }
@@ -1657,26 +1613,13 @@ pub const NtFreeVirtualMemoryError = error{
 };
 
 pub fn NtFreeVirtualMemory(hProcess: HANDLE, addr: ?*PVOID, size: *SIZE_T, free_type: ULONG) NtFreeVirtualMemoryError!void {
+    // TODO: If the return value is .INVALID_PAGE_PROTECTION, call RtlFlushSecureMemoryCache and try again.
     return switch (ntdll.NtFreeVirtualMemory(hProcess, addr, size, free_type)) {
         .SUCCESS => return,
         .ACCESS_DENIED => NtFreeVirtualMemoryError.AccessDenied,
         .INVALID_PARAMETER => NtFreeVirtualMemoryError.InvalidParameter,
         else => NtFreeVirtualMemoryError.Unexpected,
     };
-}
-
-pub const VirtualAllocError = error{Unexpected};
-
-pub fn VirtualAlloc(addr: ?LPVOID, size: usize, alloc_type: DWORD, flProtect: DWORD) VirtualAllocError!LPVOID {
-    return kernel32.VirtualAlloc(addr, size, alloc_type, flProtect) orelse {
-        switch (GetLastError()) {
-            else => |err| return unexpectedError(err),
-        }
-    };
-}
-
-pub fn VirtualFree(lpAddress: ?LPVOID, dwSize: usize, dwFreeType: DWORD) void {
-    assert(kernel32.VirtualFree(lpAddress, dwSize, dwFreeType) != 0);
 }
 
 pub const VirtualProtectError = error{
@@ -1711,19 +1654,6 @@ pub fn VirtualProtectEx(handle: HANDLE, addr: ?LPVOID, size: SIZE_T, new_prot: D
         // TODO: map errors
         else => |rc| return unexpectedStatus(rc),
     }
-}
-
-pub const VirtualQueryError = error{Unexpected};
-
-pub fn VirtualQuery(lpAddress: ?LPVOID, lpBuffer: PMEMORY_BASIC_INFORMATION, dwLength: SIZE_T) VirtualQueryError!SIZE_T {
-    const rc = kernel32.VirtualQuery(lpAddress, lpBuffer, dwLength);
-    if (rc == 0) {
-        switch (GetLastError()) {
-            else => |err| return unexpectedError(err),
-        }
-    }
-
-    return rc;
 }
 
 pub const SetConsoleTextAttributeError = error{Unexpected};
@@ -2626,16 +2556,6 @@ test ntToWin32Namespace {
 
     var too_small_buf: [6]u16 = undefined;
     try std.testing.expectError(error.NameTooLong, ntToWin32Namespace(L("\\??\\C:\\test"), &too_small_buf));
-}
-
-fn getFullPathNameW(path: [*:0]const u16, out: []u16) !usize {
-    const result = kernel32.GetFullPathNameW(path, @as(u32, @intCast(out.len)), out.ptr, null);
-    if (result == 0) {
-        switch (GetLastError()) {
-            else => |err| return unexpectedError(err),
-        }
-    }
-    return result;
 }
 
 inline fn MAKELANGID(p: c_ushort, s: c_ushort) LANGID {

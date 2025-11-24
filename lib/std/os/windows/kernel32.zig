@@ -86,23 +86,6 @@ pub extern "kernel32" fn CreateNamedPipeW(
     lpSecurityAttributes: ?*const SECURITY_ATTRIBUTES,
 ) callconv(.winapi) HANDLE;
 
-pub extern "kernel32" fn FindFirstFileW(
-    lpFileName: LPCWSTR,
-    lpFindFileData: *WIN32_FIND_DATAW,
-) callconv(.winapi) HANDLE;
-
-pub extern "kernel32" fn FindClose(
-    hFindFile: HANDLE,
-) callconv(.winapi) BOOL;
-
-// TODO: Wrapper around RtlGetFullPathName_UEx
-pub extern "kernel32" fn GetFullPathNameW(
-    lpFileName: LPCWSTR,
-    nBufferLength: DWORD,
-    lpBuffer: LPWSTR,
-    lpFilePart: ?*?LPWSTR,
-) callconv(.winapi) DWORD;
-
 // TODO: Matches `STD_*_HANDLE` to peb().ProcessParameters.Standard*
 pub extern "kernel32" fn GetStdHandle(
     nStdHandle: DWORD,
@@ -162,11 +145,6 @@ pub extern "kernel32" fn GetCurrentDirectoryW(
     lpBuffer: ?[*]WCHAR,
 ) callconv(.winapi) DWORD;
 
-// TODO: RtlDosPathNameToNtPathNameU_WithStatus + NtQueryAttributesFile.
-pub extern "kernel32" fn GetFileAttributesW(
-    lpFileName: LPCWSTR,
-) callconv(.winapi) DWORD;
-
 pub extern "kernel32" fn ReadFile(
     hFile: HANDLE,
     lpBuffer: LPVOID,
@@ -181,14 +159,6 @@ pub extern "kernel32" fn GetSystemDirectoryW(
 ) callconv(.winapi) UINT;
 
 // I/O - Kernel Objects
-
-// TODO: Wrapper around NtCreateEvent.
-pub extern "kernel32" fn CreateEventExW(
-    lpEventAttributes: ?*SECURITY_ATTRIBUTES,
-    lpName: ?LPCWSTR,
-    dwFlags: DWORD,
-    dwDesiredAccess: DWORD,
-) callconv(.winapi) ?HANDLE;
 
 // TODO: Wrapper around GetStdHandle + NtDuplicateObject.
 pub extern "kernel32" fn DuplicateHandle(
@@ -317,9 +287,6 @@ pub extern "kernel32" fn GetExitCodeProcess(
     hProcess: HANDLE,
     lpExitCode: *DWORD,
 ) callconv(.winapi) BOOL;
-
-// TODO: Already a wrapper for this, see `windows.GetCurrentProcess`.
-pub extern "kernel32" fn GetCurrentProcess() callconv(.winapi) HANDLE;
 
 // TODO: Wrapper around RtlSetEnvironmentVar.
 pub extern "kernel32" fn SetEnvironmentVariableW(
@@ -464,29 +431,6 @@ pub extern "kernel32" fn HeapValidate(
     dwFlags: DWORD,
     lpMem: ?*const anyopaque,
 ) callconv(.winapi) BOOL;
-
-// TODO: Wrapper around NtAllocateVirtualMemory.
-pub extern "kernel32" fn VirtualAlloc(
-    lpAddress: ?LPVOID,
-    dwSize: SIZE_T,
-    flAllocationType: DWORD,
-    flProtect: DWORD,
-) callconv(.winapi) ?LPVOID;
-
-// TODO: Wrapper around NtFreeVirtualMemory.
-// If the return value is .INVALID_PAGE_PROTECTION, calls RtlFlushSecureMemoryCache and try again.
-pub extern "kernel32" fn VirtualFree(
-    lpAddress: ?LPVOID,
-    dwSize: SIZE_T,
-    dwFreeType: DWORD,
-) callconv(.winapi) BOOL;
-
-// TODO: Wrapper around NtQueryVirtualMemory.
-pub extern "kernel32" fn VirtualQuery(
-    lpAddress: ?LPVOID,
-    lpBuffer: PMEMORY_BASIC_INFORMATION,
-    dwLength: SIZE_T,
-) callconv(.winapi) SIZE_T;
 
 // TODO: Getter for peb.ProcessHeap
 pub extern "kernel32" fn GetProcessHeap() callconv(.winapi) ?HANDLE;
