@@ -306,22 +306,6 @@ pub fn CreatePipe(rd: *HANDLE, wr: *HANDLE, sattr: *const SECURITY_ATTRIBUTES) C
     wr.* = write;
 }
 
-pub fn CreateEventEx(attributes: ?*SECURITY_ATTRIBUTES, name: []const u8, flags: DWORD, desired_access: DWORD) !HANDLE {
-    const nameW = try sliceToPrefixedFileW(null, name);
-    return CreateEventExW(attributes, nameW.span().ptr, flags, desired_access);
-}
-
-pub fn CreateEventExW(attributes: ?*SECURITY_ATTRIBUTES, nameW: ?LPCWSTR, flags: DWORD, desired_access: DWORD) !HANDLE {
-    const handle = kernel32.CreateEventExW(attributes, nameW, flags, desired_access);
-    if (handle) |h| {
-        return h;
-    } else {
-        switch (GetLastError()) {
-            else => |err| return unexpectedError(err),
-        }
-    }
-}
-
 pub const DeviceIoControlError = error{
     AccessDenied,
     /// The volume does not contain a recognized file system. File system
@@ -596,10 +580,6 @@ pub fn GetQueuedCompletionStatusEx(
 
 pub fn CloseHandle(hObject: HANDLE) void {
     assert(ntdll.NtClose(hObject) == .SUCCESS);
-}
-
-pub fn FindClose(hFindFile: HANDLE) void {
-    assert(kernel32.FindClose(hFindFile) != 0);
 }
 
 pub const ReadFileError = error{
@@ -1104,21 +1084,135 @@ pub fn DeleteFile(sub_path_w: []const u16, options: DeleteFileOptions) DeleteFil
     }
 }
 
-pub const MoveFileError = error{ FileNotFound, AccessDenied, Unexpected };
+pub const RenameError = error{
+    IsDir,
+    NotDir,
+    FileNotFound,
+    NoDevice,
+    AccessDenied,
+    PipeBusy,
+    PathAlreadyExists,
+    Unexpected,
+    NameTooLong,
+    NetworkNotFound,
+    AntivirusInterference,
+    BadPathName,
+    RenameAcrossMountPoints,
+} || UnexpectedError;
 
-pub fn MoveFileEx(old_path: []const u8, new_path: []const u8, flags: DWORD) (MoveFileError || Wtf8ToPrefixedFileWError)!void {
-    const old_path_w = try sliceToPrefixedFileW(null, old_path);
-    const new_path_w = try sliceToPrefixedFileW(null, new_path);
-    return MoveFileExW(old_path_w.span().ptr, new_path_w.span().ptr, flags);
-}
+pub fn RenameFile(
+    /// May only be `null` if `old_path_w` is a fully-qualified absolute path.
+    old_dir_fd: ?HANDLE,
+    old_path_w: []const u16,
+    /// May only be `null` if `new_path_w` is a fully-qualified absolute path,
+    /// or if the file is not being moved to a different directory.
+    new_dir_fd: ?HANDLE,
+    new_path_w: []const u16,
+    replace_if_exists: bool,
+) RenameError!void {
+    const src_fd = OpenFile(old_path_w, .{
+        .dir = old_dir_fd,
+        .access_mask = SYNCHRONIZE | GENERIC_WRITE | DELETE,
+        .creation = FILE_OPEN,
+        .filter = .any, // This function is supposed to rename both files and directories.
+        .follow_symlinks = false,
+    }) catch |err| switch (err) {
+        error.WouldBlock => unreachable, // Not possible without `.share_access_nonblocking = true`.
+        else => |e| return e,
+    };
+    defer CloseHandle(src_fd);
 
-pub fn MoveFileExW(old_path: [*:0]const u16, new_path: [*:0]const u16, flags: DWORD) MoveFileError!void {
-    if (kernel32.MoveFileExW(old_path, new_path, flags) == 0) {
-        switch (GetLastError()) {
-            .FILE_NOT_FOUND => return error.FileNotFound,
-            .ACCESS_DENIED => return error.AccessDenied,
-            else => |err| return unexpectedError(err),
+    var rc: NTSTATUS = undefined;
+    // FileRenameInformationEx has varying levels of support:
+    // - FILE_RENAME_INFORMATION_EX requires >= win10_rs1
+    //   (INVALID_INFO_CLASS is returned if not supported)
+    // - Requires the NTFS filesystem
+    //   (on filesystems like FAT32, INVALID_PARAMETER is returned)
+    // - FILE_RENAME_POSIX_SEMANTICS requires >= win10_rs1
+    // - FILE_RENAME_IGNORE_READONLY_ATTRIBUTE requires >= win10_rs5
+    //   (NOT_SUPPORTED is returned if a flag is unsupported)
+    //
+    // The strategy here is just to try using FileRenameInformationEx and fall back to
+    // FileRenameInformation if the return value lets us know that some aspect of it is not supported.
+    const need_fallback = need_fallback: {
+        const struct_buf_len = @sizeOf(FILE_RENAME_INFORMATION_EX) + (PATH_MAX_WIDE * 2);
+        var rename_info_buf: [struct_buf_len]u8 align(@alignOf(FILE_RENAME_INFORMATION_EX)) = undefined;
+        const struct_len = @sizeOf(FILE_RENAME_INFORMATION_EX) + new_path_w.len * 2;
+        if (struct_len > struct_buf_len) return error.NameTooLong;
+
+        const rename_info: *FILE_RENAME_INFORMATION_EX = @ptrCast(&rename_info_buf);
+        var io_status_block: IO_STATUS_BLOCK = undefined;
+
+        var flags: ULONG = FILE_RENAME_POSIX_SEMANTICS | FILE_RENAME_IGNORE_READONLY_ATTRIBUTE;
+        if (replace_if_exists) flags |= FILE_RENAME_REPLACE_IF_EXISTS;
+        rename_info.* = .{
+            .Flags = flags,
+            .RootDirectory = if (std.fs.path.isAbsoluteWindowsWtf16(new_path_w)) null else new_dir_fd,
+            .FileNameLength = @intCast(new_path_w.len * 2), // already checked error.NameTooLong
+            .FileName = undefined,
+        };
+        @memcpy((&rename_info.FileName).ptr, new_path_w);
+        rc = ntdll.NtSetInformationFile(
+            src_fd,
+            &io_status_block,
+            rename_info,
+            @intCast(struct_len), // already checked for error.NameTooLong
+            .FileRenameInformationEx,
+        );
+        switch (rc) {
+            .SUCCESS => return,
+            // The filesystem does not support FileDispositionInformationEx
+            .INVALID_PARAMETER,
+            // The operating system does not support FileDispositionInformationEx
+            .INVALID_INFO_CLASS,
+            // The operating system does not support one of the flags
+            .NOT_SUPPORTED,
+            => break :need_fallback true,
+            // For all other statuses, fall down to the switch below to handle them.
+            else => break :need_fallback false,
         }
+    };
+
+    if (need_fallback) {
+        const struct_buf_len = @sizeOf(FILE_RENAME_INFORMATION) + (PATH_MAX_WIDE * 2);
+        var rename_info_buf: [struct_buf_len]u8 align(@alignOf(FILE_RENAME_INFORMATION)) = undefined;
+        const struct_len = @sizeOf(FILE_RENAME_INFORMATION) + new_path_w.len * 2;
+        if (struct_len > struct_buf_len) return error.NameTooLong;
+
+        const rename_info: *FILE_RENAME_INFORMATION = @ptrCast(&rename_info_buf);
+        var io_status_block: IO_STATUS_BLOCK = undefined;
+
+        rename_info.* = .{
+            .Flags = @intFromBool(replace_if_exists),
+            .RootDirectory = if (std.fs.path.isAbsoluteWindowsWtf16(new_path_w)) null else new_dir_fd,
+            .FileNameLength = @intCast(new_path_w.len * 2), // already checked error.NameTooLong
+            .FileName = undefined,
+        };
+        @memcpy((&rename_info.FileName).ptr, new_path_w);
+
+        rc = ntdll.NtSetInformationFile(
+            src_fd,
+            &io_status_block,
+            rename_info,
+            @intCast(struct_len), // already checked for error.NameTooLong
+            .FileRenameInformation,
+        );
+    }
+
+    switch (rc) {
+        .SUCCESS => {},
+        .INVALID_HANDLE => unreachable,
+        .INVALID_PARAMETER => unreachable,
+        .OBJECT_PATH_SYNTAX_BAD => unreachable,
+        .ACCESS_DENIED => return error.AccessDenied,
+        .OBJECT_NAME_NOT_FOUND => return error.FileNotFound,
+        .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
+        .NOT_SAME_DEVICE => return error.RenameAcrossMountPoints,
+        .OBJECT_NAME_COLLISION => return error.PathAlreadyExists,
+        .DIRECTORY_NOT_EMPTY => return error.PathAlreadyExists,
+        .FILE_IS_A_DIRECTORY => return error.IsDir,
+        .NOT_A_DIRECTORY => return error.NotDir,
+        else => return unexpectedStatus(rc),
     }
 }
 
@@ -1515,30 +1609,6 @@ pub fn GetFileSizeEx(hFile: HANDLE) GetFileSizeError!u64 {
     return @as(u64, @bitCast(file_size));
 }
 
-pub const GetFileAttributesError = error{
-    FileNotFound,
-    AccessDenied,
-    Unexpected,
-};
-
-pub fn GetFileAttributes(filename: []const u8) (GetFileAttributesError || Wtf8ToPrefixedFileWError)!DWORD {
-    const filename_w = try sliceToPrefixedFileW(null, filename);
-    return GetFileAttributesW(filename_w.span().ptr);
-}
-
-pub fn GetFileAttributesW(lpFileName: [*:0]const u16) GetFileAttributesError!DWORD {
-    const rc = kernel32.GetFileAttributesW(lpFileName);
-    if (rc == INVALID_FILE_ATTRIBUTES) {
-        switch (GetLastError()) {
-            .FILE_NOT_FOUND => return error.FileNotFound,
-            .PATH_NOT_FOUND => return error.FileNotFound,
-            .ACCESS_DENIED => return error.AccessDenied,
-            else => |err| return unexpectedError(err),
-        }
-    }
-    return rc;
-}
-
 pub fn getpeername(s: ws2_32.SOCKET, name: *ws2_32.sockaddr, namelen: *ws2_32.socklen_t) i32 {
     return ws2_32.getpeername(s, name, @as(*i32, @ptrCast(namelen)));
 }
@@ -1657,26 +1727,13 @@ pub const NtFreeVirtualMemoryError = error{
 };
 
 pub fn NtFreeVirtualMemory(hProcess: HANDLE, addr: ?*PVOID, size: *SIZE_T, free_type: ULONG) NtFreeVirtualMemoryError!void {
+    // TODO: If the return value is .INVALID_PAGE_PROTECTION, call RtlFlushSecureMemoryCache and try again.
     return switch (ntdll.NtFreeVirtualMemory(hProcess, addr, size, free_type)) {
         .SUCCESS => return,
         .ACCESS_DENIED => NtFreeVirtualMemoryError.AccessDenied,
         .INVALID_PARAMETER => NtFreeVirtualMemoryError.InvalidParameter,
         else => NtFreeVirtualMemoryError.Unexpected,
     };
-}
-
-pub const VirtualAllocError = error{Unexpected};
-
-pub fn VirtualAlloc(addr: ?LPVOID, size: usize, alloc_type: DWORD, flProtect: DWORD) VirtualAllocError!LPVOID {
-    return kernel32.VirtualAlloc(addr, size, alloc_type, flProtect) orelse {
-        switch (GetLastError()) {
-            else => |err| return unexpectedError(err),
-        }
-    };
-}
-
-pub fn VirtualFree(lpAddress: ?LPVOID, dwSize: usize, dwFreeType: DWORD) void {
-    assert(kernel32.VirtualFree(lpAddress, dwSize, dwFreeType) != 0);
 }
 
 pub const VirtualProtectError = error{
@@ -1711,19 +1768,6 @@ pub fn VirtualProtectEx(handle: HANDLE, addr: ?LPVOID, size: SIZE_T, new_prot: D
         // TODO: map errors
         else => |rc| return unexpectedStatus(rc),
     }
-}
-
-pub const VirtualQueryError = error{Unexpected};
-
-pub fn VirtualQuery(lpAddress: ?LPVOID, lpBuffer: PMEMORY_BASIC_INFORMATION, dwLength: SIZE_T) VirtualQueryError!SIZE_T {
-    const rc = kernel32.VirtualQuery(lpAddress, lpBuffer, dwLength);
-    if (rc == 0) {
-        switch (GetLastError()) {
-            else => |err| return unexpectedError(err),
-        }
-    }
-
-    return rc;
 }
 
 pub const SetConsoleTextAttributeError = error{Unexpected};
@@ -2626,16 +2670,6 @@ test ntToWin32Namespace {
 
     var too_small_buf: [6]u16 = undefined;
     try std.testing.expectError(error.NameTooLong, ntToWin32Namespace(L("\\??\\C:\\test"), &too_small_buf));
-}
-
-fn getFullPathNameW(path: [*:0]const u16, out: []u16) !usize {
-    const result = kernel32.GetFullPathNameW(path, @as(u32, @intCast(out.len)), out.ptr, null);
-    if (result == 0) {
-        switch (GetLastError()) {
-            else => |err| return unexpectedError(err),
-        }
-    }
-    return result;
 }
 
 inline fn MAKELANGID(p: c_ushort, s: c_ushort) LANGID {
