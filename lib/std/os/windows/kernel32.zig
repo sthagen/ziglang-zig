@@ -91,12 +91,6 @@ pub extern "kernel32" fn GetStdHandle(
     nStdHandle: DWORD,
 ) callconv(.winapi) ?HANDLE;
 
-pub extern "kernel32" fn MoveFileExW(
-    lpExistingFileName: LPCWSTR,
-    lpNewFileName: LPCWSTR,
-    dwFlags: DWORD,
-) callconv(.winapi) BOOL;
-
 // TODO: Wrapper around NtSetInformationFile + `FILE_POSITION_INFORMATION`.
 //  `FILE_STANDARD_INFORMATION` is also used if dwMoveMethod is `FILE_END`
 pub extern "kernel32" fn SetFilePointerEx(

@@ -1084,21 +1084,135 @@ pub fn DeleteFile(sub_path_w: []const u16, options: DeleteFileOptions) DeleteFil
     }
 }
 
-pub const MoveFileError = error{ FileNotFound, AccessDenied, Unexpected };
+pub const RenameError = error{
+    IsDir,
+    NotDir,
+    FileNotFound,
+    NoDevice,
+    AccessDenied,
+    PipeBusy,
+    PathAlreadyExists,
+    Unexpected,
+    NameTooLong,
+    NetworkNotFound,
+    AntivirusInterference,
+    BadPathName,
+    RenameAcrossMountPoints,
+} || UnexpectedError;
 
-pub fn MoveFileEx(old_path: []const u8, new_path: []const u8, flags: DWORD) (MoveFileError || Wtf8ToPrefixedFileWError)!void {
-    const old_path_w = try sliceToPrefixedFileW(null, old_path);
-    const new_path_w = try sliceToPrefixedFileW(null, new_path);
-    return MoveFileExW(old_path_w.span().ptr, new_path_w.span().ptr, flags);
-}
+pub fn RenameFile(
+    /// May only be `null` if `old_path_w` is a fully-qualified absolute path.
+    old_dir_fd: ?HANDLE,
+    old_path_w: []const u16,
+    /// May only be `null` if `new_path_w` is a fully-qualified absolute path,
+    /// or if the file is not being moved to a different directory.
+    new_dir_fd: ?HANDLE,
+    new_path_w: []const u16,
+    replace_if_exists: bool,
+) RenameError!void {
+    const src_fd = OpenFile(old_path_w, .{
+        .dir = old_dir_fd,
+        .access_mask = SYNCHRONIZE | GENERIC_WRITE | DELETE,
+        .creation = FILE_OPEN,
+        .filter = .any, // This function is supposed to rename both files and directories.
+        .follow_symlinks = false,
+    }) catch |err| switch (err) {
+        error.WouldBlock => unreachable, // Not possible without `.share_access_nonblocking = true`.
+        else => |e| return e,
+    };
+    defer CloseHandle(src_fd);
 
-pub fn MoveFileExW(old_path: [*:0]const u16, new_path: [*:0]const u16, flags: DWORD) MoveFileError!void {
-    if (kernel32.MoveFileExW(old_path, new_path, flags) == 0) {
-        switch (GetLastError()) {
-            .FILE_NOT_FOUND => return error.FileNotFound,
-            .ACCESS_DENIED => return error.AccessDenied,
-            else => |err| return unexpectedError(err),
+    var rc: NTSTATUS = undefined;
+    // FileRenameInformationEx has varying levels of support:
+    // - FILE_RENAME_INFORMATION_EX requires >= win10_rs1
+    //   (INVALID_INFO_CLASS is returned if not supported)
+    // - Requires the NTFS filesystem
+    //   (on filesystems like FAT32, INVALID_PARAMETER is returned)
+    // - FILE_RENAME_POSIX_SEMANTICS requires >= win10_rs1
+    // - FILE_RENAME_IGNORE_READONLY_ATTRIBUTE requires >= win10_rs5
+    //   (NOT_SUPPORTED is returned if a flag is unsupported)
+    //
+    // The strategy here is just to try using FileRenameInformationEx and fall back to
+    // FileRenameInformation if the return value lets us know that some aspect of it is not supported.
+    const need_fallback = need_fallback: {
+        const struct_buf_len = @sizeOf(FILE_RENAME_INFORMATION_EX) + (PATH_MAX_WIDE * 2);
+        var rename_info_buf: [struct_buf_len]u8 align(@alignOf(FILE_RENAME_INFORMATION_EX)) = undefined;
+        const struct_len = @sizeOf(FILE_RENAME_INFORMATION_EX) + new_path_w.len * 2;
+        if (struct_len > struct_buf_len) return error.NameTooLong;
+
+        const rename_info: *FILE_RENAME_INFORMATION_EX = @ptrCast(&rename_info_buf);
+        var io_status_block: IO_STATUS_BLOCK = undefined;
+
+        var flags: ULONG = FILE_RENAME_POSIX_SEMANTICS | FILE_RENAME_IGNORE_READONLY_ATTRIBUTE;
+        if (replace_if_exists) flags |= FILE_RENAME_REPLACE_IF_EXISTS;
+        rename_info.* = .{
+            .Flags = flags,
+            .RootDirectory = if (std.fs.path.isAbsoluteWindowsWtf16(new_path_w)) null else new_dir_fd,
+            .FileNameLength = @intCast(new_path_w.len * 2), // already checked error.NameTooLong
+            .FileName = undefined,
+        };
+        @memcpy((&rename_info.FileName).ptr, new_path_w);
+        rc = ntdll.NtSetInformationFile(
+            src_fd,
+            &io_status_block,
+            rename_info,
+            @intCast(struct_len), // already checked for error.NameTooLong
+            .FileRenameInformationEx,
+        );
+        switch (rc) {
+            .SUCCESS => return,
+            // The filesystem does not support FileDispositionInformationEx
+            .INVALID_PARAMETER,
+            // The operating system does not support FileDispositionInformationEx
+            .INVALID_INFO_CLASS,
+            // The operating system does not support one of the flags
+            .NOT_SUPPORTED,
+            => break :need_fallback true,
+            // For all other statuses, fall down to the switch below to handle them.
+            else => break :need_fallback false,
         }
+    };
+
+    if (need_fallback) {
+        const struct_buf_len = @sizeOf(FILE_RENAME_INFORMATION) + (PATH_MAX_WIDE * 2);
+        var rename_info_buf: [struct_buf_len]u8 align(@alignOf(FILE_RENAME_INFORMATION)) = undefined;
+        const struct_len = @sizeOf(FILE_RENAME_INFORMATION) + new_path_w.len * 2;
+        if (struct_len > struct_buf_len) return error.NameTooLong;
+
+        const rename_info: *FILE_RENAME_INFORMATION = @ptrCast(&rename_info_buf);
+        var io_status_block: IO_STATUS_BLOCK = undefined;
+
+        rename_info.* = .{
+            .Flags = @intFromBool(replace_if_exists),
+            .RootDirectory = if (std.fs.path.isAbsoluteWindowsWtf16(new_path_w)) null else new_dir_fd,
+            .FileNameLength = @intCast(new_path_w.len * 2), // already checked error.NameTooLong
+            .FileName = undefined,
+        };
+        @memcpy((&rename_info.FileName).ptr, new_path_w);
+
+        rc = ntdll.NtSetInformationFile(
+            src_fd,
+            &io_status_block,
+            rename_info,
+            @intCast(struct_len), // already checked for error.NameTooLong
+            .FileRenameInformation,
+        );
+    }
+
+    switch (rc) {
+        .SUCCESS => {},
+        .INVALID_HANDLE => unreachable,
+        .INVALID_PARAMETER => unreachable,
+        .OBJECT_PATH_SYNTAX_BAD => unreachable,
+        .ACCESS_DENIED => return error.AccessDenied,
+        .OBJECT_NAME_NOT_FOUND => return error.FileNotFound,
+        .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
+        .NOT_SAME_DEVICE => return error.RenameAcrossMountPoints,
+        .OBJECT_NAME_COLLISION => return error.PathAlreadyExists,
+        .DIRECTORY_NOT_EMPTY => return error.PathAlreadyExists,
+        .FILE_IS_A_DIRECTORY => return error.IsDir,
+        .NOT_A_DIRECTORY => return error.NotDir,
+        else => return unexpectedStatus(rc),
     }
 }
 
