@@ -1306,6 +1306,7 @@ fn workerMakeOneStep(
     run: *Run,
 ) void {
     const io = b.graph.io;
+    const gpa = run.gpa;
 
     // First, check the conditions for running this step. If they are not met,
     // then we return without doing the step, relying on another worker to
@@ -1341,7 +1342,7 @@ fn workerMakeOneStep(
         if (new_claimed_rss > run.max_rss) {
             // Running this step right now could possibly exceed the allotted RSS.
             // Add this step to the queue of memory-blocked steps.
-            run.memory_blocked_steps.append(run.gpa, s) catch @panic("OOM");
+            run.memory_blocked_steps.append(gpa, s) catch @panic("OOM");
             return;
         }
 
@@ -1366,7 +1367,7 @@ fn workerMakeOneStep(
         .web_server = if (run.web_server) |*ws| ws else null,
         .ttyconf = run.ttyconf,
         .unit_test_timeout_ns = run.unit_test_timeout_ns,
-        .gpa = run.gpa,
+        .gpa = gpa,
     });
 
     // No matter the result, we want to display error/warning messages.
@@ -1377,7 +1378,7 @@ fn workerMakeOneStep(
         const bw, _ = std.debug.lockStderrWriter(&stdio_buffer_allocation);
         defer std.debug.unlockStderrWriter();
         const ttyconf = run.ttyconf;
-        printErrorMessages(run.gpa, s, .{}, bw, ttyconf, run.error_style, run.multiline_errors) catch {};
+        printErrorMessages(gpa, s, .{}, bw, ttyconf, run.error_style, run.multiline_errors) catch {};
     }
 
     handle_result: {
@@ -1406,29 +1407,36 @@ fn workerMakeOneStep(
     // If this is a step that claims resources, we must now queue up other
     // steps that are waiting for resources.
     if (s.max_rss != 0) {
-        run.max_rss_mutex.lockUncancelable(io);
-        defer run.max_rss_mutex.unlock(io);
+        var dispatch_deps: std.ArrayList(*Step) = .empty;
+        defer dispatch_deps.deinit(gpa);
+        dispatch_deps.ensureUnusedCapacity(gpa, run.memory_blocked_steps.items.len) catch @panic("OOM");
 
-        // Give the memory back to the scheduler.
-        run.claimed_rss -= s.max_rss;
-        // Avoid kicking off too many tasks that we already know will not have
-        // enough resources.
-        var remaining = run.max_rss - run.claimed_rss;
-        var i: usize = 0;
-        var j: usize = 0;
-        while (j < run.memory_blocked_steps.items.len) : (j += 1) {
-            const dep = run.memory_blocked_steps.items[j];
-            assert(dep.max_rss != 0);
-            if (dep.max_rss <= remaining) {
-                remaining -= dep.max_rss;
+        {
+            run.max_rss_mutex.lockUncancelable(io);
+            defer run.max_rss_mutex.unlock(io);
 
-                group.async(io, workerMakeOneStep, .{ group, b, dep, prog_node, run });
-            } else {
-                run.memory_blocked_steps.items[i] = dep;
-                i += 1;
+            // Give the memory back to the scheduler.
+            run.claimed_rss -= s.max_rss;
+            // Avoid kicking off too many tasks that we already know will not have
+            // enough resources.
+            var remaining = run.max_rss - run.claimed_rss;
+            var i: usize = 0;
+            for (run.memory_blocked_steps.items) |dep| {
+                assert(dep.max_rss != 0);
+                if (dep.max_rss <= remaining) {
+                    remaining -= dep.max_rss;
+                    dispatch_deps.appendAssumeCapacity(dep);
+                } else {
+                    run.memory_blocked_steps.items[i] = dep;
+                    i += 1;
+                }
             }
+            run.memory_blocked_steps.shrinkRetainingCapacity(i);
         }
-        run.memory_blocked_steps.shrinkRetainingCapacity(i);
+        for (dispatch_deps.items) |dep| {
+            // Must be called without max_rss_mutex held in case it executes recursively.
+            group.async(io, workerMakeOneStep, .{ group, b, dep, prog_node, run });
+        }
     }
 }
 
