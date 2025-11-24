@@ -1310,6 +1310,8 @@ pub fn GetFinalPathNameByHandle(
                 // Wine seems to return NT namespaced paths starting with \??\ from QueryObjectName
                 // (e.g. `\??\Z:\some\path\to\a\file.txt`), in which case we can just strip the
                 // prefix to turn it into an absolute path.
+                // https://github.com/ziglang/zig/issues/26029
+                // https://bugs.winehq.org/show_bug.cgi?id=39569
                 return ntToWin32Namespace(final_path, out_buffer) catch |err| switch (err) {
                     error.NotNtPath => return error.Unexpected,
                     error.NameTooLong => |e| return e,
