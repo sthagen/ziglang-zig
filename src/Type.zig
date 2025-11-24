@@ -3837,7 +3837,7 @@ fn resolveStructInner(
             }
             return error.AnalysisFail;
         },
-        error.OutOfMemory => |e| return e,
+        error.OutOfMemory, error.Canceled => |e| return e,
     };
 }
 
@@ -3896,6 +3896,7 @@ fn resolveUnionInner(
             return error.AnalysisFail;
         },
         error.OutOfMemory => |e| return e,
+        error.Canceled => |e| return e,
     };
 }
 
