@@ -107,7 +107,6 @@ pub fn main() !void {
 
     var targets = std.array_list.Managed([]const u8).init(arena);
     var debug_log_scopes = std.array_list.Managed([]const u8).init(arena);
-    var thread_pool_options: std.Thread.Pool.Options = .{ .allocator = arena };
 
     var install_prefix: ?[]const u8 = null;
     var dir_list = std.Build.DirList{};
@@ -413,19 +412,11 @@ pub fn main() !void {
                 };
             } else if (mem.eql(u8, arg, "-fno-reference-trace")) {
                 builder.reference_trace = null;
-            } else if (mem.startsWith(u8, arg, "-j")) {
-                const num = arg["-j".len..];
-                const n_jobs = std.fmt.parseUnsigned(u32, num, 10) catch |err| {
-                    std.debug.print("unable to parse jobs count '{s}': {s}", .{
-                        num, @errorName(err),
-                    });
-                    process.exit(1);
-                };
-                if (n_jobs < 1) {
-                    std.debug.print("number of jobs must be at least 1\n", .{});
-                    process.exit(1);
-                }
-                thread_pool_options.n_jobs = n_jobs;
+            } else if (mem.cutPrefix(u8, arg, "-j")) |text| {
+                const n = std.fmt.parseUnsigned(u32, text, 10) catch |err|
+                    fatal("unable to parse jobs count '{s}': {t}", .{ text, err });
+                if (n < 1) fatal("number of jobs must be at least 1", .{});
+                threaded.setAsyncLimit(.limited(n));
             } else if (mem.eql(u8, arg, "--")) {
                 builder.args = argsRest(args, arg_idx);
                 break;
@@ -516,7 +507,6 @@ pub fn main() !void {
         .error_style = error_style,
         .multiline_errors = multiline_errors,
         .summary = summary orelse if (watch or webui_listen != null) .line else .failures,
-        .thread_pool = undefined,
 
         .ttyconf = ttyconf,
     };
@@ -547,16 +537,12 @@ pub fn main() !void {
         break :w try .init();
     };
 
-    try run.thread_pool.init(thread_pool_options);
-    defer run.thread_pool.deinit();
-
     const now = Io.Clock.Timestamp.now(io, .awake) catch |err| fatal("failed to collect timestamp: {t}", .{err});
 
     run.web_server = if (webui_listen) |listen_address| ws: {
         if (builtin.single_threaded) unreachable; // `fatal` above
         break :ws .init(.{
             .gpa = gpa,
-            .thread_pool = &run.thread_pool,
             .ttyconf = ttyconf,
             .graph = &graph,
             .all_steps = run.step_stack.keys(),
@@ -675,7 +661,6 @@ const Run = struct {
     memory_blocked_steps: std.ArrayList(*Step),
     /// Allocated into `gpa`.
     step_stack: std.AutoArrayHashMapUnmanaged(*Step, void),
-    thread_pool: std.Thread.Pool,
     /// Similar to the `tty.Config` returned by `std.debug.lockStderrWriter`,
     /// but also respects the '--color' flag.
     ttyconf: tty.Config,
@@ -754,14 +739,13 @@ fn runStepNames(
     const gpa = run.gpa;
     const io = b.graph.io;
     const step_stack = &run.step_stack;
-    const thread_pool = &run.thread_pool;
 
     {
         const step_prog = parent_prog_node.start("steps", step_stack.count());
         defer step_prog.end();
 
-        var wait_group: std.Thread.WaitGroup = .{};
-        defer wait_group.wait();
+        var group: Io.Group = .init;
+        defer group.wait(io);
 
         // Here we spawn the initial set of tasks with a nice heuristic -
         // dependency order. Each worker when it finishes a step will then
@@ -771,9 +755,7 @@ fn runStepNames(
             const step = steps_slice[steps_slice.len - i - 1];
             if (step.state == .skipped_oom) continue;
 
-            thread_pool.spawnWg(&wait_group, workerMakeOneStep, .{
-                &wait_group, b, step, step_prog, run,
-            });
+            group.async(io, workerMakeOneStep, .{ &group, b, step, step_prog, run });
         }
     }
 
@@ -855,7 +837,6 @@ fn runStepNames(
         var f = std.Build.Fuzz.init(
             gpa,
             io,
-            thread_pool,
             run.ttyconf,
             step_stack.keys(),
             parent_prog_node,
@@ -1318,14 +1299,12 @@ fn constructGraphAndCheckForDependencyLoop(
 }
 
 fn workerMakeOneStep(
-    wg: *std.Thread.WaitGroup,
+    group: *Io.Group,
     b: *std.Build,
     s: *Step,
     prog_node: std.Progress.Node,
     run: *Run,
 ) void {
-    const thread_pool = &run.thread_pool;
-
     // First, check the conditions for running this step. If they are not met,
     // then we return without doing the step, relying on another worker to
     // queue this step up again when dependencies are met.
@@ -1381,7 +1360,6 @@ fn workerMakeOneStep(
 
     const make_result = s.make(.{
         .progress_node = sub_prog_node,
-        .thread_pool = thread_pool,
         .watch = run.watch,
         .web_server = if (run.web_server) |*ws| ws else null,
         .ttyconf = run.ttyconf,
@@ -1399,6 +1377,8 @@ fn workerMakeOneStep(
         const ttyconf = run.ttyconf;
         printErrorMessages(run.gpa, s, .{}, bw, ttyconf, run.error_style, run.multiline_errors) catch {};
     }
+
+    const io = b.graph.io;
 
     handle_result: {
         if (make_result) |_| {
@@ -1419,9 +1399,7 @@ fn workerMakeOneStep(
 
         // Successful completion of a step, so we queue up its dependants as well.
         for (s.dependants.items) |dep| {
-            thread_pool.spawnWg(wg, workerMakeOneStep, .{
-                wg, b, dep, prog_node, run,
-            });
+            group.async(io, workerMakeOneStep, .{ group, b, dep, prog_node, run });
         }
     }
 
@@ -1444,9 +1422,7 @@ fn workerMakeOneStep(
             if (dep.max_rss <= remaining) {
                 remaining -= dep.max_rss;
 
-                thread_pool.spawnWg(wg, workerMakeOneStep, .{
-                    wg, b, dep, prog_node, run,
-                });
+                group.async(io, workerMakeOneStep, .{ group, b, dep, prog_node, run });
             } else {
                 run.memory_blocked_steps.items[i] = dep;
                 i += 1;
