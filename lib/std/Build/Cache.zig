@@ -22,7 +22,7 @@ manifest_dir: fs.Dir,
 hash: HashHelper = .{},
 /// This value is accessed from multiple threads, protected by mutex.
 recent_problematic_timestamp: Io.Timestamp = .zero,
-mutex: std.Thread.Mutex = .{},
+mutex: Io.Mutex = .init,
 
 /// A set of strings such as the zig library directory or project source root, which
 /// are stripped from the file paths before putting into the cache. They
@@ -474,6 +474,7 @@ pub const Manifest = struct {
         /// A cache manifest file exists however it could not be parsed.
         InvalidFormat,
         OutOfMemory,
+        Canceled,
     };
 
     /// Check the cache to see if the input exists in it. If it exists, returns `true`.
@@ -559,12 +560,14 @@ pub const Manifest = struct {
                             self.diagnostic = .{ .manifest_create = error.FileNotFound };
                             return error.CacheCheckFailed;
                         },
+                        error.Canceled => return error.Canceled,
                         else => |e| {
                             self.diagnostic = .{ .manifest_create = e };
                             return error.CacheCheckFailed;
                         },
                     }
                 },
+                error.Canceled => return error.Canceled,
                 else => |e| {
                     self.diagnostic = .{ .manifest_create = e };
                     return error.CacheCheckFailed;
@@ -762,6 +765,7 @@ pub const Manifest = struct {
                     // Every digest before this one has been populated successfully.
                     return .{ .miss = .{ .file_digests_populated = idx } };
                 },
+                error.Canceled => return error.Canceled,
                 else => |e| {
                     self.diagnostic = .{ .file_open = .{
                         .file_index = idx,
@@ -790,7 +794,7 @@ pub const Manifest = struct {
                     .inode = actual_stat.inode,
                 };
 
-                if (self.isProblematicTimestamp(cache_hash_file.stat.mtime)) {
+                if (try self.isProblematicTimestamp(cache_hash_file.stat.mtime)) {
                     // The actual file has an unreliable timestamp, force it to be hashed
                     cache_hash_file.stat.mtime = .zero;
                     cache_hash_file.stat.inode = 0;
@@ -848,7 +852,9 @@ pub const Manifest = struct {
         }
     }
 
-    fn isProblematicTimestamp(man: *Manifest, timestamp: Io.Timestamp) bool {
+    fn isProblematicTimestamp(man: *Manifest, timestamp: Io.Timestamp) error{Canceled}!bool {
+        const io = man.cache.io;
+
         // If the file_time is prior to the most recent problematic timestamp
         // then we don't need to access the filesystem.
         if (timestamp.nanoseconds < man.recent_problematic_timestamp.nanoseconds)
@@ -856,8 +862,8 @@ pub const Manifest = struct {
 
         // Next we will check the globally shared Cache timestamp, which is accessed
         // from multiple threads.
-        man.cache.mutex.lock();
-        defer man.cache.mutex.unlock();
+        try man.cache.mutex.lock(io);
+        defer man.cache.mutex.unlock(io);
 
         // Save the global one to our local one to avoid locking next time.
         man.recent_problematic_timestamp = man.cache.recent_problematic_timestamp;
@@ -871,11 +877,18 @@ pub const Manifest = struct {
             var file = man.cache.manifest_dir.createFile("timestamp", .{
                 .read = true,
                 .truncate = true,
-            }) catch return true;
+            }) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return true,
+            };
             defer file.close();
 
             // Save locally and also save globally (we still hold the global lock).
-            man.recent_problematic_timestamp = (file.stat() catch return true).mtime;
+            const stat = file.stat() catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return true,
+            };
+            man.recent_problematic_timestamp = stat.mtime;
             man.cache.recent_problematic_timestamp = man.recent_problematic_timestamp;
         }
 
@@ -902,7 +915,7 @@ pub const Manifest = struct {
             .inode = actual_stat.inode,
         };
 
-        if (self.isProblematicTimestamp(ch_file.stat.mtime)) {
+        if (try self.isProblematicTimestamp(ch_file.stat.mtime)) {
             // The actual file has an unreliable timestamp, force it to be hashed
             ch_file.stat.mtime = .zero;
             ch_file.stat.inode = 0;
@@ -1038,7 +1051,7 @@ pub const Manifest = struct {
             .contents = null,
         };
 
-        if (self.isProblematicTimestamp(new_file.stat.mtime)) {
+        if (try self.isProblematicTimestamp(new_file.stat.mtime)) {
             // The actual file has an unreliable timestamp, force it to be hashed
             new_file.stat.mtime = .zero;
             new_file.stat.inode = 0;

@@ -494,7 +494,7 @@ pub fn main() !void {
 
         .max_rss = max_rss,
         .max_rss_is_default = false,
-        .max_rss_mutex = .{},
+        .max_rss_mutex = .init,
         .skip_oom_steps = skip_oom_steps,
         .unit_test_timeout_ns = test_timeout_ns,
 
@@ -583,7 +583,7 @@ pub fn main() !void {
 
         if (run.web_server) |*ws| {
             assert(!watch); // fatal error after CLI parsing
-            while (true) switch (ws.wait()) {
+            while (true) switch (try ws.wait()) {
                 .rebuild => {
                     for (run.step_stack.keys()) |step| {
                         step.state = .precheck_done;
@@ -652,7 +652,7 @@ const Run = struct {
     gpa: Allocator,
     max_rss: u64,
     max_rss_is_default: bool,
-    max_rss_mutex: std.Thread.Mutex,
+    max_rss_mutex: Io.Mutex,
     skip_oom_steps: bool,
     unit_test_timeout_ns: ?u64,
     watch: bool,
@@ -1305,6 +1305,8 @@ fn workerMakeOneStep(
     prog_node: std.Progress.Node,
     run: *Run,
 ) void {
+    const io = b.graph.io;
+
     // First, check the conditions for running this step. If they are not met,
     // then we return without doing the step, relying on another worker to
     // queue this step up again when dependencies are met.
@@ -1326,8 +1328,8 @@ fn workerMakeOneStep(
     }
 
     if (s.max_rss != 0) {
-        run.max_rss_mutex.lock();
-        defer run.max_rss_mutex.unlock();
+        run.max_rss_mutex.lockUncancelable(io);
+        defer run.max_rss_mutex.unlock(io);
 
         // Avoid running steps twice.
         if (s.state != .precheck_done) {
@@ -1378,8 +1380,6 @@ fn workerMakeOneStep(
         printErrorMessages(run.gpa, s, .{}, bw, ttyconf, run.error_style, run.multiline_errors) catch {};
     }
 
-    const io = b.graph.io;
-
     handle_result: {
         if (make_result) |_| {
             @atomicStore(Step.State, &s.state, .success, .seq_cst);
@@ -1406,8 +1406,8 @@ fn workerMakeOneStep(
     // If this is a step that claims resources, we must now queue up other
     // steps that are waiting for resources.
     if (s.max_rss != 0) {
-        run.max_rss_mutex.lock();
-        defer run.max_rss_mutex.unlock();
+        run.max_rss_mutex.lockUncancelable(io);
+        defer run.max_rss_mutex.unlock(io);
 
         // Give the memory back to the scheduler.
         run.claimed_rss -= s.max_rss;

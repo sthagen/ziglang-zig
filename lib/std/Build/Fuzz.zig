@@ -27,11 +27,11 @@ root_prog_node: std.Progress.Node,
 prog_node: std.Progress.Node,
 
 /// Protects `coverage_files`.
-coverage_mutex: std.Thread.Mutex,
+coverage_mutex: Io.Mutex,
 coverage_files: std.AutoArrayHashMapUnmanaged(u64, CoverageMap),
 
-queue_mutex: std.Thread.Mutex,
-queue_cond: std.Thread.Condition,
+queue_mutex: Io.Mutex,
+queue_cond: Io.Condition,
 msg_queue: std.ArrayList(Msg),
 
 pub const Mode = union(enum) {
@@ -122,8 +122,8 @@ pub fn init(
         .root_prog_node = root_prog_node,
         .prog_node = .none,
         .coverage_files = .empty,
-        .coverage_mutex = .{},
-        .queue_mutex = .{},
+        .coverage_mutex = .init,
+        .queue_mutex = .init,
         .queue_cond = .{},
         .msg_queue = .empty,
     };
@@ -157,9 +157,7 @@ pub fn deinit(fuzz: *Fuzz) void {
 fn rebuildTestsWorkerRun(run: *Step.Run, gpa: Allocator, ttyconf: tty.Config, parent_prog_node: std.Progress.Node) void {
     rebuildTestsWorkerRunFallible(run, gpa, ttyconf, parent_prog_node) catch |err| {
         const compile = run.producer.?;
-        log.err("step '{s}': failed to rebuild in fuzz mode: {s}", .{
-            compile.step.name, @errorName(err),
-        });
+        log.err("step '{s}': failed to rebuild in fuzz mode: {t}", .{ compile.step.name, err });
     };
 }
 
@@ -208,9 +206,7 @@ fn fuzzWorkerRun(
             return;
         },
         else => {
-            log.err("step '{s}': failed to rerun '{s}' in fuzz mode: {s}", .{
-                run.step.name, test_name, @errorName(err),
-            });
+            log.err("step '{s}': failed to rerun '{s}' in fuzz mode: {t}", .{ run.step.name, test_name, err });
             return;
         },
     };
@@ -269,8 +265,10 @@ pub fn sendUpdate(
     socket: *std.http.Server.WebSocket,
     prev: *Previous,
 ) !void {
-    fuzz.coverage_mutex.lock();
-    defer fuzz.coverage_mutex.unlock();
+    const io = fuzz.io;
+
+    try fuzz.coverage_mutex.lock(io);
+    defer fuzz.coverage_mutex.unlock(io);
 
     const coverage_maps = fuzz.coverage_files.values();
     if (coverage_maps.len == 0) return;
@@ -331,30 +329,41 @@ pub fn sendUpdate(
 }
 
 fn coverageRun(fuzz: *Fuzz) void {
-    fuzz.queue_mutex.lock();
-    defer fuzz.queue_mutex.unlock();
+    coverageRunCancelable(fuzz) catch |err| switch (err) {
+        error.Canceled => return,
+    };
+}
+
+fn coverageRunCancelable(fuzz: *Fuzz) Io.Cancelable!void {
+    const io = fuzz.io;
+
+    try fuzz.queue_mutex.lock(io);
+    defer fuzz.queue_mutex.unlock(io);
 
     while (true) {
-        fuzz.queue_cond.wait(&fuzz.queue_mutex);
+        try fuzz.queue_cond.wait(io, &fuzz.queue_mutex);
         for (fuzz.msg_queue.items) |msg| switch (msg) {
             .coverage => |coverage| prepareTables(fuzz, coverage.run, coverage.id) catch |err| switch (err) {
                 error.AlreadyReported => continue,
-                else => |e| log.err("failed to prepare code coverage tables: {s}", .{@errorName(e)}),
+                error.Canceled => return,
+                else => |e| log.err("failed to prepare code coverage tables: {t}", .{e}),
             },
             .entry_point => |entry_point| addEntryPoint(fuzz, entry_point.coverage_id, entry_point.addr) catch |err| switch (err) {
                 error.AlreadyReported => continue,
-                else => |e| log.err("failed to prepare code coverage tables: {s}", .{@errorName(e)}),
+                error.Canceled => return,
+                else => |e| log.err("failed to prepare code coverage tables: {t}", .{e}),
             },
         };
         fuzz.msg_queue.clearRetainingCapacity();
     }
 }
-fn prepareTables(fuzz: *Fuzz, run_step: *Step.Run, coverage_id: u64) error{ OutOfMemory, AlreadyReported }!void {
+fn prepareTables(fuzz: *Fuzz, run_step: *Step.Run, coverage_id: u64) error{ OutOfMemory, AlreadyReported, Canceled }!void {
     assert(fuzz.mode == .forever);
     const ws = fuzz.mode.forever.ws;
+    const io = fuzz.io;
 
-    fuzz.coverage_mutex.lock();
-    defer fuzz.coverage_mutex.unlock();
+    try fuzz.coverage_mutex.lock(io);
+    defer fuzz.coverage_mutex.unlock(io);
 
     const gop = try fuzz.coverage_files.getOrPut(fuzz.gpa, coverage_id);
     if (gop.found_existing) {
@@ -385,8 +394,8 @@ fn prepareTables(fuzz: *Fuzz, run_step: *Step.Run, coverage_id: u64) error{ OutO
         target.ofmt,
         target.cpu.arch,
     ) catch |err| {
-        log.err("step '{s}': failed to load debug information for '{f}': {s}", .{
-            run_step.step.name, rebuilt_exe_path, @errorName(err),
+        log.err("step '{s}': failed to load debug information for '{f}': {t}", .{
+            run_step.step.name, rebuilt_exe_path, err,
         });
         return error.AlreadyReported;
     };
@@ -397,15 +406,15 @@ fn prepareTables(fuzz: *Fuzz, run_step: *Step.Run, coverage_id: u64) error{ OutO
         .sub_path = "v/" ++ std.fmt.hex(coverage_id),
     };
     var coverage_file = coverage_file_path.root_dir.handle.openFile(coverage_file_path.sub_path, .{}) catch |err| {
-        log.err("step '{s}': failed to load coverage file '{f}': {s}", .{
-            run_step.step.name, coverage_file_path, @errorName(err),
+        log.err("step '{s}': failed to load coverage file '{f}': {t}", .{
+            run_step.step.name, coverage_file_path, err,
         });
         return error.AlreadyReported;
     };
     defer coverage_file.close();
 
     const file_size = coverage_file.getEndPos() catch |err| {
-        log.err("unable to check len of coverage file '{f}': {s}", .{ coverage_file_path, @errorName(err) });
+        log.err("unable to check len of coverage file '{f}': {t}", .{ coverage_file_path, err });
         return error.AlreadyReported;
     };
 
@@ -417,7 +426,7 @@ fn prepareTables(fuzz: *Fuzz, run_step: *Step.Run, coverage_id: u64) error{ OutO
         coverage_file.handle,
         0,
     ) catch |err| {
-        log.err("failed to map coverage file '{f}': {s}", .{ coverage_file_path, @errorName(err) });
+        log.err("failed to map coverage file '{f}': {t}", .{ coverage_file_path, err });
         return error.AlreadyReported;
     };
     gop.value_ptr.mapped_memory = mapped_memory;
@@ -443,7 +452,7 @@ fn prepareTables(fuzz: *Fuzz, run_step: *Step.Run, coverage_id: u64) error{ OutO
     }{ .addrs = sorted_pcs.items(.pc) });
 
     debug_info.resolveAddresses(fuzz.gpa, sorted_pcs.items(.pc), sorted_pcs.items(.sl)) catch |err| {
-        log.err("failed to resolve addresses to source locations: {s}", .{@errorName(err)});
+        log.err("failed to resolve addresses to source locations: {t}", .{err});
         return error.AlreadyReported;
     };
 
@@ -453,9 +462,11 @@ fn prepareTables(fuzz: *Fuzz, run_step: *Step.Run, coverage_id: u64) error{ OutO
     ws.notifyUpdate();
 }
 
-fn addEntryPoint(fuzz: *Fuzz, coverage_id: u64, addr: u64) error{ AlreadyReported, OutOfMemory }!void {
-    fuzz.coverage_mutex.lock();
-    defer fuzz.coverage_mutex.unlock();
+fn addEntryPoint(fuzz: *Fuzz, coverage_id: u64, addr: u64) error{ AlreadyReported, OutOfMemory, Canceled }!void {
+    const io = fuzz.io;
+
+    try fuzz.coverage_mutex.lock(io);
+    defer fuzz.coverage_mutex.unlock(io);
 
     const coverage_map = fuzz.coverage_files.getPtr(coverage_id).?;
     const header: *const abi.SeenPcsHeader = @ptrCast(coverage_map.mapped_memory[0..@sizeOf(abi.SeenPcsHeader)]);
@@ -518,8 +529,8 @@ pub fn waitAndPrintReport(fuzz: *Fuzz) void {
             .sub_path = "v/" ++ std.fmt.hex(cov.id),
         };
         var coverage_file = coverage_file_path.root_dir.handle.openFile(coverage_file_path.sub_path, .{}) catch |err| {
-            fatal("step '{s}': failed to load coverage file '{f}': {s}", .{
-                cov.run.step.name, coverage_file_path, @errorName(err),
+            fatal("step '{s}': failed to load coverage file '{f}': {t}", .{
+                cov.run.step.name, coverage_file_path, err,
             });
         };
         defer coverage_file.close();
@@ -530,8 +541,8 @@ pub fn waitAndPrintReport(fuzz: *Fuzz) void {
 
         var header: fuzz_abi.SeenPcsHeader = undefined;
         r.interface.readSliceAll(std.mem.asBytes(&header)) catch |err| {
-            fatal("step '{s}': failed to read from coverage file '{f}': {s}", .{
-                cov.run.step.name, coverage_file_path, @errorName(err),
+            fatal("step '{s}': failed to read from coverage file '{f}': {t}", .{
+                cov.run.step.name, coverage_file_path, err,
             });
         };
 
@@ -545,8 +556,8 @@ pub fn waitAndPrintReport(fuzz: *Fuzz) void {
         const chunk_count = fuzz_abi.SeenPcsHeader.seenElemsLen(header.pcs_len);
         for (0..chunk_count) |_| {
             const seen = r.interface.takeInt(usize, .little) catch |err| {
-                fatal("step '{s}': failed to read from coverage file '{f}': {s}", .{
-                    cov.run.step.name, coverage_file_path, @errorName(err),
+                fatal("step '{s}': failed to read from coverage file '{f}': {t}", .{
+                    cov.run.step.name, coverage_file_path, err,
                 });
             };
             seen_count += @popCount(seen);
