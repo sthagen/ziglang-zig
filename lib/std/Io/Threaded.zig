@@ -33,6 +33,9 @@ wait_group: std.Thread.WaitGroup = .{},
 /// immediately.
 ///
 /// Defaults to a number equal to logical CPU cores.
+///
+/// Protected by `mutex` once the I/O instance is already in use. See
+/// `setAsyncLimit`.
 async_limit: Io.Limit,
 /// Maximum thread pool size (excluding main thread) for dispatching concurrent
 /// tasks. Until this limit, calls to `Io.concurrent` will increase the thread
@@ -167,6 +170,12 @@ pub const init_single_threaded: Threaded = .{
     .old_sig_pipe = undefined,
     .have_signal_handler = false,
 };
+
+pub fn setAsyncLimit(t: *Threaded, new_limit: Io.Limit) void {
+    t.mutex.lock();
+    defer t.mutex.unlock();
+    t.async_limit = new_limit;
+}
 
 pub fn deinit(t: *Threaded) void {
     t.join();
@@ -507,7 +516,7 @@ fn async(
     start: *const fn (context: *const anyopaque, result: *anyopaque) void,
 ) ?*Io.AnyFuture {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
-    if (builtin.single_threaded or t.async_limit == .nothing) {
+    if (builtin.single_threaded) {
         start(context.ptr, result.ptr);
         return null;
     }
@@ -684,8 +693,7 @@ fn groupAsync(
     start: *const fn (*Io.Group, context: *const anyopaque) void,
 ) void {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
-    if (builtin.single_threaded or t.async_limit == .nothing)
-        return start(group, context.ptr);
+    if (builtin.single_threaded) return start(group, context.ptr);
 
     const gpa = t.allocator;
     const gc = GroupClosure.init(gpa, t, group, context, context_alignment, start) catch
