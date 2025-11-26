@@ -3,7 +3,7 @@
 A general-purpose programming language and toolchain for maintaining
 **robust**, **optimal**, and **reusable** software.
 
-https://ziglang.org/
+<https://ziglang.org/>
 
 ## Documentation
 
@@ -21,7 +21,7 @@ running `zig std`, which will open a browser tab.
 
  * [download a pre-built binary](https://ziglang.org/download/)
  * [install from a package manager](https://ziglang.org/learn/getting-started/#managers)
- * [bootstrap zig for any target](https://github.com/ziglang/zig-bootstrap)
+ * [bootstrap zig for any target](https://codeberg.org/ziglang/zig-bootstrap)
 
 A Zig installation is composed of two things:
 
@@ -101,7 +101,7 @@ Dependencies:
  * LLVM, Clang, and LLD libraries built using Zig.
 
 The easiest way to obtain both of these artifacts is to use
-[zig-bootstrap](https://github.com/ziglang/zig-bootstrap), which creates the
+[zig-bootstrap](https://codeberg.org/ziglang/zig-bootstrap), which creates the
 directory `out/zig-$target-$cpu` and `out/$target-$cpu`, to be used as
 `$ZIG_PREFIX` and `$LLVM_PREFIX`, respectively, in the following command:
 
@@ -232,7 +232,7 @@ You now have the `zig.exe` binary at `bin\zig.exe` and you can run the tests:
 bin\zig.exe build test
 ```
 
-This can take a long time. For tips & tricks on using the test suite, see [Contributing](https://github.com/ziglang/zig/blob/master/.github/CONTRIBUTING.md#editing-source-code).
+This can take a long time. For tips & tricks on using the test suite, see [Editing Source Code](#editing-source-code).
 
 Note: In case you get the error "llvm-config not found" (or similar), make sure that you have **no** trailing slash (`/` or `\`) at the end of the `-DCMAKE_PREFIX_PATH` value. 
 
@@ -613,7 +613,7 @@ architecture.
 
 QEMU packages provided by some system package managers (such as Debian) may be
 a few releases old, or may be missing newer targets such as aarch64 and RISC-V.
-[ziglang/qemu-static](https://github.com/ziglang/qemu-static) offers static
+[ziglang/qemu-static](https://codeberg.org/ziglang/qemu-static) offers static
 binaries of the latest QEMU version.
 
 ##### Testing Non-Native glibc Targets
@@ -745,7 +745,7 @@ provided by the `zig std` HTTP server as well as produced by `-femit-docs`.
 
 ## Testing Zig Code With LLDB
 
-[@jacobly0](https://github.com/jacobly0) maintains a fork of LLDB with Zig support: https://github.com/jacobly0/llvm-project/tree/lldb-zig
+[@jacobly0](https://github.com/jacobly0) maintains a fork of LLDB with Zig support: <https://github.com/jacobly0/llvm-project/tree/lldb-zig>
 
 This fork only contains changes for debugging programs compiled by Zig's self-hosted backends, i.e. `zig build-exe -fno-llvm ...`.
 
