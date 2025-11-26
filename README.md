@@ -3,7 +3,7 @@
 A general-purpose programming language and toolchain for maintaining
 **robust**, **optimal**, and **reusable** software.
 
-<https://ziglang.org/>
+https://ziglang.org/
 
 ## Documentation
 
@@ -232,9 +232,11 @@ You now have the `zig.exe` binary at `bin\zig.exe` and you can run the tests:
 bin\zig.exe build test
 ```
 
-This can take a long time. For tips & tricks on using the test suite, see [Editing Source Code](#editing-source-code).
+This can take a long time.
 
-Note: In case you get the error "llvm-config not found" (or similar), make sure that you have **no** trailing slash (`/` or `\`) at the end of the `-DCMAKE_PREFIX_PATH` value. 
+Note: In case you get the error "llvm-config not found" (or similar), make sure
+that you have **no** trailing slash (`/` or `\`) at the end of the
+`-DCMAKE_PREFIX_PATH` value.
 
 ## Building LLVM, LLD, and Clang from Source
 
@@ -745,26 +747,37 @@ provided by the `zig std` HTTP server as well as produced by `-femit-docs`.
 
 ## Testing Zig Code With LLDB
 
-[@jacobly0](https://github.com/jacobly0) maintains a fork of LLDB with Zig support: <https://github.com/jacobly0/llvm-project/tree/lldb-zig>
+[@jacobly0](https://github.com/jacobly0) maintains a fork of LLDB with Zig support:
 
-This fork only contains changes for debugging programs compiled by Zig's self-hosted backends, i.e. `zig build-exe -fno-llvm ...`.
+https://github.com/jacobly0/llvm-project/tree/lldb-zig
+
+This fork only contains changes for debugging programs compiled by Zig's
+self-hosted backends, i.e. `zig build-exe -fno-llvm ...`.
 
 ### Building
 
-To build the LLDB fork, make sure you have [prerequisites](https://lldb.llvm.org/resources/build.html#preliminaries) installed, and then do something like:
+To build the LLDB fork, make sure you have
+[prerequisites](https://lldb.llvm.org/resources/build.html#preliminaries)
+installed, and then do something like:
 
-```console
+```
 $ cmake llvm -G Ninja -B build -DLLVM_ENABLE_PROJECTS="clang;lldb" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLLVM_ENABLE_ASSERTIONS=ON -DLLDB_ENABLE_LIBEDIT=ON -DLLDB_ENABLE_PYTHON=ON
 $ cmake --build build --target lldb --target lldb-server
 ```
 
-(You may need to manually [configure dependencies](https://lldb.llvm.org/resources/build.html#optional-dependencies) if CMake can't find them.)
+(You may need to manually [configure
+dependencies](https://lldb.llvm.org/resources/build.html#optional-dependencies)
+if CMake can't find them.)
 
 Once built, you can run `./build/bin/lldb` and so on.
 
 ### Pretty Printers
 
-If you will be debugging the Zig compiler itself, or if you will be debugging any project compiled with Zig's LLVM backend (not recommended with the LLDB fork, prefer vanilla LLDB with a version that matches the version of LLVM that Zig is using), you can get a better debugging experience by using [`lldb_pretty_printers.py`](https://github.com/ziglang/zig/blob/master/tools/lldb_pretty_printers.py).
+If you will be debugging the Zig compiler itself, or if you will be debugging
+any project compiled with Zig's LLVM backend (not recommended with the LLDB
+fork, prefer vanilla LLDB with a version that matches the version of LLVM that
+Zig is using), you can get a better debugging experience by using
+[`lldb_pretty_printers.py`](https://github.com/ziglang/zig/blob/master/tools/lldb_pretty_printers.py).
 
 Put this line in `~/.lldbinit`:
 
@@ -772,13 +785,17 @@ Put this line in `~/.lldbinit`:
 command script import /path/to/zig/tools/lldb_pretty_printers.py
 ```
 
-If you will be using Zig's LLVM backend (again, not recommended with the LLDB fork), you will also want these lines:
+If you will be using Zig's LLVM backend (again, not recommended with the LLDB
+fork), you will also want these lines:
 
 ```
 type category enable zig.lang
 type category enable zig.std
 ```
-If you will be debugging a Zig compiler built using Zig's LLVM backend (again, not recommended with the LLDB fork), you will also want this line:
+
+If you will be debugging a Zig compiler built using Zig's LLVM backend (again,
+not recommended with the LLDB fork), you will also want this line:
+
 ```
 type category enable zig.stage2
 ```
