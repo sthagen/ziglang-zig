@@ -6696,7 +6696,7 @@ pub fn analyzeSaveErrRetIndex(sema: *Sema, block: *Block) SemaError!Air.Inst.Ref
     const field_index = sema.structFieldIndex(block, stack_trace_ty, field_name, LazySrcLoc.unneeded) catch |err| switch (err) {
         error.AnalysisFail => @panic("std.builtin.StackTrace is corrupt"),
         error.ComptimeReturn, error.ComptimeBreak => unreachable,
-        error.OutOfMemory => |e| return e,
+        error.OutOfMemory, error.Canceled => |e| return e,
     };
 
     return try block.addInst(.{
@@ -13924,6 +13924,7 @@ fn zirEmbedFile(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
             return sema.fail(block, operand_src, "unable to resolve '{s}': working directory has been unlinked", .{name});
         },
         error.OutOfMemory => |e| return e,
+        error.Canceled => |e| return e,
     };
     try sema.declareDependency(.{ .embed_file = ef_idx });
 
@@ -34345,7 +34346,7 @@ pub fn resolveStructLayout(sema: *Sema, ty: Type) SemaError!void {
 
     if (struct_type.layout == .@"packed") {
         sema.backingIntType(struct_type) catch |err| switch (err) {
-            error.OutOfMemory, error.AnalysisFail => |e| return e,
+            error.AnalysisFail, error.OutOfMemory, error.Canceled => |e| return e,
             error.ComptimeBreak, error.ComptimeReturn => unreachable,
         };
         return;
@@ -34893,7 +34894,7 @@ pub fn resolveStructFieldTypes(
     defer tracked_unit.end(zcu);
 
     sema.structFields(struct_type) catch |err| switch (err) {
-        error.AnalysisFail, error.OutOfMemory => |e| return e,
+        error.AnalysisFail, error.OutOfMemory, error.Canceled => |e| return e,
         error.ComptimeBreak, error.ComptimeReturn => unreachable,
     };
 }
@@ -34926,7 +34927,7 @@ pub fn resolveStructFieldInits(sema: *Sema, ty: Type) SemaError!void {
     defer tracked_unit.end(zcu);
 
     sema.structFieldInits(struct_type) catch |err| switch (err) {
-        error.AnalysisFail, error.OutOfMemory => |e| return e,
+        error.AnalysisFail, error.OutOfMemory, error.Canceled => |e| return e,
         error.ComptimeBreak, error.ComptimeReturn => unreachable,
     };
     struct_type.setHaveFieldInits(ip);
@@ -34960,7 +34961,7 @@ pub fn resolveUnionFieldTypes(sema: *Sema, ty: Type, union_type: InternPool.Load
     union_type.setStatus(ip, .field_types_wip);
     errdefer union_type.setStatus(ip, .none);
     sema.unionFields(ty.toIntern(), union_type) catch |err| switch (err) {
-        error.AnalysisFail, error.OutOfMemory => |e| return e,
+        error.AnalysisFail, error.OutOfMemory, error.Canceled => |e| return e,
         error.ComptimeBreak, error.ComptimeReturn => unreachable,
     };
     union_type.setStatus(ip, .have_field_types);
@@ -37027,6 +37028,7 @@ fn notePathToComptimeAllocPtr(
 
     const derivation = comptime_ptr.pointerDerivationAdvanced(arena, pt, false, sema) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
+        error.Canceled => @panic("TODO"), // pls don't be cancelable mlugg
         error.AnalysisFail => unreachable,
     };
 
@@ -37367,7 +37369,7 @@ pub fn resolveDeclaredEnum(
     ) catch |err| switch (err) {
         error.ComptimeBreak => unreachable,
         error.ComptimeReturn => unreachable,
-        error.OutOfMemory => |e| return e,
+        error.OutOfMemory, error.Canceled => |e| return e,
         error.AnalysisFail => {
             if (!zcu.failed_analysis.contains(sema.owner)) {
                 try zcu.transitive_failed_analysis.put(gpa, sema.owner, {});

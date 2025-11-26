@@ -2755,9 +2755,11 @@ pub const LazySrcLoc = struct {
     }
 };
 
-pub const SemaError = error{ OutOfMemory, AnalysisFail };
+pub const SemaError = error{ OutOfMemory, Canceled, AnalysisFail };
 pub const CompileError = error{
     OutOfMemory,
+    /// The compilation update is no longer desired.
+    Canceled,
     /// When this is returned, the compile error for the failure has already been recorded.
     AnalysisFail,
     /// In a comptime scope, a return instruction was encountered. This error is only seen when
