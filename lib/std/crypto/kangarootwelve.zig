@@ -2,6 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const crypto = std.crypto;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const Thread = std.Thread;
 
 const TurboSHAKE128State = crypto.hash.sha3.TurboShake128(0x06);
 const TurboSHAKE256State = crypto.hash.sha3.TurboShake256(0x06);
@@ -11,6 +13,13 @@ const cache_line_size = std.atomic.cache_line;
 
 // Optimal SIMD vector length for u64 on this target platform
 const optimal_vector_len = std.simd.suggestVectorLength(u64) orelse 1;
+
+// Number of bytes processed per SIMD batch in multi-threaded mode
+const bytes_per_batch = 256 * 1024;
+
+// Multi-threading threshold: inputs larger than this will use parallel processing.
+// Benchmarked optimal value for ReleaseFast mode.
+const large_file_threshold: usize = 2 * 1024 * 1024; // 2 MB
 
 // Round constants for Keccak-p[1600,12]
 const RC = [12]u64{
@@ -569,6 +578,16 @@ fn processLeaves(
     }
 }
 
+/// Context for processing a batch of leaves in a thread
+const LeafBatchContext = struct {
+    output_cvs: []align(@alignOf(u64)) u8,
+    batch_start: usize,
+    batch_count: usize,
+    view: *const MultiSliceView,
+    scratch_buffer: []u8, // Pre-allocated scratch space (no allocations in worker)
+    total_len: usize, // Total length of input data (for boundary checking)
+};
+
 /// Helper function to process N leaves in parallel, reducing code duplication
 inline fn processNLeaves(
     comptime Variant: type,
@@ -591,6 +610,42 @@ inline fn processNLeaves(
         processLeaves(Variant, N, leaf_buffer[0 .. N * chunk_size], &leaf_cvs);
         @memcpy(output[0..leaf_cvs.len], &leaf_cvs);
     }
+}
+
+/// Process a batch of leaves in a single thread using SIMD
+fn processLeafBatch(comptime Variant: type, ctx: LeafBatchContext) void {
+    const cv_size = Variant.cv_size;
+    const leaf_buffer = ctx.scratch_buffer[0 .. 8 * chunk_size];
+
+    var cvs_offset: usize = 0;
+    var j: usize = ctx.batch_start;
+    const batch_end = @min(ctx.batch_start + ctx.batch_count * chunk_size, ctx.total_len);
+
+    // Process leaves using SIMD (8x, 4x, 2x) based on optimal vector length
+    inline for ([_]usize{ 8, 4, 2 }) |batch_size| {
+        while (optimal_vector_len >= batch_size and j + batch_size * chunk_size <= batch_end) {
+            processNLeaves(Variant, batch_size, ctx.view, j, leaf_buffer, @alignCast(ctx.output_cvs[cvs_offset..]));
+            cvs_offset += batch_size * cv_size;
+            j += batch_size * chunk_size;
+        }
+    }
+
+    // Process remaining single leaves
+    while (j < batch_end) {
+        const chunk_len = @min(chunk_size, batch_end - j);
+        if (ctx.view.tryGetSlice(j, j + chunk_len)) |leaf_data| {
+            const cv_slice = MultiSliceView.init(leaf_data, &[_]u8{}, &[_]u8{});
+            Variant.turboShakeToBuffer(&cv_slice, 0x0B, ctx.output_cvs[cvs_offset..][0..cv_size]);
+        } else {
+            ctx.view.copyRange(j, j + chunk_len, leaf_buffer[0..chunk_len]);
+            const cv_slice = MultiSliceView.init(leaf_buffer[0..chunk_len], &[_]u8{}, &[_]u8{});
+            Variant.turboShakeToBuffer(&cv_slice, 0x0B, ctx.output_cvs[cvs_offset..][0..cv_size]);
+        }
+        cvs_offset += cv_size;
+        j += chunk_len;
+    }
+
+    std.debug.assert(cvs_offset == ctx.output_cvs.len);
 }
 
 /// Helper to process N leaves in SIMD and absorb CVs into state
@@ -676,6 +731,224 @@ fn ktSingleThreaded(comptime Variant: type, view: *const MultiSliceView, total_l
     final_state.update(&terminator);
 
     // Finalize and squeeze output
+    final_state.final(output);
+}
+
+fn BatchResult(comptime Variant: type) type {
+    const cv_size = Variant.cv_size;
+    const leaves_per_batch = bytes_per_batch / chunk_size;
+    const max_cvs_size = leaves_per_batch * cv_size;
+
+    return struct {
+        batch_idx: usize,
+        cv_len: usize,
+        cvs: [max_cvs_size]u8,
+    };
+}
+
+fn SelectLeafContext(comptime Variant: type) type {
+    const cv_size = Variant.cv_size;
+    const Result = BatchResult(Variant);
+
+    return struct {
+        view: *const MultiSliceView,
+        batch_idx: usize,
+        start_offset: usize,
+        num_leaves: usize,
+
+        fn process(ctx: @This()) Result {
+            var result: Result = .{
+                .batch_idx = ctx.batch_idx,
+                .cv_len = ctx.num_leaves * cv_size,
+                .cvs = undefined,
+            };
+
+            var leaf_buffer: [bytes_per_batch]u8 align(cache_line_size) = undefined;
+            var leaves_processed: usize = 0;
+            var byte_offset = ctx.start_offset;
+            var cv_offset: usize = 0;
+            const simd_batch_bytes = optimal_vector_len * chunk_size;
+            while (leaves_processed + optimal_vector_len <= ctx.num_leaves) {
+                if (ctx.view.tryGetSlice(byte_offset, byte_offset + simd_batch_bytes)) |leaf_data| {
+                    var leaf_cvs: [optimal_vector_len * Variant.cv_size]u8 = undefined;
+                    processLeaves(Variant, optimal_vector_len, leaf_data, &leaf_cvs);
+                    @memcpy(result.cvs[cv_offset..][0..leaf_cvs.len], &leaf_cvs);
+                } else {
+                    ctx.view.copyRange(byte_offset, byte_offset + simd_batch_bytes, leaf_buffer[0..simd_batch_bytes]);
+                    var leaf_cvs: [optimal_vector_len * Variant.cv_size]u8 = undefined;
+                    processLeaves(Variant, optimal_vector_len, leaf_buffer[0..simd_batch_bytes], &leaf_cvs);
+                    @memcpy(result.cvs[cv_offset..][0..leaf_cvs.len], &leaf_cvs);
+                }
+                leaves_processed += optimal_vector_len;
+                byte_offset += optimal_vector_len * chunk_size;
+                cv_offset += optimal_vector_len * cv_size;
+            }
+
+            while (leaves_processed < ctx.num_leaves) {
+                const leaf_end = byte_offset + chunk_size;
+                var cv_buffer: [64]u8 = undefined;
+
+                if (ctx.view.tryGetSlice(byte_offset, leaf_end)) |leaf_data| {
+                    const cv_slice = MultiSliceView.init(leaf_data, &[_]u8{}, &[_]u8{});
+                    Variant.turboShakeToBuffer(&cv_slice, 0x0B, cv_buffer[0..cv_size]);
+                } else {
+                    ctx.view.copyRange(byte_offset, leaf_end, leaf_buffer[0..chunk_size]);
+                    const cv_slice = MultiSliceView.init(leaf_buffer[0..chunk_size], &[_]u8{}, &[_]u8{});
+                    Variant.turboShakeToBuffer(&cv_slice, 0x0B, cv_buffer[0..cv_size]);
+                }
+                @memcpy(result.cvs[cv_offset..][0..cv_size], cv_buffer[0..cv_size]);
+
+                leaves_processed += 1;
+                byte_offset += chunk_size;
+                cv_offset += cv_size;
+            }
+
+            return result;
+        }
+    };
+}
+
+fn FinalLeafContext(comptime Variant: type) type {
+    return struct {
+        view: *const MultiSliceView,
+        start_offset: usize,
+        leaf_len: usize,
+        output_cv: []align(@alignOf(u64)) u8,
+
+        fn process(ctx: @This()) void {
+            const cv_size = Variant.cv_size;
+            var leaf_buffer: [chunk_size]u8 = undefined;
+            var cv_buffer: [64]u8 = undefined;
+
+            if (ctx.view.tryGetSlice(ctx.start_offset, ctx.start_offset + ctx.leaf_len)) |leaf_data| {
+                const cv_slice = MultiSliceView.init(leaf_data, &[_]u8{}, &[_]u8{});
+                Variant.turboShakeToBuffer(&cv_slice, 0x0B, cv_buffer[0..cv_size]);
+            } else {
+                ctx.view.copyRange(ctx.start_offset, ctx.start_offset + ctx.leaf_len, leaf_buffer[0..ctx.leaf_len]);
+                const cv_slice = MultiSliceView.init(leaf_buffer[0..ctx.leaf_len], &[_]u8{}, &[_]u8{});
+                Variant.turboShakeToBuffer(&cv_slice, 0x0B, cv_buffer[0..cv_size]);
+            }
+            @memcpy(ctx.output_cv[0..cv_size], cv_buffer[0..cv_size]);
+        }
+    };
+}
+
+fn ktMultiThreaded(
+    comptime Variant: type,
+    allocator: Allocator,
+    io: Io,
+    view: *const MultiSliceView,
+    total_len: usize,
+    output: []u8,
+) !void {
+    comptime std.debug.assert(bytes_per_batch % (optimal_vector_len * chunk_size) == 0);
+
+    const cv_size = Variant.cv_size;
+    const StateType = Variant.StateType;
+    const leaves_per_batch = bytes_per_batch / chunk_size;
+    const remaining_bytes = total_len - chunk_size;
+    const total_leaves = std.math.divCeil(usize, remaining_bytes, chunk_size) catch unreachable;
+
+    var final_state = StateType.init(.{});
+
+    var first_chunk_buffer: [chunk_size]u8 = undefined;
+    if (view.tryGetSlice(0, chunk_size)) |first_chunk| {
+        final_state.update(first_chunk);
+    } else {
+        view.copyRange(0, chunk_size, &first_chunk_buffer);
+        final_state.update(&first_chunk_buffer);
+    }
+
+    const padding = [_]u8{ 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    final_state.update(&padding);
+
+    const full_leaves = remaining_bytes / chunk_size;
+    const has_partial_leaf = (remaining_bytes % chunk_size) != 0;
+    const partial_leaf_size = if (has_partial_leaf) remaining_bytes % chunk_size else 0;
+
+    if (full_leaves > 0) {
+        const total_batches = std.math.divCeil(usize, full_leaves, leaves_per_batch) catch unreachable;
+        const max_concurrent: usize = @min(256, total_batches);
+
+        const Result = BatchResult(Variant);
+        const SelectResult = union(enum) { batch: Result };
+        const Select = Io.Select(SelectResult);
+
+        const select_buf = try allocator.alloc(SelectResult, max_concurrent);
+        defer allocator.free(select_buf);
+
+        // Buffer for out-of-order results (select_buf slots get reused)
+        const pending_cv_buf = try allocator.alloc([leaves_per_batch * cv_size]u8, max_concurrent);
+        defer allocator.free(pending_cv_buf);
+        var pending_cv_lens: [256]usize = .{0} ** 256;
+
+        var select: Select = .init(io, select_buf);
+        var batches_spawned: usize = 0;
+        var next_to_process: usize = 0;
+
+        while (next_to_process < total_batches) {
+            while (batches_spawned < total_batches and batches_spawned - next_to_process < max_concurrent) {
+                const batch_start_leaf = batches_spawned * leaves_per_batch;
+                const batch_leaves = @min(leaves_per_batch, full_leaves - batch_start_leaf);
+                const start_offset = chunk_size + batch_start_leaf * chunk_size;
+
+                select.async(.batch, SelectLeafContext(Variant).process, .{SelectLeafContext(Variant){
+                    .view = view,
+                    .batch_idx = batches_spawned,
+                    .start_offset = start_offset,
+                    .num_leaves = batch_leaves,
+                }});
+                batches_spawned += 1;
+            }
+
+            const result = select.wait() catch unreachable;
+            const batch = result.batch;
+            const slot = batch.batch_idx % max_concurrent;
+
+            if (batch.batch_idx == next_to_process) {
+                final_state.update(batch.cvs[0..batch.cv_len]);
+                next_to_process += 1;
+
+                // Drain pending batches that are now ready
+                while (next_to_process < total_batches) {
+                    const pending_slot = next_to_process % max_concurrent;
+                    const pending_len = pending_cv_lens[pending_slot];
+                    if (pending_len == 0) break;
+
+                    final_state.update(pending_cv_buf[pending_slot][0..pending_len]);
+                    pending_cv_lens[pending_slot] = 0;
+                    next_to_process += 1;
+                }
+            } else {
+                @memcpy(pending_cv_buf[slot][0..batch.cv_len], batch.cvs[0..batch.cv_len]);
+                pending_cv_lens[slot] = batch.cv_len;
+            }
+        }
+
+        select.group.wait(io);
+    }
+
+    if (has_partial_leaf) {
+        var cv_buffer: [64]u8 = undefined;
+        var leaf_buffer: [chunk_size]u8 = undefined;
+
+        const start_offset = chunk_size + full_leaves * chunk_size;
+        if (view.tryGetSlice(start_offset, start_offset + partial_leaf_size)) |leaf_data| {
+            const cv_slice = MultiSliceView.init(leaf_data, &[_]u8{}, &[_]u8{});
+            Variant.turboShakeToBuffer(&cv_slice, 0x0B, cv_buffer[0..cv_size]);
+        } else {
+            view.copyRange(start_offset, start_offset + partial_leaf_size, leaf_buffer[0..partial_leaf_size]);
+            const cv_slice = MultiSliceView.init(leaf_buffer[0..partial_leaf_size], &[_]u8{}, &[_]u8{});
+            Variant.turboShakeToBuffer(&cv_slice, 0x0B, cv_buffer[0..cv_size]);
+        }
+        final_state.update(cv_buffer[0..cv_size]);
+    }
+
+    const n_enc = rightEncode(total_leaves);
+    final_state.update(n_enc.slice());
+    const terminator = [_]u8{ 0xFF, 0xFF };
+    final_state.update(&terminator);
+
     final_state.final(output);
 }
 
@@ -974,6 +1247,32 @@ fn KTHash(
             // Tree mode - single-threaded SIMD processing
             ktSingleThreaded(Variant, &view, total_len, out);
         }
+
+        /// Hash with automatic parallelization for large inputs (>2MB).
+        /// Automatically uses sequential processing for smaller inputs to avoid thread overhead.
+        /// Allocator required for temporary buffers. IO object required for thread management.
+        pub fn hashParallel(message: []const u8, out: []u8, options: Options, allocator: Allocator, io: Io) !void {
+            const custom = options.customization orelse &[_]u8{};
+
+            const custom_len_enc = rightEncode(custom.len);
+            const view = MultiSliceView.init(message, custom, custom_len_enc.slice());
+            const total_len = view.totalLen();
+
+            // Single chunk case
+            if (total_len <= chunk_size) {
+                singleChunkFn(&view, 0x07, out);
+                return;
+            }
+
+            // Use single-threaded processing if below threshold
+            if (total_len < large_file_threshold) {
+                ktSingleThreaded(Variant, &view, total_len, out);
+                return;
+            }
+
+            // Tree mode - multi-threaded processing
+            try ktMultiThreaded(Variant, allocator, io, &view, total_len, out);
+        }
     };
 }
 
@@ -1005,6 +1304,222 @@ pub const KT128 = KTHash(KT128Variant, turboShake128MultiSliceToBuffer);
 /// Use KT256 when you need extra conservative margins.
 /// For most applications, KT128 offers better performance with adequate security.
 pub const KT256 = KTHash(KT256Variant, turboShake256MultiSliceToBuffer);
+
+test "KT128 sequential and parallel produce same output for small inputs" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const random = prng.random();
+
+    // Test with different small input sizes
+    const test_sizes = [_]usize{ 100, 1024, 4096, 8192 }; // 100B, 1KB, 4KB, 8KB
+
+    for (test_sizes) |size| {
+        const input = try allocator.alloc(u8, size);
+        defer allocator.free(input);
+
+        // Fill with random data
+        random.bytes(input);
+
+        var output_seq: [32]u8 = undefined;
+        var output_par: [32]u8 = undefined;
+
+        // Hash with sequential method
+        try KT128.hash(input, &output_seq, .{});
+
+        // Hash with parallel method
+        try KT128.hashParallel(input, &output_par, .{}, allocator, io);
+
+        // Verify outputs match
+        try std.testing.expectEqualSlices(u8, &output_seq, &output_par);
+    }
+}
+
+test "KT128 sequential and parallel produce same output for large inputs" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const random = prng.random();
+
+    // Test with input sizes above the 2MB threshold to trigger parallel processing.
+    // Include a size with partial final leaf to stress boundary handling.
+    const test_sizes = [_]usize{
+        5 * 512 * 1024, // 2.5 MB
+        5 * 512 * 1024 + 8191, // 2.5 MB + 8191B (partial leaf)
+    };
+
+    for (test_sizes) |size| {
+        const input = try allocator.alloc(u8, size);
+        defer allocator.free(input);
+
+        // Fill with random data
+        random.bytes(input);
+
+        var output_seq: [64]u8 = undefined;
+        var output_par: [64]u8 = undefined;
+
+        // Hash with sequential method
+        try KT128.hash(input, &output_seq, .{});
+
+        // Hash with parallel method
+        try KT128.hashParallel(input, &output_par, .{}, allocator, io);
+
+        // Verify outputs match
+        try std.testing.expectEqualSlices(u8, &output_seq, &output_par);
+    }
+}
+
+test "KT128 sequential and parallel produce same output for many random lengths" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const random = prng.random();
+
+    const num_tests = if (builtin.mode == .Debug) 10 else 1000;
+    const max_length = 250000;
+
+    for (0..num_tests) |_| {
+        const length = random.intRangeAtMost(usize, 0, max_length);
+
+        const input = try allocator.alloc(u8, length);
+        defer allocator.free(input);
+
+        random.bytes(input);
+
+        var output_seq: [32]u8 = undefined;
+        var output_par: [32]u8 = undefined;
+
+        try KT128.hash(input, &output_seq, .{});
+        try KT128.hashParallel(input, &output_par, .{}, allocator, io);
+
+        try std.testing.expectEqualSlices(u8, &output_seq, &output_par);
+    }
+}
+
+test "KT128 sequential and parallel produce same output with customization" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const random = prng.random();
+
+    const input_size = 5 * 512 * 1024; // 2.5MB
+    const input = try allocator.alloc(u8, input_size);
+    defer allocator.free(input);
+
+    // Fill with random data
+    random.bytes(input);
+
+    const customization = "test domain";
+    var output_seq: [48]u8 = undefined;
+    var output_par: [48]u8 = undefined;
+
+    // Hash with sequential method
+    try KT128.hash(input, &output_seq, .{ .customization = customization });
+
+    // Hash with parallel method
+    try KT128.hashParallel(input, &output_par, .{ .customization = customization }, allocator, io);
+
+    // Verify outputs match
+    try std.testing.expectEqualSlices(u8, &output_seq, &output_par);
+}
+
+test "KT256 sequential and parallel produce same output for small inputs" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const random = prng.random();
+
+    // Test with different small input sizes
+    const test_sizes = [_]usize{ 100, 1024, 4096, 8192 }; // 100B, 1KB, 4KB, 8KB
+
+    for (test_sizes) |size| {
+        const input = try allocator.alloc(u8, size);
+        defer allocator.free(input);
+
+        // Fill with random data
+        random.bytes(input);
+
+        var output_seq: [64]u8 = undefined;
+        var output_par: [64]u8 = undefined;
+
+        // Hash with sequential method
+        try KT256.hash(input, &output_seq, .{});
+
+        // Hash with parallel method
+        try KT256.hashParallel(input, &output_par, .{}, allocator, io);
+
+        // Verify outputs match
+        try std.testing.expectEqualSlices(u8, &output_seq, &output_par);
+    }
+}
+
+test "KT256 sequential and parallel produce same output for large inputs" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const random = prng.random();
+
+    // Test with input sizes above the 2MB threshold to trigger parallel processing.
+    // Include a size with partial final leaf to stress boundary handling.
+    const test_sizes = [_]usize{
+        5 * 512 * 1024, // 2.5 MB
+        5 * 512 * 1024 + 8191, // 2.5 MB + 8191B (partial leaf)
+    };
+
+    for (test_sizes) |size| {
+        const input = try allocator.alloc(u8, size);
+        defer allocator.free(input);
+
+        // Fill with random data
+        random.bytes(input);
+
+        var output_seq: [64]u8 = undefined;
+        var output_par: [64]u8 = undefined;
+
+        // Hash with sequential method
+        try KT256.hash(input, &output_seq, .{});
+
+        // Hash with parallel method
+        try KT256.hashParallel(input, &output_par, .{}, allocator, io);
+
+        // Verify outputs match
+        try std.testing.expectEqualSlices(u8, &output_seq, &output_par);
+    }
+}
+
+test "KT256 sequential and parallel produce same output with customization" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const random = prng.random();
+
+    const input_size = 5 * 512 * 1024; // 2.5MB
+    const input = try allocator.alloc(u8, input_size);
+    defer allocator.free(input);
+
+    // Fill with random data
+    random.bytes(input);
+
+    const customization = "test domain";
+    var output_seq: [80]u8 = undefined;
+    var output_par: [80]u8 = undefined;
+
+    // Hash with sequential method
+    try KT256.hash(input, &output_seq, .{ .customization = customization });
+
+    // Hash with parallel method
+    try KT256.hashParallel(input, &output_par, .{ .customization = customization }, allocator, io);
+
+    // Verify outputs match
+    try std.testing.expectEqualSlices(u8, &output_seq, &output_par);
+}
 
 /// Helper: Generate pattern data where data[i] = (i % 251)
 fn generatePattern(allocator: Allocator, len: usize) ![]u8 {
